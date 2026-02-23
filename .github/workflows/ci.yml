@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: setup zig
         uses: mlugg/setup-zig@v2
@@ -40,6 +42,12 @@ jobs:
 
       - name: test
         run: zig build test
+
+      - name: test impact gate
+        run: ./tools/ci/test_impact_gate.sh
+
+      - name: mutation gate
+        run: ./tools/ci/mutation_gate.sh
 
       - name: perf parser gate
         run: zig build perf -Doptimize=ReleaseFast

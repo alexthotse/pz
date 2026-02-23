@@ -452,7 +452,7 @@ test "e2e footer visible at bottom" {
     try std.testing.expect(std.mem.indexOf(u8, row7, "gpt-4") != null);
 }
 
-// ── Golden parity tests ──
+// ── Golden snapshot tests ──
 // Full-frame style assertions: verify exact fg, bg, bold at each content position
 
 test "golden: text block has default fg, no bg fill" {

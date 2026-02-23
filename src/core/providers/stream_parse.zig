@@ -335,3 +335,37 @@ test "parser property random chunk boundaries preserve parsed stream" {
         }
     }
 }
+
+test "parser fuzz malformed frames return typed errors only" {
+    var prng = std.Random.DefaultPrng.init(0xC0DE_5EED);
+    const rnd = prng.random();
+
+    var iter: usize = 0;
+    while (iter < 256) : (iter += 1) {
+        const n = rnd.intRangeAtMost(usize, 1, 64);
+        var raw: [64]u8 = undefined;
+        rnd.bytes(raw[0..n]);
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            if (raw[i] == '\n' or raw[i] == '\r' or raw[i] == 0) raw[i] = 'x';
+        }
+
+        var payload = std.ArrayList(u8).empty;
+        defer payload.deinit(std.testing.allocator);
+        try payload.appendSlice(std.testing.allocator, raw[0..n]);
+        try payload.appendSlice(std.testing.allocator, "\nstop:done\n");
+
+        const chunks = [_][]const u8{payload.items};
+        var out = parseChunks(std.testing.allocator, chunks[0..]) catch |err| switch (err) {
+            error.BadFrame,
+            error.UnknownTag,
+            error.InvalidUsage,
+            error.UnknownStop,
+            error.OutOfMemory,
+            => continue,
+            else => return err,
+        };
+        out.deinit();
+    }
+}

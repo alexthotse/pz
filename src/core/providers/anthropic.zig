@@ -13,7 +13,7 @@ pub const Client = struct {
     http: std.http.Client,
 
     pub fn init(alloc: std.mem.Allocator) !Client {
-        var auth_res = try auth_mod.load(alloc);
+        var auth_res = try auth_mod.loadForProvider(alloc, .anthropic);
         errdefer auth_res.deinit();
         return .{
             .alloc = alloc,
@@ -56,7 +56,7 @@ pub const Client = struct {
         const old = self.auth.auth.oauth;
 
         // Try refresh endpoint
-        if (auth_mod.refreshOAuth(ar, old)) |new_oauth| {
+        if (auth_mod.refreshOAuthForProvider(ar, .anthropic, old)) |new_oauth| {
             const auth_ar = self.auth.arena.allocator();
             const new_access = try auth_ar.dupe(u8, new_oauth.access);
             const new_refresh = try auth_ar.dupe(u8, new_oauth.refresh);
@@ -71,7 +71,7 @@ pub const Client = struct {
         } else |_| {}
 
         // Refresh failed — reload from disk (another instance may have refreshed)
-        var reloaded = auth_mod.load(self.alloc) catch return error.RefreshFailed;
+        var reloaded = auth_mod.loadForProvider(self.alloc, .anthropic) catch return error.RefreshFailed;
         switch (reloaded.auth) {
             .oauth => |oauth| {
                 const now = std.time.milliTimestamp();
@@ -199,7 +199,9 @@ pub const Client = struct {
             const status_int: u16 = @intFromEnum(stream.response.head.status);
             // Sanitize: response body may not be valid UTF-8
             const safe_body = sanitizeUtf8(ar, err_body) catch "unknown error";
-            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, safe_body });
+            // Extract human-readable message from API JSON error body
+            const msg = extractApiErrMsg(safe_body) orelse safe_body;
+            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, msg });
         } else {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
         }
@@ -486,6 +488,18 @@ fn sanitizeUtf8(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
         i += n;
     }
     return out[0..o];
+}
+
+/// Extract "message" from Anthropic JSON error: {"type":"error","error":{"message":"..."}}
+/// Returns a slice into the input body (the JSON string value is unescaped in-place by the parser,
+/// but we just scan for the key and extract the raw value to avoid lifetime issues).
+fn extractApiErrMsg(body: []const u8) ?[]const u8 {
+    // Find "message":" and extract until closing quote (handles the common case without allocation)
+    const needle = "\"message\":\"";
+    const start = (std.mem.indexOf(u8, body, needle) orelse return null) + needle.len;
+    const end = std.mem.indexOfScalarPos(u8, body, start, '"') orelse return null;
+    const msg = body[start..end];
+    return if (msg.len > 0) msg else null;
 }
 
 fn mapStopReason(reason: []const u8) providers.StopReason {

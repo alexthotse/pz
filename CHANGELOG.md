@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Native OpenAI streaming provider (`/v1/responses`) with text, reasoning, tool-call, usage, and stop/error event mapping.
+
+### Changed
+- Runtime native-provider selection is now provider-aware (`anthropic` and `openai`) instead of Anthropic-only.
+- OAuth token refresh is now provider-scoped in shared auth code (`refreshOAuthForProvider`), with Anthropic and OpenAI using the same typed flow.
+- Missing-provider diagnostics are now provider-specific for native providers and explicit for unsupported native labels.
+- Removed Pi-parity-specific snapshot/doc naming from runtime/TUI tests and docs in favor of pz-owned behavior coverage.
+
+### Tests
+- Added comprehensive OpenAI provider unit tests for SSE event parsing, tool-call assembly, usage/stop mapping, and request-body conversion.
+- Added auth unit tests for provider-specific refresh request encoding and unsupported-provider rejection.
+- Added runtime regression for unsupported native provider labels when `--provider-cmd` is not set.
+- Added OpenAI parser property coverage for randomized tool-call argument assembly and stop-reason invariants.
+- Added auth parser/request-encoding regressions for escaped callback payloads and form token exchange bodies.
+- Added stream parser fuzz coverage for malformed frame inputs with typed-error invariants.
+- CI now enforces deterministic mutation and test-impact gates (`tools/ci/mutation_gate.sh`, `tools/ci/test_impact_gate.sh`).
+
 ## [0.1.8] - 2026-02-23
 
 ### Changed
@@ -54,7 +74,6 @@ All notable changes to this project will be documented in this file.
 ### Tests
 - Added input parser regressions for SS3 Up/Down arrow decoding.
 - Added runtime regressions for lossy UTF-8 sanitization and safe transcript insertion of invalid command output.
-
 ## [0.1.4] - 2026-02-23
 
 ### Added
@@ -71,7 +90,7 @@ All notable changes to this project will be documented in this file.
 ### Tests
 - Added update diagnostics tests for HTTP-failure message formatting and response-sanitization behavior.
 - Added session-restore UX tests covering resume overlay listing, ordering, and up/down arrow wrap navigation.
-- Added explicit runtime parity test for `-r` (resume latest session) behavior.
+- Added explicit runtime test for `-r` (resume latest session) behavior.
 
 ## [0.1.3] - 2026-02-23
 
@@ -98,7 +117,7 @@ All notable changes to this project will be documented in this file.
 - Input mode toggle (`Alt+Down`) for `steering` and `queue`, with footer status (`mode ... qN`).
 - Queued-message picker (`Alt+Up`) to navigate queued prompts and restore one into the editor for editing.
 - Persistent background job journal with startup recovery and stale-job cleanup.
-- Parity spec document at `docs/parity.md` covering command, footer, bg, and ask-tool behavior.
+- UX behavior spec covering command, footer, bg, and ask-tool behavior.
 
 ### Changed
 - Release artifacts remain focused on 3 targets: `x86_64-linux`, `aarch64-linux`, `aarch64-macos`.
@@ -118,7 +137,7 @@ All notable changes to this project will be documented in this file.
 - Added input queue tests for `Alt+Down` mode switching, queue overlay selection/edit restore, and queue footer state.
 - Added `ask` tool tests for hook wiring, empty-question validation, and hook-failure surfaces.
 - Added bg journal tests for replay, cleanup, malformed lines, and stale-entry recovery.
-- Added parity harness snapshot coverage for slash command + bg lifecycle flow.
+- Added snapshot coverage for slash command + bg lifecycle flow.
 - CI now enforces parser performance budget with an explicit ReleaseFast perf gate.
 
 ## [0.1.1] - 2026-02-23
