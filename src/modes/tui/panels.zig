@@ -293,6 +293,16 @@ pub const Panels = struct {
                     try writePart(frm, &x, x_end, y1, ")", dim_st);
                 }
             }
+
+            // Right-align hint on line 1
+            const hint = "shift+drag: select";
+            const hint_cols = hint.len;
+            if (hint_cols + 1 < rect.w) {
+                var hx = x_end - hint_cols;
+                if (hx > x + 1) {
+                    try writePart(frm, &hx, x_end, y1, hint, dim_st);
+                }
+            }
         }
 
         if (rect.h < 2) return;

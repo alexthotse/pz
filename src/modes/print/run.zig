@@ -47,7 +47,7 @@ fn execVerbose(run_ctx: contract.RunCtx, out: std.Io.AnyWriter, verbose: bool) r
 
         switch (ev) {
             .stop => |stop| {
-                stop_reason = run_err.mergeStop(stop_reason, stop.reason);
+                stop_reason = core.providers.StopReason.merge(stop_reason, stop.reason);
             },
             else => {},
         }

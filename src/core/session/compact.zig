@@ -189,92 +189,123 @@ pub fn escapeXml(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return buf;
 }
 
-pub fn sortPaths(paths: [][]const u8) void {
-    std.sort.pdq([]const u8, paths, {}, struct {
-        fn cmp(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.cmp);
-}
-
 // -- File operations extraction (F1) --
 
-const file_tools = [_][]const u8{ "read", "write", "edit", "glob", "grep", "bash" };
+const FileOps = struct {
+    read: []const []const u8,
+    modified: []const []const u8,
+};
 
-fn isFileTool(name: []const u8) bool {
-    for (file_tools) |t| {
+const read_tools = [_][]const u8{ "read", "grep", "find", "ls" };
+const write_tools = [_][]const u8{ "write", "edit" };
+
+fn isToolKind(name: []const u8, comptime table: []const []const u8) bool {
+    inline for (table) |t| {
         if (std.mem.eql(u8, name, t)) return true;
     }
     return false;
 }
 
-fn extractPath(tc: schema.Event.ToolCall) ?[]const u8 {
-    if (!isFileTool(tc.name)) return null;
-
+fn extractPath(alloc: std.mem.Allocator, args: []const u8) !?[]const u8 {
     const parsed = std.json.parseFromSlice(
-        struct {
-            file_path: ?[]const u8 = null,
-            path: ?[]const u8 = null,
-            pattern: ?[]const u8 = null,
-            command: ?[]const u8 = null,
-        },
-        std.heap.page_allocator,
-        tc.args,
-        .{ .allocate = .alloc_if_needed, .ignore_unknown_fields = true },
+        struct { path: ?[]const u8 = null, file_path: ?[]const u8 = null },
+        alloc,
+        args,
+        .{ .allocate = .alloc_always },
     ) catch return null;
     defer parsed.deinit();
-
-    const v = parsed.value;
-    return v.file_path orelse v.path orelse v.pattern orelse v.command;
+    const p = parsed.value.path orelse parsed.value.file_path orelse return null;
+    if (p.len == 0) return null;
+    return try alloc.dupe(u8, p);
 }
 
-/// Extract deduplicated, sorted file paths from tool_call events.
-pub fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) ![][]const u8 {
-    var set: std.StringHashMapUnmanaged(void) = .empty;
+/// Extract read and modified file paths from tool_call events.
+/// Files appearing in both read and write are placed only in modified.
+fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?FileOps {
+    var read_set: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer {
-        var it = set.keyIterator();
-        while (it.next()) |k| alloc.free(@constCast(k.*));
-        set.deinit(alloc);
+        for (read_set.keys()) |k| alloc.free(k);
+        read_set.deinit(alloc);
+    }
+    var mod_set: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer {
+        for (mod_set.keys()) |k| alloc.free(k);
+        mod_set.deinit(alloc);
     }
 
     for (events) |ev| {
-        switch (ev.data) {
-            .tool_call => |tc| {
-                const path = extractPath(tc) orelse continue;
-                if (set.contains(path)) continue;
-                const owned = try alloc.dupe(u8, path);
-                errdefer alloc.free(owned);
-                try set.put(alloc, owned, {});
-            },
-            else => {},
+        const tc = switch (ev.data) {
+            .tool_call => |tc| tc,
+            else => continue,
+        };
+        const p = try extractPath(alloc, tc.args) orelse continue;
+        if (isToolKind(tc.name, &write_tools)) {
+            if (read_set.fetchOrderedRemove(p)) |kv| {
+                alloc.free(kv.key);
+            }
+            const gop = try mod_set.getOrPut(alloc, p);
+            if (gop.found_existing) alloc.free(p);
+        } else if (isToolKind(tc.name, &read_tools)) {
+            if (mod_set.contains(p)) {
+                alloc.free(p);
+                continue;
+            }
+            const gop = try read_set.getOrPut(alloc, p);
+            if (gop.found_existing) alloc.free(p);
+        } else {
+            alloc.free(p);
         }
     }
 
-    // Drain into sorted slice, transferring ownership
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer list.deinit(alloc);
+    if (read_set.count() == 0 and mod_set.count() == 0) return null;
 
-    var it = set.keyIterator();
-    while (it.next()) |k| try list.append(alloc, k.*);
+    // Transfer ownership to caller
+    const r = try alloc.dupe([]const u8, read_set.keys());
+    errdefer alloc.free(r);
+    read_set.clearRetainingCapacity();
 
-    std.sort.pdq([]const u8, list.items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
+    const m = try alloc.dupe([]const u8, mod_set.keys());
+    errdefer alloc.free(m);
+    mod_set.clearRetainingCapacity();
+
+    return FileOps{ .read = r, .modified = m };
+}
+
+fn freeFileOps(alloc: std.mem.Allocator, ops: FileOps) void {
+    for (ops.read) |p| alloc.free(p);
+    alloc.free(ops.read);
+    for (ops.modified) |p| alloc.free(p);
+    alloc.free(ops.modified);
+}
+
+// .off: summarization is mechanical; thinking tokens waste output budget
+/// Format file operations as XML-style tags for compaction summaries.
+/// Returns null if no file operations found.
+pub fn formatFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?[]const u8 {
+    const ops = try extractFileOps(alloc, events) orelse return null;
+    defer freeFileOps(alloc, ops);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+
+    if (ops.read.len > 0) {
+        try buf.appendSlice(alloc, "<read-files>\n");
+        for (ops.read) |p| {
+            try buf.appendSlice(alloc, p);
+            try buf.append(alloc, '\n');
         }
-    }.lt);
+        try buf.appendSlice(alloc, "</read-files>\n");
+    }
+    if (ops.modified.len > 0) {
+        try buf.appendSlice(alloc, "<modified-files>\n");
+        for (ops.modified) |p| {
+            try buf.appendSlice(alloc, p);
+            try buf.append(alloc, '\n');
+        }
+        try buf.appendSlice(alloc, "</modified-files>\n");
+    }
 
-    set.clearRetainingCapacity();
-    return try list.toOwnedSlice(alloc);
-}
-
-pub fn freeFileOps(alloc: std.mem.Allocator, paths: [][]const u8) void {
-    for (paths) |p| alloc.free(@constCast(p));
-    alloc.free(paths);
-}
-
-/// Stub: future LLM-based session summary.
-pub fn generateSummary(_: std.mem.Allocator, _: []const schema.Event) ?[]u8 {
-    return null;
+    return try buf.toOwnedSlice(alloc);
 }
 
 test "compaction rewrites stream and preserves semantic events" {
@@ -360,15 +391,6 @@ test "escapeXml all five special chars" {
     try std.testing.expectEqualStrings("&amp;&lt;&gt;&quot;&apos;", out);
 }
 
-test "sortPaths sorts file paths" {
-    var paths = [_][]const u8{ "src/main.zig", "build.zig", "README.md", "src/app.zig" };
-    sortPaths(&paths);
-    try std.testing.expectEqualStrings("README.md", paths[0]);
-    try std.testing.expectEqualStrings("build.zig", paths[1]);
-    try std.testing.expectEqualStrings("src/app.zig", paths[2]);
-    try std.testing.expectEqualStrings("src/main.zig", paths[3]);
-}
-
 // Property: escapeXml output never contains raw special chars
 test "escapeXml property: no raw specials in output" {
     const zc = @import("zcheck");
@@ -410,79 +432,109 @@ test "escapeXml property: output never shorter than input" {
     }.prop, .{ .iterations = 500 });
 }
 
-test "extractFileOps deduplicates and sorts" {
-    const alloc = std.testing.allocator;
-    const events = [_]schema.Event{
-        .{ .data = .{ .tool_call = .{ .id = "1", .name = "read", .args = "{\"path\":\"/b.txt\"}" } } },
-        .{ .data = .{ .tool_call = .{ .id = "2", .name = "write", .args = "{\"file_path\":\"/a.txt\"}" } } },
-        .{ .data = .{ .tool_call = .{ .id = "3", .name = "read", .args = "{\"path\":\"/b.txt\"}" } } },
-    };
-    const ops = try extractFileOps(alloc, &events);
-    defer freeFileOps(alloc, ops);
-
-    try std.testing.expectEqual(@as(usize, 2), ops.len);
-    try std.testing.expectEqualStrings("/a.txt", ops[0]);
-    try std.testing.expectEqualStrings("/b.txt", ops[1]);
+fn mkEv(name: []const u8, args: []const u8) schema.Event {
+    return .{ .at_ms = 1, .data = .{ .tool_call = .{
+        .id = "c1",
+        .name = name,
+        .args = args,
+    } } };
 }
 
-test "extractFileOps handles glob and grep" {
-    const alloc = std.testing.allocator;
-    const events = [_]schema.Event{
-        .{ .data = .{ .tool_call = .{ .id = "1", .name = "glob", .args = "{\"pattern\":\"*.zig\"}" } } },
-        .{ .data = .{ .tool_call = .{ .id = "2", .name = "grep", .args = "{\"path\":\"src/\"}" } } },
-    };
-    const ops = try extractFileOps(alloc, &events);
-    defer freeFileOps(alloc, ops);
+test "formatFileOps mixed read and write" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
 
-    try std.testing.expectEqual(@as(usize, 2), ops.len);
-    try std.testing.expectEqualStrings("*.zig", ops[0]);
-    try std.testing.expectEqualStrings("src/", ops[1]);
+    const evs = [_]schema.Event{
+        mkEv("read", "{\"path\":\"/src/a.zig\"}"),
+        mkEv("grep", "{\"path\":\"/src/b.zig\"}"),
+        mkEv("write", "{\"path\":\"/src/c.zig\"}"),
+        mkEv("edit", "{\"path\":\"/src/d.zig\"}"),
+    };
+    const got = try formatFileOps(std.testing.allocator, &evs) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "<read-files>
+        \\/src/a.zig
+        \\/src/b.zig
+        \\</read-files>
+        \\<modified-files>
+        \\/src/c.zig
+        \\/src/d.zig
+        \\</modified-files>
+        \\"
+    ).expectEqual(got);
 }
 
-test "extractFileOps handles bash command" {
-    const alloc = std.testing.allocator;
-    const events = [_]schema.Event{
-        .{ .data = .{ .tool_call = .{ .id = "1", .name = "bash", .args = "{\"command\":\"ls -la\"}" } } },
-    };
-    const ops = try extractFileOps(alloc, &events);
-    defer freeFileOps(alloc, ops);
+test "formatFileOps read only" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
 
-    try std.testing.expectEqual(@as(usize, 1), ops.len);
-    try std.testing.expectEqualStrings("ls -la", ops[0]);
+    const evs = [_]schema.Event{
+        mkEv("read", "{\"path\":\"/x.zig\"}"),
+        mkEv("find", "{\"path\":\"/y\"}"),
+    };
+    const got = try formatFileOps(std.testing.allocator, &evs) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "<read-files>
+        \\/x.zig
+        \\/y
+        \\</read-files>
+        \\"
+    ).expectEqual(got);
 }
 
-test "extractFileOps skips non-tool events" {
-    const alloc = std.testing.allocator;
-    const events = [_]schema.Event{
-        .{ .data = .{ .text = .{ .text = "hello" } } },
-        .{ .data = .{ .stop = .{ .reason = .done } } },
+test "formatFileOps write only" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const evs = [_]schema.Event{
+        mkEv("write", "{\"path\":\"/out.txt\"}"),
     };
-    const ops = try extractFileOps(alloc, &events);
-    defer freeFileOps(alloc, ops);
-    try std.testing.expectEqual(@as(usize, 0), ops.len);
+    const got = try formatFileOps(std.testing.allocator, &evs) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "<modified-files>
+        \\/out.txt
+        \\</modified-files>
+        \\"
+    ).expectEqual(got);
 }
 
-test "extractFileOps skips unknown tools" {
-    const alloc = std.testing.allocator;
-    const events = [_]schema.Event{
-        .{ .data = .{ .tool_call = .{ .id = "1", .name = "unknown", .args = "{\"path\":\"/x\"}" } } },
+test "formatFileOps returns null when no file tools" {
+    const evs = [_]schema.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "hello" } } },
+        mkEv("bash", "{\"cmd\":\"ls\"}"),
     };
-    const ops = try extractFileOps(alloc, &events);
-    defer freeFileOps(alloc, ops);
-    try std.testing.expectEqual(@as(usize, 0), ops.len);
+    try std.testing.expect(try formatFileOps(std.testing.allocator, &evs) == null);
 }
 
-test "extractFileOps handles malformed JSON" {
-    const alloc = std.testing.allocator;
-    const events = [_]schema.Event{
-        .{ .data = .{ .tool_call = .{ .id = "1", .name = "read", .args = "{bad json" } } },
-    };
-    const ops = try extractFileOps(alloc, &events);
-    defer freeFileOps(alloc, ops);
-    try std.testing.expectEqual(@as(usize, 0), ops.len);
-}
+test "formatFileOps deduplicates read+write to modified only" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
 
-test "generateSummary returns null" {
-    const alloc = std.testing.allocator;
-    try std.testing.expect(generateSummary(alloc, &.{}) == null);
+    const evs = [_]schema.Event{
+        mkEv("read", "{\"path\":\"/src/f.zig\"}"),
+        mkEv("edit", "{\"path\":\"/src/f.zig\"}"),
+        mkEv("read", "{\"path\":\"/src/g.zig\"}"),
+    };
+    const got = try formatFileOps(std.testing.allocator, &evs) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "<read-files>
+        \\/src/g.zig
+        \\</read-files>
+        \\<modified-files>
+        \\/src/f.zig
+        \\</modified-files>
+        \\"
+    ).expectEqual(got);
 }

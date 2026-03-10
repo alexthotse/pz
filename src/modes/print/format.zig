@@ -185,7 +185,7 @@ pub const Formatter = struct {
     }
 
     fn pushStop(self: *Formatter, reason: core.providers.StopReason) void {
-        if (self.stop == null or stopRank(self.stop.?) < stopRank(reason)) {
+        if (self.stop == null or self.stop.?.rank() < reason.rank()) {
             self.stop = reason;
         }
     }
@@ -244,16 +244,6 @@ fn usageLessThan(curr: core.providers.Usage, next: core.providers.Usage) bool {
     if (curr.tot_tok != next.tot_tok) return curr.tot_tok < next.tot_tok;
     if (curr.out_tok != next.out_tok) return curr.out_tok < next.out_tok;
     return curr.in_tok < next.in_tok;
-}
-
-fn stopRank(reason: core.providers.StopReason) u8 {
-    return switch (reason) {
-        .done => 0,
-        .tool => 1,
-        .max_out => 2,
-        .canceled => 3,
-        .err => 4,
-    };
 }
 
 fn stopName(reason: core.providers.StopReason) []const u8 {

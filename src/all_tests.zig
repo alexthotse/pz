@@ -14,6 +14,7 @@ const tui_vscreen = @import("modes/tui/vscreen.zig");
 const tui_fixture = @import("modes/tui/fixture.zig");
 const perf_baseline = @import("perf/baseline.zig");
 const core_skill = @import("core/skill.zig");
+const core_policy = @import("core/policy.zig");
 
 test "all module tests" {
     _ = app_cli;
@@ -32,4 +33,5 @@ test "all module tests" {
     _ = tui_fixture;
     _ = perf_baseline;
     _ = core_skill;
+    _ = core_policy;
 }

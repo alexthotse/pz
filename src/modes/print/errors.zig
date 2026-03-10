@@ -44,23 +44,6 @@ pub fn mapStop(reason: core.providers.StopReason) ?Err {
     };
 }
 
-pub fn mergeStop(curr: ?core.providers.StopReason, next: core.providers.StopReason) core.providers.StopReason {
-    if (curr) |prev| {
-        if (stopRank(prev) >= stopRank(next)) return prev;
-    }
-    return next;
-}
-
-fn stopRank(reason: core.providers.StopReason) u8 {
-    return switch (reason) {
-        .done => 0,
-        .tool => 1,
-        .max_out => 2,
-        .canceled => 3,
-        .err => 4,
-    };
-}
-
 test "map provides stable exit codes and messages for each typed print error" {
     const Case = struct {
         err: Err,
@@ -99,12 +82,4 @@ test "mapStop maps stop reasons to typed print errors" {
     try std.testing.expectEqual(error.StopTool, mapStop(.tool).?);
     try std.testing.expectEqual(error.StopCanceled, mapStop(.canceled).?);
     try std.testing.expectEqual(error.StopErr, mapStop(.err).?);
-}
-
-test "mergeStop chooses deterministic highest priority stop reason" {
-    try std.testing.expectEqual(core.providers.StopReason.done, mergeStop(null, .done));
-    try std.testing.expectEqual(core.providers.StopReason.max_out, mergeStop(.done, .max_out));
-    try std.testing.expectEqual(core.providers.StopReason.max_out, mergeStop(.max_out, .done));
-    try std.testing.expectEqual(core.providers.StopReason.err, mergeStop(.tool, .err));
-    try std.testing.expectEqual(core.providers.StopReason.canceled, mergeStop(.canceled, .max_out));
 }

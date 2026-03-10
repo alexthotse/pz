@@ -81,6 +81,23 @@ pub const StopReason = enum {
     tool,
     canceled,
     err,
+
+    pub fn rank(self: StopReason) u8 {
+        return switch (self) {
+            .done => 0,
+            .tool => 1,
+            .max_out => 2,
+            .canceled => 3,
+            .err => 4,
+        };
+    }
+
+    pub fn merge(curr: ?StopReason, next: StopReason) StopReason {
+        if (curr) |prev| {
+            if (prev.rank() >= next.rank()) return prev;
+        }
+        return next;
+    }
 };
 
 pub const Provider = struct {
@@ -164,3 +181,21 @@ pub const Stream = struct {
         self.vt.deinit(self.ctx);
     }
 };
+
+const testing = @import("std").testing;
+
+test "StopReason.rank returns priority order" {
+    try testing.expectEqual(@as(u8, 0), StopReason.done.rank());
+    try testing.expectEqual(@as(u8, 1), StopReason.tool.rank());
+    try testing.expectEqual(@as(u8, 2), StopReason.max_out.rank());
+    try testing.expectEqual(@as(u8, 3), StopReason.canceled.rank());
+    try testing.expectEqual(@as(u8, 4), StopReason.err.rank());
+}
+
+test "StopReason.merge chooses highest priority" {
+    try testing.expectEqual(StopReason.done, StopReason.merge(null, .done));
+    try testing.expectEqual(StopReason.max_out, StopReason.merge(.done, .max_out));
+    try testing.expectEqual(StopReason.max_out, StopReason.merge(.max_out, .done));
+    try testing.expectEqual(StopReason.err, StopReason.merge(.tool, .err));
+    try testing.expectEqual(StopReason.canceled, StopReason.merge(.canceled, .max_out));
+}

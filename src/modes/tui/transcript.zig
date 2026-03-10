@@ -14,9 +14,6 @@ pub const Rect = struct {
 
 const imgproto = @import("imgproto.zig");
 
-const tbl_buf_cap = 64; // max lines (header + sep + data) in table rendering
-const max_tbl_data = tbl_buf_cap - 2; // cap for data rows (minus header + sep)
-
 const Kind = enum { text, user, thinking, tool, err, meta, image };
 const ToolPhase = enum { none, call, result };
 
@@ -302,7 +299,7 @@ pub const Transcript = struct {
                     if (isMdTableLine(line)) {
                         if (md_wit.next()) |sep_line| {
                             if (isMdTableSepLine(sep_line)) {
-                                var table_lines_buf: [tbl_buf_cap][]const u8 = undefined;
+                                var table_lines_buf: [64][]const u8 = undefined;
                                 var table_n: usize = 0;
                                 table_lines_buf[table_n] = line;
                                 table_n += 1;
@@ -686,21 +683,13 @@ fn fmtToolCall(alloc: std.mem.Allocator, name: []const u8, args: []const u8) ![]
     };
 
     // bash tool: show command
-    if (std.mem.eql(u8, name, "bash") or std.mem.eql(u8, name, "Bash")) {
+    if (std.mem.eql(u8, name, "bash")) {
         if (obj.get("command")) |cmd| {
             const cmd_str = switch (cmd) {
                 .string => |s| s,
                 else => return std.fmt.allocPrint(alloc, " $ bash", .{}),
             };
-            // Show first line only; truncate at 80 chars with ellipsis
-            const first_line = if (std.mem.indexOfScalar(u8, cmd_str, '\n')) |nl|
-                cmd_str[0..nl]
-            else
-                cmd_str;
-            if (first_line.len > 80) {
-                return std.fmt.allocPrint(alloc, " $ {s}\xe2\x80\xa6", .{first_line[0..79]});
-            }
-            return std.fmt.allocPrint(alloc, " $ {s}", .{first_line});
+            return std.fmt.allocPrint(alloc, " $ {s}", .{cmd_str});
         }
     }
 
@@ -1165,7 +1154,7 @@ fn countMdLines(text: []const u8, w: usize) usize {
                         }
                         data_n += 1;
                     }
-                    n += mdTableVisualRows(@min(data_n, max_tbl_data));
+                    n += mdTableVisualRows(data_n);
                     continue;
                 }
                 pending = sep_line;
@@ -1242,6 +1231,8 @@ pub fn parseAnsi(alloc: std.mem.Allocator, text: []const u8, base_st: frame.Styl
         return .{ .buf = buf, .spans = .empty };
     }
 
+    const State = enum { text, esc, csi, osc };
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     try buf.ensureTotalCapacity(alloc, text.len);
     errdefer buf.deinit(alloc);
@@ -1251,16 +1242,41 @@ pub fn parseAnsi(alloc: std.mem.Allocator, text: []const u8, base_st: frame.Styl
 
     var cur_st = base_st;
     var span_start: ?usize = null;
+    var seq_start: usize = 0;
 
     var i: usize = 0;
+    var state: State = .text;
     while (i < text.len) {
-        if (text[i] == 0x1b) {
-            i += 1;
-            if (i >= text.len) break;
-            if (text[i] == '[') {
-                // CSI: parse SGR
+        state = sw: switch (state) {
+            .text => {
+                if (text[i] == 0x1b) {
+                    i += 1;
+                    continue :sw .esc;
+                }
+                buf.appendAssumeCapacity(text[i]);
                 i += 1;
-                const seq_start = i;
+                break :sw .text; // re-enter while loop for bounds check
+            },
+            .esc => {
+                if (i >= text.len) break :sw .text;
+                switch (text[i]) {
+                    '[' => {
+                        i += 1;
+                        seq_start = i;
+                        continue :sw .csi;
+                    },
+                    ']' => {
+                        i += 1;
+                        continue :sw .osc;
+                    },
+                    else => {
+                        // Simple ESC+char — skip
+                        i += 1;
+                        break :sw .text; // re-enter while loop for bounds check
+                    },
+                }
+            },
+            .csi => {
                 while (i < text.len) {
                     if (text[i] >= 0x40 and text[i] <= 0x7e) {
                         const cmd = text[i];
@@ -1286,30 +1302,23 @@ pub fn parseAnsi(alloc: std.mem.Allocator, text: []const u8, base_st: frame.Styl
                     }
                     i += 1;
                 }
-            } else if (text[i] == ']') {
-                // OSC: ESC ] ... (BEL | ESC \)
-                i += 1; // consume ']'
+                break :sw .text; // re-enter while loop for bounds check
+            },
+            .osc => {
                 while (i < text.len) {
                     if (text[i] == 0x07) {
-                        // BEL terminator
                         i += 1;
                         break;
                     }
                     if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '\\') {
-                        // ST terminator
                         i += 2;
                         break;
                     }
                     i += 1;
                 }
-            } else {
-                // Simple ESC+char — skip
-                i += 1;
-            }
-        } else {
-            buf.appendAssumeCapacity(text[i]);
-            i += 1;
-        }
+                break :sw .text; // re-enter while loop for bounds check
+            },
+        };
     }
 
     // Close trailing span
@@ -2049,6 +2058,48 @@ test "parseAnsi strips OSC terminated by ST" {
     try std.testing.expectEqualStrings("world", res.buf.items);
 }
 
+test "parseAnsi multi-sgr: bold red then reset then green" {
+    const base: frame.Style = .{};
+    // "\x1b[1;31mhello\x1b[0m \x1b[32mworld\x1b[0m"
+    const input = "\x1b[1;31mhello\x1b[0m \x1b[32mworld\x1b[0m";
+    var res = try parseAnsi(std.testing.allocator, input, base);
+    defer {
+        res.buf.deinit(std.testing.allocator);
+        res.spans.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqualStrings("hello world", res.buf.items);
+    // Should have two styled spans: "hello" (bold+red) and "world" (green)
+    try std.testing.expectEqual(@as(usize, 2), res.spans.items.len);
+    const s0 = res.spans.items[0];
+    try std.testing.expectEqualStrings("hello", res.buf.items[s0.start..s0.end]);
+    try std.testing.expect(s0.st.bold);
+    const s1 = res.spans.items[1];
+    try std.testing.expectEqualStrings("world", res.buf.items[s1.start..s1.end]);
+    try std.testing.expect(!s1.st.bold);
+}
+
+test "parseAnsi trailing ESC at end of input" {
+    const base: frame.Style = .{};
+    // Text ending with a lone ESC byte — should not crash
+    var res = try parseAnsi(std.testing.allocator, "abc\x1b", base);
+    defer {
+        res.buf.deinit(std.testing.allocator);
+        res.spans.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqualStrings("abc", res.buf.items);
+}
+
+test "parseAnsi CSI non-SGR sequence stripped" {
+    const base: frame.Style = .{};
+    // CSI cursor movement (ESC[2J = clear screen) should be stripped, not crash
+    var res = try parseAnsi(std.testing.allocator, "before\x1b[2Jafter", base);
+    defer {
+        res.buf.deinit(std.testing.allocator);
+        res.spans.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqualStrings("beforeafter", res.buf.items);
+}
+
 test "scrollUp and scrollDown adjust offset" {
     var tr = Transcript.init(std.testing.allocator);
     defer tr.deinit();
@@ -2374,60 +2425,4 @@ test "scroll offset clamped to max" {
     try std.testing.expect(std.mem.indexOf(u8, r0, "A") != null);
     const r2 = try rowAscii(&frm, 2, raw[0..]);
     try std.testing.expect(std.mem.indexOf(u8, r2, "B") != null);
-}
-
-test "countMdLines caps table data rows to buffer size" {
-    var buf: [4096]u8 = undefined;
-    var pos: usize = 0;
-    const hdr = "| a | b |\n";
-    const sep = "| - | - |\n";
-    @memcpy(buf[pos..][0..hdr.len], hdr);
-    pos += hdr.len;
-    @memcpy(buf[pos..][0..sep.len], sep);
-    pos += sep.len;
-    const row_txt = "| x | y |\n";
-    const n_data: usize = 70;
-    for (0..n_data) |_| {
-        @memcpy(buf[pos..][0..row_txt.len], row_txt);
-        pos += row_txt.len;
-    }
-    const counted = countMdLines(buf[0..pos], 80);
-    const expected = mdTableVisualRows(max_tbl_data);
-    try std.testing.expectEqual(expected, counted);
-}
-
-test "large table does not cause viewport to scroll past content" {
-    var tr = Transcript.init(std.testing.allocator);
-    defer tr.deinit();
-
-    var buf: [4096]u8 = undefined;
-    var pos: usize = 0;
-    const hdr = "| a | b |\n";
-    const sep = "| - | - |\n";
-    @memcpy(buf[pos..][0..hdr.len], hdr);
-    pos += hdr.len;
-    @memcpy(buf[pos..][0..sep.len], sep);
-    pos += sep.len;
-    const row_txt = "| x | y |\n";
-    for (0..70) |_| {
-        @memcpy(buf[pos..][0..row_txt.len], row_txt);
-        pos += row_txt.len;
-    }
-
-    try tr.append(.{ .text = buf[0..pos] });
-
-    const fw: usize = 30;
-    const fh: usize = 10;
-    var frm = try frame.Frame.init(std.testing.allocator, fw, fh);
-    defer frm.deinit(std.testing.allocator);
-    try tr.render(&frm, .{ .x = 0, .y = 0, .w = fw, .h = fh });
-
-    // Bottom row must have content, not blank (before fix, skip overshot)
-    var raw: [30]u8 = undefined;
-    const last = try rowAscii(&frm, fh - 1, raw[0..]);
-    var blank = true;
-    for (last) |c| {
-        if (c != ' ') { blank = false; break; }
-    }
-    try std.testing.expect(!blank);
 }

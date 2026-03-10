@@ -210,253 +210,213 @@ pub const Reader = struct {
         const data = self.buf[self.pos..self.len];
         if (data.len == 0) return null;
 
-        // ESC sequences
-        if (data[0] == 0x1b) {
-            if (data.len < 2) {
-                // Lone ESC — might be incomplete, wait for more
-                return null;
-            }
-            if (data[1] == '[') return self.parseCsi(data);
-            if (data[1] == 'O') return self.parseSS3(data);
-            // Alt+Enter: ESC CR or ESC LF
-            if (data[1] == '\r' or data[1] == '\n') {
-                self.pos += 2;
-                return .{ .key = .alt_enter };
-            }
-            // Alt+b / Alt+f: word movement
-            if (data[1] == 'b') {
-                self.pos += 2;
-                return .{ .key = .alt_b };
-            }
-            if (data[1] == 'f') {
-                self.pos += 2;
-                return .{ .key = .alt_f };
-            }
-            if (data[1] == 'd') {
-                self.pos += 2;
-                return .{ .key = .alt_d };
-            }
-            if (data[1] == 'y') {
-                self.pos += 2;
-                return .{ .key = .alt_y };
-            }
-            // ESC + unrecognized: emit standalone ESC
-            self.pos += 1;
-            return .{ .key = .esc };
-        }
-
-        // Ctrl-A
-        if (data[0] == 0x01) {
-            self.pos += 1;
-            return .{ .key = .ctrl_a };
-        }
-
-        // Ctrl-C
-        if (data[0] == 0x03) {
-            self.pos += 1;
-            return .{ .key = .ctrl_c };
-        }
-
-        // Ctrl-D
-        if (data[0] == 0x04) {
-            self.pos += 1;
-            return .{ .key = .ctrl_d };
-        }
-
-        // Ctrl-E
-        if (data[0] == 0x05) {
-            self.pos += 1;
-            return .{ .key = .ctrl_e };
-        }
-
-        // Ctrl-G
-        if (data[0] == 0x07) {
-            self.pos += 1;
-            return .{ .key = .ctrl_g };
-        }
-
-        // Ctrl-J (newline insert)
-        if (data[0] == 0x0a) {
-            self.pos += 1;
-            return .{ .key = .ctrl_j };
-        }
-
-        // Ctrl-K
-        if (data[0] == 0x0b) {
-            self.pos += 1;
-            return .{ .key = .ctrl_k };
-        }
-
-        // Ctrl-L
-        if (data[0] == 0x0c) {
-            self.pos += 1;
-            return .{ .key = .ctrl_l };
-        }
-
-        // Ctrl-O
-        if (data[0] == 0x0f) {
-            self.pos += 1;
-            return .{ .key = .ctrl_o };
-        }
-
-        // Ctrl-P
-        if (data[0] == 0x10) {
-            self.pos += 1;
-            return .{ .key = .ctrl_p };
-        }
-
-        // Ctrl-T
-        if (data[0] == 0x14) {
-            self.pos += 1;
-            return .{ .key = .ctrl_t };
-        }
-
-        // Ctrl-U
-        if (data[0] == 0x15) {
-            self.pos += 1;
-            return .{ .key = .ctrl_u };
-        }
-
-        // Ctrl-V (paste image)
-        if (data[0] == 0x16) {
-            self.pos += 1;
-            return .{ .key = .ctrl_v };
-        }
-
-        // Ctrl-W
-        if (data[0] == 0x17) {
-            self.pos += 1;
-            return .{ .key = .ctrl_w };
-        }
-
-        // Ctrl-] (jump-to-char)
-        if (data[0] == 0x1d) {
-            self.pos += 1;
-            return .{ .key = .ctrl_close_bracket };
-        }
-        // Ctrl-Y
-        if (data[0] == 0x19) {
-            self.pos += 1;
-            return .{ .key = .ctrl_y };
-        }
-        // Ctrl-Z
-        if (data[0] == 0x1a) {
-            self.pos += 1;
-            return .{ .key = .ctrl_z };
-        }
-
-        // Enter (CR)
-        if (data[0] == '\r') {
-            self.pos += 1;
-            // Skip CR+LF pair
-            if (data[0] == '\r' and data.len > 1 and data[1] == '\n')
+        return sw: switch (data[0]) {
+            0x1b => {
+                // ESC sequences
+                if (data.len < 2) break :sw null; // incomplete
+                switch (data[1]) {
+                    '[' => break :sw self.parseCsi(data),
+                    'O' => break :sw self.parseSS3(data),
+                    '\r', '\n' => {
+                        self.pos += 2;
+                        break :sw .{ .key = .alt_enter };
+                    },
+                    'b' => {
+                        self.pos += 2;
+                        break :sw .{ .key = .alt_b };
+                    },
+                    'f' => {
+                        self.pos += 2;
+                        break :sw .{ .key = .alt_f };
+                    },
+                    'd' => {
+                        self.pos += 2;
+                        break :sw .{ .key = .alt_d };
+                    },
+                    'y' => {
+                        self.pos += 2;
+                        break :sw .{ .key = .alt_y };
+                    },
+                    else => {
+                        self.pos += 1;
+                        break :sw .{ .key = .esc };
+                    },
+                }
+            },
+            0x01 => {
                 self.pos += 1;
-            return .{ .key = .enter };
-        }
-
-        // Backspace (DEL or BS)
-        if (data[0] == 0x7f or data[0] == 0x08) {
-            self.pos += 1;
-            return .{ .key = .backspace };
-        }
-
-        // Tab
-        if (data[0] == 0x09) {
-            self.pos += 1;
-            return .{ .key = .tab };
-        }
-
-        // Other control chars — ignore
-        if (data[0] < 0x20) {
-            self.pos += 1;
-            return .none;
-        }
-
-        // UTF-8 character
-        const seq_len = std.unicode.utf8ByteSequenceLength(data[0]) catch {
-            self.pos += 1;
-            return .none;
+                break :sw .{ .key = .ctrl_a };
+            },
+            0x03 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_c };
+            },
+            0x04 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_d };
+            },
+            0x05 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_e };
+            },
+            0x07 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_g };
+            },
+            0x0a => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_j };
+            },
+            0x0b => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_k };
+            },
+            0x0c => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_l };
+            },
+            0x0f => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_o };
+            },
+            0x10 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_p };
+            },
+            0x14 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_t };
+            },
+            0x15 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_u };
+            },
+            0x16 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_v };
+            },
+            0x17 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_w };
+            },
+            0x19 => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_y };
+            },
+            0x1a => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_z };
+            },
+            0x1d => {
+                self.pos += 1;
+                break :sw .{ .key = .ctrl_close_bracket };
+            },
+            '\r' => {
+                self.pos += 1;
+                // Skip CR+LF pair
+                if (data.len > 1 and data[1] == '\n')
+                    self.pos += 1;
+                break :sw .{ .key = .enter };
+            },
+            0x7f, 0x08 => {
+                self.pos += 1;
+                break :sw .{ .key = .backspace };
+            },
+            0x09 => {
+                self.pos += 1;
+                break :sw .{ .key = .tab };
+            },
+            0x00, 0x02, 0x06, 0x0e, 0x11...0x13, 0x18, 0x1c, 0x1e, 0x1f => {
+                // Other control chars — ignore
+                self.pos += 1;
+                break :sw @as(?Ev, .none);
+            },
+            else => |b| {
+                // UTF-8 character
+                const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+                    self.pos += 1;
+                    break :sw @as(?Ev, .none);
+                };
+                if (data.len < seq_len) break :sw null; // incomplete
+                const cp = std.unicode.utf8Decode(data[0..seq_len]) catch {
+                    self.pos += 1;
+                    break :sw @as(?Ev, .none);
+                };
+                self.pos += seq_len;
+                break :sw .{ .key = .{ .char = cp } };
+            },
         };
-        if (data.len < seq_len) return null; // incomplete
-        const cp = std.unicode.utf8Decode(data[0..seq_len]) catch {
-            self.pos += 1;
-            return .none;
-        };
-        self.pos += seq_len;
-        return .{ .key = .{ .char = cp } };
     }
 
     fn parseCsi(self: *Reader, data: []const u8) ?Ev {
         if (data.len < 3) return null; // need at least ESC [ X
 
-        // Bracketed paste start: ESC [ 200 ~
-        if (data.len >= 6 and std.mem.eql(u8, data[2..6], "200~")) {
-            self.pos += 6;
-            self.in_paste = true;
-            self.paste_len = 0;
-            return self.accumulatePaste();
-        }
-
-        // SGR mouse: ESC [ < ...
-        if (data[2] == '<') {
-            if (mouse.parse(data)) |r| {
-                self.pos += r.len;
-                return .{ .mouse = r.ev };
-            }
-            // Incomplete mouse sequence — need more bytes
-            if (data.len < 9) return null;
-            // Malformed — skip ESC [
-            self.pos += 2;
-            return .none;
-        }
-
-        // Simple CSI sequences: ESC [ letter
-        switch (data[2]) {
+        return sw: switch (data[2]) {
+            '<' => {
+                // SGR mouse: ESC [ < ...
+                if (mouse.parse(data)) |r| {
+                    self.pos += r.len;
+                    break :sw .{ .mouse = r.ev };
+                }
+                if (data.len < 9) break :sw null; // incomplete
+                self.pos += 2;
+                break :sw @as(?Ev, .none); // malformed
+            },
             'A' => {
                 self.pos += 3;
-                return .{ .key = .up };
-            }, // up
+                break :sw .{ .key = .up };
+            },
             'B' => {
                 self.pos += 3;
-                return .{ .key = .down };
-            }, // down
+                break :sw .{ .key = .down };
+            },
             'Z' => {
                 self.pos += 3;
-                return .{ .key = .shift_tab };
+                break :sw .{ .key = .shift_tab };
             },
             'C' => {
                 self.pos += 3;
-                return .{ .key = .right };
+                break :sw .{ .key = .right };
             },
             'D' => {
                 self.pos += 3;
-                return .{ .key = .left };
+                break :sw .{ .key = .left };
             },
             'H' => {
                 self.pos += 3;
-                return .{ .key = .home };
+                break :sw .{ .key = .home };
             },
             'F' => {
                 self.pos += 3;
-                return .{ .key = .end };
+                break :sw .{ .key = .end };
             },
-            else => {},
-        }
-
-        // CSI with numeric params: ESC [ N ~
-        // Scan for final byte (0x40-0x7e)
-        var i: usize = 2;
-        while (i < data.len) : (i += 1) {
-            if (data[i] >= 0x40 and data[i] <= 0x7e) {
-                i += 1; // include final byte
-                const seq = data[2..i];
-                const ev = mapCsiParam(seq);
-                self.pos += i;
-                return ev;
-            }
-        }
-        // Incomplete CSI
-        return null;
+            // Param bytes (digits, semicolons, intermediate) — scan for final byte
+            '0'...'9', ';', '?', ' '...'/' => {
+                // Bracketed paste: ESC [ 200 ~
+                if (data[2] == '2' and data.len >= 6 and std.mem.eql(u8, data[3..6], "00~")) {
+                    self.pos += 6;
+                    self.in_paste = true;
+                    self.paste_len = 0;
+                    break :sw self.accumulatePaste();
+                }
+                var i: usize = 2;
+                while (i < data.len) : (i += 1) {
+                    if (data[i] >= 0x40 and data[i] <= 0x7e) {
+                        i += 1;
+                        const seq = data[2..i];
+                        const ev = mapCsiParam(seq);
+                        self.pos += i;
+                        break :sw ev;
+                    }
+                }
+                break :sw null; // incomplete
+            },
+            else => {
+                // Unknown CSI final byte
+                self.pos += 3;
+                break :sw @as(?Ev, .none);
+            },
+        };
     }
 
     fn parseSS3(self: *Reader, data: []const u8) ?Ev {
@@ -1029,4 +989,37 @@ test "reader emits notify from either notify fd" {
         .notify => {},
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "parse multi-byte sequence: ctrl-c then arrow then char" {
+    var r = Reader.init(-1);
+    // Ctrl-C (0x03) + ESC[A (up) + 'z'
+    const seq = "\x03\x1b[Az";
+    @memcpy(r.buf[0..seq.len], seq);
+    r.len = seq.len;
+    try expectKey(r.parseOne().?, .ctrl_c);
+    try expectKey(r.parseOne().?, .up);
+    try expectKey(r.parseOne().?, .{ .char = 'z' });
+}
+
+test "parse CSI param sequences: delete, page-up, page-down" {
+    var r = Reader.init(-1);
+    // Delete (ESC[3~) + PageUp (ESC[5~) + PageDown (ESC[6~)
+    const seq = "\x1b[3~\x1b[5~\x1b[6~";
+    @memcpy(r.buf[0..seq.len], seq);
+    r.len = seq.len;
+    try expectKey(r.parseOne().?, .delete);
+    try expectKey(r.parseOne().?, .page_up);
+    try expectKey(r.parseOne().?, .page_down);
+}
+
+test "parse mixed ctrl keys and alt keys" {
+    var r = Reader.init(-1);
+    // Ctrl-A (0x01) + Alt-f (ESC f) + Tab (0x09)
+    const seq = "\x01\x1bf\x09";
+    @memcpy(r.buf[0..seq.len], seq);
+    r.len = seq.len;
+    try expectKey(r.parseOne().?, .ctrl_a);
+    try expectKey(r.parseOne().?, .alt_f);
+    try expectKey(r.parseOne().?, .tab);
 }

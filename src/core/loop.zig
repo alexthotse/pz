@@ -19,6 +19,7 @@ pub const ModeEv = union(enum) {
     session: session.Event,
     provider: providers.Ev,
     tool: tools.Event,
+    session_write_err: []const u8,
 };
 
 pub const ModeSink = struct {
@@ -148,6 +149,43 @@ const Stage = enum {
     compact,
 };
 
+pub const CmdCache = struct {
+    const max_cmds = 1024;
+
+    set: std.AutoArrayHashMapUnmanaged(u64, void) = .{},
+    alloc: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator) CmdCache {
+        return .{ .alloc = alloc };
+    }
+
+    pub fn deinit(self: *CmdCache) void {
+        self.set.deinit(self.alloc);
+    }
+
+    pub fn contains(self: *const CmdCache, cmd: []const u8) bool {
+        return self.set.contains(hash(cmd));
+    }
+
+    pub fn add(self: *CmdCache, cmd: []const u8) !void {
+        const h = hash(cmd);
+        if (self.set.contains(h)) return;
+        if (self.set.count() >= max_cmds) {
+            self.set.orderedRemoveAt(0);
+        }
+        try self.set.put(self.alloc, h, {});
+    }
+
+    pub fn count(self: *const CmdCache) usize {
+        return self.set.count();
+    }
+
+    fn hash(cmd: []const u8) u64 {
+        const trimmed = std.mem.trimRight(u8, cmd, &std.ascii.whitespace);
+        return std.hash.Wyhash.hash(0, trimmed);
+    }
+};
+
 pub const Opts = struct {
     alloc: std.mem.Allocator,
     sid: []const u8,
@@ -165,6 +203,7 @@ pub const Opts = struct {
     cancel: ?CancelSrc = null,
     compactor: ?Compactor = null,
     compact_every: u32 = 0,
+    cmd_cache: ?*CmdCache = null,
 };
 
 pub const RunOut = struct {
@@ -310,7 +349,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
         .data = .{ .prompt = .{ .text = opts.prompt } },
     };
     opts.store.append(opts.sid, prompt_ev) catch |append_err| {
-        return failWithReport(opts, .store_append, append_err);
+        try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
     };
     onSessionAppend(opts, &append_ct) catch |compact_err| {
         return failWithReport(opts, .compact, compact_err);
@@ -382,7 +421,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
 
             const sess_ev = mapProviderEv(ev, nowMs(opts));
             opts.store.append(opts.sid, sess_ev) catch |append_err| {
-                return failWithReport(opts, .store_append, append_err);
+                try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
             };
             onSessionAppend(opts, &append_ct) catch |compact_err| {
                 return failWithReport(opts, .compact, compact_err);
@@ -415,7 +454,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
 
                     const tr_sess_ev = mapProviderEv(tr_ev, nowMs(opts));
                     opts.store.append(opts.sid, tr_sess_ev) catch |append_err| {
-                        return failWithReport(opts, .store_append, append_err);
+                        try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
                     };
                     onSessionAppend(opts, &append_ct) catch |compact_err| {
                         return failWithReport(opts, .compact, compact_err);
@@ -1023,6 +1062,7 @@ test "loop smoke composes replay provider tool and mode" {
                     },
                     .finish => self.tool_finish_ct += 1,
                 },
+                .session_write_err => {},
             }
         }
     };
@@ -1226,6 +1266,7 @@ test "loop smoke finishes single turn with no tools" {
                 .session => self.session_ct += 1,
                 .provider => self.provider_ct += 1,
                 .tool => self.tool_ct += 1,
+                .session_write_err => {},
             }
         }
     };
@@ -1777,4 +1818,56 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     // Session persists partial — turns is 0 because cancel happened mid-first-turn
     try std.testing.expectEqual(@as(u16, 0), out.turns);
     try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
+}
+
+test "CmdCache approve echo hi does not approve echo rm -rf" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.add("echo hi");
+    try std.testing.expect(cache.contains("echo hi"));
+    try std.testing.expect(!cache.contains("echo rm -rf"));
+}
+
+test "CmdCache approved command auto-approved on second check" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try std.testing.expect(!cache.contains("echo hi"));
+    try cache.add("echo hi");
+    try std.testing.expect(cache.contains("echo hi"));
+    // Adding again is idempotent
+    try cache.add("echo hi");
+    try std.testing.expectEqual(@as(usize, 1), cache.count());
+    try std.testing.expect(cache.contains("echo hi"));
+}
+
+test "CmdCache trims trailing whitespace for key" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.add("echo hi   ");
+    try std.testing.expect(cache.contains("echo hi"));
+    try std.testing.expect(cache.contains("echo hi\t\n"));
+    try std.testing.expectEqual(@as(usize, 1), cache.count());
+}
+
+test "CmdCache respects max_commands limit" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    // Fill to capacity
+    for (0..CmdCache.max_cmds) |i| {
+        var buf: [32]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&buf, "cmd-{d}", .{i});
+        try cache.add(cmd);
+    }
+    try std.testing.expectEqual(@as(usize, CmdCache.max_cmds), cache.count());
+
+    // Adding one more evicts the oldest
+    try cache.add("overflow");
+    try std.testing.expectEqual(@as(usize, CmdCache.max_cmds), cache.count());
+    try std.testing.expect(cache.contains("overflow"));
+    try std.testing.expect(!cache.contains("cmd-0")); // evicted
+    try std.testing.expect(cache.contains("cmd-1")); // still present
 }

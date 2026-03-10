@@ -76,6 +76,7 @@ pub const Ui = struct {
     }
 
     pub fn deinit(self: *Ui) void {
+        if (self.ov) |*ov| ov.deinit(self.alloc);
         self.clearPathItems();
         self.rnd.deinit();
         self.frm.deinit(self.alloc);

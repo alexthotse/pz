@@ -239,102 +239,74 @@ fn tokenizeLang(line: []const u8, buf: []Token, comptime lang: Lang) []const Tok
     var i: usize = 0;
 
     while (i < line.len and n < buf.len) {
-        // Line comment: //
-        if (cfg.line_comment) |lc| {
-            if (i + lc.len <= line.len and std.mem.eql(u8, line[i..][0..lc.len], lc)) {
-                buf[n] = .{ .start = i, .end = line.len, .kind = .comment };
-                return buf[0 .. n + 1];
-            }
-        }
-        // Hash comment
-        if (cfg.hash_comment and line[i] == '#') {
-            buf[n] = .{ .start = i, .end = line.len, .kind = .comment };
-            return buf[0 .. n + 1];
-        }
-
-        // String (double quote)
-        if (line[i] == '"') {
-            const end = scanStr(line, i);
-            buf[n] = .{ .start = i, .end = end, .kind = .string };
-            n += 1;
-            i = end;
-            continue;
-        }
-        // String (single quote)
-        if (cfg.has_single_quote_str and line[i] == '\'') {
-            const end = scanStr(line, i);
-            buf[n] = .{ .start = i, .end = end, .kind = .string };
-            n += 1;
-            i = end;
-            continue;
-        }
-        // Zig char literal: 'x' (single char, not single-quote string)
-        if (!cfg.has_single_quote_str and line[i] == '\'') {
-            const end = scanStr(line, i);
-            buf[n] = .{ .start = i, .end = end, .kind = .string };
-            n += 1;
-            i = end;
-            continue;
-        }
-
-        // Number (not preceded by ident char)
-        if (isDigit(line[i]) and (i == 0 or !isIdentChar(line[i - 1]))) {
-            const end = scanNum(line, i);
-            buf[n] = .{ .start = i, .end = end, .kind = .number };
-            n += 1;
-            i = end;
-            continue;
-        }
-
-        // Identifier / keyword / type / func
-        if (isIdentStart(line[i]) or line[i] == '@') {
-            const start = i;
-            if (line[i] == '@') i += 1;
-            while (i < line.len and isIdentChar(line[i])) : (i += 1) {}
-            const word = line[start..i];
-
-            // Check keyword
-            if (isKw(cfg.keywords, word)) {
-                buf[n] = .{ .start = start, .end = i, .kind = .keyword };
-                n += 1;
-                continue;
-            }
-            // Check function call: ident followed by '('
-            if (i < line.len and line[i] == '(') {
-                buf[n] = .{ .start = start, .end = i, .kind = .func };
-                n += 1;
-                continue;
-            }
-            // PascalCase type detection for Zig
-            if (cfg.has_types and isPascalCase(word)) {
-                buf[n] = .{ .start = start, .end = i, .kind = .type_name };
-                n += 1;
-                continue;
-            }
-            buf[n] = .{ .start = start, .end = i, .kind = .text };
-            n += 1;
-            continue;
-        }
-
-        // Operator
-        if (isOp(line[i])) {
-            buf[n] = .{ .start = i, .end = i + 1, .kind = .operator };
-            n += 1;
-            i += 1;
-            continue;
-        }
-        // Punct
-        if (isPunct(line[i])) {
-            buf[n] = .{ .start = i, .end = i + 1, .kind = .punct };
-            n += 1;
-            i += 1;
-            continue;
-        }
-
-        // Whitespace / other
-        const start = i;
-        i += 1;
-        buf[n] = .{ .start = start, .end = i, .kind = .text };
+        const tok: Token = sw: switch (line[i]) {
+            '#' => {
+                if (cfg.hash_comment) {
+                    buf[n] = .{ .start = i, .end = line.len, .kind = .comment };
+                    return buf[0 .. n + 1];
+                }
+                // '#' as text
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+            },
+            '/' => {
+                if (cfg.line_comment) |lc| {
+                    if (i + lc.len <= line.len and std.mem.eql(u8, line[i..][0..lc.len], lc)) {
+                        buf[n] = .{ .start = i, .end = line.len, .kind = .comment };
+                        return buf[0 .. n + 1];
+                    }
+                }
+                // '/' as operator
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .operator };
+            },
+            '"', '\'' => {
+                const end = scanStr(line, i);
+                const start = i;
+                i = end;
+                break :sw .{ .start = start, .end = end, .kind = .string };
+            },
+            '0'...'9' => {
+                if (i == 0 or !isIdentChar(line[i - 1])) {
+                    const end = scanNum(line, i);
+                    const start = i;
+                    i = end;
+                    break :sw .{ .start = start, .end = end, .kind = .number };
+                }
+                // Digit preceded by ident char — part of identifier, handled as text
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+            },
+            'a'...'z', 'A'...'Z', '_', '@' => {
+                const start = i;
+                if (line[i] == '@') i += 1;
+                while (i < line.len and isIdentChar(line[i])) : (i += 1) {}
+                const word = line[start..i];
+                if (isKw(cfg.keywords, word)) {
+                    break :sw .{ .start = start, .end = i, .kind = .keyword };
+                }
+                if (i < line.len and line[i] == '(') {
+                    break :sw .{ .start = start, .end = i, .kind = .func };
+                }
+                if (cfg.has_types and isPascalCase(word)) {
+                    break :sw .{ .start = start, .end = i, .kind = .type_name };
+                }
+                break :sw .{ .start = start, .end = i, .kind = .text };
+            },
+            '=', '+', '-', '*', '<', '>', '!', '&', '|', '^', '~', '%' => {
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .operator };
+            },
+            '(', ')', '{', '}', '[', ']', ',', ';', '.' => {
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .punct };
+            },
+            else => {
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+            },
+        };
+        buf[n] = tok;
         n += 1;
     }
     return buf[0..n];
@@ -347,49 +319,56 @@ fn tokenizeJson(line: []const u8, buf: []Token) []const Token {
     var i: usize = 0;
 
     while (i < line.len and n < buf.len) {
-        // String (key or value)
-        if (line[i] == '"') {
-            const end = scanStr(line, i);
-            // Determine if this is a key (followed by ':')
-            var j = end;
-            while (j < line.len and (line[j] == ' ' or line[j] == '\t')) : (j += 1) {}
-            const kind: Kind = if (j < line.len and line[j] == ':') .func else .string;
-            buf[n] = .{ .start = i, .end = end, .kind = kind };
-            n += 1;
-            i = end;
-            continue;
-        }
-        // Numbers
-        if ((isDigit(line[i]) or (line[i] == '-' and i + 1 < line.len and isDigit(line[i + 1]))) and
-            (i == 0 or !isIdentChar(line[i - 1])))
-        {
-            const end = scanNum(line, i);
-            buf[n] = .{ .start = i, .end = end, .kind = .number };
-            n += 1;
-            i = end;
-            continue;
-        }
-        // Booleans / null
-        if (isIdentStart(line[i])) {
-            const start = i;
-            while (i < line.len and isIdentChar(line[i])) : (i += 1) {}
-            const word = line[start..i];
-            const kind: Kind = if (json_lit_map.get(word) != null) .keyword else .text;
-            buf[n] = .{ .start = start, .end = i, .kind = kind };
-            n += 1;
-            continue;
-        }
-        // Punct
-        if (isPunct(line[i]) or line[i] == ':') {
-            buf[n] = .{ .start = i, .end = i + 1, .kind = .punct };
-            n += 1;
-            i += 1;
-            continue;
-        }
-        // Whitespace / other
-        const start = i;
-        i += 1;
-        buf[n] = .{ .start = start, .end = i, .kind = .text };
+        const tok: Token = sw: switch (line[i]) {
+            '"' => {
+                const start = i;
+                const end = scanStr(line, i);
+                // Determine if this is a key (followed by ':')
+                var j = end;
+                while (j < line.len and (line[j] == ' ' or line[j] == '\t')) : (j += 1) {}
+                const kind: Kind = if (j < line.len and line[j] == ':') .func else .string;
+                i = end;
+                break :sw .{ .start = start, .end = end, .kind = kind };
+            },
+            '-' => {
+                if (i + 1 < line.len and isDigit(line[i + 1]) and
+                    (i == 0 or !isIdentChar(line[i - 1])))
+                {
+                    const start = i;
+                    const end = scanNum(line, i);
+                    i = end;
+                    break :sw .{ .start = start, .end = end, .kind = .number };
+                }
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+            },
+            '0'...'9' => {
+                if (i == 0 or !isIdentChar(line[i - 1])) {
+                    const start = i;
+                    const end = scanNum(line, i);
+                    i = end;
+                    break :sw .{ .start = start, .end = end, .kind = .number };
+                }
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+            },
+            'a'...'z', 'A'...'Z', '_' => {
+                const start = i;
+                while (i < line.len and isIdentChar(line[i])) : (i += 1) {}
+                const word = line[start..i];
+                const kind: Kind = if (json_lit_map.get(word) != null) .keyword else .text;
+                break :sw .{ .start = start, .end = i, .kind = kind };
+            },
+            '(', ')', '{', '}', '[', ']', ',', ';', '.', ':' => {
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .punct };
+            },
+            else => {
+                i += 1;
+                break :sw .{ .start = i - 1, .end = i, .kind = .text };
+            },
+        };
+        buf[n] = tok;
         n += 1;
     }
     return buf[0..n];
@@ -670,4 +649,64 @@ test "unknown lang uses generic tokenizer" {
     }
     try testing.expect(has_str);
     try testing.expect(has_num);
+}
+
+test "zig: multi-token statement" {
+    var buf: [64]Token = undefined;
+    const line = "const x: MyType = foo(42); // call";
+    const toks = tokenize(line, .zig, &buf);
+    // Verify token sequence: keyword, text, punct, type, operator, func, number, punct, punct, comment
+    try testing.expectEqual(Kind.keyword, toks[0].kind);
+    try testing.expectEqualStrings("const", line[toks[0].start..toks[0].end]);
+    var found_type = false;
+    var found_func = false;
+    var found_num = false;
+    var found_comment = false;
+    for (toks) |t| {
+        if (t.kind == .type_name) found_type = true;
+        if (t.kind == .func) found_func = true;
+        if (t.kind == .number) found_num = true;
+        if (t.kind == .comment) found_comment = true;
+    }
+    try testing.expect(found_type);
+    try testing.expect(found_func);
+    try testing.expect(found_num);
+    try testing.expect(found_comment);
+}
+
+test "json: multi-token object line" {
+    var buf: [64]Token = undefined;
+    const line = "  \"count\": 42, \"active\": true";
+    const toks = tokenize(line, .json, &buf);
+    var keys: usize = 0;
+    var nums: usize = 0;
+    var kws: usize = 0;
+    for (toks) |t| {
+        if (t.kind == .func) keys += 1;
+        if (t.kind == .number) nums += 1;
+        if (t.kind == .keyword) kws += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), keys); // "count" and "active"
+    try testing.expectEqual(@as(usize, 1), nums); // 42
+    try testing.expectEqual(@as(usize, 1), kws); // true
+}
+
+test "json: negative number and null" {
+    var buf: [64]Token = undefined;
+    const line = "{\"val\": -3.14, \"x\": null}";
+    const toks = tokenize(line, .json, &buf);
+    var found_neg = false;
+    var found_null = false;
+    for (toks) |t| {
+        if (t.kind == .number) {
+            try testing.expectEqualStrings("-3.14", line[t.start..t.end]);
+            found_neg = true;
+        }
+        if (t.kind == .keyword) {
+            try testing.expectEqualStrings("null", line[t.start..t.end]);
+            found_null = true;
+        }
+    }
+    try testing.expect(found_neg);
+    try testing.expect(found_null);
 }

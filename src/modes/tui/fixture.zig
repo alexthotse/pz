@@ -347,7 +347,16 @@ test "golden snapshot deterministic frame text" {
         fn run(text: []const u8, out: []u8) []const u8 {
             var w: usize = 0;
             var in_space = false;
-            for (text) |ch| {
+            var i: usize = 0;
+            while (i < text.len) : (i += 1) {
+                // Skip ANSI escape sequences: ESC [ ... final_byte
+                if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '[') {
+                    i += 2;
+                    while (i < text.len and text[i] >= 0x20 and text[i] <= 0x3f) : (i += 1) {}
+                    // i now points to final byte or end; loop increment will skip it
+                    continue;
+                }
+                const ch = text[i];
                 if (ch == ' ') {
                     if (in_space) continue;
                     in_space = true;
@@ -379,7 +388,7 @@ test "golden snapshot deterministic frame text" {
         \\  .row1: []const u8
         \\    ""
         \\  .row8: []const u8
-        \\    ""
+        \\    "shift+drag: select"
         \\  .row9: []const u8
         \\    "1 turn m"
     ).expectEqual(snap);

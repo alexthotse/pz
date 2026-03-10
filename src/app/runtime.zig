@@ -201,7 +201,7 @@ const PrintSink = struct {
                     .stop => |stop| {
                         // stop:tool is an internal handoff marker when loop continues.
                         if (stop.reason == .tool) return;
-                        self.stop_reason = print_err.mergeStop(self.stop_reason, stop.reason);
+                        self.stop_reason = core.providers.StopReason.merge(self.stop_reason, stop.reason);
                     },
                     else => {},
                 }
@@ -1021,6 +1021,7 @@ const JsonSink = struct {
             .session => |payload| try self.emit("session", payload),
             .provider => |payload| try self.emit("provider", payload),
             .tool => |payload| try self.emit("tool", payload),
+            .session_write_err => |msg| try self.emit("session_write_err", msg),
         }
     }
 
@@ -1855,18 +1856,9 @@ fn runTui(
                             }
                             if (cmd == .select_logout) {
                                 const providers = core.providers.auth.listLoggedIn(alloc) catch try alloc.alloc(core.providers.auth.Provider, 0);
-                                if (providers.len == 0) {
-                                    alloc.free(providers);
+                                defer alloc.free(providers);
+                                if (!try showLogoutOverlay(alloc, &ui, providers)) {
                                     try ui.tr.infoText("no providers logged in");
-                                } else {
-                                    const names = try alloc.alloc([]u8, providers.len);
-                                    for (providers, 0..) |p, i| {
-                                        names[i] = try alloc.dupe(u8, core.providers.auth.providerName(p));
-                                    }
-                                    alloc.free(providers);
-                                    var ov = tui_overlay.Overlay.initDyn(alloc, names, "Logout", .logout);
-                                    ui.ov = ov;
-                                    _ = &ov;
                                 }
                                 try ui.draw(out);
                                 continue;
@@ -2944,6 +2936,7 @@ fn handleSlashCommand(
                 \\  Alt+Up         Restore queued messages to editor
                 \\  Page Up/Down   Scroll transcript (half page)
                 \\  Scroll Up/Down Scroll transcript
+                \\  Shift+Drag     Select text
                 \\  !cmd           Run bash (include)
                 \\  !!cmd          Run bash (exclude)
                 \\  /              Commands
@@ -4218,6 +4211,7 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
         .{ "alt+enter", "to queue follow-up" },
         .{ "alt+up", "to restore queued messages" },
         .{ "ctrl+v", "to paste image" },
+        .{ "shift+drag", "to select text" },
         .{ "drop files", "to attach" },
     };
     for (keys) |kv| {
@@ -4569,6 +4563,21 @@ fn queueFollowup(
 fn clearQueueSlice(alloc: std.mem.Allocator, queue: *std.ArrayListUnmanaged([]u8)) void {
     for (queue.items) |item| alloc.free(item);
     queue.items.len = 0;
+}
+
+fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: []const core.providers.auth.Provider) !bool {
+    if (providers.len == 0) return false;
+    const names = try alloc.alloc([]u8, providers.len);
+    for (names) |*n| n.len = 0;
+    errdefer {
+        for (names) |n| if (n.len > 0) alloc.free(n);
+        alloc.free(names);
+    }
+    for (providers, 0..) |p, i| {
+        names[i] = try alloc.dupe(u8, core.providers.auth.providerName(p));
+    }
+    ui.ov = tui_overlay.Overlay.initDyn(alloc, names, "Logout", .logout);
+    return true;
 }
 
 fn showResumeOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, session_dir_path: ?[]const u8) !bool {
@@ -6582,4 +6591,34 @@ test "runtime rpc tools command updates tool availability per turn" {
     try std.testing.expect(std.mem.indexOf(u8, written, "\"cmd\":\"tools\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "no-bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "has-bash") != null);
+}
+
+test "showLogoutOverlay builds overlay and frees on deinit" {
+    const alloc = std.testing.allocator;
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+
+    // Empty providers: no overlay created, no leak.
+    {
+        const provs = try alloc.alloc(core.providers.auth.Provider, 0);
+        defer alloc.free(provs);
+        try std.testing.expect(!try showLogoutOverlay(alloc, &ui, provs));
+        try std.testing.expect(ui.ov == null);
+    }
+
+    // Two providers: overlay created with dyn_items.
+    {
+        var provs = try alloc.alloc(core.providers.auth.Provider, 2);
+        defer alloc.free(provs);
+        provs[0] = .anthropic;
+        provs[1] = .openai;
+        try std.testing.expect(try showLogoutOverlay(alloc, &ui, provs));
+        try std.testing.expect(ui.ov != null);
+        try std.testing.expect(ui.ov.?.dyn_items != null);
+        try std.testing.expectEqual(@as(usize, 2), ui.ov.?.dyn_items.?.len);
+        try std.testing.expectEqualStrings("anthropic", ui.ov.?.dyn_items.?[0]);
+        try std.testing.expectEqualStrings("openai", ui.ov.?.dyn_items.?[1]);
+        ui.ov.?.deinit(alloc);
+        ui.ov = null;
+    }
 }
