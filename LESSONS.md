@@ -4,6 +4,15 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 
 ---
 
+## Session Notes (2026-03-10)
+
+### Worked Well
+- Keep a repo-local `docs/zig.md` copied from `~/.agents/docs/zig.md` and point `AGENTS.md` at it so every agent works from the same Zig 0.15 rules inside the repo.
+- Enforce `ohsnap` for struct/multi-field assertions and `joelreymont/zcheck` for property tests in the task definition before parallel work starts; that prevents workers from drifting into field-by-field test rewrites.
+
+### Did Not Work
+- Leaving Zig rules only in `~/.agents/docs/zig.md` made the repo instructions incomplete. Do not rely on off-repo paths when the project expects durable, shared guidance.
+
 ## Session Notes (2026-02-22)
 
 ### Worked Well

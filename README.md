@@ -1,6 +1,6 @@
 # pz
 
-A coding-agent harness rewritten from the ground up in Zig. Drop-in replacement for [pi](https://github.com/badlogic/pi-coding-agent) — same features, same config, single static binary.
+A security-first coding harness rewritten from the ground up in Zig for enterprise environments. `pz` is not a generic extensible agent platform, for now: the goal is peace of mind through built-in security, policy, auditability, and a single static binary.
 
 ## Why pz?
 
@@ -15,7 +15,7 @@ A coding-agent harness rewritten from the ground up in Zig. Drop-in replacement 
 
 ## Features
 
-Full feature parity with pi, plus some extras:
+Pi-grade harness capabilities, with the product direction centered on built-in enterprise guardrails rather than extensibility:
 
 - **Interactive TUI** — streaming responses, markdown rendering, syntax highlighting
 - **Image rendering** — Kitty graphics protocol support in terminal

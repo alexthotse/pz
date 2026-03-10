@@ -56,15 +56,21 @@ Run relevant tests before and after each fix or feature.
 Every bug fix must add or strengthen a test.
 Use `ohsnap` snapshots for struct/multi-field outputs and serialized payload checks.
 Use `std.testing.expectEqual` only for scalar primitives.
+Use `joelreymont/zcheck` for property tests and add fuzz/property coverage where the surface warrants it.
 
 ## Zig Rules
 
-See `~/.agents/docs/zig.md`.
+See `docs/zig.md` (mirrored from `~/.agents/docs/zig.md`).
 
 ## Plan Rule
 
 Track execution against `PLAN.md`.
 When a plan item is complete, update status in commit message and notes.
+
+## Lessons Rule
+
+Read `LESSONS.md` at the start of work.
+Update `LESSONS.md` at the end of the session with new do-more and do-not-do lessons.
 
 ## Release Rule
 
