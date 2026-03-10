@@ -2,4 +2,5 @@
 zig-out/
 
 .pz/
+.dots/
 PLAN.md
