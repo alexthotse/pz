@@ -11,6 +11,10 @@ pub const @"export" = @import("export.zig");
 pub const retry_state = @import("retry_state.zig");
 pub const regress = @import("regress.zig");
 pub const golden = @import("golden.zig");
+pub const session_file = @import("session_file.zig");
+
+pub const SessionFile = session_file.SessionFile;
+pub const cleanOrphanTmpFiles = session_file.cleanOrphanTmpFiles;
 
 pub const Event = schema.Event;
 pub const event_version = schema.version_current;
@@ -25,6 +29,9 @@ pub const NullStore = null_store.Store;
 pub const CompactCheckpoint = compact.Checkpoint;
 pub const compactSession = compact.run;
 pub const loadCompactCheckpoint = compact.loadCheckpoint;
+pub const GeneratedSummary = compact.GeneratedSummary;
+pub const generateSummary = compact.generateSummary;
+pub const freeGeneratedSummary = compact.freeGeneratedSummary;
 pub const exportMarkdown = @"export".toMarkdown;
 pub const RetryState = retry_state.State;
 pub const saveRetryState = retry_state.save;

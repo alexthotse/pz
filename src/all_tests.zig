@@ -15,6 +15,9 @@ const tui_fixture = @import("modes/tui/fixture.zig");
 const perf_baseline = @import("perf/baseline.zig");
 const core_skill = @import("core/skill.zig");
 const core_policy = @import("core/policy.zig");
+const core_shell = @import("core/shell.zig");
+const core_lru = @import("core/lru.zig");
+const session_file = @import("core/session/session_file.zig");
 
 test "all module tests" {
     _ = app_cli;
@@ -34,4 +37,7 @@ test "all module tests" {
     _ = perf_baseline;
     _ = core_skill;
     _ = core_policy;
+    _ = core_shell;
+    _ = core_lru;
+    _ = session_file;
 }

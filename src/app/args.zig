@@ -43,7 +43,7 @@ pub const Parsed = struct {
     cfg: CfgSel = .auto,
     session: SessionSel = .auto,
     no_session: bool = false,
-    tool_mask: u8 = core.tools.builtin.mask_all,
+    tool_mask: u16 = core.tools.builtin.mask_all,
     model: ?[]const u8 = null,
     models: ?[]const u8 = null, // comma-separated model list for cycling
     provider: ?[]const u8 = null,
@@ -381,16 +381,16 @@ fn setNoSession(out: *Parsed, session_seen: bool) ParseError!void {
     out.no_session = true;
 }
 
-fn setTools(out: *Parsed, tools_seen: *bool, mask: u8) ParseError!void {
+fn setTools(out: *Parsed, tools_seen: *bool, mask: u16) ParseError!void {
     if (tools_seen.*) return error.ToolsConflict;
     tools_seen.* = true;
     out.tool_mask = mask;
 }
 
-fn parseToolMask(raw: []const u8) ParseError!u8 {
+fn parseToolMask(raw: []const u8) ParseError!u16 {
     if (raw.len == 0) return error.MissingToolsValue;
 
-    var mask: u8 = 0;
+    var mask: u16 = 0;
     var it = std.mem.splitScalar(u8, raw, ',');
     while (it.next()) |part_raw| {
         const part = std.mem.trim(u8, part_raw, " \t\r\n");
@@ -621,7 +621,7 @@ test "parse accepts tool selection flags" {
     );
 
     const none = try parse(&.{"--no-tools"});
-    try std.testing.expectEqual(@as(u8, 0), none.tool_mask);
+    try std.testing.expectEqual(@as(u16, 0), none.tool_mask);
 }
 
 test "errors on tool selection conflicts and invalid values" {

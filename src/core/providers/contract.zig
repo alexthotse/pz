@@ -100,6 +100,16 @@ pub const StopReason = enum {
     }
 };
 
+pub const SummaryReq = struct {
+    events_json: []const []const u8,
+    file_ops: ?[]const u8 = null,
+    max_tokens: u32 = 1024,
+};
+
+pub const SummaryResult = struct {
+    summary: []const u8,
+};
+
 pub const Provider = struct {
     ctx: *anyopaque,
     vt: *const Vt,

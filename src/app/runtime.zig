@@ -749,6 +749,9 @@ const LiveTurn = struct {
     wake_r: std.posix.fd_t,
     wake_w: std.posix.fd_t,
     cancel_flag: TurnCancelFlag = .{},
+    last_stop: ?core.providers.StopReason = null,
+    last_err: ?[]u8 = null,
+    last_model: ?[]u8 = null,
 
     fn init(alloc: std.mem.Allocator) !LiveTurn {
         const pipe = try std.posix.pipe2(.{
@@ -776,6 +779,8 @@ const LiveTurn = struct {
         for (self.evs.items[self.ev_head..]) |ev| freeProviderEv(self.alloc, ev);
         self.evs.deinit(self.alloc);
         if (self.err_name) |name| self.alloc.free(name);
+        if (self.last_err) |e| self.alloc.free(e);
+        if (self.last_model) |m| self.alloc.free(m);
         self.mu.unlock();
         std.posix.close(self.wake_r);
         std.posix.close(self.wake_w);
@@ -805,6 +810,14 @@ const LiveTurn = struct {
             self.mu.unlock();
             return append_err;
         };
+        switch (ev) {
+            .stop => |s| self.last_stop = s.reason,
+            .err => |txt| {
+                if (self.last_err) |old| self.alloc.free(old);
+                self.last_err = self.alloc.dupe(u8, txt) catch null;
+            },
+            else => {},
+        }
         self.mu.unlock();
         self.nudge();
     }
@@ -859,9 +872,19 @@ const LiveTurn = struct {
             self.alloc.free(name);
             self.err_name = null;
         }
+        self.last_stop = null;
+        if (self.last_err) |e| {
+            self.alloc.free(e);
+            self.last_err = null;
+        }
+        if (self.last_model) |m| {
+            self.alloc.free(m);
+            self.last_model = null;
+        }
         for (self.evs.items[self.ev_head..]) |ev| freeProviderEv(self.alloc, ev);
         self.evs.items.len = 0;
         self.ev_head = 0;
+        self.last_model = self.alloc.dupe(u8, opts.model) catch null;
         self.mu.unlock();
 
         self.cancel_flag.clear();
@@ -3458,16 +3481,16 @@ fn sessionStats(
     };
 }
 
-fn parseCmdToolMask(raw: []const u8) !u8 {
+fn parseCmdToolMask(raw: []const u8) !u16 {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0) return error.InvalidToolMask;
-    const special = std.StaticStringMap(u8).initComptime(.{
+    const special = std.StaticStringMap(u16).initComptime(.{
         .{ "all", core.tools.builtin.mask_all },
         .{ "none", 0 },
     });
     if (special.get(trimmed)) |m| return m;
 
-    var mask: u8 = 0;
+    var mask: u16 = 0;
     var it = std.mem.splitScalar(u8, trimmed, ',');
     while (it.next()) |part_raw| {
         const part = std.mem.trim(u8, part_raw, " \t\r\n");
@@ -3555,7 +3578,7 @@ fn completeFilePath(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     ui.ed.cur = new_cur;
 }
 
-fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u8) ![]u8 {
+fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
     if (mask == 0) return alloc.dupe(u8, "none");
 
     var out = std.ArrayList(u8).empty;
@@ -3571,7 +3594,7 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u8) ![]u8 {
         "ls",
         "ask",
     };
-    const bits = [_]u8{
+    const bits = [_]u16{
         core.tools.builtin.mask_read,
         core.tools.builtin.mask_write,
         core.tools.builtin.mask_bash,
@@ -6621,4 +6644,49 @@ test "showLogoutOverlay builds overlay and frees on deinit" {
         ui.ov.?.deinit(alloc);
         ui.ov = null;
     }
+}
+
+test "LiveTurn tracks last_stop last_err and last_model" {
+    const alloc = std.testing.allocator;
+    var lt = try LiveTurn.init(alloc);
+    defer lt.deinit();
+
+    // Enqueue stop event
+    try lt.enqueueProvider(.{ .stop = .{ .reason = .max_out } });
+    try std.testing.expectEqual(core.providers.StopReason.max_out, lt.last_stop.?);
+
+    // Enqueue err event
+    try lt.enqueueProvider(.{ .err = "bad request" });
+    try std.testing.expectEqualStrings("bad request", lt.last_err.?);
+
+    // Drain events
+    const ev1 = lt.popProvider().?;
+    defer freeProviderEv(alloc, ev1);
+    const ev2 = lt.popProvider().?;
+    defer freeProviderEv(alloc, ev2);
+    try std.testing.expect(lt.popProvider() == null);
+
+    // Overwrite err
+    try lt.enqueueProvider(.{ .err = "timeout" });
+    try std.testing.expectEqualStrings("timeout", lt.last_err.?);
+    const ev3 = lt.popProvider().?;
+    defer freeProviderEv(alloc, ev3);
+
+    // Simulate turn reset
+    lt.mu.lock();
+    lt.last_stop = null;
+    if (lt.last_err) |e| {
+        alloc.free(e);
+        lt.last_err = null;
+    }
+    if (lt.last_model) |m| {
+        alloc.free(m);
+        lt.last_model = null;
+    }
+    lt.last_model = try alloc.dupe(u8, "claude-opus-4-20250918");
+    lt.mu.unlock();
+
+    try std.testing.expect(lt.last_stop == null);
+    try std.testing.expect(lt.last_err == null);
+    try std.testing.expectEqualStrings("claude-opus-4-20250918", lt.last_model.?);
 }

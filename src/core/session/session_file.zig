@@ -1,0 +1,115 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
+/// Wraps a session file path with lifecycle tracking.
+/// If `close()` is never called, `deinit()` logs a warning and deletes the orphan.
+pub const SessionFile = struct {
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    path: []const u8,
+    closed: bool = false,
+
+    pub fn init(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8) !SessionFile {
+        const owned = try alloc.dupe(u8, path);
+        errdefer alloc.free(owned);
+
+        // Create the file to establish it on disk.
+        var f = try dir.createFile(owned, .{ .truncate = false });
+        errdefer dir.deleteFile(owned) catch {};
+        f.close();
+
+        return .{
+            .alloc = alloc,
+            .dir = dir,
+            .path = owned,
+        };
+    }
+
+    pub fn close(self: *SessionFile) void {
+        self.closed = true;
+    }
+
+    pub fn deinit(self: *SessionFile) void {
+        if (!self.closed) {
+            if (!builtin.is_test) {
+                std.debug.print("warning: session file not closed, deleting orphan: {s}\n", .{self.path});
+            }
+            self.dir.deleteFile(self.path) catch |err| {
+                if (!builtin.is_test) {
+                    std.debug.print("warning: orphan cleanup failed: {s}\n", .{@errorName(err)});
+                }
+            };
+        }
+        self.alloc.free(self.path);
+        self.* = undefined;
+    }
+};
+
+/// Delete any orphaned `.compact.tmp` files left by interrupted compactions.
+pub fn cleanOrphanTmpFiles(dir: std.fs.Dir) void {
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (std.mem.endsWith(u8, entry.name, ".compact.tmp")) {
+            dir.deleteFile(entry.name) catch |err| {
+                std.debug.print("warning: orphan tmp cleanup failed for {s}: {s}\n", .{ entry.name, @errorName(err) });
+            };
+        }
+    }
+}
+
+test "deinit without close deletes the file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var sf = try SessionFile.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
+    // Do NOT call close — simulate abnormal exit.
+    sf.deinit();
+
+    // File should be gone.
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile("test-sess.jsonl"),
+    );
+}
+
+test "close then deinit preserves the file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var sf = try SessionFile.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
+    sf.close();
+    sf.deinit();
+
+    // File should still exist.
+    const stat = try tmp.dir.statFile("test-sess.jsonl");
+    try std.testing.expect(stat.size == 0);
+}
+
+test "cleanOrphanTmpFiles removes compact.tmp files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create orphan tmp files and a normal session file.
+    {
+        var f = try tmp.dir.createFile("s1.jsonl.compact.tmp", .{});
+        f.close();
+    }
+    {
+        var f = try tmp.dir.createFile("s2.jsonl.compact.tmp", .{});
+        f.close();
+    }
+    {
+        var f = try tmp.dir.createFile("s1.jsonl", .{});
+        f.close();
+    }
+
+    cleanOrphanTmpFiles(tmp.dir);
+
+    // Tmp files should be gone.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("s1.jsonl.compact.tmp"));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("s2.jsonl.compact.tmp"));
+
+    // Normal file should survive.
+    _ = try tmp.dir.statFile("s1.jsonl");
+}

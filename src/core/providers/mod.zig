@@ -23,5 +23,7 @@ pub const Ev = c.Ev;
 pub const Usage = c.Usage;
 pub const Stop = c.Stop;
 pub const StopReason = c.StopReason;
+pub const SummaryReq = c.SummaryReq;
+pub const SummaryResult = c.SummaryResult;
 pub const Provider = c.Provider;
 pub const Stream = c.Stream;

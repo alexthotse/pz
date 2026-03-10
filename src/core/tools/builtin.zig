@@ -9,15 +9,15 @@ const find = @import("find.zig");
 const ls = @import("ls.zig");
 
 const default_max_bytes: usize = 64 * 1024;
-pub const mask_read: u8 = 1 << 0;
-pub const mask_write: u8 = 1 << 1;
-pub const mask_bash: u8 = 1 << 2;
-pub const mask_edit: u8 = 1 << 3;
-pub const mask_grep: u8 = 1 << 4;
-pub const mask_find: u8 = 1 << 5;
-pub const mask_ls: u8 = 1 << 6;
-pub const mask_ask: u8 = 1 << 7;
-pub const mask_all: u8 =
+pub const mask_read: u16 = 1 << 0;
+pub const mask_write: u16 = 1 << 1;
+pub const mask_bash: u16 = 1 << 2;
+pub const mask_edit: u16 = 1 << 3;
+pub const mask_grep: u16 = 1 << 4;
+pub const mask_find: u16 = 1 << 5;
+pub const mask_ls: u16 = 1 << 6;
+pub const mask_ask: u16 = 1 << 7;
+pub const mask_all: u16 =
     mask_read |
     mask_write |
     mask_bash |
@@ -132,14 +132,14 @@ pub const AskHook = struct {
 pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize = default_max_bytes,
-    tool_mask: u8 = mask_all,
+    tool_mask: u16 = mask_all,
     ask_hook: ?AskHook = null,
 };
 
 pub const Runtime = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
-    tool_mask: u8,
+    tool_mask: u16,
     ask_hook: ?AskHook,
     entries: [8]tools.Entry = undefined,
     selected: [8]tools.Entry = undefined,
@@ -463,8 +463,8 @@ pub const Runtime = struct {
     }
 };
 
-pub fn maskForName(name: []const u8) ?u8 {
-    const map = std.StaticStringMap(u8).initComptime(.{
+pub fn maskForName(name: []const u8) ?u16 {
+    const map = std.StaticStringMap(u16).initComptime(.{
         .{ "read", mask_read },
         .{ "write", mask_write },
         .{ "bash", mask_bash },

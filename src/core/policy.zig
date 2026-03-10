@@ -1,6 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 
+pub const ver_current: u16 = 1;
+
 pub const Effect = enum {
     allow,
     deny,
@@ -134,6 +136,118 @@ pub fn evalEnv(rules: []const Rule, key: []const u8, val: []const u8) Effect {
             result = r.effect;
     }
     return result;
+}
+
+/// Versioned policy document for JSON serialization.
+pub const Doc = struct {
+    version: u16 = ver_current,
+    rules: []const Rule,
+};
+
+/// Parse a policy document from JSON.
+/// Missing `version` defaults to 1. Unknown versions are rejected.
+pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    if (root != .object) return error.UnexpectedToken;
+
+    const ver: u16 = blk: {
+        if (root.object.get("version")) |v| {
+            switch (v) {
+                .integer => |i| break :blk @intCast(i),
+                else => return error.UnexpectedToken,
+            }
+        }
+        break :blk 1;
+    };
+
+    if (ver != ver_current) return error.UnsupportedPolicyVersion;
+
+    const rules_val = root.object.get("rules") orelse return error.UnexpectedToken;
+    if (rules_val != .array) return error.UnexpectedToken;
+
+    const items = rules_val.array.items;
+    const rules = try alloc.alloc(Rule, items.len);
+    errdefer alloc.free(rules);
+
+    for (items, 0..) |item, i| {
+        if (item != .object) return error.UnexpectedToken;
+        var rule = Rule{ .pattern = "", .effect = .allow };
+
+        if (item.object.get("pattern")) |p| {
+            if (p != .string) return error.UnexpectedToken;
+            rule.pattern = try alloc.dupe(u8, p.string);
+        }
+
+        if (item.object.get("effect")) |eff| {
+            if (eff != .string) return error.UnexpectedToken;
+            if (std.mem.eql(u8, eff.string, "allow")) {
+                rule.effect = .allow;
+            } else if (std.mem.eql(u8, eff.string, "deny")) {
+                rule.effect = .deny;
+            } else return error.UnexpectedToken;
+        }
+
+        if (item.object.get("tool")) |t| {
+            if (t != .string) return error.UnexpectedToken;
+            rule.tool = try alloc.dupe(u8, t.string);
+        }
+
+        rules[i] = rule;
+    }
+
+    return .{ .version = ver, .rules = rules };
+}
+
+/// Serialize a policy document to JSON.
+pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    const w = buf.writer(alloc);
+
+    try w.writeAll("{\"version\":");
+    try w.print("{d}", .{doc.version});
+    try w.writeAll(",\"rules\":[");
+    for (doc.rules, 0..) |rule, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"pattern\":");
+        try writeJsonStr(w, rule.pattern);
+        try w.writeAll(",\"effect\":");
+        try writeJsonStr(w, @tagName(rule.effect));
+        if (rule.tool) |t| {
+            try w.writeAll(",\"tool\":");
+            try writeJsonStr(w, t);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("]}");
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn writeJsonStr(w: anytype, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
+}
+
+/// Free owned allocations from parseDoc.
+pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {
+    for (doc.rules) |rule| {
+        if (rule.pattern.len > 0) alloc.free(rule.pattern);
+        if (rule.tool) |t| alloc.free(t);
+    }
+    alloc.free(doc.rules);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -317,4 +431,307 @@ test "evalEnv key=value pattern" {
     try testing.expectEqual(Effect.deny, evalEnv(&rules, "AWS_KEY", "myAKIAtoken"));
     try testing.expectEqual(Effect.allow, evalEnv(&rules, "AWS_KEY", "safe_value"));
     try testing.expectEqual(Effect.allow, evalEnv(&rules, "HOME", "/home/user"));
+}
+
+test "parseDoc valid v1" {
+    const json = "{\"version\":1,\"rules\":[{\"pattern\":\"*.zig\",\"effect\":\"allow\"},{\"pattern\":\"*.secret\",\"effect\":\"deny\"}]}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(@as(u16, 1), doc.version);
+    try testing.expectEqual(@as(usize, 2), doc.rules.len);
+    try testing.expectEqual(Effect.allow, doc.rules[0].effect);
+    try testing.expectEqual(Effect.deny, doc.rules[1].effect);
+}
+
+test "parseDoc missing version defaults to v1" {
+    const json = "{\"rules\":[{\"pattern\":\"*\",\"effect\":\"allow\"}]}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(@as(u16, 1), doc.version);
+    try testing.expectEqual(@as(usize, 1), doc.rules.len);
+}
+
+test "parseDoc rejects unsupported version" {
+    const json = "{\"version\":99,\"rules\":[]}";
+    try testing.expectError(error.UnsupportedPolicyVersion, parseDoc(testing.allocator, json));
+}
+
+test "parseDoc roundtrip" {
+    const rules = [_]Rule{
+        .{ .pattern = "*.zig", .effect = .deny, .tool = "bash" },
+        .{ .pattern = "*", .effect = .allow },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+
+    const doc2 = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc2);
+
+    try testing.expectEqual(@as(u16, ver_current), doc2.version);
+    try testing.expectEqual(@as(usize, 2), doc2.rules.len);
+    try testing.expectEqual(Effect.deny, doc2.rules[0].effect);
+    try testing.expect(std.mem.eql(u8, "bash", doc2.rules[0].tool.?));
+    try testing.expectEqual(Effect.allow, doc2.rules[1].effect);
+    try testing.expect(doc2.rules[1].tool == null);
+}
+
+test "parseDoc with tool filter" {
+    const json = "{\"version\":1,\"rules\":[{\"pattern\":\"*\",\"effect\":\"deny\",\"tool\":\"rm\"}]}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(@as(usize, 1), doc.rules.len);
+    try testing.expect(std.mem.eql(u8, "rm", doc.rules[0].tool.?));
+    try testing.expectEqual(Effect.deny, doc.rules[0].effect);
+}
+
+// ── Snapshot tests (ohsnap) ────────────────────────────────────────────
+
+fn snapEsc(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    errdefer out.deinit(alloc);
+
+    for (s) |c| switch (c) {
+        '\\' => try out.appendSlice(alloc, "\\\\"),
+        '"' => try out.appendSlice(alloc, "\\\""),
+        '\n' => try out.appendSlice(alloc, "\\n"),
+        '\r' => try out.appendSlice(alloc, "\\r"),
+        '\t' => try out.appendSlice(alloc, "\\t"),
+        else => try out.append(alloc, c),
+    };
+
+    return out.toOwnedSlice(alloc);
+}
+
+test "snapshot: evaluate with complex rule chains" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const rules = [_]Rule{
+        .{ .pattern = "*.secret", .effect = .deny },
+        .{ .pattern = "src/*.zig", .effect = .allow, .tool = "read" },
+        .{ .pattern = "src/*.zig", .effect = .deny, .tool = "write" },
+        .{ .pattern = "docs/*", .effect = .allow },
+        .{ .pattern = "build/*", .effect = .deny },
+        .{ .pattern = "*", .effect = .allow },
+    };
+
+    const Result = struct {
+        secret_null: Effect,
+        src_read: Effect,
+        src_write: Effect,
+        src_bash: Effect,
+        docs_null: Effect,
+        build_null: Effect,
+        other_null: Effect,
+    };
+
+    const r = Result{
+        .secret_null = evaluate(&rules, "key.secret", null),
+        .src_read = evaluate(&rules, "src/main.zig", "read"),
+        .src_write = evaluate(&rules, "src/main.zig", "write"),
+        .src_bash = evaluate(&rules, "src/main.zig", "bash"),
+        .docs_null = evaluate(&rules, "docs/README", null),
+        .build_null = evaluate(&rules, "build/out.o", null),
+        .other_null = evaluate(&rules, "foo.txt", null),
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.snapshot: evaluate with complex rule chains.Result
+        \\  .secret_null: core.policy.Effect
+        \\    .deny
+        \\  .src_read: core.policy.Effect
+        \\    .allow
+        \\  .src_write: core.policy.Effect
+        \\    .deny
+        \\  .src_bash: core.policy.Effect
+        \\    .allow
+        \\  .docs_null: core.policy.Effect
+        \\    .allow
+        \\  .build_null: core.policy.Effect
+        \\    .deny
+        \\  .other_null: core.policy.Effect
+        \\    .allow
+    ).expectEqual(r);
+}
+
+test "snapshot: Doc roundtrip with special chars" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const talloc = testing.allocator;
+
+    const rules = [_]Rule{
+        .{ .pattern = "path\\with\\backslashes", .effect = .allow },
+        .{ .pattern = "has\"quotes", .effect = .deny, .tool = "tab\there" },
+        .{ .pattern = "new\nline", .effect = .allow },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const json = try encodeDoc(talloc, doc);
+    defer talloc.free(json);
+
+    const parsed = try parseDoc(talloc, json);
+    defer deinitDoc(talloc, parsed);
+
+    const Fields = struct {
+        version: u16,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+        pat1: []const u8,
+        eff1: Effect,
+        tool1: []const u8,
+        pat2: []const u8,
+        eff2: Effect,
+    };
+
+    const pat0 = try snapEsc(talloc, parsed.rules[0].pattern);
+    defer talloc.free(pat0);
+    const pat1 = try snapEsc(talloc, parsed.rules[1].pattern);
+    defer talloc.free(pat1);
+    const tool1 = try snapEsc(talloc, parsed.rules[1].tool.?);
+    defer talloc.free(tool1);
+    const pat2 = try snapEsc(talloc, parsed.rules[2].pattern);
+    defer talloc.free(pat2);
+
+    const f = Fields{
+        .version = parsed.version,
+        .n_rules = parsed.rules.len,
+        .pat0 = pat0,
+        .eff0 = parsed.rules[0].effect,
+        .pat1 = pat1,
+        .eff1 = parsed.rules[1].effect,
+        .tool1 = tool1,
+        .pat2 = pat2,
+        .eff2 = parsed.rules[2].effect,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.snapshot: Doc roundtrip with special chars.Fields
+        \\  .version: u16 = 1
+        \\  .n_rules: usize = 3
+        \\  .pat0: []const u8
+        \\    "path\\with\\backslashes"
+        \\  .eff0: core.policy.Effect
+        \\    .allow
+        \\  .pat1: []const u8
+        \\    "has\"quotes"
+        \\  .eff1: core.policy.Effect
+        \\    .deny
+        \\  .tool1: []const u8
+        \\    "tab\there"
+        \\  .pat2: []const u8
+        \\    "new\nline"
+        \\  .eff2: core.policy.Effect
+        \\    .allow
+    ).expectEqual(f);
+}
+
+test "snapshot: protected paths denied under allow-all" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const rules = [_]Rule{
+        .{ .pattern = "*", .effect = .allow },
+    };
+
+    const Results = struct {
+        audit_log: Effect,
+        session: Effect,
+        pz_config: Effect,
+        pz_secrets: Effect,
+        pz_auth: Effect,
+    };
+
+    const r = Results{
+        .audit_log = evaluate(&rules, "app.audit.log", null),
+        .session = evaluate(&rules, "data.session", null),
+        .pz_config = evaluate(&rules, ".pz/config", null),
+        .pz_secrets = evaluate(&rules, ".pz/secrets", null),
+        .pz_auth = evaluate(&rules, ".pz/auth", null),
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.snapshot: protected paths denied under allow-all.Results
+        \\  .audit_log: core.policy.Effect
+        \\    .deny
+        \\  .session: core.policy.Effect
+        \\    .deny
+        \\  .pz_config: core.policy.Effect
+        \\    .deny
+        \\  .pz_secrets: core.policy.Effect
+        \\    .deny
+        \\  .pz_auth: core.policy.Effect
+        \\    .deny
+    ).expectEqual(r);
+}
+
+// ── Property tests (zcheck) ────────────────────────────────────────────
+
+test "property: matchGlob star matches anything" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { s: zc.String }) bool {
+            return matchGlob("*", args.s.slice());
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "property: matchGlob identity (literal self-match)" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { s: zc.Id }) bool {
+            // Id is alphanumeric-only, no glob metacharacters
+            const txt = args.s.slice();
+            return matchGlob(txt, txt);
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "property: evaluate empty rules always denies" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { p: zc.FilePath }) bool {
+            const rules: []const Rule = &.{};
+            return evaluate(rules, args.p.slice(), null) == .deny;
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "property: evaluate allow-all allows non-protected" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { s: zc.Id }) bool {
+            // Id generates alphanumeric strings that won't match protected
+            // patterns (*.audit.log, *.session, .pz/*)
+            const path = args.s.slice();
+            const rules = [_]Rule{
+                .{ .pattern = "*", .effect = .allow },
+            };
+            return evaluate(&rules, path, null) == .allow;
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "property: evalEnv last-match-wins consistency" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { k: zc.Id, v: zc.String }) bool {
+            const key = args.k.slice();
+            const val = args.v.slice();
+
+            // Two rules with same pattern, opposite effects — last wins
+            const allow_last = [_]Rule{
+                .{ .pattern = "*", .effect = .deny },
+                .{ .pattern = "*", .effect = .allow },
+            };
+            const deny_last = [_]Rule{
+                .{ .pattern = "*", .effect = .allow },
+                .{ .pattern = "*", .effect = .deny },
+            };
+
+            const r1 = evalEnv(&allow_last, key, val);
+            const r2 = evalEnv(&deny_last, key, val);
+            return r1 == .allow and r2 == .deny;
+        }
+    }.prop, .{ .iterations = 500 });
 }
