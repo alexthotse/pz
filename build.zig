@@ -58,6 +58,12 @@ pub fn build(b: *std.Build) void {
     })) |ohsnap_dep| {
         exe_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
     }
+    if (b.lazyDependency("zcheck", .{
+        .target = target,
+        .optimize = optimize,
+    })) |zcheck_dep| {
+        exe_tests.root_module.addImport("zcheck", zcheck_dep.module("zcheck"));
+    }
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const suite_tests = b.addTest(.{
@@ -73,6 +79,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |ohsnap_dep| {
         suite_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
+    }
+    if (b.lazyDependency("zcheck", .{
+        .target = target,
+        .optimize = optimize,
+    })) |zcheck_dep| {
+        suite_tests.root_module.addImport("zcheck", zcheck_dep.module("zcheck"));
     }
     const run_suite_tests = b.addRunArtifact(suite_tests);
 

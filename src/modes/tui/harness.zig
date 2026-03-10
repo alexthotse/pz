@@ -426,12 +426,14 @@ pub const Ui = struct {
         const active = self.pn.run_state == .streaming or self.pn.run_state == .tool or compact_on;
         if (active) self.spin +%= 1;
 
-        var lbl_buf: [64]u8 = undefined;
+        var lbl_buf: [128]u8 = undefined;
         const status: ?BorderStatus = switch (self.pn.run_state) {
             .streaming, .tool => blk: {
-                const prefix: []const u8 = if (self.pn.run_state == .tool) " running tool " else " streaming ";
                 const sc = spinner.cp(self.spin);
-                const label = std.fmt.bufPrint(&lbl_buf, "{s}{u} ", .{ prefix, sc }) catch prefix;
+                const label = if (self.pn.run_state == .tool)
+                    std.fmt.bufPrint(&lbl_buf, " $ {s} {u} ", .{ self.pn.toolLabel(), sc }) catch " $ … "
+                else
+                    std.fmt.bufPrint(&lbl_buf, " streaming {u} ", .{sc}) catch " streaming ";
                 break :blk .{ .label = label, .fg = t.accent };
             },
             .canceled => .{ .label = " canceled ", .fg = t.warn },

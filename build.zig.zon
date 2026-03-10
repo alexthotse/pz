@@ -8,6 +8,10 @@
             .url = "https://github.com/mnemnion/ohsnap/archive/refs/tags/v0.4.2.tar.gz",
             .hash = "ohsnap-0.4.2-iWxzyiGcAAAbUPJG3B6agP55LfeqGbtTOQ4PcgSGUb9-",
         },
+        .zcheck = .{
+            .url = "https://github.com/joelreymont/zcheck/archive/refs/heads/master.tar.gz",
+            .hash = "zcheck-0.1.0-Px1bihTWAAAkvAodyD2kta9DXdUztoCIfdS1s6TzqghA",
+        },
     },
     .paths = .{
         "build.zig",

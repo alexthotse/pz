@@ -14,6 +14,9 @@ pub const Rect = struct {
 
 const imgproto = @import("imgproto.zig");
 
+const tbl_buf_cap = 64; // max lines (header + sep + data) in table rendering
+const max_tbl_data = tbl_buf_cap - 2; // cap for data rows (minus header + sep)
+
 const Kind = enum { text, user, thinking, tool, err, meta, image };
 const ToolPhase = enum { none, call, result };
 
@@ -299,7 +302,7 @@ pub const Transcript = struct {
                     if (isMdTableLine(line)) {
                         if (md_wit.next()) |sep_line| {
                             if (isMdTableSepLine(sep_line)) {
-                                var table_lines_buf: [64][]const u8 = undefined;
+                                var table_lines_buf: [tbl_buf_cap][]const u8 = undefined;
                                 var table_n: usize = 0;
                                 table_lines_buf[table_n] = line;
                                 table_n += 1;
@@ -683,13 +686,21 @@ fn fmtToolCall(alloc: std.mem.Allocator, name: []const u8, args: []const u8) ![]
     };
 
     // bash tool: show command
-    if (std.mem.eql(u8, name, "bash")) {
+    if (std.mem.eql(u8, name, "bash") or std.mem.eql(u8, name, "Bash")) {
         if (obj.get("command")) |cmd| {
             const cmd_str = switch (cmd) {
                 .string => |s| s,
                 else => return std.fmt.allocPrint(alloc, " $ bash", .{}),
             };
-            return std.fmt.allocPrint(alloc, " $ {s}", .{cmd_str});
+            // Show first line only; truncate at 80 chars with ellipsis
+            const first_line = if (std.mem.indexOfScalar(u8, cmd_str, '\n')) |nl|
+                cmd_str[0..nl]
+            else
+                cmd_str;
+            if (first_line.len > 80) {
+                return std.fmt.allocPrint(alloc, " $ {s}\xe2\x80\xa6", .{first_line[0..79]});
+            }
+            return std.fmt.allocPrint(alloc, " $ {s}", .{first_line});
         }
     }
 
@@ -1154,7 +1165,7 @@ fn countMdLines(text: []const u8, w: usize) usize {
                         }
                         data_n += 1;
                     }
-                    n += mdTableVisualRows(data_n);
+                    n += mdTableVisualRows(@min(data_n, max_tbl_data));
                     continue;
                 }
                 pending = sep_line;
@@ -2363,4 +2374,60 @@ test "scroll offset clamped to max" {
     try std.testing.expect(std.mem.indexOf(u8, r0, "A") != null);
     const r2 = try rowAscii(&frm, 2, raw[0..]);
     try std.testing.expect(std.mem.indexOf(u8, r2, "B") != null);
+}
+
+test "countMdLines caps table data rows to buffer size" {
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    const hdr = "| a | b |\n";
+    const sep = "| - | - |\n";
+    @memcpy(buf[pos..][0..hdr.len], hdr);
+    pos += hdr.len;
+    @memcpy(buf[pos..][0..sep.len], sep);
+    pos += sep.len;
+    const row_txt = "| x | y |\n";
+    const n_data: usize = 70;
+    for (0..n_data) |_| {
+        @memcpy(buf[pos..][0..row_txt.len], row_txt);
+        pos += row_txt.len;
+    }
+    const counted = countMdLines(buf[0..pos], 80);
+    const expected = mdTableVisualRows(max_tbl_data);
+    try std.testing.expectEqual(expected, counted);
+}
+
+test "large table does not cause viewport to scroll past content" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    const hdr = "| a | b |\n";
+    const sep = "| - | - |\n";
+    @memcpy(buf[pos..][0..hdr.len], hdr);
+    pos += hdr.len;
+    @memcpy(buf[pos..][0..sep.len], sep);
+    pos += sep.len;
+    const row_txt = "| x | y |\n";
+    for (0..70) |_| {
+        @memcpy(buf[pos..][0..row_txt.len], row_txt);
+        pos += row_txt.len;
+    }
+
+    try tr.append(.{ .text = buf[0..pos] });
+
+    const fw: usize = 30;
+    const fh: usize = 10;
+    var frm = try frame.Frame.init(std.testing.allocator, fw, fh);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = fw, .h = fh });
+
+    // Bottom row must have content, not blank (before fix, skip overshot)
+    var raw: [30]u8 = undefined;
+    const last = try rowAscii(&frm, fh - 1, raw[0..]);
+    var blank = true;
+    for (last) |c| {
+        if (c != ' ') { blank = false; break; }
+    }
+    try std.testing.expect(!blank);
 }

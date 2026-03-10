@@ -70,6 +70,8 @@ pub const Panels = struct {
     input_mode: InputMode = .steering,
     queued_msgs: u32 = 0,
     thinking_label: []const u8 = "",
+    tool_label_buf: [48]u8 = undefined,
+    tool_label_len: u8 = 0,
     is_sub: bool = false, // subscription (vs pay-per-token)
 
     pub const InitError = std.mem.Allocator.Error || error{InvalidUtf8};
@@ -202,6 +204,11 @@ pub const Panels = struct {
         return ct;
     }
 
+    pub fn toolLabel(self: *const Panels) []const u8 {
+        if (self.tool_label_len > 0) return self.tool_label_buf[0..self.tool_label_len];
+        return "tool";
+    }
+
     pub fn tool(self: *const Panels, idx: usize) ToolView {
         const row = self.rows.items[idx];
         return .{
@@ -220,6 +227,7 @@ pub const Panels = struct {
                 try self.upsertCall(tc);
                 try self.setErr("");
                 self.run_state = .tool;
+                self.setToolLabel(tc.name, tc.args);
             },
             .tool_result => |tr| try self.applyResult(tr),
             .usage => |usage| {
@@ -428,6 +436,48 @@ pub const Panels = struct {
         if (!isTerminal(self.run_state)) {
             self.run_state = if (self.runningCount() > 0) .tool else .streaming;
         }
+    }
+
+    fn setToolLabel(self: *Panels, name: []const u8, args: []const u8) void {
+        // For bash: extract command from JSON args
+        if (std.mem.eql(u8, name, "bash") or std.mem.eql(u8, name, "Bash")) {
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.alloc,
+                args,
+                .{},
+            ) catch {
+                self.writeLabel(name);
+                return;
+            };
+            defer parsed.deinit();
+            const obj = switch (parsed.value) {
+                .object => |o| o,
+                else => {
+                    self.writeLabel(name);
+                    return;
+                },
+            };
+            if (obj.get("command")) |cmd| {
+                switch (cmd) {
+                    .string => |s| {
+                        // First line only
+                        const line = if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s[0..nl] else s;
+                        self.writeLabel(line);
+                        return;
+                    },
+                    else => {},
+                }
+            }
+        }
+        self.writeLabel(name);
+    }
+
+    fn writeLabel(self: *Panels, s: []const u8) void {
+        const max = self.tool_label_buf.len;
+        const len = @min(s.len, max);
+        @memcpy(self.tool_label_buf[0..len], s[0..len]);
+        self.tool_label_len = @intCast(len);
     }
 
     fn upsertCall(self: *Panels, tc: core.providers.ToolCall) EventError!void {

@@ -143,6 +143,140 @@ fn freeJsonSlice(alloc: std.mem.Allocator, rows: [][]u8) void {
     alloc.free(rows);
 }
 
+pub fn escapeXml(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    var len: usize = 0;
+    for (input) |c| {
+        len += switch (c) {
+            '&' => 5, // &amp;
+            '<' => 4, // &lt;
+            '>' => 4, // &gt;
+            '"' => 6, // &quot;
+            '\'' => 6, // &apos;
+            else => 1,
+        };
+    }
+
+    const buf = try alloc.alloc(u8, len);
+    var i: usize = 0;
+    for (input) |c| {
+        switch (c) {
+            '&' => {
+                @memcpy(buf[i..][0..5], "&amp;");
+                i += 5;
+            },
+            '<' => {
+                @memcpy(buf[i..][0..4], "&lt;");
+                i += 4;
+            },
+            '>' => {
+                @memcpy(buf[i..][0..4], "&gt;");
+                i += 4;
+            },
+            '"' => {
+                @memcpy(buf[i..][0..6], "&quot;");
+                i += 6;
+            },
+            '\'' => {
+                @memcpy(buf[i..][0..6], "&apos;");
+                i += 6;
+            },
+            else => {
+                buf[i] = c;
+                i += 1;
+            },
+        }
+    }
+    return buf;
+}
+
+pub fn sortPaths(paths: [][]const u8) void {
+    std.sort.pdq([]const u8, paths, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.cmp);
+}
+
+// -- File operations extraction (F1) --
+
+const file_tools = [_][]const u8{ "read", "write", "edit", "glob", "grep", "bash" };
+
+fn isFileTool(name: []const u8) bool {
+    for (file_tools) |t| {
+        if (std.mem.eql(u8, name, t)) return true;
+    }
+    return false;
+}
+
+fn extractPath(tc: schema.Event.ToolCall) ?[]const u8 {
+    if (!isFileTool(tc.name)) return null;
+
+    const parsed = std.json.parseFromSlice(
+        struct {
+            file_path: ?[]const u8 = null,
+            path: ?[]const u8 = null,
+            pattern: ?[]const u8 = null,
+            command: ?[]const u8 = null,
+        },
+        std.heap.page_allocator,
+        tc.args,
+        .{ .allocate = .alloc_if_needed, .ignore_unknown_fields = true },
+    ) catch return null;
+    defer parsed.deinit();
+
+    const v = parsed.value;
+    return v.file_path orelse v.path orelse v.pattern orelse v.command;
+}
+
+/// Extract deduplicated, sorted file paths from tool_call events.
+pub fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) ![][]const u8 {
+    var set: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var it = set.keyIterator();
+        while (it.next()) |k| alloc.free(@constCast(k.*));
+        set.deinit(alloc);
+    }
+
+    for (events) |ev| {
+        switch (ev.data) {
+            .tool_call => |tc| {
+                const path = extractPath(tc) orelse continue;
+                if (set.contains(path)) continue;
+                const owned = try alloc.dupe(u8, path);
+                errdefer alloc.free(owned);
+                try set.put(alloc, owned, {});
+            },
+            else => {},
+        }
+    }
+
+    // Drain into sorted slice, transferring ownership
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer list.deinit(alloc);
+
+    var it = set.keyIterator();
+    while (it.next()) |k| try list.append(alloc, k.*);
+
+    std.sort.pdq([]const u8, list.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+
+    set.clearRetainingCapacity();
+    return try list.toOwnedSlice(alloc);
+}
+
+pub fn freeFileOps(alloc: std.mem.Allocator, paths: [][]const u8) void {
+    for (paths) |p| alloc.free(@constCast(p));
+    alloc.free(paths);
+}
+
+/// Stub: future LLM-based session summary.
+pub fn generateSummary(_: std.mem.Allocator, _: []const schema.Event) ?[]u8 {
+    return null;
+}
+
 test "compaction rewrites stream and preserves semantic events" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -203,4 +337,152 @@ test "compaction checkpoint returns null when absent" {
     defer tmp.cleanup();
 
     try std.testing.expect((try loadCheckpoint(std.testing.allocator, tmp.dir, "missing")) == null);
+}
+
+test "escapeXml escapes mixed content" {
+    const alloc = std.testing.allocator;
+    const out = try escapeXml(alloc, "A<B&C");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("A&lt;B&amp;C", out);
+}
+
+test "escapeXml no escapes returns same content" {
+    const alloc = std.testing.allocator;
+    const out = try escapeXml(alloc, "no escapes");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("no escapes", out);
+}
+
+test "escapeXml all five special chars" {
+    const alloc = std.testing.allocator;
+    const out = try escapeXml(alloc, "&<>\"'");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("&amp;&lt;&gt;&quot;&apos;", out);
+}
+
+test "sortPaths sorts file paths" {
+    var paths = [_][]const u8{ "src/main.zig", "build.zig", "README.md", "src/app.zig" };
+    sortPaths(&paths);
+    try std.testing.expectEqualStrings("README.md", paths[0]);
+    try std.testing.expectEqualStrings("build.zig", paths[1]);
+    try std.testing.expectEqualStrings("src/app.zig", paths[2]);
+    try std.testing.expectEqualStrings("src/main.zig", paths[3]);
+}
+
+// Property: escapeXml output never contains raw special chars
+test "escapeXml property: no raw specials in output" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { input: zc.String }) bool {
+            const s = args.input.slice();
+            const out = escapeXml(std.testing.allocator, s) catch return true;
+            defer std.testing.allocator.free(out);
+            // Verify no raw & < > " ' remain (they must be entity-encoded)
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) {
+                const c = out[i];
+                if (c == '&') {
+                    // Must be start of entity: &amp; &lt; &gt; &quot; &apos;
+                    if (std.mem.startsWith(u8, out[i..], "&amp;") or
+                        std.mem.startsWith(u8, out[i..], "&lt;") or
+                        std.mem.startsWith(u8, out[i..], "&gt;") or
+                        std.mem.startsWith(u8, out[i..], "&quot;") or
+                        std.mem.startsWith(u8, out[i..], "&apos;")) continue;
+                    return false; // bare &
+                }
+                if (c == '<' or c == '>' or c == '"' or c == '\'') return false;
+            }
+            return true;
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+// Property: escapeXml output length >= input length
+test "escapeXml property: output never shorter than input" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { input: zc.String }) bool {
+            const s = args.input.slice();
+            const out = escapeXml(std.testing.allocator, s) catch return true;
+            defer std.testing.allocator.free(out);
+            return out.len >= s.len;
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "extractFileOps deduplicates and sorts" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .tool_call = .{ .id = "1", .name = "read", .args = "{\"path\":\"/b.txt\"}" } } },
+        .{ .data = .{ .tool_call = .{ .id = "2", .name = "write", .args = "{\"file_path\":\"/a.txt\"}" } } },
+        .{ .data = .{ .tool_call = .{ .id = "3", .name = "read", .args = "{\"path\":\"/b.txt\"}" } } },
+    };
+    const ops = try extractFileOps(alloc, &events);
+    defer freeFileOps(alloc, ops);
+
+    try std.testing.expectEqual(@as(usize, 2), ops.len);
+    try std.testing.expectEqualStrings("/a.txt", ops[0]);
+    try std.testing.expectEqualStrings("/b.txt", ops[1]);
+}
+
+test "extractFileOps handles glob and grep" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .tool_call = .{ .id = "1", .name = "glob", .args = "{\"pattern\":\"*.zig\"}" } } },
+        .{ .data = .{ .tool_call = .{ .id = "2", .name = "grep", .args = "{\"path\":\"src/\"}" } } },
+    };
+    const ops = try extractFileOps(alloc, &events);
+    defer freeFileOps(alloc, ops);
+
+    try std.testing.expectEqual(@as(usize, 2), ops.len);
+    try std.testing.expectEqualStrings("*.zig", ops[0]);
+    try std.testing.expectEqualStrings("src/", ops[1]);
+}
+
+test "extractFileOps handles bash command" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .tool_call = .{ .id = "1", .name = "bash", .args = "{\"command\":\"ls -la\"}" } } },
+    };
+    const ops = try extractFileOps(alloc, &events);
+    defer freeFileOps(alloc, ops);
+
+    try std.testing.expectEqual(@as(usize, 1), ops.len);
+    try std.testing.expectEqualStrings("ls -la", ops[0]);
+}
+
+test "extractFileOps skips non-tool events" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .text = .{ .text = "hello" } } },
+        .{ .data = .{ .stop = .{ .reason = .done } } },
+    };
+    const ops = try extractFileOps(alloc, &events);
+    defer freeFileOps(alloc, ops);
+    try std.testing.expectEqual(@as(usize, 0), ops.len);
+}
+
+test "extractFileOps skips unknown tools" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .tool_call = .{ .id = "1", .name = "unknown", .args = "{\"path\":\"/x\"}" } } },
+    };
+    const ops = try extractFileOps(alloc, &events);
+    defer freeFileOps(alloc, ops);
+    try std.testing.expectEqual(@as(usize, 0), ops.len);
+}
+
+test "extractFileOps handles malformed JSON" {
+    const alloc = std.testing.allocator;
+    const events = [_]schema.Event{
+        .{ .data = .{ .tool_call = .{ .id = "1", .name = "read", .args = "{bad json" } } },
+    };
+    const ops = try extractFileOps(alloc, &events);
+    defer freeFileOps(alloc, ops);
+    try std.testing.expectEqual(@as(usize, 0), ops.len);
+}
+
+test "generateSummary returns null" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(generateSummary(alloc, &.{}) == null);
 }

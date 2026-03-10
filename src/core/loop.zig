@@ -1617,3 +1617,164 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     const last = store_impl.last_err[0..store_impl.last_err_len];
     try std.testing.expect(std.mem.indexOf(u8, last, "runtime:provider_start:StartBoom") != null);
 }
+
+test "mid-stream cancel delivers partial text then canceled stop" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        text_ct: usize = 0,
+        canceled_ct: usize = 0,
+        last_text: [128]u8 = [_]u8{0} ** 128,
+        last_text_len: usize = 0,
+        rdr: ReaderImpl = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            switch (ev.data) {
+                .text => |t| {
+                    self.text_ct += 1;
+                    const len = @min(t.text.len, self.last_text.len);
+                    @memcpy(self.last_text[0..len], t.text[0..len]);
+                    self.last_text_len = len;
+                },
+                .stop => |s| {
+                    if (s.reason == .canceled) self.canceled_ct += 1;
+                },
+                else => {},
+            }
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Ev,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Ev {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        text_ct: usize = 0,
+        canceled_ct: usize = 0,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .text => self.text_ct += 1,
+                    .stop => |s| {
+                        if (s.reason == .canceled) self.canceled_ct += 1;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    const CancelImpl = struct {
+        poll_ct: usize = 0,
+        // Cancel after the first stream event has been processed.
+        // The cancel check runs once per stream.next() iteration,
+        // so poll_ct==0 is the top-of-turn check, poll_ct==1 is
+        // after the first event.
+        fn isCanceled(self: *@This()) bool {
+            self.poll_ct += 1;
+            // First poll is top-of-turn (before stream starts).
+            // Second poll is after the first text event ("Hello").
+            // We cancel on the second poll so the first text is delivered.
+            return self.poll_ct >= 3;
+        }
+    };
+
+    const evs = [_]providers.Ev{
+        .{ .text = "Hello" },
+        .{ .text = " world" },
+        .{ .stop = .{ .reason = .done } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var cancel_impl = CancelImpl{};
+    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-midcancel",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+        .cancel = cancel,
+    });
+
+    // Partial text was delivered (only first chunk before cancel)
+    try std.testing.expectEqual(@as(usize, 1), store_impl.text_ct);
+    try std.testing.expectEqualStrings("Hello", store_impl.last_text[0..store_impl.last_text_len]);
+
+    // Cancel stop was emitted
+    try std.testing.expectEqual(@as(usize, 1), store_impl.canceled_ct);
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.canceled_ct);
+
+    // Mode also received the partial text
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.text_ct);
+
+    // Session persists partial — turns is 0 because cancel happened mid-first-turn
+    try std.testing.expectEqual(@as(u16, 0), out.turns);
+    try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
+}
