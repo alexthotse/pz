@@ -1,4 +1,5 @@
 const std = @import("std");
+const syslog_mock = @import("../test/syslog_mock.zig");
 
 pub const version: u8 = 1;
 pub const nil = "-";
@@ -488,79 +489,6 @@ fn validateSdName(raw: []const u8) !void {
     }
 }
 
-const UdpCollector = struct {
-    fd: std.posix.socket_t,
-    addr: std.net.Address,
-    buf: [4096]u8 = undefined,
-    len: usize = 0,
-
-    fn init() !UdpCollector {
-        var addr = try std.net.Address.parseIp("127.0.0.1", 0);
-        const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
-        errdefer {
-            (std.net.Stream{ .handle = fd }).close();
-        }
-
-        var socklen = addr.getOsSockLen();
-        try std.posix.bind(fd, &addr.any, socklen);
-        try std.posix.getsockname(fd, &addr.any, &socklen);
-
-        return .{
-            .fd = fd,
-            .addr = addr,
-        };
-    }
-
-    fn deinit(self: *UdpCollector) void {
-        (std.net.Stream{ .handle = self.fd }).close();
-        self.* = undefined;
-    }
-
-    fn port(self: *const UdpCollector) u16 {
-        return self.addr.getPort();
-    }
-
-    fn run(self: *UdpCollector) void {
-        self.len = std.posix.recvfrom(self.fd, self.buf[0..], 0, null, null) catch 0;
-    }
-
-    fn message(self: *const UdpCollector) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
-
-const TcpCollector = struct {
-    server: std.net.Server,
-    buf: [4096]u8 = undefined,
-    len: usize = 0,
-
-    fn init() !TcpCollector {
-        const addr = try std.net.Address.parseIp("127.0.0.1", 0);
-        const server = try addr.listen(.{ .reuse_address = true });
-        return .{ .server = server };
-    }
-
-    fn deinit(self: *TcpCollector) void {
-        self.server.deinit();
-        self.* = undefined;
-    }
-
-    fn port(self: *const TcpCollector) u16 {
-        return self.server.listen_address.getPort();
-    }
-
-    fn run(self: *TcpCollector) void {
-        var conn = self.server.accept() catch return;
-        defer conn.stream.close();
-
-        self.len = readOctetFrame(conn.stream.handle, self.buf[0..]) catch 0;
-    }
-
-    fn message(self: *const TcpCollector) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
-
 fn readOctetFrame(fd: std.posix.socket_t, buf: []u8) !usize {
     var len_buf: [32]u8 = undefined;
     var len_used: usize = 0;
@@ -627,10 +555,10 @@ test "encodeAlloc rejects invalid header field bytes" {
 }
 
 test "udp sender emits datagram to local collector" {
-    var collector = try UdpCollector.init();
+    var collector = try syslog_mock.UdpCollector.init();
     defer collector.deinit();
 
-    const t = try std.Thread.spawn(.{}, UdpCollector.run, .{&collector});
+    const t = try collector.spawn();
 
     var sender = try Sender.init(std.testing.allocator, .{
         .transport = .udp,
@@ -666,10 +594,10 @@ test "udp sender emits datagram to local collector" {
 }
 
 test "tcp sender emits octet-counted frame to local collector" {
-    var collector = try TcpCollector.init();
+    var collector = try syslog_mock.TcpCollector.init();
     defer collector.deinit();
 
-    const t = try std.Thread.spawn(.{}, TcpCollector.run, .{&collector});
+    const t = try collector.spawn();
 
     var sender = try Sender.init(std.testing.allocator, .{
         .transport = .tcp,
@@ -697,10 +625,10 @@ test "tcp sender emits octet-counted frame to local collector" {
 }
 
 test "udp sender truncates only the payload and annotates metadata" {
-    var collector = try UdpCollector.init();
+    var collector = try syslog_mock.UdpCollector.init();
     defer collector.deinit();
 
-    const t = try std.Thread.spawn(.{}, UdpCollector.run, .{&collector});
+    const t = try collector.spawn();
 
     var sender = try Sender.init(std.testing.allocator, .{
         .transport = .udp,
@@ -741,10 +669,10 @@ test "udp sender truncates only the payload and annotates metadata" {
 }
 
 test "tcp sender preserves the full payload for large messages" {
-    var collector = try TcpCollector.init();
+    var collector = try syslog_mock.TcpCollector.init();
     defer collector.deinit();
 
-    const t = try std.Thread.spawn(.{}, TcpCollector.run, .{&collector});
+    const t = try collector.spawn();
 
     var sender = try Sender.init(std.testing.allocator, .{
         .transport = .tcp,
