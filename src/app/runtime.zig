@@ -209,6 +209,15 @@ const PrintSink = struct {
                 }
                 try self.fmt.push(pev);
             },
+            .session_write_err => |msg| {
+                if (self.fmt.text_seen and !self.fmt.text_ended_nl) {
+                    try self.fmt.out.writeByte('\n');
+                    self.fmt.text_ended_nl = true;
+                }
+                try self.fmt.out.writeAll("[session write failed: ");
+                try self.fmt.out.writeAll(msg);
+                try self.fmt.out.writeAll("]\n");
+            },
             else => {},
         }
     }
@@ -221,6 +230,11 @@ const TuiSink = struct {
     fn push(self: *TuiSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
             .provider => |pev| try self.ui.onProvider(pev),
+            .session_write_err => |msg| {
+                const note = try std.fmt.allocPrint(self.ui.alloc, "[session write failed: {s}]", .{msg});
+                defer self.ui.alloc.free(note);
+                try self.ui.tr.infoText(note);
+            },
             else => {},
         }
         try self.ui.draw(self.out);
@@ -6945,6 +6959,40 @@ test "runtime json mode emits JSON lines for loop events" {
     try std.testing.expect(std.mem.indexOf(u8, written, "\"type\":\"session\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "\"type\":\"provider\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "pong") != null);
+}
+
+test "PrintSink surfaces session write errors non-fatally" {
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var sink = PrintSink.init(std.testing.allocator, out_fbs.writer().any());
+    defer sink.deinit();
+
+    try sink.push(.{ .provider = .{ .text = "hello" } });
+    try sink.push(.{ .session_write_err = "DiskFull" });
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "hello\n[session write failed: DiskFull]") != null);
+}
+
+test "TuiSink surfaces session write errors in transcript" {
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 60, 10, "m", "p");
+    defer ui.deinit();
+
+    var out_buf: [4096]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var sink = TuiSink{
+        .ui = &ui,
+        .out = out_fbs.writer().any(),
+    };
+
+    try sink.push(.{ .session_write_err = "DiskFull" });
+
+    var found = false;
+    for (ui.tr.blocks.items) |blk| {
+        if (std.mem.indexOf(u8, blk.buf.items, "session write failed: DiskFull") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "runtime rpc mode handles session model prompt and quit commands" {
