@@ -653,6 +653,14 @@ fn buildSchema(alloc: std.mem.Allocator, params: []const tools.Spec.Param) ![]co
     return buf.toOwnedSlice() catch return error.OutOfMemory;
 }
 
+const ToolCancelBridge = struct {
+    src: CancelSrc,
+
+    fn isCanceled(self: *@This()) bool {
+        return self.src.isCanceled();
+    }
+};
+
 fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolResult {
     const entry = opts.reg.byName(tc.name) orelse {
         return .{
@@ -674,12 +682,21 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
         };
     };
 
+    var tool_cancel = if (opts.cancel) |cancel| ToolCancelBridge{
+        .src = cancel,
+    } else null;
+    const call_cancel = if (tool_cancel) |*cancel|
+        tools.CancelSrc.from(ToolCancelBridge, cancel, ToolCancelBridge.isCanceled)
+    else
+        null;
+
     const call: tools.Call = .{
         .id = tc.id,
         .kind = entry.kind,
         .args = parsed_args,
         .src = .model,
         .at_ms = at_ms,
+        .cancel = call_cancel,
     };
 
     var mode_sink = ToolModeSink{
@@ -1452,6 +1469,139 @@ test "loop cancellation emits canceled stop and exits early" {
     try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
     try std.testing.expectEqual(@as(usize, 1), store_impl.canceled_ct);
     try std.testing.expectEqual(@as(usize, 1), mode_impl.provider_canceled_ct);
+}
+
+test "runTool forwards cancel source to dispatch" {
+    const DispatchImpl = struct {
+        run_ct: usize = 0,
+        out: [1]tools.Output = undefined,
+
+        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+            self.run_ct += 1;
+            try std.testing.expect(call.cancel != null);
+            try std.testing.expect(call.cancel.?.isCanceled());
+
+            self.out[0] = .{
+                .call_id = call.id,
+                .seq = 0,
+                .at_ms = call.at_ms,
+                .stream = .stdout,
+                .chunk = "tool-ok",
+            };
+
+            return .{
+                .call_id = call.id,
+                .started_at_ms = call.at_ms,
+                .ended_at_ms = call.at_ms,
+                .out = self.out[0..],
+                .final = .{ .ok = .{ .code = 0 } },
+            };
+        }
+    };
+
+    const ModeImpl = struct {
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+
+    const ProviderImpl = struct {
+        fn start(_: *@This(), _: providers.Req) !providers.Stream {
+            return error.Unused;
+        }
+    };
+
+    const StoreImpl = struct {
+        fn append(_: *@This(), _: []const u8, _: session.Event) !void {
+            return error.Unused;
+        }
+
+        fn replay(_: *@This(), _: []const u8) !session.Reader {
+            return error.Unused;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const CancelImpl = struct {
+        fn isCanceled(_: *@This()) bool {
+            return true;
+        }
+    };
+
+    var dispatch_impl = DispatchImpl{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "read",
+            .kind = .read,
+            .spec = .{
+                .kind = .read,
+                .desc = "read file",
+                .params = &.{
+                    .{
+                        .name = "path",
+                        .ty = .string,
+                        .required = true,
+                        .desc = "path",
+                    },
+                },
+                .out = .{
+                    .max_bytes = 4096,
+                    .stream = false,
+                },
+                .timeout_ms = 1000,
+                .destructive = false,
+            },
+            .dispatch = tools.Dispatch.from(
+                DispatchImpl,
+                &dispatch_impl,
+                DispatchImpl.run,
+            ),
+        },
+    };
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var provider_impl = ProviderImpl{};
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var cancel_impl = CancelImpl{};
+    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+
+    const tr = try runTool(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-tool-cancel",
+        .prompt = "prompt",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .cancel = cancel,
+    }, .{
+        .id = "call-1",
+        .name = "read",
+        .args = "{\"path\":\"a.txt\"}",
+    });
+    defer std.testing.allocator.free(tr.id);
+    defer std.testing.allocator.free(tr.out);
+
+    try std.testing.expectEqual(@as(usize, 1), dispatch_impl.run_ct);
+    try std.testing.expectEqualStrings("call-1", tr.id);
+    try std.testing.expectEqualStrings("tool-ok", tr.out);
+    try std.testing.expect(!tr.is_err);
 }
 
 test "loop compaction trigger runs at configured append cadence" {

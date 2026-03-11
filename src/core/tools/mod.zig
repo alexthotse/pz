@@ -1,3 +1,4 @@
+const std = @import("std");
 const runtime = @import("runtime.zig");
 pub const output = @import("output.zig");
 pub const builtin = @import("builtin.zig");
@@ -51,12 +52,44 @@ pub const Tool = struct {
 
 pub const Spec = Tool;
 
+pub const CancelSrc = struct {
+    ctx: *anyopaque,
+    is_canceled_fn: *const fn (ctx: *anyopaque) bool,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime is_canceled_fn: fn (ctx: *T) bool,
+    ) CancelSrc {
+        const Wrap = struct {
+            fn isCanceled(raw: *anyopaque) bool {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return is_canceled_fn(typed);
+            }
+        };
+
+        return .{
+            .ctx = ctx,
+            .is_canceled_fn = Wrap.isCanceled,
+        };
+    }
+
+    pub fn isCanceled(self: CancelSrc) bool {
+        return self.is_canceled_fn(self.ctx);
+    }
+
+    pub fn jsonStringify(_: CancelSrc, jw: anytype) !void {
+        try jw.write(null);
+    }
+};
+
 pub const Call = struct {
     id: []const u8,
     kind: Kind,
     args: Args,
     src: Source,
     at_ms: i64,
+    cancel: ?CancelSrc = null,
 
     pub const Source = enum {
         model,
@@ -231,3 +264,35 @@ pub const Dispatch = rt.Dispatch;
 pub const Entry = rt.Entry;
 pub const Registry = rt.Registry;
 pub const RegistryErr = rt.Err;
+
+test "CancelSrc forwards isCanceled" {
+    const Impl = struct {
+        canceled: bool = false,
+
+        fn isCanceled(self: *@This()) bool {
+            return self.canceled;
+        }
+    };
+
+    var impl = Impl{
+        .canceled = true,
+    };
+    const cancel = CancelSrc.from(Impl, &impl, Impl.isCanceled);
+
+    try std.testing.expect(cancel.isCanceled());
+}
+
+test "CancelSrc stringifies as null" {
+    const Impl = struct {
+        fn isCanceled(_: *@This()) bool {
+            return false;
+        }
+    };
+
+    var impl = Impl{};
+    const cancel = CancelSrc.from(Impl, &impl, Impl.isCanceled);
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, cancel, .{});
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expectEqualStrings("null", json);
+}
