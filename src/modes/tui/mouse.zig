@@ -18,6 +18,14 @@ pub const Result = struct {
     len: usize,
 };
 
+const ParseSnap = struct {
+    scroll_up: Result,
+    scroll_down: Result,
+    press: Result,
+    release: Result,
+    consumed_len: Result,
+};
+
 /// Parse SGR mouse sequence: \x1b[<btn;x;yM or \x1b[<btn;x;ym
 pub fn parse(buf: []const u8) ?Result {
     if (buf.len < 6) return null;
@@ -71,43 +79,47 @@ fn parseNum(buf: []const u8, pos: *usize) ?usize {
 // Tests
 // ============================================================
 
-test "parse scroll up" {
-    const buf = "\x1b[<64;10;5M";
-    const r = parse(buf).?;
-    try std.testing.expect(r.ev == .scroll_up);
-    try std.testing.expectEqual(buf.len, r.len);
-}
+test "parse snapshots are stable" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
 
-test "parse scroll down" {
-    const buf = "\x1b[<65;1;1M";
-    const r = parse(buf).?;
-    try std.testing.expect(r.ev == .scroll_down);
-    try std.testing.expectEqual(buf.len, r.len);
-}
+    const snap = ParseSnap{
+        .scroll_up = parse("\x1b[<64;10;5M").?,
+        .scroll_down = parse("\x1b[<65;1;1M").?,
+        .press = parse("\x1b[<0;5;10M").?,
+        .release = parse("\x1b[<0;3;7m").?,
+        .consumed_len = parse("\x1b[<64;1;1Mtrailing").?,
+    };
 
-test "parse button press" {
-    const buf = "\x1b[<0;5;10M";
-    const r = parse(buf).?;
-    switch (r.ev) {
-        .press => |p| {
-            try std.testing.expectEqual(@as(usize, 4), p.x);
-            try std.testing.expectEqual(@as(usize, 9), p.y);
-            try std.testing.expectEqual(@as(u8, 0), p.btn);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "parse button release" {
-    const buf = "\x1b[<0;3;7m";
-    const r = parse(buf).?;
-    switch (r.ev) {
-        .release => |p| {
-            try std.testing.expectEqual(@as(usize, 2), p.x);
-            try std.testing.expectEqual(@as(usize, 6), p.y);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\modes.tui.mouse.ParseSnap
+        \\  .scroll_up: modes.tui.mouse.Result
+        \\    .ev: modes.tui.mouse.Ev
+        \\      .scroll_up: void = void
+        \\    .len: usize = 11
+        \\  .scroll_down: modes.tui.mouse.Result
+        \\    .ev: modes.tui.mouse.Ev
+        \\      .scroll_down: void = void
+        \\    .len: usize = 10
+        \\  .press: modes.tui.mouse.Result
+        \\    .ev: modes.tui.mouse.Ev
+        \\      .press: modes.tui.mouse.Ev.Pos
+        \\        .x: usize = 4
+        \\        .y: usize = 9
+        \\        .btn: u8 = 0
+        \\    .len: usize = 10
+        \\  .release: modes.tui.mouse.Result
+        \\    .ev: modes.tui.mouse.Ev
+        \\      .release: modes.tui.mouse.Ev.Pos
+        \\        .x: usize = 2
+        \\        .y: usize = 6
+        \\        .btn: u8 = 0
+        \\    .len: usize = 9
+        \\  .consumed_len: modes.tui.mouse.Result
+        \\    .ev: modes.tui.mouse.Ev
+        \\      .scroll_up: void = void
+        \\    .len: usize = 10
+    ).expectEqual(snap);
 }
 
 test "parse returns null on short buf" {
@@ -126,11 +138,4 @@ test "parse returns null on missing final" {
 
 test "parse returns null on bad final char" {
     try std.testing.expect(parse("\x1b[<0;1;1X") == null);
-}
-
-test "parse consumes exact length" {
-    const buf = "\x1b[<64;1;1Mtrailing";
-    const r = parse(buf).?;
-    try std.testing.expectEqual(@as(usize, 10), r.len);
-    try std.testing.expect(r.ev == .scroll_up);
 }

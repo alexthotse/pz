@@ -15,6 +15,16 @@ const FrameSnap = struct {
     row8: []const u8,
     row9: []const u8,
 };
+const TableSnap = struct {
+    counts: [5]usize,
+    top: [3]usize,
+    hdr: [3]usize,
+    row1: [3]usize,
+    row2: [3]usize,
+    bot: [3]usize,
+    corners: [9]u21,
+    padding: [6]u21,
+};
 
 /// Render a Ui into a VScreen via the renderer.
 fn renderToVs(ui: *Ui, vs: *VScreen) !void {
@@ -236,6 +246,9 @@ test "e2e word wrap in narrow terminal" {
 }
 
 test "e2e markdown table draws aligned separators" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var ui = try Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
 
@@ -283,42 +296,79 @@ test "e2e markdown table draws aligned separators" {
     const d2n = S.borderCols(&vs, 5, &d2cols);
     const bot_n = S.borderCols(&vs, 6, &bot_cols);
 
-    try std.testing.expectEqual(@as(usize, 3), top_n);
-    try std.testing.expectEqual(@as(usize, 3), hdr_n);
-    try std.testing.expectEqual(@as(usize, 3), d1n);
-    try std.testing.expectEqual(@as(usize, 3), d2n);
-    try std.testing.expectEqual(@as(usize, 3), bot_n);
-
-    try std.testing.expectEqual(hcols[0], hdr_cols[0]);
-    try std.testing.expectEqual(hcols[1], hdr_cols[1]);
-    try std.testing.expectEqual(hcols[2], hdr_cols[2]);
-    try std.testing.expectEqual(hcols[0], d1cols[0]);
-    try std.testing.expectEqual(hcols[1], d1cols[1]);
-    try std.testing.expectEqual(hcols[2], d1cols[2]);
-    try std.testing.expectEqual(hcols[0], d2cols[0]);
-    try std.testing.expectEqual(hcols[1], d2cols[1]);
-    try std.testing.expectEqual(hcols[2], d2cols[2]);
-    try std.testing.expectEqual(hcols[0], bot_cols[0]);
-    try std.testing.expectEqual(hcols[1], bot_cols[1]);
-    try std.testing.expectEqual(hcols[2], bot_cols[2]);
-
-    try std.testing.expectEqual(@as(u21, 0x250C), vs.cellAt(0, hcols[0]).cp); // ┌
-    try std.testing.expectEqual(@as(u21, 0x252C), vs.cellAt(0, hcols[1]).cp); // ┬
-    try std.testing.expectEqual(@as(u21, 0x2510), vs.cellAt(0, hcols[2]).cp); // ┐
-    try std.testing.expectEqual(@as(u21, 0x251C), vs.cellAt(2, hcols[0]).cp); // ├
-    try std.testing.expectEqual(@as(u21, 0x253C), vs.cellAt(2, hcols[1]).cp); // ┼
-    try std.testing.expectEqual(@as(u21, 0x2524), vs.cellAt(2, hcols[2]).cp); // ┤
-    try std.testing.expectEqual(@as(u21, 0x2514), vs.cellAt(6, hcols[0]).cp); // └
-    try std.testing.expectEqual(@as(u21, 0x2534), vs.cellAt(6, hcols[1]).cp); // ┴
-    try std.testing.expectEqual(@as(u21, 0x2518), vs.cellAt(6, hcols[2]).cp); // ┘
-
-    // Rows keep explicit left/right padding inside each column.
-    try std.testing.expectEqual(@as(u21, ' '), vs.cellAt(3, hcols[0] + 1).cp);
-    try std.testing.expectEqual(@as(u21, 'a'), vs.cellAt(3, hcols[0] + 2).cp);
-    try std.testing.expectEqual(@as(u21, ' '), vs.cellAt(3, hcols[1] - 1).cp);
-    try std.testing.expectEqual(@as(u21, ' '), vs.cellAt(3, hcols[1] + 1).cp);
-    try std.testing.expectEqual(@as(u21, '1'), vs.cellAt(3, hcols[1] + 2).cp);
-    try std.testing.expectEqual(@as(u21, ' '), vs.cellAt(3, hcols[2] - 1).cp);
+    const snap = TableSnap{
+        .counts = .{ top_n, hdr_n, d1n, d2n, bot_n },
+        .top = .{ hcols[0], hcols[1], hcols[2] },
+        .hdr = .{ hdr_cols[0], hdr_cols[1], hdr_cols[2] },
+        .row1 = .{ d1cols[0], d1cols[1], d1cols[2] },
+        .row2 = .{ d2cols[0], d2cols[1], d2cols[2] },
+        .bot = .{ bot_cols[0], bot_cols[1], bot_cols[2] },
+        .corners = .{
+            vs.cellAt(0, hcols[0]).cp,
+            vs.cellAt(0, hcols[1]).cp,
+            vs.cellAt(0, hcols[2]).cp,
+            vs.cellAt(2, hcols[0]).cp,
+            vs.cellAt(2, hcols[1]).cp,
+            vs.cellAt(2, hcols[2]).cp,
+            vs.cellAt(6, hcols[0]).cp,
+            vs.cellAt(6, hcols[1]).cp,
+            vs.cellAt(6, hcols[2]).cp,
+        },
+        .padding = .{
+            vs.cellAt(3, hcols[0] + 1).cp,
+            vs.cellAt(3, hcols[0] + 2).cp,
+            vs.cellAt(3, hcols[1] - 1).cp,
+            vs.cellAt(3, hcols[1] + 1).cp,
+            vs.cellAt(3, hcols[1] + 2).cp,
+            vs.cellAt(3, hcols[2] - 1).cp,
+        },
+    };
+    try oh.snap(@src(),
+        \\modes.tui.fixture.TableSnap
+        \\  .counts: [5]usize
+        \\    [0]: usize = 3
+        \\    [1]: usize = 3
+        \\    [2]: usize = 3
+        \\    [3]: usize = 3
+        \\    [4]: usize = 3
+        \\  .top: [3]usize
+        \\    [0]: usize = 1
+        \\    [1]: usize = 15
+        \\    [2]: usize = 23
+        \\  .hdr: [3]usize
+        \\    [0]: usize = 1
+        \\    [1]: usize = 15
+        \\    [2]: usize = 23
+        \\  .row1: [3]usize
+        \\    [0]: usize = 1
+        \\    [1]: usize = 15
+        \\    [2]: usize = 23
+        \\  .row2: [3]usize
+        \\    [0]: usize = 1
+        \\    [1]: usize = 15
+        \\    [2]: usize = 23
+        \\  .bot: [3]usize
+        \\    [0]: usize = 1
+        \\    [1]: usize = 15
+        \\    [2]: usize = 23
+        \\  .corners: [9]u21
+        \\    [0]: u21 = '┌'
+        \\    [1]: u21 = '┬'
+        \\    [2]: u21 = '┐'
+        \\    [3]: u21 = '├'
+        \\    [4]: u21 = '┼'
+        \\    [5]: u21 = '┤'
+        \\    [6]: u21 = '└'
+        \\    [7]: u21 = '┴'
+        \\    [8]: u21 = '┘'
+        \\  .padding: [6]u21
+        \\    [0]: u21 = ' '
+        \\    [1]: u21 = 'a'
+        \\    [2]: u21 = ' '
+        \\    [3]: u21 = ' '
+        \\    [4]: u21 = '1'
+        \\    [5]: u21 = ' '
+    ).expectEqual(snap);
 }
 
 test "golden snapshot deterministic frame text" {

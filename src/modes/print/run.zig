@@ -98,7 +98,76 @@ fn mapEvent(ev: core.providers.Ev) core.session.Event {
     };
 }
 
+const RunProviderSnap = struct {
+    start_ct: usize,
+    model: []const u8,
+    msg_ct: usize,
+    part_ct: usize,
+    role: core.providers.Role,
+    prompt: []const u8,
+    deinit_ct: usize,
+};
+
+const RunStoreSnap = struct {
+    replay_ct: usize,
+    append_ct: usize,
+    len: usize,
+    sid: []const u8,
+};
+
+const RunToolCallSnap = struct {
+    id: []const u8,
+    name: []const u8,
+    args: []const u8,
+};
+
+const RunToolResultSnap = struct {
+    id: []const u8,
+    out: []const u8,
+    is_err: bool,
+};
+
+const RunUsageSnap = struct {
+    in_tok: u64,
+    out_tok: u64,
+    tot_tok: u64,
+};
+
+const RunEventsSnap = struct {
+    prompt: []const u8,
+    text: []const u8,
+    thinking: []const u8,
+    tool_call: RunToolCallSnap,
+    tool_result: RunToolResultSnap,
+    usage: RunUsageSnap,
+    stop: core.session.Event.StopReason,
+    err: []const u8,
+};
+
+const RunVerboseSnap = struct {
+    provider: RunProviderSnap,
+    store: RunStoreSnap,
+    events: RunEventsSnap,
+    out: []const u8,
+};
+
+const RunErrSnap = struct {
+    deinit_ct: usize,
+    append_ct: usize,
+    prompt: []const u8,
+    out: []const u8,
+};
+
+const RunStopSnap = struct {
+    deinit_ct: usize,
+    append_ct: usize,
+    out: []const u8,
+};
+
 test "exec runs prompt path and persists mapped provider events" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const StreamImpl = struct {
         idx: usize = 0,
         deinit_ct: usize = 0,
@@ -246,76 +315,121 @@ test "exec runs prompt path and persists mapped provider events" {
         .prompt = "ship-it",
     }, out_fbs.writer().any(), true);
 
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.start_ct);
-    try std.testing.expectEqualStrings(model_default, provider_impl.model);
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.msg_ct);
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.part_ct);
-    try std.testing.expectEqual(core.providers.Role.user, provider_impl.role);
-    try std.testing.expectEqualStrings("ship-it", provider_impl.prompt);
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.stream.deinit_ct);
-
-    try std.testing.expectEqual(@as(usize, 0), store_impl.replay_ct);
-    try std.testing.expectEqual(@as(usize, 8), store_impl.append_ct);
-    try std.testing.expectEqual(@as(usize, 8), store_impl.len);
-    try std.testing.expectEqualStrings("sid-1", store_impl.sid);
-
-    switch (store_impl.evs[0].data) {
-        .prompt => |out| try std.testing.expectEqualStrings("ship-it", out.text),
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[1].data) {
-        .text => |out| try std.testing.expectEqualStrings("out-a", out.text),
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[2].data) {
-        .thinking => |out| try std.testing.expectEqualStrings("think-a", out.text),
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[3].data) {
-        .tool_call => |out| {
-            try std.testing.expectEqualStrings("call-1", out.id);
-            try std.testing.expectEqualStrings("read", out.name);
-            try std.testing.expectEqualStrings("{\"path\":\"x\"}", out.args);
+    const snap = RunVerboseSnap{
+        .provider = .{
+            .start_ct = provider_impl.start_ct,
+            .model = provider_impl.model,
+            .msg_ct = provider_impl.msg_ct,
+            .part_ct = provider_impl.part_ct,
+            .role = provider_impl.role,
+            .prompt = provider_impl.prompt,
+            .deinit_ct = provider_impl.stream.deinit_ct,
         },
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[4].data) {
-        .tool_result => |out| {
-            try std.testing.expectEqualStrings("call-1", out.id);
-            try std.testing.expectEqualStrings("ok", out.out);
-            try std.testing.expect(!out.is_err);
+        .store = .{
+            .replay_ct = store_impl.replay_ct,
+            .append_ct = store_impl.append_ct,
+            .len = store_impl.len,
+            .sid = store_impl.sid,
         },
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[5].data) {
-        .usage => |out| {
-            try std.testing.expectEqual(@as(u64, 5), out.in_tok);
-            try std.testing.expectEqual(@as(u64, 7), out.out_tok);
-            try std.testing.expectEqual(@as(u64, 12), out.tot_tok);
+        .events = .{
+            .prompt = switch (store_impl.evs[0].data) {
+                .prompt => |out| out.text,
+                else => return error.TestUnexpectedResult,
+            },
+            .text = switch (store_impl.evs[1].data) {
+                .text => |out| out.text,
+                else => return error.TestUnexpectedResult,
+            },
+            .thinking = switch (store_impl.evs[2].data) {
+                .thinking => |out| out.text,
+                else => return error.TestUnexpectedResult,
+            },
+            .tool_call = switch (store_impl.evs[3].data) {
+                .tool_call => |out| .{ .id = out.id, .name = out.name, .args = out.args },
+                else => return error.TestUnexpectedResult,
+            },
+            .tool_result = switch (store_impl.evs[4].data) {
+                .tool_result => |out| .{ .id = out.id, .out = out.out, .is_err = out.is_err },
+                else => return error.TestUnexpectedResult,
+            },
+            .usage = switch (store_impl.evs[5].data) {
+                .usage => |out| .{ .in_tok = out.in_tok, .out_tok = out.out_tok, .tot_tok = out.tot_tok },
+                else => return error.TestUnexpectedResult,
+            },
+            .stop = switch (store_impl.evs[6].data) {
+                .stop => |out| out.reason,
+                else => return error.TestUnexpectedResult,
+            },
+            .err = switch (store_impl.evs[7].data) {
+                .err => |out| out.text,
+                else => return error.TestUnexpectedResult,
+            },
         },
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[6].data) {
-        .stop => |out| try std.testing.expectEqual(core.session.Event.StopReason.done, out.reason),
-        else => try std.testing.expect(false),
-    }
-    switch (store_impl.evs[7].data) {
-        .err => |out| try std.testing.expectEqualStrings("warn-a", out.text),
-        else => try std.testing.expect(false),
-    }
-
-    const want_out =
-        "out-a\n" ++
-        "thinking \"think-a\"\n" ++
-        "tool_call id=\"call-1\" name=\"read\" args=\"{\\\"path\\\":\\\"x\\\"}\"\n" ++
-        "tool_result id=\"call-1\" is_err=false out=\"ok\"\n" ++
-        "usage in=5 out=7 total=12\n" ++
-        "stop reason=done\n" ++
-        "err \"warn-a\"\n";
-    try std.testing.expectEqualStrings(want_out, out_fbs.getWritten());
+        .out = out_fbs.getWritten(),
+    };
+    try oh.snap(@src(),
+        \\modes.print.run.RunVerboseSnap
+        \\  .provider: modes.print.run.RunProviderSnap
+        \\    .start_ct: usize = 1
+        \\    .model: []const u8
+        \\      "default"
+        \\    .msg_ct: usize = 1
+        \\    .part_ct: usize = 1
+        \\    .role: core.providers.contract.Role
+        \\      .user
+        \\    .prompt: []const u8
+        \\      "ship-it"
+        \\    .deinit_ct: usize = 1
+        \\  .store: modes.print.run.RunStoreSnap
+        \\    .replay_ct: usize = 0
+        \\    .append_ct: usize = 8
+        \\    .len: usize = 8
+        \\    .sid: []const u8
+        \\      "sid-1"
+        \\  .events: modes.print.run.RunEventsSnap
+        \\    .prompt: []const u8
+        \\      "ship-it"
+        \\    .text: []const u8
+        \\      "out-a"
+        \\    .thinking: []const u8
+        \\      "think-a"
+        \\    .tool_call: modes.print.run.RunToolCallSnap
+        \\      .id: []const u8
+        \\        "call-1"
+        \\      .name: []const u8
+        \\        "read"
+        \\      .args: []const u8
+        \\        "{"path":"x"}"
+        \\    .tool_result: modes.print.run.RunToolResultSnap
+        \\      .id: []const u8
+        \\        "call-1"
+        \\      .out: []const u8
+        \\        "ok"
+        \\      .is_err: bool = false
+        \\    .usage: modes.print.run.RunUsageSnap
+        \\      .in_tok: u64 = 5
+        \\      .out_tok: u64 = 7
+        \\      .tot_tok: u64 = 12
+        \\    .stop: core.session.schema.Event.StopReason
+        \\      .done
+        \\    .err: []const u8
+        \\      "warn-a"
+        \\  .out: []const u8
+        \\    "out-a
+        \\thinking "think-a"
+        \\tool_call id="call-1" name="read" args="{\"path\":\"x\"}"
+        \\tool_result id="call-1" is_err=false out="ok"
+        \\usage in=5 out=7 total=12
+        \\stop reason=done
+        \\err "warn-a"
+        \\"
+    ).expectEqual(snap);
 }
 
 test "exec deinit stream and maps stream next error to typed print error" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const StreamImpl = struct {
         idx: usize = 0,
         fail_at: usize = 0,
@@ -403,16 +517,30 @@ test "exec deinit stream and maps stream next error to typed print error" {
         .prompt = "prompt-2",
     }, out_fbs.writer().any(), true));
 
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.stream.deinit_ct);
-    try std.testing.expectEqual(@as(usize, 1), store_impl.append_ct);
-    switch (store_impl.evs[0].data) {
-        .prompt => |out| try std.testing.expectEqualStrings("prompt-2", out.text),
-        else => try std.testing.expect(false),
-    }
-    try std.testing.expectEqualStrings("", out_fbs.getWritten());
+    const snap = RunErrSnap{
+        .deinit_ct = provider_impl.stream.deinit_ct,
+        .append_ct = store_impl.append_ct,
+        .prompt = switch (store_impl.evs[0].data) {
+            .prompt => |out| out.text,
+            else => return error.TestUnexpectedResult,
+        },
+        .out = out_fbs.getWritten(),
+    };
+    try oh.snap(@src(),
+        \\modes.print.run.RunErrSnap
+        \\  .deinit_ct: usize = 1
+        \\  .append_ct: usize = 1
+        \\  .prompt: []const u8
+        \\    "prompt-2"
+        \\  .out: []const u8
+        \\    ""
+    ).expectEqual(snap);
 }
 
 test "exec maps max_out stop reason to deterministic typed error" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const StreamImpl = struct {
         idx: usize = 0,
         deinit_ct: usize = 0,
@@ -510,12 +638,26 @@ test "exec maps max_out stop reason to deterministic typed error" {
         .prompt = "prompt-3",
     }, out_fbs.writer().any(), true));
 
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.stream.deinit_ct);
-    try std.testing.expectEqual(@as(usize, 3), store_impl.append_ct);
-    try std.testing.expectEqualStrings("out-z\nstop reason=max_out\n", out_fbs.getWritten());
+    const snap = RunStopSnap{
+        .deinit_ct = provider_impl.stream.deinit_ct,
+        .append_ct = store_impl.append_ct,
+        .out = out_fbs.getWritten(),
+    };
+    try oh.snap(@src(),
+        \\modes.print.run.RunStopSnap
+        \\  .deinit_ct: usize = 1
+        \\  .append_ct: usize = 3
+        \\  .out: []const u8
+        \\    "out-z
+        \\stop reason=max_out
+        \\"
+    ).expectEqual(snap);
 }
 
 test "exec chooses highest stop reason deterministically" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const StreamImpl = struct {
         idx: usize = 0,
         deinit_ct: usize = 0,
@@ -613,7 +755,17 @@ test "exec chooses highest stop reason deterministically" {
         .prompt = "prompt-4",
     }, out_fbs.writer().any(), true));
 
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.stream.deinit_ct);
-    try std.testing.expectEqual(@as(usize, 3), store_impl.append_ct);
-    try std.testing.expectEqualStrings("stop reason=err\n", out_fbs.getWritten());
+    const snap = RunStopSnap{
+        .deinit_ct = provider_impl.stream.deinit_ct,
+        .append_ct = store_impl.append_ct,
+        .out = out_fbs.getWritten(),
+    };
+    try oh.snap(@src(),
+        \\modes.print.run.RunStopSnap
+        \\  .deinit_ct: usize = 1
+        \\  .append_ct: usize = 3
+        \\  .out: []const u8
+        \\    "stop reason=err
+        \\"
+    ).expectEqual(snap);
 }
