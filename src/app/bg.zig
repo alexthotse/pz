@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("../core/mod.zig");
 const journal_mod = @import("job_journal.zig");
 
 pub const State = enum {
@@ -76,22 +77,31 @@ pub const Mgr = struct {
     pub const Opts = struct {
         state_dir: ?[]const u8 = null,
         recover: bool = true,
+        emit_audit_ctx: ?*anyopaque = null,
+        emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+        now_ms: *const fn () i64 = nowMs,
     };
 
     alloc: std.mem.Allocator,
     mu: std.Thread.Mutex = .{},
+    audit_mu: std.Thread.Mutex = .{},
     jobs: std.ArrayListUnmanaged(Job) = .empty,
     done: std.ArrayListUnmanaged(u64) = .empty,
     next_id: u64 = 1,
     wake_r: std.posix.fd_t,
     wake_w: std.posix.fd_t,
     journal: journal_mod.Journal,
+    emit_audit_ctx: ?*anyopaque = null,
+    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    now_ms: *const fn () i64 = nowMs,
+    audit_seq: u64 = 1,
 
     pub fn init(alloc: std.mem.Allocator) !Mgr {
         return initWithOpts(alloc, .{});
     }
 
     pub fn initWithOpts(alloc: std.mem.Allocator, opts: Opts) !Mgr {
+        if (opts.emit_audit != null and opts.emit_audit_ctx == null) return error.InvalidArgs;
         const pipe = try std.posix.pipe2(.{
             .NONBLOCK = true,
             .CLOEXEC = true,
@@ -108,6 +118,9 @@ pub const Mgr = struct {
             .journal = try journal_mod.Journal.init(alloc, .{
                 .state_dir = opts.state_dir,
             }),
+            .emit_audit_ctx = opts.emit_audit_ctx,
+            .emit_audit = opts.emit_audit,
+            .now_ms = opts.now_ms,
         };
         errdefer out.journal.deinit();
 
@@ -165,7 +178,27 @@ pub const Mgr = struct {
 
     pub fn start(self: *Mgr, cmd_raw: []const u8, cwd: ?[]const u8) !u64 {
         const cmd = std.mem.trim(u8, cmd_raw, " \t");
-        if (cmd.len == 0) return error.InvalidArgs;
+        const cwd_txt = cwd orelse "";
+        const start_attrs = [_]core.audit.Attr{
+            .{ .key = "cwd", .vis = .mask, .val = .{ .str = cwd_txt } },
+        };
+        try self.emitControlAudit(.{
+            .op = "start",
+            .msg = .{ .text = "bg control start", .vis = .@"pub" },
+            .argv = .{ .text = cmd, .vis = .mask },
+            .attrs = &start_attrs,
+        });
+        if (cmd.len == 0) {
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = "InvalidArgs", .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
+            return error.InvalidArgs;
+        }
 
         const id = blk: {
             self.mu.lock();
@@ -200,7 +233,17 @@ pub const Mgr = struct {
         child.stderr_behavior = .Ignore;
         child.cwd = cwd;
         child.env_map = &env;
-        try child.spawn();
+        child.spawn() catch |err| {
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(err), .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
+            return err;
+        };
 
         const ctx = try self.alloc.create(WaitCtx);
         errdefer self.alloc.destroy(ctx);
@@ -213,7 +256,17 @@ pub const Mgr = struct {
         const pid: i32 = @intCast(child.id);
         const started_at_ms = std.time.milliTimestamp();
 
-        try self.journal.appendLaunch(id, pid, cmd_dup, log_path, started_at_ms);
+        self.journal.appendLaunch(id, pid, cmd_dup, log_path, started_at_ms) catch |err| {
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(err), .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
+            return err;
+        };
 
         self.mu.lock();
         const idx = self.jobs.items.len;
@@ -237,6 +290,14 @@ pub const Mgr = struct {
             self.alloc.destroy(ctx);
             self.alloc.free(cmd_dup);
             self.alloc.free(log_path);
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(append_err), .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
             return append_err;
         };
         self.mu.unlock();
@@ -256,6 +317,14 @@ pub const Mgr = struct {
             } else {
                 self.mu.unlock();
             }
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(spawn_err), .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
             return spawn_err;
         };
 
@@ -266,39 +335,128 @@ pub const Mgr = struct {
             self.mu.unlock();
             thr.join();
             self.journal.appendCleanup(id, "start_internal_error") catch {};
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = "InternalError", .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
             return error.InternalError;
         }
         self.mu.unlock();
 
+        const ok_attrs = [_]core.audit.Attr{
+            .{ .key = "job_id", .val = .{ .uint = id } },
+            .{ .key = "pid", .val = .{ .uint = @intCast(pid) } },
+            .{ .key = "cwd", .vis = .mask, .val = .{ .str = cwd_txt } },
+            .{ .key = "log_path", .vis = .mask, .val = .{ .str = log_path } },
+        };
+        try self.emitControlAudit(.{
+            .op = "start",
+            .msg = .{ .text = "bg control success", .vis = .@"pub" },
+            .argv = .{ .text = cmd, .vis = .mask },
+            .attrs = &ok_attrs,
+        });
         return id;
     }
 
     pub fn stop(self: *Mgr, id: u64) !StopRes {
+        const start_attrs = [_]core.audit.Attr{
+            .{ .key = "job_id", .val = .{ .uint = id } },
+        };
+        try self.emitControlAudit(.{
+            .op = "stop",
+            .msg = .{ .text = "bg control start", .vis = .@"pub" },
+            .attrs = &start_attrs,
+        });
         self.mu.lock();
         const idx = self.findIdxLocked(id) orelse {
             self.mu.unlock();
+            const fail_attrs = [_]core.audit.Attr{
+                .{ .key = "job_id", .val = .{ .uint = id } },
+                .{ .key = "status", .val = .{ .str = "not_found" } },
+            };
+            try self.emitControlAudit(.{
+                .op = "stop",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = "bg not found", .vis = .@"pub" },
+                .attrs = &fail_attrs,
+            });
             return .not_found;
         };
         const job = self.jobs.items[idx];
         if (job.state != .running) {
             self.mu.unlock();
+            const done_attrs = [_]core.audit.Attr{
+                .{ .key = "job_id", .val = .{ .uint = id } },
+                .{ .key = "status", .val = .{ .str = "already_done" } },
+            };
+            try self.emitControlAudit(.{
+                .op = "stop",
+                .msg = .{ .text = "bg control success", .vis = .@"pub" },
+                .attrs = &done_attrs,
+            });
             return .already_done;
         }
         const pid: std.posix.pid_t = @intCast(job.pid);
         self.mu.unlock();
 
         std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
-            error.ProcessNotFound => return .already_done,
-            else => return err,
+            error.ProcessNotFound => {
+                const done_attrs = [_]core.audit.Attr{
+                    .{ .key = "job_id", .val = .{ .uint = id } },
+                    .{ .key = "status", .val = .{ .str = "already_done" } },
+                };
+                try self.emitControlAudit(.{
+                    .op = "stop",
+                    .msg = .{ .text = "bg control success", .vis = .@"pub" },
+                    .attrs = &done_attrs,
+                });
+                return .already_done;
+            },
+            else => {
+                try self.emitControlAudit(.{
+                    .op = "stop",
+                    .out = .fail,
+                    .sev = .err,
+                    .msg = .{ .text = @errorName(err), .vis = .mask },
+                    .attrs = &start_attrs,
+                });
+                return err;
+            },
         };
+        const ok_attrs = [_]core.audit.Attr{
+            .{ .key = "job_id", .val = .{ .uint = id } },
+            .{ .key = "status", .val = .{ .str = "sent" } },
+        };
+        try self.emitControlAudit(.{
+            .op = "stop",
+            .msg = .{ .text = "bg control success", .vis = .@"pub" },
+            .attrs = &ok_attrs,
+        });
         return .sent;
     }
 
     pub fn list(self: *Mgr, alloc: std.mem.Allocator) ![]View {
+        try self.emitControlAudit(.{
+            .op = "list",
+            .msg = .{ .text = "bg control start", .vis = .@"pub" },
+        });
         self.mu.lock();
         defer self.mu.unlock();
 
-        const out = try alloc.alloc(View, self.jobs.items.len);
+        const out = alloc.alloc(View, self.jobs.items.len) catch |err| {
+            try self.emitControlAudit(.{
+                .op = "list",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(err), .vis = .mask },
+            });
+            return err;
+        };
         errdefer alloc.free(out);
 
         var i: usize = 0;
@@ -312,9 +470,25 @@ pub const Mgr = struct {
         }
 
         for (self.jobs.items) |job| {
-            out[i] = try copyJob(alloc, job);
+            out[i] = copyJob(alloc, job) catch |err| {
+                try self.emitControlAudit(.{
+                    .op = "list",
+                    .out = .fail,
+                    .sev = .err,
+                    .msg = .{ .text = @errorName(err), .vis = .mask },
+                });
+                return err;
+            };
             i += 1;
         }
+        const ok_attrs = [_]core.audit.Attr{
+            .{ .key = "count", .val = .{ .uint = @intCast(out.len) } },
+        };
+        try self.emitControlAudit(.{
+            .op = "list",
+            .msg = .{ .text = "bg control success", .vis = .@"pub" },
+            .attrs = &ok_attrs,
+        });
         return out;
     }
 
@@ -327,14 +501,35 @@ pub const Mgr = struct {
     }
 
     pub fn drainDone(self: *Mgr, alloc: std.mem.Allocator) ![]View {
+        try self.emitControlAudit(.{
+            .op = "drain",
+            .msg = .{ .text = "bg control start", .vis = .@"pub" },
+        });
         self.mu.lock();
-        const ids = try alloc.alloc(u64, self.done.items.len);
+        const ids = alloc.alloc(u64, self.done.items.len) catch |err| {
+            self.mu.unlock();
+            try self.emitControlAudit(.{
+                .op = "drain",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(err), .vis = .mask },
+            });
+            return err;
+        };
         for (self.done.items, 0..) |id, i| ids[i] = id;
         self.done.clearRetainingCapacity();
         self.mu.unlock();
         defer alloc.free(ids);
 
-        const out = try alloc.alloc(View, ids.len);
+        const out = alloc.alloc(View, ids.len) catch |err| {
+            try self.emitControlAudit(.{
+                .op = "drain",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = @errorName(err), .vis = .mask },
+            });
+            return err;
+        };
         errdefer alloc.free(out);
 
         var i: usize = 0;
@@ -348,10 +543,34 @@ pub const Mgr = struct {
         }
 
         for (ids) |id| {
-            const v = (try self.view(alloc, id)) orelse return error.InternalError;
+            const v = (self.view(alloc, id) catch |err| {
+                try self.emitControlAudit(.{
+                    .op = "drain",
+                    .out = .fail,
+                    .sev = .err,
+                    .msg = .{ .text = @errorName(err), .vis = .mask },
+                });
+                return err;
+            }) orelse {
+                try self.emitControlAudit(.{
+                    .op = "drain",
+                    .out = .fail,
+                    .sev = .err,
+                    .msg = .{ .text = "InternalError", .vis = .mask },
+                });
+                return error.InternalError;
+            };
             out[i] = v;
             i += 1;
         }
+        const ok_attrs = [_]core.audit.Attr{
+            .{ .key = "count", .val = .{ .uint = @intCast(out.len) } },
+        };
+        try self.emitControlAudit(.{
+            .op = "drain",
+            .msg = .{ .text = "bg control success", .vis = .@"pub" },
+            .attrs = &ok_attrs,
+        });
         return out;
     }
 
@@ -465,7 +684,51 @@ pub const Mgr = struct {
         }
         return error.PathAlreadyExists;
     }
+
+    fn emitControlAudit(self: *Mgr, req: ControlAudit) !void {
+        const emit = self.emit_audit orelse return;
+        self.audit_mu.lock();
+        const seq = self.audit_seq;
+        self.audit_seq +%= 1;
+        self.audit_mu.unlock();
+
+        try emit(self.emit_audit_ctx.?, self.alloc, .{
+            .ts_ms = self.now_ms(),
+            .sid = "bg",
+            .seq = seq,
+            .sev = req.sev,
+            .out = req.out,
+            .actor = .{ .kind = .sys },
+            .res = .{
+                .kind = .cmd,
+                .name = .{ .text = "bg", .vis = .@"pub" },
+                .op = req.op,
+            },
+            .msg = req.msg,
+            .data = .{
+                .tool = .{
+                    .name = .{ .text = "bg", .vis = .@"pub" },
+                    .call_id = req.op,
+                    .argv = req.argv,
+                },
+            },
+            .attrs = req.attrs,
+        });
+    }
 };
+
+const ControlAudit = struct {
+    op: []const u8,
+    out: core.audit.Out = .ok,
+    sev: core.audit.Sev = .info,
+    msg: ?core.audit.Str,
+    argv: ?core.audit.Str = null,
+    attrs: []const core.audit.Attr = &.{},
+};
+
+fn nowMs() i64 {
+    return std.time.milliTimestamp();
+}
 
 fn copyJob(alloc: std.mem.Allocator, job: Job) !View {
     return .{
@@ -518,6 +781,71 @@ fn toJobSnap(v: View) JobSnap {
         .cmd = v.cmd,
         .has_log = v.log_path.len > 0,
     };
+}
+
+const AuditCap = struct {
+    rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        for (self.rows.items) |row| alloc.free(row);
+        self.rows.deinit(alloc);
+    }
+};
+
+fn captureAudit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+    const cap: *AuditCap = @ptrCast(@alignCast(ctx));
+    const raw = try core.audit.encodeAlloc(alloc, ent);
+    try cap.rows.append(alloc, raw);
+}
+
+fn scrubBgAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out = try alloc.dupe(u8, raw);
+
+    const log_pat = "\"key\":\"log_path\",\"vis\":\"mask\",\"ty\":\"str\",\"val\":\"/tmp/pz-bg-";
+    if (std.mem.indexOf(u8, out, log_pat)) |log_idx| {
+        const start = log_idx + log_pat.len;
+        const end_rel = std.mem.indexOfScalar(u8, out[start..], '"') orelse return out;
+        const end = start + end_rel;
+        const repl = try std.mem.concat(alloc, u8, &.{ out[0..start], "LOG", out[end..] });
+        alloc.free(out);
+        out = repl;
+    }
+
+    const pid_pat = "\"key\":\"pid\",\"vis\":\"pub\",\"ty\":\"uint\",\"val\":";
+    if (std.mem.indexOf(u8, out, pid_pat)) |pid_idx| {
+        const start = pid_idx + pid_pat.len;
+        const end_rel = std.mem.indexOfAny(u8, out[start..], "},") orelse return out;
+        const end = start + end_rel;
+        const repl = try std.mem.concat(alloc, u8, &.{ out[0..start], "0", out[end..] });
+        alloc.free(out);
+        out = repl;
+    }
+
+    const sent = "\"key\":\"status\",\"vis\":\"pub\",\"ty\":\"str\",\"val\":\"sent\"";
+    const done = "\"key\":\"status\",\"vis\":\"pub\",\"ty\":\"str\",\"val\":\"already_done\"";
+    if (std.mem.indexOf(u8, out, sent) != null) {
+        const repl = try std.mem.replaceOwned(
+            u8,
+            alloc,
+            out,
+            sent,
+            "\"key\":\"status\",\"vis\":\"pub\",\"ty\":\"str\",\"val\":\"OUTCOME\"",
+        );
+        alloc.free(out);
+        out = repl;
+    } else if (std.mem.indexOf(u8, out, done) != null) {
+        const repl = try std.mem.replaceOwned(
+            u8,
+            alloc,
+            out,
+            done,
+            "\"key\":\"status\",\"vis\":\"pub\",\"ty\":\"str\",\"val\":\"OUTCOME\"",
+        );
+        alloc.free(out);
+        out = repl;
+    }
+
+    return out;
 }
 
 test "bg manager rejects empty command" {
@@ -723,4 +1051,88 @@ test "bg manager recovers and clears stale journal launch entries" {
     const active = try mgr.journal.replayActive(std.testing.allocator);
     defer journal_mod.deinitActives(std.testing.allocator, active);
     try std.testing.expectEqual(@as(usize, 0), active.len);
+}
+
+test "bg manager audit emits start and success entries for control ops" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var cap = AuditCap{};
+    defer cap.deinit(std.testing.allocator);
+
+    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+        .emit_audit_ctx = &cap,
+        .emit_audit = captureAudit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 123;
+            }
+        }.f,
+    });
+    defer mgr.deinit();
+
+    const id = try mgr.start("printf done", "/tmp/secret");
+    const listed = try mgr.list(std.testing.allocator);
+    defer deinitViews(std.testing.allocator, listed);
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+
+    const stop = try mgr.stop(id);
+    try std.testing.expect(stop == .sent or stop == .already_done);
+
+    const woke = try waitWake(mgr.wakeFd(), 5000);
+    try std.testing.expect(woke);
+
+    const done = try mgr.drainDone(std.testing.allocator);
+    defer deinitViews(std.testing.allocator, done);
+    try std.testing.expectEqual(@as(usize, 1), done.len);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    const scrubbed = try scrubBgAudit(std.testing.allocator, joined);
+    defer std.testing.allocator.free(scrubbed);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":123,"sid":"bg","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"printf done","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":"/tmp/secret"}]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"printf done","vis":"mask"}},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":1},{"key":"pid","vis":"pub","ty":"uint","val":0},{"key":"cwd","vis":"mask","ty":"str","val":"/tmp/secret"},{"key":"log_path","vis":"mask","ty":"str","val":"/tmp/pz-bg-LOG"}]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"list"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"list"},"attrs":[]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":4,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"list"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"list"},"attrs":[{"key":"count","vis":"pub","ty":"uint","val":1}]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":1}]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":6,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":1},{"key":"status","vis":"pub","ty":"str","val":"OUTCOME"}]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":7,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"drain"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"drain"},"attrs":[]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":8,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"drain"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"drain"},"attrs":[{"key":"count","vis":"pub","ty":"uint","val":1}]}"
+    ).expectEqual(scrubbed);
+}
+
+test "bg manager audit emits failure entries for invalid start and missing stop" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var cap = AuditCap{};
+    defer cap.deinit(std.testing.allocator);
+
+    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+        .emit_audit_ctx = &cap,
+        .emit_audit = captureAudit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 456;
+            }
+        }.f,
+    });
+    defer mgr.deinit();
+
+    try std.testing.expectError(error.InvalidArgs, mgr.start("   ", null));
+    try std.testing.expectEqual(StopRes.not_found, try mgr.stop(42));
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":456,"sid":"bg","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":""}]}
+        \\{"v":1,"ts_ms":456,"sid":"bg","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"InvalidArgs","vis":"mask"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":""}]}
+        \\{"v":1,"ts_ms":456,"sid":"bg","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":42}]}
+        \\{"v":1,"ts_ms":456,"sid":"bg","seq":4,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg not found","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":42},{"key":"status","vis":"pub","ty":"str","val":"not_found"}]}"
+    ).expectEqual(joined);
 }
