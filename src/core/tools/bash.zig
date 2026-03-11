@@ -57,7 +57,7 @@ pub const Handler = struct {
         }
 
         const argv = [_][]const u8{ "/bin/bash", "-lc", args.cmd };
-        const run_res = try runChild(self, argv[0..], args.cwd, &env);
+        const run_res = try runChild(self, argv[0..], args.cwd, &env, call.cancel);
 
         var stdout_chunk = run_res.stdout.chunk;
         errdefer self.alloc.free(stdout_chunk);
@@ -164,7 +164,7 @@ pub const Handler = struct {
             .ended_at_ms = self.now_ms,
             .out = out,
             .out_owned = true,
-            .final = termToFinal(run_res.term),
+            .final = run_res.final,
         };
     }
 
@@ -185,8 +185,16 @@ const Capture = struct {
 const RunOut = struct {
     stdout: Capture,
     stderr: Capture,
-    term: std.process.Child.Term,
+    final: tools.Result.Final,
 };
+
+const WaitPoll = union(enum) {
+    pending,
+    status: u32,
+};
+
+const wait_poll_ms: u64 = 10;
+const term_grace_ms: u64 = 150;
 
 const CollectCtx = struct {
     alloc: std.mem.Allocator,
@@ -228,6 +236,7 @@ fn runChild(
     argv: []const []const u8,
     cwd: ?[]const u8,
     env: *const std.process.EnvMap,
+    cancel: ?tools.CancelSrc,
 ) Err!RunOut {
     var child = std.process.Child.init(argv, self.alloc);
     child.stdin_behavior = .Ignore;
@@ -277,7 +286,7 @@ fn runChild(
         return mapProcErr(thr_err);
     };
 
-    const term = child.wait() catch |wait_err| {
+    const final = waitWithCancel(&child, cancel) catch |wait_err| {
         killAndWait(&child) catch |kill_err| {
             stdout_thr.join();
             stderr_thr.join();
@@ -328,20 +337,73 @@ fn runChild(
             .chunk = stderr_chunk,
             .full_bytes = stderr_ctx.full_bytes,
         },
-        .term = term,
+        .final = final,
     };
 }
 
 fn killAndWait(child: *std.process.Child) Err!void {
-    _ = child.kill() catch |kill_err| switch (kill_err) {
-        error.AlreadyTerminated => {
-            _ = child.wait() catch |wait_err| {
-                return mapProcErr(wait_err);
-            };
-            return;
-        },
-        else => return mapProcErr(kill_err),
+    _ = terminateAndReap(child) catch |kill_err| return mapProcErr(kill_err);
+}
+
+fn waitWithCancel(child: *std.process.Child, cancel: ?tools.CancelSrc) anyerror!tools.Result.Final {
+    try child.waitForSpawn();
+
+    while (true) {
+        switch (pollChild(child)) {
+            .status => |status| return statusToFinal(status),
+            .pending => {},
+        }
+
+        if (cancel) |src| {
+            if (src.isCanceled()) {
+                _ = try terminateAndReap(child);
+                return .{ .cancelled = .{ .reason = .user } };
+            }
+        }
+
+        std.Thread.sleep(wait_poll_ms * std.time.ns_per_ms);
+    }
+}
+
+fn terminateAndReap(child: *std.process.Child) anyerror!u32 {
+    switch (pollChild(child)) {
+        .status => |status| return status,
+        .pending => {},
+    }
+
+    std.posix.kill(child.id, std.posix.SIG.TERM) catch |kill_err| switch (kill_err) {
+        error.ProcessNotFound => return reapChild(child),
+        else => return kill_err,
     };
+
+    var polls: u64 = 0;
+    while (polls < (term_grace_ms / wait_poll_ms)) : (polls += 1) {
+        std.Thread.sleep(wait_poll_ms * std.time.ns_per_ms);
+        switch (pollChild(child)) {
+            .status => |status| return status,
+            .pending => {},
+        }
+    }
+
+    std.posix.kill(child.id, std.posix.SIG.KILL) catch |kill_err| switch (kill_err) {
+        error.ProcessNotFound => {},
+        else => return kill_err,
+    };
+
+    return reapChild(child);
+}
+
+fn pollChild(child: *std.process.Child) WaitPoll {
+    const res = std.posix.waitpid(child.id, std.c.W.NOHANG);
+    if (res.pid == 0) return .pending;
+    child.id = undefined;
+    return .{ .status = res.status };
+}
+
+fn reapChild(child: *std.process.Child) u32 {
+    const res = std.posix.waitpid(child.id, 0);
+    child.id = undefined;
+    return res.status;
 }
 
 fn satAdd(a: usize, b: usize) usize {
@@ -383,31 +445,44 @@ fn mapCollectErr(err: anyerror) Err {
     };
 }
 
-fn termToFinal(term: std.process.Child.Term) tools.Result.Final {
-    return switch (term) {
-        .Exited => |code| if (code == 0)
-            .{ .ok = .{ .code = 0 } }
-        else
-            .{ .failed = .{
-                .code = @as(i32, code),
-                .kind = .exec,
-                .msg = "bash exited non-zero",
-            } },
-        .Signal => .{ .failed = .{
+fn statusToFinal(status: u32) tools.Result.Final {
+    if (statusToError(status)) |failed| {
+        return .{ .failed = failed };
+    }
+    return .{ .ok = .{ .code = 0 } };
+}
+
+fn statusToError(status: u32) ?tools.Result.Failed {
+    if (std.posix.W.IFEXITED(status)) {
+        const code = std.posix.W.EXITSTATUS(status);
+        if (code == 0) return null;
+        return .{
+            .code = @as(i32, code),
+            .kind = .exec,
+            .msg = "bash exited non-zero",
+        };
+    }
+
+    if (std.posix.W.IFSIGNALED(status)) {
+        return .{
             .code = null,
             .kind = .exec,
             .msg = "bash terminated by signal",
-        } },
-        .Stopped => .{ .failed = .{
+        };
+    }
+
+    if (std.posix.W.IFSTOPPED(status)) {
+        return .{
             .code = null,
             .kind = .exec,
             .msg = "bash stopped",
-        } },
-        .Unknown => .{ .failed = .{
-            .code = null,
-            .kind = .exec,
-            .msg = "bash terminated",
-        } },
+        };
+    }
+
+    return .{
+        .code = null,
+        .kind = .exec,
+        .msg = "bash terminated",
     };
 }
 
@@ -530,6 +605,43 @@ test "bash handler returns failed final on non-zero exit" {
             try std.testing.expectEqual(@as(?i32, 7), failed.code);
             try std.testing.expect(failed.kind == .exec);
             try std.testing.expectEqualStrings("bash exited non-zero", failed.msg);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "bash handler returns failed final on signal exit" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    const call: tools.Call = .{
+        .id = "b3-signal",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = "kill -TERM $$",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    const res = try handler.run(call, sink);
+    defer handler.deinitResult(res);
+
+    try std.testing.expectEqual(@as(usize, 0), res.out.len);
+
+    switch (res.final) {
+        .failed => |failed| {
+            try std.testing.expectEqual(@as(?i32, null), failed.code);
+            try std.testing.expect(failed.kind == .exec);
+            try std.testing.expectEqualStrings("bash terminated by signal", failed.msg);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -686,4 +798,75 @@ test "bash handler returns kind mismatch for wrong call kind" {
     };
 
     try std.testing.expectError(error.KindMismatch, handler.run(call, sink));
+}
+
+test "bash handler cancels running child and reaps TERM-resistant process" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    const CancelImpl = struct {
+        canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn isCanceled(self: *@This()) bool {
+            return self.canceled.load(.acquire);
+        }
+    };
+    const RunCtx = struct {
+        handler: Handler,
+        call: tools.Call,
+        sink: tools.Sink,
+        res: ?tools.Result = null,
+        err: ?Err = null,
+
+        fn run(self: *@This()) void {
+            self.res = self.handler.run(self.call, self.sink) catch |run_err| {
+                self.err = run_err;
+                return;
+            };
+        }
+    };
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    var cancel_impl = CancelImpl{};
+    const cancel = tools.CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    const call: tools.Call = .{
+        .id = "b9",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = "trap '' TERM; printf 'start'; while :; do sleep 1; done",
+        } },
+        .src = .model,
+        .at_ms = 0,
+        .cancel = cancel,
+    };
+
+    var ctx = RunCtx{
+        .handler = handler,
+        .call = call,
+        .sink = sink,
+    };
+
+    const thr = try std.Thread.spawn(.{}, RunCtx.run, .{&ctx});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    cancel_impl.canceled.store(true, .release);
+    thr.join();
+
+    if (ctx.err) |run_err| return run_err;
+    const res = ctx.res orelse return error.TestUnexpectedResult;
+    defer handler.deinitResult(res);
+
+    try std.testing.expectEqual(@as(usize, 1), res.out.len);
+    try std.testing.expect(res.out[0].stream == .stdout);
+    try std.testing.expectEqualStrings("start", res.out[0].chunk);
+
+    switch (res.final) {
+        .cancelled => |cancelled| try std.testing.expect(cancelled.reason == .user),
+        else => return error.TestUnexpectedResult,
+    }
 }
