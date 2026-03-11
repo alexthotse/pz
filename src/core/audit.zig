@@ -777,12 +777,72 @@ fn writeRes(w: anytype, res: Res) !void {
     try w.writeByte('}');
 }
 
+fn containsNoCase(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > hay.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn detectPubRedact(txt: []const u8) ?[]const u8 {
+    if (containsNoCase(txt, ".ssh/") or
+        containsNoCase(txt, "id_rsa") or
+        containsNoCase(txt, "id_ed25519") or
+        containsNoCase(txt, ".aws/credentials") or
+        containsNoCase(txt, ".pz/auth.json") or
+        containsNoCase(txt, ".pz/policy.json"))
+    {
+        return "path";
+    }
+    if (containsNoCase(txt, "authorization:") or
+        containsNoCase(txt, "bearer ") or
+        containsNoCase(txt, "cookie:") or
+        containsNoCase(txt, "access_token") or
+        containsNoCase(txt, "refresh_token") or
+        containsNoCase(txt, "api_key") or
+        containsNoCase(txt, "apikey") or
+        std.mem.startsWith(u8, txt, "sk-") or
+        std.mem.startsWith(u8, txt, "ghp_") or
+        std.mem.startsWith(u8, txt, "xoxb-") or
+        std.mem.indexOf(u8, txt, "AKIA") != null)
+    {
+        return "secret";
+    }
+    return null;
+}
+
+fn writeTaggedJsonStr(w: anytype, tag: []const u8, txt: []const u8) !void {
+    var hash_buf: [16]u8 = undefined;
+    const hash_txt = try std.fmt.bufPrint(&hash_buf, "{x:0>16}", .{std.hash.Wyhash.hash(0, txt)});
+    var tag_buf: [32]u8 = undefined;
+    const out = try std.fmt.bufPrint(&tag_buf, "[{s}:{s}]", .{ tag, hash_txt });
+    try writeJsonStr(w, out);
+}
+
+fn writeVisText(w: anytype, txt: []const u8, vis: Vis) !void {
+    switch (vis) {
+        .@"pub" => {
+            if (detectPubRedact(txt)) |tag| {
+                try writeTaggedJsonStr(w, tag, txt);
+            } else {
+                try writeJsonStr(w, txt);
+            }
+        },
+        .mask => try writeTaggedJsonStr(w, "mask", txt),
+        .hash => try writeTaggedJsonStr(w, "hash", txt),
+        .secret => try writeTaggedJsonStr(w, "secret", txt),
+    }
+}
+
 fn writeStr(w: anytype, s: Str) !void {
     try w.writeByte('{');
     var first = true;
 
     try writeObjKey(w, &first, "text");
-    try writeJsonStr(w, s.text);
+    try writeVisText(w, s.text, s.vis);
 
     try writeObjKey(w, &first, "vis");
     try writeJsonStr(w, @tagName(s.vis));
@@ -814,7 +874,7 @@ fn writeAttr(w: anytype, attr: Attr) !void {
             try writeObjKey(w, &first, "ty");
             try writeJsonStr(w, "str");
             try writeObjKey(w, &first, "val");
-            try writeJsonStr(w, v);
+            try writeVisText(w, v, attr.vis);
         },
         .int => |v| {
             try writeObjKey(w, &first, "ty");
@@ -1022,7 +1082,7 @@ test "snapshot: canonical tool entry encoding" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "kind=tool | redact=true | json={"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"src/core/audit.zig","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"cat ~/.ssh/id_rsa","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"permission denied"}]}"
+        \\  "kind=tool | redact=true | json={"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"[mask:2aa5dc7ee92f3807]","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"[secret:8c3b19aca7d7c3f8]","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"[mask:bdfd41dd2fcacdeb]"}]}"
     ).expectEqual(snap);
 }
 
@@ -1115,7 +1175,7 @@ test "snapshot: variant encodings stay canonical" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"/repo","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":".pz/secrets","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"user@example.com","vis":"hash"}},"attrs":[]} | ship={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
+        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"[mask:47a56333843b7ed0]","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[secret:cb01a7199946da94]","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"[hash:ce3e6e686cd0c59f]","vis":"hash"}},"attrs":[]} | ship={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
     ).expectEqual(snap);
 }
 
@@ -1150,7 +1210,7 @@ test "encoding escapes control bytes and stays stable" {
     try testing.expectEqualStrings(raw_a, raw_b);
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":77,"sid":"sess-b","seq":9,"kind":"turn","sev":"info","out":"ok","actor":{"kind":"sys"},"msg":{"text":"line\n\u0001\t","vis":"mask"},"data":{"idx":3,"phase":"done","model":"gpt-5"},"attrs":[{"key":"ctrl","vis":"mask","ty":"str","val":"a\n\u0002b"},{"key":"delta","vis":"pub","ty":"int","val":-4}]}"
+        \\  "{"v":1,"ts_ms":77,"sid":"sess-b","seq":9,"kind":"turn","sev":"info","out":"ok","actor":{"kind":"sys"},"msg":{"text":"[mask:aba5f20f2fb92386]","vis":"mask"},"data":{"idx":3,"phase":"done","model":"gpt-5"},"attrs":[{"key":"ctrl","vis":"mask","ty":"str","val":"[mask:31310066477309fa]"},{"key":"delta","vis":"pub","ty":"int","val":-4}]}"
     ).expectEqual(raw_a);
 }
 
@@ -1196,7 +1256,7 @@ test "snapshot: audit payload ships through syslog canonically" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "<36>1 1970-01-01T00:00:00.123Z pz-host pz 17 audit [pz@32473 sid="sess-c" seq="7"] {"v":1,"ts_ms":123,"sid":"sess-c","seq":7,"kind":"tool","sev":"warn","out":"ok","actor":{"kind":"tool","id":{"text":"bash","vis":"pub"}},"res":{"kind":"cmd","name":{"text":"rm -rf /tmp/nope","vis":"mask"},"op":"exec"},"data":{"name":{"text":"bash","vis":"pub"},"call_id":"call-7","argv":{"text":"rm -rf /tmp/nope","vis":"mask"},"code":143,"ms":19},"attrs":[{"key":"cancel","vis":"pub","ty":"bool","val":true}]}"
+        \\  "<36>1 1970-01-01T00:00:00.123Z pz-host pz 17 audit [pz@32473 sid="sess-c" seq="7"] {"v":1,"ts_ms":123,"sid":"sess-c","seq":7,"kind":"tool","sev":"warn","out":"ok","actor":{"kind":"tool","id":{"text":"bash","vis":"pub"}},"res":{"kind":"cmd","name":{"text":"[mask:a3f737f3e5d8415e]","vis":"mask"},"op":"exec"},"data":{"name":{"text":"bash","vis":"pub"},"call_id":"call-7","argv":{"text":"[mask:a3f737f3e5d8415e]","vis":"mask"},"code":143,"ms":19},"attrs":[{"key":"cancel","vis":"pub","ty":"bool","val":true}]}"
     ).expectEqual(frame);
 }
 
@@ -1348,7 +1408,7 @@ test "syslog shipper buffers disconnect and flushes in order" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
+        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
     ).expectEqual(snap);
 }
 
@@ -1398,7 +1458,7 @@ test "syslog shipper drops oldest on ring overflow" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
+        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
     ).expectEqual(snap);
 }
 

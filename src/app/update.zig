@@ -1137,7 +1137,7 @@ test "update audit emits start and deny entries on policy block" {
     try oh.snap(@src(),
         \\[]u8
         \\  "{"v":1,"ts_ms":123,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
-        \\{"v":1,"ts_ms":123,"sid":"upgrade","seq":2,"kind":"tool","sev":"warn","out":"deny","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"policy denied","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":".pz/upgrade","vis":"mask"}},"attrs":[]}"
+        \\{"v":1,"ts_ms":123,"sid":"upgrade","seq":2,"kind":"tool","sev":"warn","out":"deny","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"policy denied","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:402ca83241371ed1]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(joined);
 }
 

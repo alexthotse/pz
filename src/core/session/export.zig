@@ -314,13 +314,13 @@ test "export audit emits start and success entries" {
 
     const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
     defer std.testing.allocator.free(joined);
-    const scrubbed = try std.mem.replaceOwned(u8, std.testing.allocator, joined, real, "/tmp/TMP");
+    const scrubbed = try scrubExportAudit(std.testing.allocator, joined);
     defer std.testing.allocator.free(scrubbed);
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":123,"sid":"ex2","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"/tmp/TMP/audit.md","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":123,"sid":"ex2","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"/tmp/TMP/audit.md","vis":"mask"}},"attrs":[]}"
+        \\  "{"v":1,"ts_ms":123,"sid":"ex2","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":123,"sid":"ex2","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(scrubbed);
 }
 
@@ -371,12 +371,36 @@ test "export audit emits failure entry on write failure" {
 
     const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
     defer std.testing.allocator.free(joined);
-    const scrubbed = try std.mem.replaceOwned(u8, std.testing.allocator, joined, real, "/tmp/TMP");
+    const scrubbed = try scrubExportAudit(std.testing.allocator, joined);
     defer std.testing.allocator.free(scrubbed);
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":456,"sid":"ex3","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"FileNotFound","vis":"mask"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"}},"attrs":[]}"
+        \\  "{"v":1,"ts_ms":456,"sid":"ex3","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"[mask:e0d43158cc95b24d]","vis":"mask"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(scrubbed);
+}
+
+fn scrubExportAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var cur = try alloc.dupe(u8, raw);
+    const pats = [_][]const u8{
+        "\"res\":{\"kind\":\"file\",\"name\":{\"text\":\"",
+        "\"argv\":{\"text\":\"",
+    };
+    for (pats) |pat| {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(alloc);
+        var off: usize = 0;
+        while (std.mem.indexOfPos(u8, cur, off, pat)) |idx| {
+            const start = idx + pat.len;
+            const end = std.mem.indexOfScalarPos(u8, cur, start, '"') orelse break;
+            try out.appendSlice(alloc, cur[off..start]);
+            try out.appendSlice(alloc, "[mask:PATH]");
+            off = end;
+        }
+        try out.appendSlice(alloc, cur[off..]);
+        alloc.free(cur);
+        cur = try out.toOwnedSlice(alloc);
+    }
+    return cur;
 }

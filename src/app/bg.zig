@@ -811,6 +811,16 @@ fn scrubBgAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
         out = repl;
     }
 
+    const redacted_log_pat = "\"key\":\"log_path\",\"vis\":\"mask\",\"ty\":\"str\",\"val\":\"";
+    if (std.mem.indexOf(u8, out, redacted_log_pat)) |log_idx| {
+        const start = log_idx + redacted_log_pat.len;
+        const end_rel = std.mem.indexOfScalar(u8, out[start..], '"') orelse return out;
+        const end = start + end_rel;
+        const repl = try std.mem.concat(alloc, u8, &.{ out[0..start], "[mask:LOG]", out[end..] });
+        alloc.free(out);
+        out = repl;
+    }
+
     const pid_pat = "\"key\":\"pid\",\"vis\":\"pub\",\"ty\":\"uint\",\"val\":";
     if (std.mem.indexOf(u8, out, pid_pat)) |pid_idx| {
         const start = pid_idx + pid_pat.len;
@@ -1093,8 +1103,8 @@ test "bg manager audit emits start and success entries for control ops" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":123,"sid":"bg","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"printf done","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":"/tmp/secret"}]}
-        \\{"v":1,"ts_ms":123,"sid":"bg","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"printf done","vis":"mask"}},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":1},{"key":"pid","vis":"pub","ty":"uint","val":0},{"key":"cwd","vis":"mask","ty":"str","val":"/tmp/secret"},{"key":"log_path","vis":"mask","ty":"str","val":"/tmp/pz-bg-LOG"}]}
+        \\  "{"v":1,"ts_ms":123,"sid":"bg","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"[mask:dc2b0ed26cdc3e2e]","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":"[mask:93f882d68ce39638]"}]}
+        \\{"v":1,"ts_ms":123,"sid":"bg","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"[mask:dc2b0ed26cdc3e2e]","vis":"mask"}},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":1},{"key":"pid","vis":"pub","ty":"uint","val":0},{"key":"cwd","vis":"mask","ty":"str","val":"[mask:93f882d68ce39638]"},{"key":"log_path","vis":"mask","ty":"str","val":"[mask:LOG]"}]}
         \\{"v":1,"ts_ms":123,"sid":"bg","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"list"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"list"},"attrs":[]}
         \\{"v":1,"ts_ms":123,"sid":"bg","seq":4,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"list"},"msg":{"text":"bg control success","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"list"},"attrs":[{"key":"count","vis":"pub","ty":"uint","val":1}]}
         \\{"v":1,"ts_ms":123,"sid":"bg","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":1}]}
@@ -1130,8 +1140,8 @@ test "bg manager audit emits failure entries for invalid start and missing stop"
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":456,"sid":"bg","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":""}]}
-        \\{"v":1,"ts_ms":456,"sid":"bg","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"InvalidArgs","vis":"mask"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":""}]}
+        \\  "{"v":1,"ts_ms":456,"sid":"bg","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"[mask:0409638ee2bde459]","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":"[mask:0409638ee2bde459]"}]}
+        \\{"v":1,"ts_ms":456,"sid":"bg","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"start"},"msg":{"text":"[mask:f2c3def0536a2885]","vis":"mask"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"start","argv":{"text":"[mask:0409638ee2bde459]","vis":"mask"}},"attrs":[{"key":"cwd","vis":"mask","ty":"str","val":"[mask:0409638ee2bde459]"}]}
         \\{"v":1,"ts_ms":456,"sid":"bg","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":42}]}
         \\{"v":1,"ts_ms":456,"sid":"bg","seq":4,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg not found","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":42},{"key":"status","vis":"pub","ty":"str","val":"not_found"}]}"
     ).expectEqual(joined);
