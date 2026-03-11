@@ -79,22 +79,45 @@ fn streamName(stream: Stream) []const u8 {
 }
 
 test "output apply keeps chunk when within limit" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const got = apply("abc", 3);
-    try std.testing.expectEqualStrings("abc", got.chunk);
-    try std.testing.expect(!got.truncated);
-    try std.testing.expect(got.meta == null);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "chunk={s}\ntruncated={}\nmeta={}\n", .{
+        got.chunk,
+        got.truncated,
+        got.meta == null,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "chunk=abc
+        \\truncated=false
+        \\meta=true
+        \\"
+    ).expectEqual(snap);
 }
 
 test "output apply truncates chunk and emits metadata" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const got = apply("abcd", 3);
-    try std.testing.expectEqualStrings("abc", got.chunk);
-    try std.testing.expect(got.truncated);
-
     const meta = got.meta orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 3), meta.limit_bytes);
-    try std.testing.expectEqual(@as(usize, 4), meta.full_bytes);
-    try std.testing.expectEqual(@as(usize, 3), meta.kept_bytes);
-    try std.testing.expectEqual(@as(usize, 1), meta.dropped_bytes);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "chunk={s}\ntruncated={}\nmeta={d}|{d}|{d}|{d}\n", .{
+        got.chunk,
+        got.truncated,
+        meta.limit_bytes,
+        meta.full_bytes,
+        meta.kept_bytes,
+        meta.dropped_bytes,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "chunk=abc
+        \\truncated=true
+        \\meta=3|4|3|1
+        \\"
+    ).expectEqual(snap);
 }
 
 test "output metadata json is stable" {

@@ -197,6 +197,8 @@ test "registry lookup resolves by name and kind" {
 }
 
 test "registry run dispatches to named handler" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         ct: usize = 0,
         last: u8 = 0,
@@ -241,11 +243,22 @@ test "registry run dispatches to named handler" {
     const reg = TReg.Registry.init(entries[0..]);
 
     const res = try reg.run("write", .{ .kind = .write, .value = 7 }, sink);
-    try std.testing.expectEqual(@as(i32, 27), res.code);
-    try std.testing.expectEqual(@as(usize, 0), read_impl.ct);
-    try std.testing.expectEqual(@as(usize, 1), write_impl.ct);
-    try std.testing.expectEqual(@as(usize, 1), sink_impl.ct);
-    try std.testing.expectEqual(@as(u8, 2), sink_impl.last);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "code={d}\nread={d}\nwrite={d}\nsink={d}|{d}\n", .{
+        res.code,
+        read_impl.ct,
+        write_impl.ct,
+        sink_impl.ct,
+        sink_impl.last,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "code=27
+        \\read=0
+        \\write=1
+        \\sink=1|2
+        \\"
+    ).expectEqual(snap);
 
     try std.testing.expectError(
         TReg.Err.NotFound,

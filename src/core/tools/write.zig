@@ -83,6 +83,8 @@ fn mapWriteErr(err: anyerror) Err {
 }
 
 test "write handler overwrites file with deterministic timestamps" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -112,18 +114,29 @@ test "write handler overwrites file with deterministic timestamps" {
 
     const res = try handler.run(call, sink);
 
-    try std.testing.expectEqual(@as(i64, 77), res.started_at_ms);
-    try std.testing.expectEqual(@as(i64, 77), res.ended_at_ms);
-    try std.testing.expectEqual(@as(usize, 0), res.out.len);
-
-    switch (res.final) {
-        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
-        else => return error.TestUnexpectedResult,
-    }
-
     const got = try tmp.dir.readFileAlloc(std.testing.allocator, "out.txt", 64);
     defer std.testing.allocator.free(got);
-    try std.testing.expectEqualStrings("new", got);
+    const code = switch (res.final) {
+        .ok => |ok| ok.code,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "start={d}\nend={d}\nout={d}\ncode={d}\nfile={s}\n", .{
+        res.started_at_ms,
+        res.ended_at_ms,
+        res.out.len,
+        code,
+        got,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "start=77
+        \\end=77
+        \\out=0
+        \\code=0
+        \\file=new
+        \\"
+    ).expectEqual(snap);
 }
 
 test "write handler appends when append is true" {

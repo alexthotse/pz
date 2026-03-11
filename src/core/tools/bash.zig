@@ -487,6 +487,8 @@ fn statusToError(status: u32) ?tools.Result.Failed {
 }
 
 test "bash handler captures stdout and stderr with deterministic timestamps" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -511,27 +513,37 @@ test "bash handler captures stdout and stderr with deterministic timestamps" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    try std.testing.expectEqual(@as(i64, 99), res.started_at_ms);
-    try std.testing.expectEqual(@as(i64, 99), res.ended_at_ms);
-    try std.testing.expectEqual(@as(usize, 2), res.out.len);
-
-    try std.testing.expectEqual(@as(u32, 0), res.out[0].seq);
-    try std.testing.expectEqual(@as(i64, 99), res.out[0].at_ms);
-    try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expectEqualStrings("out", res.out[0].chunk);
-    try std.testing.expect(!res.out[0].truncated);
-
-    try std.testing.expectEqual(@as(u32, 1), res.out[1].seq);
-    try std.testing.expectEqual(@as(i64, 99), res.out[1].at_ms);
-    try std.testing.expect(res.out[1].stream == .stderr);
-    try std.testing.expectEqualStrings("err", res.out[1].chunk);
-    try std.testing.expect(!res.out[1].truncated);
-
-    switch (res.final) {
-        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
+    const code = switch (res.final) {
+        .ok => |ok| ok.code,
         else => return error.TestUnexpectedResult,
-    }
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "start={d}\nend={d}\nout={d}\n0={d}|{d}|{s}|{s}|{}\n1={d}|{d}|{s}|{s}|{}\ncode={d}\n", .{
+        res.started_at_ms,
+        res.ended_at_ms,
+        res.out.len,
+        res.out[0].seq,
+        res.out[0].at_ms,
+        @tagName(res.out[0].stream),
+        res.out[0].chunk,
+        res.out[0].truncated,
+        res.out[1].seq,
+        res.out[1].at_ms,
+        @tagName(res.out[1].stream),
+        res.out[1].chunk,
+        res.out[1].truncated,
+        code,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "start=99
+        \\end=99
+        \\out=2
+        \\0=0|99|stdout|out|false
+        \\1=1|99|stderr|err|false
+        \\code=0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler applies explicit env variables" {
@@ -572,6 +584,8 @@ test "bash handler applies explicit env variables" {
 }
 
 test "bash handler returns failed final on non-zero exit" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -595,22 +609,31 @@ test "bash handler returns failed final on non-zero exit" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expect(res.out[0].stream == .stderr);
-    try std.testing.expectEqualStrings("fail", res.out[0].chunk);
-
-    switch (res.final) {
-        .failed => |failed| {
-            try std.testing.expectEqual(@as(?i32, 7), failed.code);
-            try std.testing.expect(failed.kind == .exec);
-            try std.testing.expectEqualStrings("bash exited non-zero", failed.msg);
-        },
+    const failed = switch (res.final) {
+        .failed => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "out={d}\n0={s}|{s}\nfailed={any}|{s}|{s}\n", .{
+        res.out.len,
+        @tagName(res.out[0].stream),
+        res.out[0].chunk,
+        failed.code,
+        @tagName(failed.kind),
+        failed.msg,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "out=1
+        \\0=stderr|fail
+        \\failed=7|exec|bash exited non-zero
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler returns failed final on signal exit" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -634,17 +657,23 @@ test "bash handler returns failed final on signal exit" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    try std.testing.expectEqual(@as(usize, 0), res.out.len);
-
-    switch (res.final) {
-        .failed => |failed| {
-            try std.testing.expectEqual(@as(?i32, null), failed.code);
-            try std.testing.expect(failed.kind == .exec);
-            try std.testing.expectEqualStrings("bash terminated by signal", failed.msg);
-        },
+    const failed = switch (res.final) {
+        .failed => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "out={d}\nfailed={any}|{s}|{s}\n", .{
+        res.out.len,
+        failed.code,
+        @tagName(failed.kind),
+        failed.msg,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "out=0
+        \\failed=null|exec|bash terminated by signal
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler returns invalid args on empty command" {

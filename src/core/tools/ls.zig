@@ -186,6 +186,8 @@ fn mapDirErr(err: anyerror) Err {
 }
 
 test "ls handler lists entries in deterministic order and marks directories" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -220,8 +222,22 @@ test "ls handler lists entries in deterministic order and marks directories" {
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
 
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqualStrings("a.txt\nb.txt\nd/\n", res.out[0].chunk);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "out={d}\n0={s}|{s}|{}\n", .{
+        res.out.len,
+        @tagName(res.out[0].stream),
+        res.out[0].chunk,
+        res.out[0].truncated,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "out=1
+        \\0=stdout|a.txt
+        \\b.txt
+        \\d/
+        \\|false
+        \\"
+    ).expectEqual(snap);
 }
 
 test "ls handler rejects missing path and wrong kind" {
@@ -256,6 +272,8 @@ test "ls handler rejects missing path and wrong kind" {
 }
 
 test "ls handler emits truncation metadata when output exceeds limit" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -286,7 +304,19 @@ test "ls handler emits truncation metadata when output exceeds limit" {
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
 
-    try std.testing.expectEqual(@as(usize, 2), res.out.len);
-    try std.testing.expect(res.out[0].truncated);
-    try std.testing.expect(res.out[1].stream == .meta);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "out={d}\n0={s}|{}\n1={s}|len={d}\n", .{
+        res.out.len,
+        @tagName(res.out[0].stream),
+        res.out[0].truncated,
+        @tagName(res.out[1].stream),
+        res.out[1].chunk.len,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "out=2
+        \\0=stdout|true
+        \\1=meta|len=99
+        \\"
+    ).expectEqual(snap);
 }

@@ -155,6 +155,8 @@ const TEv = union(enum) {
 const TRt = bind(TKind, TSpec, TCall, TEv, TResult);
 
 test "runtime emits start output finish in order" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         start_seen: bool = false,
         evs: [8]TEv = undefined,
@@ -220,50 +222,50 @@ test "runtime emits start output finish in order" {
     };
 
     const res = try reg.run("beta", call, sink);
-
-    try std.testing.expectEqual(@as(usize, 4), sink_impl.ct);
-    try std.testing.expect(sink_impl.evs[0] == .start);
-    try std.testing.expect(sink_impl.evs[1] == .output);
-    try std.testing.expect(sink_impl.evs[2] == .output);
-    try std.testing.expect(sink_impl.evs[3] == .finish);
-
-    switch (sink_impl.evs[0]) {
-        .start => |start| {
-            try std.testing.expectEqual(@as(i64, 77), start.at_ms);
-            try std.testing.expectEqualStrings("c1", start.call.id);
-            try std.testing.expect(start.call.kind == .beta);
-            try std.testing.expectEqual(@as(i64, 77), start.call.at_ms);
-        },
+    const start = switch (sink_impl.evs[0]) {
+        .start => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-
-    switch (sink_impl.evs[1]) {
-        .output => |out_ev| {
-            try std.testing.expectEqual(@as(u32, 0), out_ev.seq);
-            try std.testing.expectEqualStrings("x", out_ev.chunk);
-        },
+    };
+    const out0 = switch (sink_impl.evs[1]) {
+        .output => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-
-    switch (sink_impl.evs[2]) {
-        .output => |out_ev| {
-            try std.testing.expectEqual(@as(u32, 1), out_ev.seq);
-            try std.testing.expectEqualStrings("y", out_ev.chunk);
-        },
+    };
+    const out1 = switch (sink_impl.evs[2]) {
+        .output => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-
-    switch (sink_impl.evs[3]) {
-        .finish => |fin| {
-            try std.testing.expectEqual(@as(usize, 2), fin.out.len);
-            try std.testing.expectEqual(@as(i32, 7), fin.code);
-        },
+    };
+    const fin = switch (sink_impl.evs[3]) {
+        .finish => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-
-    try std.testing.expectEqual(@as(usize, 1), dispatch_impl.ct);
-    try std.testing.expectEqual(@as(usize, 2), res.out.len);
-    try std.testing.expectEqual(@as(i32, 7), res.code);
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "ct={d}\nstart={d}|{s}|{s}|{d}\nout0={d}|{s}\nout1={d}|{s}\nfinish={d}|{d}\ndispatch={d}\nres={d}|{d}\n", .{
+        sink_impl.ct,
+        start.at_ms,
+        start.call.id,
+        @tagName(start.call.kind),
+        start.call.at_ms,
+        out0.seq,
+        out0.chunk,
+        out1.seq,
+        out1.chunk,
+        fin.out.len,
+        fin.code,
+        dispatch_impl.ct,
+        res.out.len,
+        res.code,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "ct=4
+        \\start=77|c1|beta|77
+        \\out0=0|x
+        \\out1=1|y
+        \\finish=2|7
+        \\dispatch=1
+        \\res=2|7
+        \\"
+    ).expectEqual(snap);
 }
 
 test "runtime emits start and finish when handler has no output" {
