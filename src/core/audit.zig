@@ -1001,25 +1001,16 @@ test "snapshot: canonical tool entry encoding" {
     const raw = try encodeAlloc(talloc, ent);
     defer talloc.free(raw);
 
-    const Snap = struct {
-        kind: Kind,
-        redact: bool,
-        json: []const u8,
-    };
-
-    const snap = Snap{
-        .kind = kindOf(ent),
-        .redact = needsRedact(ent),
-        .json = raw,
-    };
+    const snap = try std.fmt.allocPrint(talloc, "kind={s} | redact={s} | json={s}", .{
+        @tagName(kindOf(ent)),
+        if (needsRedact(ent)) "true" else "false",
+        raw,
+    });
+    defer talloc.free(snap);
 
     try oh.snap(@src(),
-        \\core.audit.test.snapshot: canonical tool entry encoding.Snap
-        \\  .kind: core.audit.Kind
-        \\    .tool
-        \\  .redact: bool = true
-        \\  .json: []const u8
-        \\    "{"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"src/core/audit.zig","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"cat ~/.ssh/id_rsa","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"permission denied"}]}"
+        \\[]u8
+        \\  "kind=tool | redact=true | json={"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"src/core/audit.zig","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"cat ~/.ssh/id_rsa","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"permission denied"}]}"
     ).expectEqual(snap);
 }
 
@@ -1102,30 +1093,17 @@ test "snapshot: variant encodings stay canonical" {
     });
     defer talloc.free(ship_raw);
 
-    const Snap = struct {
-        sess: []const u8,
-        policy: []const u8,
-        auth: []const u8,
-        ship: []const u8,
-    };
-
-    const snap = Snap{
-        .sess = sess_raw,
-        .policy = policy_raw,
-        .auth = auth_raw,
-        .ship = ship_raw,
-    };
+    const snap = try std.fmt.allocPrint(talloc, "sess={s} | policy={s} | auth={s} | ship={s}", .{
+        sess_raw,
+        policy_raw,
+        auth_raw,
+        ship_raw,
+    });
+    defer talloc.free(snap);
 
     try oh.snap(@src(),
-        \\core.audit.test.snapshot: variant encodings stay canonical.Snap
-        \\  .sess: []const u8
-        \\    "{"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"/repo","vis":"mask"}},"attrs":[]}"
-        \\  .policy: []const u8
-        \\    "{"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":".pz/secrets","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]}"
-        \\  .auth: []const u8
-        \\    "{"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"user@example.com","vis":"hash"}},"attrs":[]}"
-        \\  .ship: []const u8
-        \\    "{"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
+        \\[]u8
+        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"/repo","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":".pz/secrets","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"user@example.com","vis":"hash"}},"attrs":[]} | ship={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
     ).expectEqual(snap);
 }
 
@@ -1340,55 +1318,26 @@ test "syslog shipper buffers disconnect and flushes in order" {
     try testing.expectEqualStrings("SendFail", errName(r2.err));
     try testing.expectEqualStrings("null", errName(r3.err));
 
-    const Snap = struct {
-        queued: usize,
-        dropped: u64,
-        backoff_ms: u32,
-        next_retry_ms: []const u8,
-        early_err: []const u8,
-        early_sent: usize,
-        late_err: []const u8,
-        late_sent: usize,
-        conn_calls: usize,
-        one: []const u8,
-        two: []const u8,
-        three: []const u8,
-    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "queued={d} | dropped={d} | backoff_ms={d} | next_retry_ms={s} | early_err={s} | early_sent={d} | late_err={s} | late_sent={d} | conn_calls={d} | one={s} | two={s} | three={s}", .{
+        st.queued,
+        st.dropped,
+        st.backoff_ms,
+        try fmtOptI64(&retry_buf, st.next_retry_ms),
+        errName(early.err),
+        early.sent,
+        errName(late.err),
+        late.sent,
+        net.conn_calls,
+        net.sent.items[0],
+        net.sent.items[1],
+        net.sent.items[2],
+    });
+    defer testing.allocator.free(snap);
 
     try oh.snap(@src(),
-        \\core.audit.test.syslog shipper buffers disconnect and flushes in order.Snap
-        \\  .queued: usize = 0
-        \\  .dropped: u64 = 0
-        \\  .backoff_ms: u32 = 10
-        \\  .next_retry_ms: []const u8
-        \\    "null"
-        \\  .early_err: []const u8
-        \\    "null"
-        \\  .early_sent: usize = 0
-        \\  .late_err: []const u8
-        \\    "null"
-        \\  .late_sent: usize = 2
-        \\  .conn_calls: usize = 2
-        \\  .one: []const u8
-        \\    "<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
-        \\  .two: []const u8
-        \\    "<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
-        \\  .three: []const u8
-        \\    "<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
-    ).expectEqual(Snap{
-        .queued = st.queued,
-        .dropped = st.dropped,
-        .backoff_ms = st.backoff_ms,
-        .next_retry_ms = try fmtOptI64(&retry_buf, st.next_retry_ms),
-        .early_err = errName(early.err),
-        .early_sent = early.sent,
-        .late_err = errName(late.err),
-        .late_sent = late.sent,
-        .conn_calls = net.conn_calls,
-        .one = net.sent.items[0],
-        .two = net.sent.items[1],
-        .three = net.sent.items[2],
-    });
+        \\[]u8
+        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
+    ).expectEqual(snap);
 }
 
 test "syslog shipper drops oldest on ring overflow" {
@@ -1424,36 +1373,21 @@ test "syslog shipper drops oldest on ring overflow" {
     try testing.expect(r3.state == .buffered);
     try testing.expectEqualStrings("ConnectFail", errName(r1.err));
 
-    const Snap = struct {
-        r3_dropped: usize,
-        queued: usize,
-        dropped: u64,
-        fl_sent: usize,
-        conn_calls: usize,
-        first: []const u8,
-        second: []const u8,
-    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "r3_dropped={d} | queued={d} | dropped={d} | fl_sent={d} | conn_calls={d} | first={s} | second={s}", .{
+        r3.dropped,
+        ship.stats().queued,
+        ship.stats().dropped,
+        fl.sent,
+        net.conn_calls,
+        net.sent.items[0],
+        net.sent.items[1],
+    });
+    defer testing.allocator.free(snap);
 
     try oh.snap(@src(),
-        \\core.audit.test.syslog shipper drops oldest on ring overflow.Snap
-        \\  .r3_dropped: usize = 1
-        \\  .queued: usize = 0
-        \\  .dropped: u64 = 1
-        \\  .fl_sent: usize = 2
-        \\  .conn_calls: usize = 2
-        \\  .first: []const u8
-        \\    "<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
-        \\  .second: []const u8
-        \\    "<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
-    ).expectEqual(Snap{
-        .r3_dropped = r3.dropped,
-        .queued = ship.stats().queued,
-        .dropped = ship.stats().dropped,
-        .fl_sent = fl.sent,
-        .conn_calls = net.conn_calls,
-        .first = net.sent.items[0],
-        .second = net.sent.items[1],
-    });
+        \\[]u8
+        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"siem.internal:6514","vis":"mask"},"len":128},"attrs":[]}"
+    ).expectEqual(snap);
 }
 
 test "syslog shipper bounds reconnect backoff and resets after connect" {

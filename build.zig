@@ -65,10 +65,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
-        exe_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
-    }
-    exe_tests.root_module.addImport("zcheck", zcheck_mod);
+    addTestDeps(b, exe_tests.root_module, dep_opt, zcheck_mod);
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const suite_tests = b.addTest(.{
@@ -79,15 +76,25 @@ pub fn build(b: *std.Build) void {
         }),
     });
     suite_tests.root_module.addOptions("build_options", options);
-    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
-        suite_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
-    }
-    suite_tests.root_module.addImport("zcheck", zcheck_mod);
+    addTestDeps(b, suite_tests.root_module, dep_opt, zcheck_mod);
     const run_suite_tests = b.addRunArtifact(suite_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_suite_tests.step);
+
+    const core_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/foundation_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addTestDeps(b, core_tests.root_module, dep_opt, zcheck_mod);
+    const run_core_tests = b.addRunArtifact(core_tests);
+
+    const core_test_step = b.step("core-test", "Run direct core audit/syslog tests");
+    core_test_step.dependOn(&run_core_tests.step);
 
     const perf_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -96,10 +103,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
-        perf_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
-    }
-    perf_tests.root_module.addImport("zcheck", zcheck_mod);
+    addTestDeps(b, perf_tests.root_module, dep_opt, zcheck_mod);
     const run_perf_tests = b.addRunArtifact(perf_tests);
     const perf_step = b.step("perf", "Run performance budget tests");
     perf_step.dependOn(&run_perf_tests.step);
@@ -108,7 +112,20 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&exe.step);
     check_step.dependOn(&exe_tests.step);
     check_step.dependOn(&suite_tests.step);
+    check_step.dependOn(&core_tests.step);
     check_step.dependOn(&perf_tests.step);
+}
+
+fn addTestDeps(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    dep_opt: anytype,
+    zcheck_mod: *std.Build.Module,
+) void {
+    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
+        mod.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
+    }
+    mod.addImport("zcheck", zcheck_mod);
 }
 
 fn depMod(
