@@ -452,6 +452,8 @@ test "info output and truncation survive roundtrip" {
 }
 
 test "stub handshake run output done flow" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const hash =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     var stub = try Stub.init("tool-parent", hash);
@@ -460,14 +462,16 @@ test "stub handshake run output done flow" {
     try testing.expectEqual(@as(u32, 1), hello.seq);
     try testing.expectEqual(Stub.State.wait_hello, stub.state);
     try testing.expect(stub.activeId() == null);
-    switch (hello.msg) {
-        .hello => |msg| {
-            try testing.expectEqual(Role.parent, msg.role);
-            try testing.expectEqualStrings("tool-parent", msg.agent_id);
-            try testing.expectEqualStrings(hash, msg.policy_hash);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Msg
+        \\  .hello: core.agent.Hello
+        \\    .role: core.agent.Role
+        \\      .parent
+        \\    .agent_id: []const u8
+        \\      "tool-parent"
+        \\    .policy_hash: []const u8
+        \\      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ).expectEqual(hello.msg);
 
     const ready = try stub.recv(Frame.init(4, .{
         .hello = .{
@@ -477,14 +481,16 @@ test "stub handshake run output done flow" {
         },
     }));
     try testing.expectEqual(Stub.State.idle, stub.state);
-    switch (ready) {
-        .ready => |msg| {
-            try testing.expectEqual(Role.child, msg.role);
-            try testing.expectEqualStrings("agent-child", msg.agent_id);
-            try testing.expectEqualStrings(hash, msg.policy_hash);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Ev
+        \\  .ready: core.agent.Hello
+        \\    .role: core.agent.Role
+        \\      .child
+        \\    .agent_id: []const u8
+        \\      "agent-child"
+        \\    .policy_hash: []const u8
+        \\      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ).expectEqual(ready);
 
     const run = try stub.run(.{
         .id = "job-1",
@@ -493,13 +499,14 @@ test "stub handshake run output done flow" {
     try testing.expectEqual(@as(u32, 2), run.seq);
     try testing.expectEqual(Stub.State.running, stub.state);
     try testing.expectEqualStrings("job-1", stub.activeId().?);
-    switch (run.msg) {
-        .run => |msg| {
-            try testing.expectEqualStrings("job-1", msg.id);
-            try testing.expectEqualStrings("delegate this", msg.prompt);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Msg
+        \\  .run: core.agent.Run
+        \\    .id: []const u8
+        \\      "job-1"
+        \\    .prompt: []const u8
+        \\      "delegate this"
+    ).expectEqual(run.msg);
 
     const out_ev = try stub.recv(Frame.init(5, .{
         .out = .{
@@ -508,14 +515,16 @@ test "stub handshake run output done flow" {
             .text = "delegated to child agent",
         },
     }));
-    switch (out_ev) {
-        .out => |out| {
-            try testing.expectEqual(OutKind.info, out.kind);
-            try testing.expectEqualStrings("job-1", out.id);
-            try testing.expectEqualStrings("delegated to child agent", out.text);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Ev
+        \\  .out: core.agent.Out
+        \\    .id: []const u8
+        \\      "job-1"
+        \\    .kind: core.agent.OutKind
+        \\      .info
+        \\    .text: []const u8
+        \\      "delegated to child agent"
+    ).expectEqual(out_ev);
 
     const done_ev = try stub.recv(Frame.init(6, .{
         .done = .{
@@ -526,13 +535,15 @@ test "stub handshake run output done flow" {
     }));
     try testing.expectEqual(Stub.State.idle, stub.state);
     try testing.expect(stub.activeId() == null);
-    switch (done_ev) {
-        .done => |done| {
-            try testing.expectEqual(Stop.done, done.stop);
-            try testing.expect(!done.truncated);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Ev
+        \\  .done: core.agent.Done
+        \\    .id: []const u8
+        \\      "job-1"
+        \\    .stop: core.agent.Stop
+        \\      .done
+        \\    .truncated: bool = false
+    ).expectEqual(done_ev);
 }
 
 test "stub rejects run before child hello" {
@@ -547,6 +558,8 @@ test "stub rejects run before child hello" {
 }
 
 test "stub cancel keeps run live until terminal frame" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const hash =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     var stub = try Stub.init("tool-parent", hash);
@@ -567,10 +580,12 @@ test "stub cancel keeps run live until terminal frame" {
     try testing.expectEqual(@as(u32, 3), cancel.seq);
     try testing.expectEqual(Stub.State.running, stub.state);
     try testing.expectEqualStrings("job-2", stub.activeId().?);
-    switch (cancel.msg) {
-        .cancel => |msg| try testing.expectEqualStrings("job-2", msg.id),
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Msg
+        \\  .cancel: core.agent.Cancel
+        \\    .id: []const u8
+        \\      "job-2"
+    ).expectEqual(cancel.msg);
 
     const done_ev = try stub.recv(Frame.init(2, .{
         .done = .{
@@ -581,13 +596,15 @@ test "stub cancel keeps run live until terminal frame" {
     }));
     try testing.expectEqual(Stub.State.idle, stub.state);
     try testing.expect(stub.activeId() == null);
-    switch (done_ev) {
-        .done => |done| {
-            try testing.expectEqual(Stop.canceled, done.stop);
-            try testing.expect(done.truncated);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Ev
+        \\  .done: core.agent.Done
+        \\    .id: []const u8
+        \\      "job-2"
+        \\    .stop: core.agent.Stop
+        \\      .canceled
+        \\    .truncated: bool = true
+    ).expectEqual(done_ev);
 }
 
 test "stub rejects mismatched run id" {
