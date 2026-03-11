@@ -805,6 +805,7 @@ const path_marks = [_][]const u8{
     ".netrc",
     ".pypirc",
     ".env",
+    ".docker/config.json",
     ".pz/auth.json",
     ".pz/policy.json",
     ".pz/settings.json",
@@ -812,17 +813,28 @@ const path_marks = [_][]const u8{
 
 const secret_marks = [_][]const u8{
     "authorization:",
+    "authorization=",
     "bearer ",
     "cookie:",
+    "cookie=",
     "access_token",
     "refresh_token",
+    "id_token",
+    "oauth_token",
+    "session_token",
     "token=",
     "api_key",
+    "api-key",
     "apikey",
+    "x-api-key",
+    "x-auth-token",
     "client_secret",
     "secret_key",
+    "private_key",
     "password",
     "passwd",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+    "-----BEGIN PRIVATE KEY-----",
 };
 
 fn containsNoCase(hay: []const u8, needle: []const u8) bool {
@@ -856,6 +868,8 @@ fn detectPubRedact(txt: []const u8) ?[]const u8 {
             "sk-",
             "ghp_",
             "gho_",
+            "ghs_",
+            "ghu_",
             "github_pat_",
             "xoxb-",
             "xoxp-",
@@ -1302,6 +1316,50 @@ test "snapshot: variant encodings stay canonical" {
         \\[]u8
         \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"[mask:47a56333843b7ed0]","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[secret:cb01a7199946da94]","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"[hash:ce3e6e686cd0c59f]","vis":"hash"}},"attrs":[]} | ship={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
     ).expectEqual(snap);
+}
+
+test "property: public secret markers always redact" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { tail: zc.Id }) bool {
+            const alloc = testing.allocator;
+            const raw = std.fmt.allocPrint(alloc, "authorization=Bearer sk-{s}", .{args.tail.slice()}) catch return false;
+            defer alloc.free(raw);
+            const out = redactTextAlloc(alloc, raw, .@"pub") catch return false;
+            defer alloc.free(out);
+            return std.mem.startsWith(u8, out, "[secret:") and
+                std.mem.indexOf(u8, out, "authorization") == null and
+                std.mem.indexOf(u8, out, "sk-") == null;
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "property: public protected paths always redact" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { name: zc.Id }) bool {
+            const alloc = testing.allocator;
+            const raw = std.fmt.allocPrint(alloc, "cp ~/.ssh/{s} ~/.cache/copy", .{args.name.slice()}) catch return false;
+            defer alloc.free(raw);
+            const out = redactTextAlloc(alloc, raw, .@"pub") catch return false;
+            defer alloc.free(out);
+            return std.mem.startsWith(u8, out, "[path:") and
+                std.mem.indexOf(u8, out, ".ssh/") == null;
+        }
+    }.prop, .{ .iterations = 500 });
+}
+
+test "property: plain public ids stay visible" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { txt: zc.Id }) bool {
+            const alloc = testing.allocator;
+            const raw = args.txt.slice();
+            const out = redactTextAlloc(alloc, raw, .@"pub") catch return false;
+            defer alloc.free(out);
+            return std.mem.eql(u8, out, raw);
+        }
+    }.prop, .{ .iterations = 500 });
 }
 
 test "encoding escapes control bytes and stays stable" {

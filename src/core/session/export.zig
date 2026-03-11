@@ -4,7 +4,7 @@ const schema = @import("schema.zig");
 const reader_mod = @import("reader.zig");
 const sid_path = @import("path.zig");
 
-const Hooks = struct {
+pub const AuditHooks = struct {
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = nowMs,
@@ -21,12 +21,22 @@ pub fn toMarkdown(
     return toMarkdownWith(alloc, dir, sid, out_path, .{});
 }
 
+pub fn toMarkdownAudited(
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    sid: []const u8,
+    out_path: ?[]const u8,
+    hooks: AuditHooks,
+) ![]u8 {
+    return toMarkdownWith(alloc, dir, sid, out_path, hooks);
+}
+
 fn toMarkdownWith(
     alloc: std.mem.Allocator,
     dir: std.fs.Dir,
     sid: []const u8,
     out_path: ?[]const u8,
-    hooks: Hooks,
+    hooks: AuditHooks,
 ) ![]u8 {
     var rdr = try reader_mod.ReplayReader.init(alloc, dir, sid, .{});
     defer rdr.deinit();
@@ -200,7 +210,7 @@ fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.
     };
 }
 
-fn emitAudit(alloc: std.mem.Allocator, hooks: Hooks, ent: audit.Entry) !void {
+fn emitAudit(alloc: std.mem.Allocator, hooks: AuditHooks, ent: audit.Entry) !void {
     if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, ent);
 }
 

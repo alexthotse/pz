@@ -24,6 +24,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Approval caches for privileged tool calls need the full raw arg payload plus session/location/policy binding; anything narrower silently broadens the grant surface.
 - For shipped audit E2E, capture multiple collector frames, extract the syslog body back out, and verify the sealed chain from the collected payloads; that proves transport + redaction together instead of only unit-encoding them.
 - For runtime control audit, route slash commands, RPC commands, and overlay selections through one shared helper with its own sequence counter; otherwise one UI path will bypass privileged audit again.
+- For DLP-style text redaction, keep path/secret markers in shared lists and property-test both positive markers and plain-id negatives; otherwise detector growth turns into unreviewable `or` chains.
 
 ### Did Not Work
 - Using synthetic policy paths under `.pz/runtime/...` for runtime actions was wrong because policy self-protection denies any `.pz` path before rule evaluation.
@@ -33,6 +34,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Putting `<!update>` anywhere but the first snapshot line does not work; `ohsnap` will keep failing instead of rewriting the snapshot.
 - Exposing Zig stdlib private error sets (for example `std.net.GetAddressListError`) from repo APIs is a dead end. Map them at the boundary.
 - Treating `std.net.Stream.writer` like the old zero-arg API caused wasted compile/debug churn. In Zig 0.15 it requires a caller-supplied buffer; direct `std.posix.write` is often simpler in tiny test servers.
+- Leaving temporary `std.debug.print` probes in inherited code polluted targeted test runs and risks shipping noise. Strip them before final validation, not after.
 
 ## Session Notes (2026-03-10)
 
