@@ -3068,7 +3068,7 @@ fn handleSlashCommand(
         .tools => {
             if (arg.len != 0) {
                 const mask = parseCmdToolMask(arg) catch {
-                    try out.writeAll("error: invalid tools value; use all, none, or comma list of read,write,bash,edit,grep,find,ls,ask\n");
+                    try out.writeAll("error: invalid tools value; use all, none, or comma list of read,write,bash,edit,grep,find,ls,ask,skill\n");
                     return .handled;
                 };
                 tools_rt.tool_mask = mask;
@@ -7049,7 +7049,7 @@ test "runtime snapshot for slash + bg flow" {
         \\  .has_bg_footer: bool = true
     ).expectEqual(Snap{
         .has_help = std.mem.indexOf(u8, written, "/help") != null,
-        .has_tools_set = std.mem.indexOf(u8, written, "tools set to read,write,bash,edit,grep,find,ls,ask") != null,
+        .has_tools_set = std.mem.indexOf(u8, written, "tools set to read,write,bash,edit,grep,find,ls,ask,skill") != null,
         .has_bg_started = std.mem.indexOf(u8, written, "bg started id=1") != null,
         .has_bg_list_header = std.mem.indexOf(u8, written, "id pid state code log cmd") != null,
         .has_bg_footer = std.mem.indexOf(u8, written, "bg L1 R1 D0") != null,
@@ -7214,6 +7214,20 @@ test "parseCmdToolMask fuzz smoke does not panic" {
         }
         _ = parseCmdToolMask(buf[0..n]) catch {};
     }
+}
+
+test "parseCmdToolMask accepts skill" {
+    const got = try parseCmdToolMask("read,skill");
+    try std.testing.expectEqual(core.tools.builtin.mask_read | core.tools.builtin.mask_skill, got);
+}
+
+test "toolMaskCsvAlloc includes skill" {
+    const got = try toolMaskCsvAlloc(
+        std.testing.allocator,
+        core.tools.builtin.mask_read | core.tools.builtin.mask_skill,
+    );
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("read,skill", got);
 }
 
 test "chooseLogoutProvider picks active provider when available" {

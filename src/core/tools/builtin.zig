@@ -856,5 +856,6 @@ test "maskForName validates builtin tool names" {
     try std.testing.expect(maskForName("find") != null);
     try std.testing.expect(maskForName("ls") != null);
     try std.testing.expect(maskForName("ask") != null);
+    try std.testing.expect(maskForName("skill") != null);
     try std.testing.expect(maskForName("wat") == null);
 }
