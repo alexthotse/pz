@@ -98,37 +98,44 @@ pub const SenderOpts = struct {
     transport: Transport = .udp,
     host: []const u8,
     port: u16 = 514,
+    hooks: Hooks = .{},
 };
 
 pub const Sender = struct {
     alloc: std.mem.Allocator,
     transport: Transport,
+    host: []u8,
+    port: u16,
+    hooks: Hooks,
     fd: std.posix.socket_t,
     addr: std.net.Address,
 
     pub fn init(alloc: std.mem.Allocator, opts: SenderOpts) !Sender {
         if (opts.host.len == 0) return error.InvalidHost;
 
-        const addr = try resolve(alloc, opts.host, opts.port);
-        const fd = try openSocket(addr, opts.transport);
-        errdefer {
-            (std.net.Stream{ .handle = fd }).close();
-        }
+        const host = try alloc.dupe(u8, opts.host);
+        errdefer alloc.free(host);
 
-        if (opts.transport == .tcp) {
-            try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
-        }
+        const addr = try opts.hooks.resolve(alloc, opts.host, opts.port);
+        const fd = try opts.hooks.open_socket(addr, opts.transport);
+        errdefer opts.hooks.close_socket(fd);
+
+        if (opts.transport == .tcp) try opts.hooks.connect(fd, addr);
 
         return .{
             .alloc = alloc,
             .transport = opts.transport,
+            .host = host,
+            .port = opts.port,
+            .hooks = opts.hooks,
             .fd = fd,
             .addr = addr,
         };
     }
 
     pub fn deinit(self: *Sender) void {
-        (std.net.Stream{ .handle = self.fd }).close();
+        self.hooks.close_socket(self.fd);
+        self.alloc.free(self.host);
         self.* = undefined;
     }
 
@@ -141,20 +148,52 @@ pub const Sender = struct {
     pub fn sendRaw(self: *Sender, raw: []const u8) !void {
         switch (self.transport) {
             .udp => {
-                const fit = try fitUdpAlloc(self.alloc, raw);
-                defer fit.deinit(self.alloc);
-
-                const sent = try std.posix.sendto(self.fd, fit.raw, 0, &self.addr.any, self.addr.getOsSockLen());
-                if (sent != fit.raw.len) return error.ShortWrite;
+                self.sendUdp(raw) catch {
+                    try self.refresh();
+                    try self.sendUdp(raw);
+                };
             },
             .tcp => {
-                var prefix_buf: [32]u8 = undefined;
-                const prefix = try std.fmt.bufPrint(&prefix_buf, "{d} ", .{raw.len});
-                try sendAll(self.fd, prefix);
-                try sendAll(self.fd, raw);
+                self.sendTcp(raw) catch {
+                    try self.refresh();
+                    try self.sendTcp(raw);
+                };
             },
         }
     }
+
+    fn refresh(self: *Sender) !void {
+        const addr = try self.hooks.resolve(self.alloc, self.host, self.port);
+        const fd = try self.hooks.open_socket(addr, self.transport);
+        errdefer self.hooks.close_socket(fd);
+        if (self.transport == .tcp) try self.hooks.connect(fd, addr);
+
+        self.hooks.close_socket(self.fd);
+        self.fd = fd;
+        self.addr = addr;
+    }
+
+    fn sendUdp(self: *Sender, raw: []const u8) !void {
+        const fit = try fitUdpAlloc(self.alloc, raw);
+        defer fit.deinit(self.alloc);
+        try self.hooks.send_udp(self.fd, fit.raw, self.addr);
+    }
+
+    fn sendTcp(self: *Sender, raw: []const u8) !void {
+        var prefix_buf: [32]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&prefix_buf, "{d} ", .{raw.len});
+        try self.hooks.send_tcp(self.fd, prefix);
+        try self.hooks.send_tcp(self.fd, raw);
+    }
+};
+
+const Hooks = struct {
+    resolve: *const fn (alloc: std.mem.Allocator, host: []const u8, port: u16) anyerror!std.net.Address = resolve,
+    open_socket: *const fn (addr: std.net.Address, transport: Transport) anyerror!std.posix.socket_t = openSocket,
+    connect: *const fn (fd: std.posix.socket_t, addr: std.net.Address) anyerror!void = connectSocket,
+    send_udp: *const fn (fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) anyerror!void = sendUdpRaw,
+    send_tcp: *const fn (fd: std.posix.socket_t, raw: []const u8) anyerror!void = sendAll,
+    close_socket: *const fn (fd: std.posix.socket_t) void = closeSocket,
 };
 
 const udp_max_len: usize = 1024;
@@ -350,6 +389,19 @@ fn openSocket(addr: std.net.Address, transport: Transport) !std.posix.socket_t {
         .tcp => std.posix.IPPROTO.TCP,
     };
     return try std.posix.socket(addr.any.family, kind | std.posix.SOCK.CLOEXEC, proto);
+}
+
+fn connectSocket(fd: std.posix.socket_t, addr: std.net.Address) !void {
+    try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
+}
+
+fn closeSocket(fd: std.posix.socket_t) void {
+    (std.net.Stream{ .handle = fd }).close();
+}
+
+fn sendUdpRaw(fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) !void {
+    const sent = try std.posix.sendto(fd, raw, 0, &addr.any, addr.getOsSockLen());
+    if (sent != raw.len) return error.ShortWrite;
 }
 
 fn sendAll(fd: std.posix.socket_t, raw: []const u8) !void {
@@ -729,4 +781,62 @@ test "tcp sender preserves the full payload for large messages" {
 
     try std.testing.expectEqualStrings(raw, collector.message());
     try std.testing.expect(std.mem.indexOf(u8, collector.message(), trunc_sd_id) == null);
+}
+
+test "udp sender re-resolves hostname after send failure" {
+    const Wrap = struct {
+        var h = struct {
+            resolve_ct: usize = 0,
+            sent_port: u16 = 0,
+        }{};
+
+        fn resolve(raw_alloc: std.mem.Allocator, _: []const u8, _: u16) !std.net.Address {
+            _ = raw_alloc;
+            const self = &h;
+            self.resolve_ct += 1;
+            return std.net.Address.parseIp("127.0.0.1", if (self.resolve_ct == 1) 4011 else 4012);
+        }
+
+        fn openSocket(_: std.net.Address, _: Transport) !std.posix.socket_t {
+            return 0;
+        }
+
+        fn connect(_: std.posix.socket_t, _: std.net.Address) !void {}
+
+        fn sendUdp(_: std.posix.socket_t, raw: []const u8, addr: std.net.Address) !void {
+            _ = raw;
+            if (addr.getPort() == 4011) return error.NetworkUnreachable;
+            h.sent_port = addr.getPort();
+        }
+
+        fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
+
+        fn closeSocket(_: std.posix.socket_t) void {}
+    };
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .transport = .udp,
+        .host = "localhost",
+        .port = 514,
+        .hooks = .{
+            .resolve = Wrap.resolve,
+            .open_socket = Wrap.openSocket,
+            .connect = Wrap.connect,
+            .send_udp = Wrap.sendUdp,
+            .send_tcp = Wrap.sendTcp,
+            .close_socket = Wrap.closeSocket,
+        },
+    });
+    defer sender.deinit();
+
+    try sender.send(.{
+        .hostname = "host",
+        .app_name = "pz",
+        .procid = "1",
+        .msgid = "AUDIT",
+        .msg = "retry",
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), Wrap.h.resolve_ct);
+    try std.testing.expectEqual(@as(u16, 4012), Wrap.h.sent_port);
 }
