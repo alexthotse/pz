@@ -2,6 +2,12 @@
 
 AI-only reference. Telegraphic. No fluff. All facts.
 
+## Knowledge Source
+
+- Use known Zig 0.15 rules and this file first.
+- Do not inspect Zig std/source for routine API questions.
+- Read Zig source only when blocked on a repo-specific compile/runtime fact that this file does not cover.
+
 ## Comptime Dispatch (BLOCKING)
 
 **NEVER if-chains for dispatch.** Use tables or StaticStringMap.

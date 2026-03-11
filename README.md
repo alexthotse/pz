@@ -43,7 +43,7 @@ The binary lands in `zig-out/bin/pz`.
 ## Run
 
 ```
-# Uses ~/.pi/agent/auth.json and settings.json automatically
+# Canonical state lives under ~/.pz/ and ./.pz/
 pz
 
 # Explicit provider and model
@@ -67,11 +67,15 @@ zig build test
 
 ## Config
 
-pz reads pi's config files directly:
+Canonical `pz` state lives under `.pz/`:
 
-- `~/.pi/agent/auth.json` — OAuth / API key credentials
-- `~/.pi/agent/settings.json` — model, provider, tools, thinking mode
-- `AGENTS.md` / `CLAUDE.md` — system prompts (project and global)
+- `~/.pz/settings.json` — global defaults
+- `./.pz/settings.json` — project-local overrides
+- `~/.pz/auth.json` — OAuth / API key credentials
+- `~/.pz/state.json` — local machine state
+- `~/.pz/sessions/` and `./.pz/sessions/` — persisted sessions
+- `~/.pz/policy.json` and `./.pz/policy.json` — authoritative policy bundles
+- `AGENTS.md` — policy-controlled context files
 
 ## License
 

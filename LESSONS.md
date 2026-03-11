@@ -9,9 +9,13 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ### Worked Well
 - Keep a repo-local `docs/zig.md` copied from `~/.agents/docs/zig.md` and point `AGENTS.md` at it so every agent works from the same Zig 0.15 rules inside the repo.
 - Enforce `ohsnap` for struct/multi-field assertions and `joelreymont/zcheck` for property tests in the task definition before parallel work starts; that prevents workers from drifting into field-by-field test rewrites.
+- For parallel dot execution, assign one `jj workspace` per agent, give each worker explicit file ownership, and merge their work back only after the tracks stabilize. Reuse and close the live agent pool instead of over-spawning threads.
+- Keep routine Zig API knowledge in `docs/zig.md` so normal work does not require spelunking Zig std/source.
 
 ### Did Not Work
 - Leaving Zig rules only in `~/.agents/docs/zig.md` made the repo instructions incomplete. Do not rely on off-repo paths when the project expects durable, shared guidance.
+- Spawning fresh subagents without first reclaiming finished threads hit the agent limit and stalled review rounds. Reuse or close agents before launching more.
+- Looking at Zig std/source for normal API recall wasted time. Default to `docs/zig.md` and only read source when truly blocked.
 
 ## Session Notes (2026-02-22)
 
