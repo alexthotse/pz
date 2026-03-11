@@ -4494,6 +4494,19 @@ fn isPathLike(raw: []const u8) bool {
 }
 
 fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run) !?[]u8 {
+    if (run_cmd.cfg.policy_lock.system_prompt and
+        (run_cmd.system_prompt != null or run_cmd.append_system_prompt != null))
+    {
+        return error.PolicyLockedSystemPrompt;
+    }
+    if (run_cmd.cfg.policy_lock.context) {
+        const paths = try core.context.discoverPaths(alloc);
+        defer {
+            for (paths) |p| alloc.free(p);
+            alloc.free(paths);
+        }
+        if (paths.len > 0) return error.PolicyLockedContext;
+    }
     if (run_cmd.system_prompt) |sp| {
         if (run_cmd.append_system_prompt) |ap| {
             return try std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ sp, ap });
@@ -7828,6 +7841,52 @@ test "LiveTurn cloneReq duplicates retained request" {
     try std.testing.expectEqual(@as(f32, 0.2), dup.provider_opts.temp.?);
     try std.testing.expectEqual(@as(u32, 42), dup.provider_opts.max_out.?);
     try std.testing.expectEqualStrings("sys", dup.system_prompt.?);
+}
+
+test "buildSystemPrompt rejects explicit prompt under policy lock" {
+    var run = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, config.model_default),
+            .provider = try std.testing.allocator.dupe(u8, config.provider_default),
+            .session_dir = try std.testing.allocator.dupe(u8, config.session_dir_default),
+            .policy_lock = .{ .system_prompt = true },
+        },
+        .system_prompt = "sys",
+    };
+    defer run.cfg.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.PolicyLockedSystemPrompt, buildSystemPrompt(std.testing.allocator, run));
+}
+
+test "buildSystemPrompt rejects context under policy lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "AGENTS.md", .data = "ctx" });
+    const old = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old);
+    const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd);
+    try std.posix.chdir(cwd);
+    defer std.posix.chdir(old) catch {};
+
+    var run = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, config.model_default),
+            .provider = try std.testing.allocator.dupe(u8, config.provider_default),
+            .session_dir = try std.testing.allocator.dupe(u8, config.session_dir_default),
+            .policy_lock = .{ .context = true },
+        },
+    };
+    defer run.cfg.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.PolicyLockedContext, buildSystemPrompt(std.testing.allocator, run));
 }
 
 test "shouldRetryOverflow gates retry to real overflow in same model once" {

@@ -1,17 +1,20 @@
 const std = @import("std");
+const policy = @import("policy.zig");
 const prov_contract = @import("providers/contract.zig");
 
-/// Discover and load AGENTS.md / CLAUDE.md context files.
+/// Discover and load AGENTS.md context files.
 /// Searches global dir, then walks cwd upward to root.
 /// Returns concatenated content with section headers.
 pub fn load(alloc: std.mem.Allocator) !?[]u8 {
+    if ((try loadPolicyLock(alloc)).context) return null;
+
     var parts = std.ArrayListUnmanaged([]u8){};
     defer {
         for (parts.items) |p| alloc.free(p);
         parts.deinit(alloc);
     }
 
-    // Global: ~/.pz/AGENTS.md or ~/.pz/CLAUDE.md
+    // Global: ~/.pz/AGENTS.md
     if (globalDir(alloc)) |gdir| {
         defer alloc.free(gdir);
         if (readContext(alloc, gdir)) |content| {
@@ -59,6 +62,8 @@ fn assembleParts(alloc: std.mem.Allocator, parts: []const []u8) !?[]u8 {
 
 /// Returns list of discovered context file paths (for startup display).
 pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
+    if ((try loadPolicyLock(alloc)).context) return try alloc.alloc([]u8, 0);
+
     var paths = std.ArrayListUnmanaged([]u8){};
     errdefer {
         for (paths.items) |p| alloc.free(p);
@@ -85,15 +90,12 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
 }
 
 fn findFile(alloc: std.mem.Allocator, dir: []const u8) ?[]u8 {
-    for ([_][]const u8{ "AGENTS.md", "CLAUDE.md" }) |name| {
-        const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch return null;
-        std.fs.accessAbsolute(path, .{}) catch {
-            alloc.free(path);
-            continue;
-        };
-        return path;
-    }
-    return null;
+    const path = std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{dir}) catch return null;
+    std.fs.accessAbsolute(path, .{}) catch {
+        alloc.free(path);
+        return null;
+    };
+    return path;
 }
 
 fn globalDir(alloc: std.mem.Allocator) ?[]u8 {
@@ -103,7 +105,15 @@ fn globalDir(alloc: std.mem.Allocator) ?[]u8 {
 }
 
 fn readContext(alloc: std.mem.Allocator, dir: []const u8) ?[]u8 {
-    return readFile(alloc, dir, "AGENTS.md") orelse readFile(alloc, dir, "CLAUDE.md");
+    return readFile(alloc, dir, "AGENTS.md");
+}
+
+fn loadPolicyLock(alloc: std.mem.Allocator) !policy.Lock {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.process.getCwd(&cwd_buf) catch return .{};
+    const home = std.process.getEnvVarOwned(alloc, "HOME") catch null;
+    defer if (home) |v| alloc.free(v);
+    return policy.loadLock(alloc, cwd, home);
 }
 
 fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]u8 {
@@ -189,4 +199,31 @@ test "readFile wraps context content as untrusted input" {
     );
     defer std.testing.allocator.free(want);
     try std.testing.expectEqualStrings(want, got);
+}
+
+test "load returns null when policy locks context" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{ .sub_path = "AGENTS.md", .data = "ctx" });
+    const seed = try @import("signing.zig").Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    const kp = try @import("signing.zig").KeyPair.fromSeed(seed);
+    const raw = try policy.encodeSignedDoc(std.testing.allocator, .{
+        .rules = &.{},
+        .lock = .{ .context = true },
+    }, kp);
+    defer std.testing.allocator.free(raw);
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/policy.json", .data = raw });
+
+    const old = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old);
+    const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd);
+    try std.posix.chdir(cwd);
+    defer std.posix.chdir(old) catch {};
+
+    const got = try load(std.testing.allocator);
+    defer if (got) |v| std.testing.allocator.free(v);
+    try std.testing.expect(got == null);
 }

@@ -152,6 +152,7 @@ test "cli mode dispatch uses config mode when mode flag absent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
+    try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{
         .sub_path = config.auto_cfg_path,
         .data = "{\"mode\":\"print\"}",
@@ -174,6 +175,7 @@ test "cli mode dispatch applies mode flag over config and env" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
+    try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{
         .sub_path = config.auto_cfg_path,
         .data = "{\"mode\":\"print\"}",

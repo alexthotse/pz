@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     };
+    const policy_pk_hex = b.option(
+        []const u8,
+        "policy-pk-hex",
+        "Trusted Ed25519 public key for policy bundles",
+    ) orelse "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083";
     // zcheck's package build still shells out to git; import the module directly.
     const zcheck_mod = depMod(b, "zcheck", "src/zcheck.zig", target, optimize);
 
@@ -39,6 +44,7 @@ pub fn build(b: *std.Build) void {
     ) catch "No commit history available";
     const vcs_log = std.mem.trimRight(u8, vcs_log_raw, "\n\r ");
     options.addOption([]const u8, "changelog", vcs_log);
+    options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
 
     const exe = b.addExecutable(.{
         .name = "pz",

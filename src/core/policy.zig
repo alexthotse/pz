@@ -1,5 +1,6 @@
 const std = @import("std");
 const signing = @import("signing.zig");
+const build_options = @import("build_options");
 const testing = std.testing;
 
 pub const ver_current: u16 = 1;
@@ -15,6 +16,26 @@ pub const Rule = struct {
     tool: ?[]const u8 = null,
 };
 
+pub const Lock = struct {
+    cfg: bool = false,
+    env: bool = false,
+    cli: bool = false,
+    context: bool = false,
+    system_prompt: bool = false,
+
+    pub fn merge(a: Lock, b: Lock) Lock {
+        return .{
+            .cfg = a.cfg or b.cfg,
+            .env = a.env or b.env,
+            .cli = a.cli or b.cli,
+            .context = a.context or b.context,
+            .system_prompt = a.system_prompt or b.system_prompt,
+        };
+    }
+};
+
+pub const policy_rel_path = ".pz/policy.json";
+
 pub const Policy = struct {
     rules: []const Rule,
 
@@ -29,7 +50,6 @@ pub const protected = [_][]const u8{
     "*.session",
     ".pz",
     "AGENTS.md",
-    "CLAUDE.md",
 };
 
 /// Glob match: `*` matches any chars, `?` matches single char, `\` escapes.
@@ -182,6 +202,7 @@ pub fn evalEnv(rules: []const Rule, key: []const u8, val: []const u8) Effect {
 pub const Doc = struct {
     version: u16 = ver_current,
     rules: []const Rule,
+    lock: Lock = .{},
 };
 
 pub const SignedDoc = struct {
@@ -189,6 +210,10 @@ pub const SignedDoc = struct {
     pk: signing.PublicKey,
     sig: signing.Signature,
 };
+
+fn trustedPolicyPk() !signing.PublicKey {
+    return signing.PublicKey.parseHex(build_options.policy_pk_hex);
+}
 
 /// Parse a policy document from JSON.
 /// Missing `version` defaults to 1. Unknown versions are rejected.
@@ -252,7 +277,32 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         init_n += 1;
     }
 
-    return .{ .version = ver, .rules = rules };
+    var lock = Lock{};
+    if (root.object.get("lock")) |lock_val| {
+        if (lock_val != .object) return error.UnexpectedToken;
+        if (lock_val.object.get("config")) |v| {
+            if (v != .bool) return error.UnexpectedToken;
+            lock.cfg = v.bool;
+        }
+        if (lock_val.object.get("env")) |v| {
+            if (v != .bool) return error.UnexpectedToken;
+            lock.env = v.bool;
+        }
+        if (lock_val.object.get("cli")) |v| {
+            if (v != .bool) return error.UnexpectedToken;
+            lock.cli = v.bool;
+        }
+        if (lock_val.object.get("context")) |v| {
+            if (v != .bool) return error.UnexpectedToken;
+            lock.context = v.bool;
+        }
+        if (lock_val.object.get("system_prompt")) |v| {
+            if (v != .bool) return error.UnexpectedToken;
+            lock.system_prompt = v.bool;
+        }
+    }
+
+    return .{ .version = ver, .rules = rules, .lock = lock };
 }
 
 pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
@@ -279,7 +329,9 @@ pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
     const payload = try encodeDoc(alloc, doc);
     defer alloc.free(payload);
 
-    const pk = try signing.PublicKey.parseText(key.string);
+    const embedded_pk = try signing.PublicKey.parseText(key.string);
+    const pk = try trustedPolicyPk();
+    if (!std.mem.eql(u8, embedded_pk.raw[0..], pk.raw[0..])) return error.UntrustedSigner;
     const sig_det = try signing.Signature.parseHex(sig.string);
     _ = try signing.verifyDetached(payload, sig_det, pk);
 
@@ -298,6 +350,34 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
 
     try w.writeAll("{\"version\":");
     try w.print("{d}", .{doc.version});
+    if (doc.lock.cfg or doc.lock.env or doc.lock.cli or doc.lock.context or doc.lock.system_prompt) {
+        try w.writeAll(",\"lock\":{");
+        var first = true;
+        if (doc.lock.cfg) {
+            try w.writeAll("\"config\":true");
+            first = false;
+        }
+        if (doc.lock.env) {
+            if (!first) try w.writeByte(',');
+            try w.writeAll("\"env\":true");
+            first = false;
+        }
+        if (doc.lock.cli) {
+            if (!first) try w.writeByte(',');
+            try w.writeAll("\"cli\":true");
+            first = false;
+        }
+        if (doc.lock.context) {
+            if (!first) try w.writeByte(',');
+            try w.writeAll("\"context\":true");
+            first = false;
+        }
+        if (doc.lock.system_prompt) {
+            if (!first) try w.writeByte(',');
+            try w.writeAll("\"system_prompt\":true");
+        }
+        try w.writeByte('}');
+    }
     try w.writeAll(",\"rules\":[");
     for (doc.rules, 0..) |rule, i| {
         if (i > 0) try w.writeByte(',');
@@ -335,6 +415,39 @@ pub fn encodeSignedDoc(alloc: std.mem.Allocator, doc: Doc, kp: signing.KeyPair) 
     try w.print("{s}", .{&sig_hex});
     try w.writeAll("\"}}");
     return try buf.toOwnedSlice(alloc);
+}
+
+pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!Lock {
+    var lock = Lock{};
+    if (home) |home_path| {
+        const path = try std.fs.path.join(alloc, &.{ home_path, policy_rel_path });
+        defer alloc.free(path);
+        lock = lock.merge(try loadLockFile(alloc, path));
+    }
+    if (cwd) |cwd_path| {
+        const path = try std.fs.path.join(alloc, &.{ cwd_path, policy_rel_path });
+        defer alloc.free(path);
+        lock = lock.merge(try loadLockFile(alloc, path));
+    }
+    return lock;
+}
+
+fn loadLockFile(alloc: std.mem.Allocator, path: []const u8) anyerror!Lock {
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return error.InvalidPolicy,
+    };
+    defer file.close();
+
+    const raw = try file.readToEndAlloc(alloc, 256 * 1024);
+    defer alloc.free(raw);
+
+    const doc = parseSignedDoc(alloc, raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+    defer deinitSignedDoc(alloc, doc);
+    return doc.doc.lock;
 }
 
 fn writeJsonStr(w: anytype, s: []const u8) !void {
@@ -462,7 +575,6 @@ test "self-protection" {
     try testing.expectEqual(Effect.deny, evaluate(&rules, "/tmp/.pz/sessions/abc.jsonl", null));
     try testing.expectEqual(Effect.deny, evaluate(&rules, "AGENTS.md", null));
     try testing.expectEqual(Effect.deny, evaluate(&rules, "/tmp/AGENTS.md", null));
-    try testing.expectEqual(Effect.deny, evaluate(&rules, "CLAUDE.md", null));
 }
 
 test "Policy struct eval" {
@@ -651,6 +763,19 @@ test "signed policy bundle rejects tampering" {
     mut[idx + 3] = 'a';
 
     try testing.expectError(error.SigMismatch, parseSignedDoc(testing.allocator, mut));
+}
+
+test "signed policy bundle rejects untrusted signer" {
+    const rules = [_]Rule{
+        .{ .pattern = "*", .effect = .allow },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const seed = try signing.Seed.parseHex("0000000000000000000000000000000000000000000000000000000000000001");
+    const kp = try signing.KeyPair.fromSeed(seed);
+    const json = try encodeSignedDoc(testing.allocator, doc, kp);
+    defer testing.allocator.free(json);
+
+    try testing.expectError(error.UntrustedSigner, parseSignedDoc(testing.allocator, json));
 }
 
 // ── Snapshot tests (ohsnap) ────────────────────────────────────────────
