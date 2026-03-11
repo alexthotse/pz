@@ -1243,14 +1243,15 @@ test "auth audit covers oauth login and persistence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const auth = try loadFileAuthForProvider(arena.allocator(), home, .anthropic);
-    switch (auth) {
-        .oauth => |oauth_tok| {
-            try std.testing.expectEqualStrings("oa-access", oauth_tok.access);
-            try std.testing.expectEqualStrings("oa-refresh", oauth_tok.refresh);
-            try std.testing.expectEqual(@as(i64, 123), oauth_tok.expires);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .oauth: core.providers.auth.OAuth
+        \\    .access: []const u8
+        \\      "oa-access"
+        \\    .refresh: []const u8
+        \\      "oa-refresh"
+        \\    .expires: i64 = 123
+    ).expectEqual(auth);
 
     const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
     defer std.testing.allocator.free(joined);
@@ -1439,6 +1440,8 @@ test "loadFileAuth returns AuthNotFound when file is missing" {
 }
 
 test "loadFileAuthForProvider parses openai oauth entry" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1463,14 +1466,15 @@ test "loadFileAuthForProvider parses openai oauth entry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const auth = try loadFileAuthForProvider(arena.allocator(), home, .openai);
-    switch (auth) {
-        .oauth => |oauth| {
-            try std.testing.expectEqualStrings("oa-access", oauth.access);
-            try std.testing.expectEqualStrings("oa-refresh", oauth.refresh);
-            try std.testing.expectEqual(@as(i64, 123), oauth.expires);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .oauth: core.providers.auth.OAuth
+        \\    .access: []const u8
+        \\      "oa-access"
+        \\    .refresh: []const u8
+        \\      "oa-refresh"
+        \\    .expires: i64 = 123
+    ).expectEqual(auth);
 }
 
 test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
@@ -1499,6 +1503,8 @@ test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
 }
 
 test "oauth helpers expose provider capabilities and metadata" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     try std.testing.expect(oauthCapable(.anthropic));
     try std.testing.expect(oauthCapable(.openai));
     try std.testing.expect(!oauthCapable(.google));
@@ -1510,14 +1516,26 @@ test "oauth helpers expose provider capabilities and metadata" {
     try std.testing.expect(looksLikeApiKey(.google, "anything"));
 
     const anth = oauthLoginInfo(.anthropic) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("/callback", anth.callback_path);
-    try std.testing.expectEqualStrings("start anthropic oauth", anth.start_action);
-    try std.testing.expectEqualStrings("complete anthropic oauth", anth.complete_action);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthLoginInfo
+        \\  .callback_path: []const u8
+        \\    "/callback"
+        \\  .start_action: []const u8
+        \\    "start anthropic oauth"
+        \\  .complete_action: []const u8
+        \\    "complete anthropic oauth"
+    ).expectEqual(anth);
 
     const oa = oauthLoginInfo(.openai) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("/auth/callback", oa.callback_path);
-    try std.testing.expectEqualStrings("start openai oauth", oa.start_action);
-    try std.testing.expectEqualStrings("complete openai oauth", oa.complete_action);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthLoginInfo
+        \\  .callback_path: []const u8
+        \\    "/auth/callback"
+        \\  .start_action: []const u8
+        \\    "start openai oauth"
+        \\  .complete_action: []const u8
+        \\    "complete openai oauth"
+    ).expectEqual(oa);
 
     try std.testing.expect(oauthLoginInfo(.google) == null);
 }
@@ -1559,55 +1577,90 @@ test "beginOAuthWithRedirect rejects unsupported provider" {
 }
 
 test "parseAnthropicOAuthInput supports code#state" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var parsed = try parseAnthropicOAuthInput(std.testing.allocator, "abc123#state456");
     defer parsed.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("abc123", parsed.code);
-    try std.testing.expect(parsed.state != null);
-    try std.testing.expectEqualStrings("state456", parsed.state.?);
-    try std.testing.expect(parsed.redirect_uri == null);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthCodeInput
+        \\  .code: []u8
+        \\    "abc123"
+        \\  .state: ?[]u8
+        \\    "state456"
+        \\  .redirect_uri: ?[]u8
+        \\    null
+    ).expectEqual(parsed);
 }
 
 test "parseAnthropicOAuthInput supports callback URL query params" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const input = "http://localhost:64915/callback?code=abc123&state=state%20456";
     var parsed = try parseAnthropicOAuthInput(std.testing.allocator, input);
     defer parsed.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("abc123", parsed.code);
-    try std.testing.expect(parsed.state != null);
-    try std.testing.expectEqualStrings("state 456", parsed.state.?);
-    try std.testing.expect(parsed.redirect_uri != null);
-    try std.testing.expectEqualStrings("http://localhost:64915/callback", parsed.redirect_uri.?);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthCodeInput
+        \\  .code: []u8
+        \\    "abc123"
+        \\  .state: ?[]u8
+        \\    "state 456"
+        \\  .redirect_uri: ?[]u8
+        \\    "http://localhost:64915/callback"
+    ).expectEqual(parsed);
 }
 
 test "parseOAuthInput decodes escaped callback code and state" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const input = "http://127.0.0.1:1455/auth/callback?code=ab%2Bcd%2Fef&state=st%2B1%2F2";
     var parsed = try parseOAuthInput(std.testing.allocator, input);
     defer parsed.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("ab+cd/ef", parsed.code);
-    try std.testing.expect(parsed.state != null);
-    try std.testing.expectEqualStrings("st+1/2", parsed.state.?);
-    try std.testing.expect(parsed.redirect_uri != null);
-    try std.testing.expectEqualStrings("http://127.0.0.1:1455/auth/callback", parsed.redirect_uri.?);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthCodeInput
+        \\  .code: []u8
+        \\    "ab+cd/ef"
+        \\  .state: ?[]u8
+        \\    "st+1/2"
+        \\  .redirect_uri: ?[]u8
+        \\    "http://127.0.0.1:1455/auth/callback"
+    ).expectEqual(parsed);
 }
 
 test "parseAnthropicOAuthInput supports raw query params" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var parsed = try parseAnthropicOAuthInput(std.testing.allocator, "code=abc123&state=state%20456");
     defer parsed.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("abc123", parsed.code);
-    try std.testing.expect(parsed.state != null);
-    try std.testing.expectEqualStrings("state 456", parsed.state.?);
-    try std.testing.expect(parsed.redirect_uri == null);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthCodeInput
+        \\  .code: []u8
+        \\    "abc123"
+        \\  .state: ?[]u8
+        \\    "state 456"
+        \\  .redirect_uri: ?[]u8
+        \\    null
+    ).expectEqual(parsed);
 }
 
 test "parseAnthropicOAuthInput accepts code-only input" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var parsed = try parseAnthropicOAuthInput(std.testing.allocator, "abc123");
     defer parsed.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("abc123", parsed.code);
-    try std.testing.expect(parsed.state == null);
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuthCodeInput
+        \\  .code: []u8
+        \\    "abc123"
+        \\  .state: ?[]u8
+        \\    null
+        \\  .redirect_uri: ?[]u8
+        \\    null
+    ).expectEqual(parsed);
 }
 
 test "parseAnthropicOAuthInput rejects empty input" {
