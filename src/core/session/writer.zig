@@ -3,6 +3,7 @@ const posix = std.posix;
 const schema = @import("schema.zig");
 const sid_path = @import("path.zig");
 const fs_secure = @import("../fs_secure.zig");
+const OhSnap = @import("ohsnap");
 
 pub const Event = schema.Event;
 
@@ -72,6 +73,7 @@ pub const Writer = struct {
 };
 
 test "jsonl append preserves event order" {
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -95,42 +97,44 @@ test "jsonl append preserves event order" {
     const raw = try tmp.dir.readFileAlloc(std.testing.allocator, "s1.jsonl", 4096);
     defer std.testing.allocator.free(raw);
 
+    var rows = std.ArrayListUnmanaged(schema.Event).empty;
+    defer {
+        for (rows.items) |row| row.free(std.testing.allocator);
+        rows.deinit(std.testing.allocator);
+    }
+
     var it = std.mem.splitScalar(u8, raw, '\n');
-    var idx: usize = 0;
     while (it.next()) |line| {
         if (line.len == 0) continue;
         var parsed = try schema.decodeSlice(std.testing.allocator, line);
         defer parsed.deinit();
-
-        try std.testing.expectEqual(@as(u16, schema.version_current), parsed.value.version);
-        switch (idx) {
-            0 => {
-                try std.testing.expectEqual(@as(i64, 1), parsed.value.at_ms);
-                switch (parsed.value.data) {
-                    .prompt => |v| try std.testing.expectEqualStrings("alpha", v.text),
-                    else => try std.testing.expect(false),
-                }
-            },
-            1 => {
-                try std.testing.expectEqual(@as(i64, 2), parsed.value.at_ms);
-                switch (parsed.value.data) {
-                    .text => |v| try std.testing.expectEqualStrings("beta", v.text),
-                    else => try std.testing.expect(false),
-                }
-            },
-            2 => {
-                try std.testing.expectEqual(@as(i64, 3), parsed.value.at_ms);
-                switch (parsed.value.data) {
-                    .err => |v| try std.testing.expectEqualStrings("gamma", v.text),
-                    else => try std.testing.expect(false),
-                }
-            },
-            else => return error.TestUnexpectedResult,
-        }
-        idx += 1;
+        try rows.append(std.testing.allocator, try parsed.value.dupe(std.testing.allocator));
     }
 
-    try std.testing.expectEqual(@as(usize, 3), idx);
+    try oh.snap(@src(),
+        \\[]core.session.schema.Event
+        \\  [0]: core.session.schema.Event
+        \\    .version: u16 = 1
+        \\    .at_ms: i64 = 1
+        \\    .data: core.session.schema.Event.Data
+        \\      .prompt: core.session.schema.Event.Text
+        \\        .text: []const u8
+        \\          "alpha"
+        \\  [1]: core.session.schema.Event
+        \\    .version: u16 = 1
+        \\    .at_ms: i64 = 2
+        \\    .data: core.session.schema.Event.Data
+        \\      .text: core.session.schema.Event.Text
+        \\        .text: []const u8
+        \\          "beta"
+        \\  [2]: core.session.schema.Event
+        \\    .version: u16 = 1
+        \\    .at_ms: i64 = 3
+        \\    .data: core.session.schema.Event.Data
+        \\      .err: core.session.schema.Event.Text
+        \\        .text: []const u8
+        \\          "gamma"
+    ).expectEqual(rows.items);
     if (@import("builtin").os.tag != .windows) {
         const st = try tmp.dir.statFile("s1.jsonl");
         try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
