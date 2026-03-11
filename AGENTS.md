@@ -21,6 +21,19 @@ Build `pz`: a Zig CLI harness with TUI. Do not optimize for compatibility with p
 - Keep names short and clear.
 - Keep hot paths allocation-aware.
 
+## Read Window Rule
+
+- Use `rg -n` to find the anchor first.
+- Default file reads to a 20-line window around the anchor.
+- If that is insufficient, double the window: 40, then 80, then 160.
+- Only start wider when it is obvious up front that 20 lines cannot contain the relevant construct.
+
+## Trace Rule
+
+- Emit terse commentary traces during active work so the user can see progress.
+- Include a trace before substantial reads, edits, test runs, merges, and agent launches.
+- Keep traces factual and short.
+
 ## Source Control
 
 Use `jj`, not `git`.
