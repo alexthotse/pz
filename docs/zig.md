@@ -153,6 +153,7 @@ try std.testing.expectError(error.X, err_union);
 
 - In `jj` repos, build metadata must not shell out to `git`. Use `jj log` or repository metadata already available to the build, or sibling workspaces will fail tests.
 - `ohsnap` raw-value snapshots must include the rendered type header, not just the value body.
+- When `ohsnap` needs to rewrite an existing snapshot, `<!update>` must be the first snapshot line, before the type header.
 - In raw multiline `ohsnap` snapshots, quotes are literal after `\\`. Do not escape JSON quotes inside the snapshot body.
 ```zig
 try oh.snap(@src(),
@@ -160,6 +161,9 @@ try oh.snap(@src(),
     \\  "value"
 ).expectEqual(got);
 ```
+- `std.net.GetAddressListError` is private in Zig 0.15. Public repo APIs must not expose it; map resolver failures into repo-owned error sets.
+- `std.net.Address` is an extern union. IPv4 bytes live at `addr.in.sa.addr`, IPv6 bytes at `addr.in6.sa.addr`, and `std.net.Address.eql(a, b)` is the right equality check.
+- `ReplayReader.next()` returns arena-backed borrowed slices. If an event must survive another read, use a detached path such as `nextDup()`/`Event.dupe()`.
 - `std.net.Stream.writer` needs a caller-owned buffer in Zig 0.15. If you do not need buffered streaming, write directly to the socket/file handle.
 
 ## Anti-Patterns (BLOCKING)

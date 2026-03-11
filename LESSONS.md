@@ -10,6 +10,8 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Landing worker results with `jj restore --from <commit> <file>` kept dot merges exact and avoided stale workspace side-data.
 - Replacing `git` shell-outs in `build.zig` with `jj log` made test runs work inside `jj workspace` siblings without fake `.git` hacks.
 - For seeded `pbt` self-tests, snapshot the actual fixed-seed success stream and shrunk witness from the harness instead of guessing expected bytes.
+- For borrowed replay/session events, add an owned path (`nextDup`/`dupe`) instead of relying on callers to remember arena lifetime rules.
+- For DNS/network guards, keep address classification in one shared helper and compare `std.net.Address` values with `std.net.Address.eql`, not struct equality.
 - For TUI `ask`, keep the tool thread on a waitable handoff and let the main loop answer through its existing `tui_input.Reader`; pausing the ESC watcher only while the main loop owns stdin preserves single-reader semantics and avoids editor/ask interleaving.
 - Gate every bash entrypoint through one shared protected-command scanner; otherwise direct `!cmd` and tool `bash` drift and one becomes the bypass.
 - For RFC 5424 UDP truncation, parse through the structured-data boundary and append truncation metadata there; trimming raw bytes blindly risks invalid frames and would miss the `sendRaw` audit path.
@@ -20,6 +22,8 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.
 - For raw string snapshots, writing only the body text is wrong. `ohsnap` expects the full typed shape like `[]u8` plus the value line.
 - Escaping JSON quotes inside raw multiline `ohsnap` snapshots is wrong. After `\\`, the quotes are literal snapshot content.
+- Putting `<!update>` anywhere but the first snapshot line does not work; `ohsnap` will keep failing instead of rewriting the snapshot.
+- Exposing Zig stdlib private error sets (for example `std.net.GetAddressListError`) from repo APIs is a dead end. Map them at the boundary.
 - Treating `std.net.Stream.writer` like the old zero-arg API caused wasted compile/debug churn. In Zig 0.15 it requires a caller-supplied buffer; direct `std.posix.write` is often simpler in tiny test servers.
 
 ## Session Notes (2026-03-10)
