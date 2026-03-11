@@ -269,6 +269,8 @@ test "runtime emits start output finish in order" {
 }
 
 test "runtime emits start and finish when handler has no output" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         evs: [4]TEv = undefined,
         ct: usize = 0,
@@ -310,12 +312,25 @@ test "runtime emits start and finish when handler has no output" {
         .value = 0,
     }, sink);
 
-    try std.testing.expectEqual(@as(usize, 2), sink_impl.ct);
-    try std.testing.expect(sink_impl.evs[0] == .start);
-    try std.testing.expect(sink_impl.evs[1] == .finish);
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const w = fbs.writer();
+    for (sink_impl.evs[0..sink_impl.ct]) |ev| {
+        try w.print("{s}\n", .{@tagName(ev)});
+    }
+
+    const snap = fbs.getWritten();
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "start
+        \\finish
+        \\"
+    ).expectEqual(snap);
 }
 
 test "runtime preserves handler error type and does not emit finish" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         start_seen: bool = false,
         evs: [4]TEv = undefined,
@@ -361,6 +376,17 @@ test "runtime preserves handler error type and does not emit finish" {
         .value = 0,
     }, sink));
 
-    try std.testing.expectEqual(@as(usize, 1), sink_impl.ct);
-    try std.testing.expect(sink_impl.evs[0] == .start);
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const w = fbs.writer();
+    for (sink_impl.evs[0..sink_impl.ct]) |ev| {
+        try w.print("{s}\n", .{@tagName(ev)});
+    }
+
+    const snap = fbs.getWritten();
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "start
+        \\"
+    ).expectEqual(snap);
 }
