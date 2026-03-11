@@ -216,13 +216,21 @@ const HistItem = struct {
     part: providers.Part,
 };
 
+const HistEnt = union(enum) {
+    item: HistItem,
+    clear: void,
+};
+
 const Hist = struct {
     alloc: std.mem.Allocator,
-    items: std.ArrayListUnmanaged(HistItem) = .{},
+    items: std.ArrayListUnmanaged(HistEnt) = .{},
 
     fn deinit(self: *Hist) void {
-        for (self.items.items) |it| {
-            freePart(self.alloc, it.part);
+        for (self.items.items) |ent| {
+            switch (ent) {
+                .item => |it| freePart(self.alloc, it.part),
+                .clear => {},
+            }
         }
         self.items.deinit(self.alloc);
     }
@@ -231,10 +239,10 @@ const Hist = struct {
         const owned = try self.alloc.dupe(u8, text);
         errdefer self.alloc.free(owned);
 
-        try self.items.append(self.alloc, .{
+        try self.items.append(self.alloc, .{ .item = .{
             .role = role,
             .part = .{ .text = owned },
-        });
+        } });
     }
 
     fn pushToolCallDup(
@@ -249,14 +257,14 @@ const Hist = struct {
         const args = try self.alloc.dupe(u8, tc.args);
         errdefer self.alloc.free(args);
 
-        try self.items.append(self.alloc, .{
+        try self.items.append(self.alloc, .{ .item = .{
             .role = role,
             .part = .{ .tool_call = .{
                 .id = id,
                 .name = name,
                 .args = args,
             } },
-        });
+        } });
     }
 
     fn pushToolResultDup(
@@ -269,21 +277,25 @@ const Hist = struct {
         const out = try self.alloc.dupe(u8, tr.out);
         errdefer self.alloc.free(out);
 
-        try self.items.append(self.alloc, .{
+        try self.items.append(self.alloc, .{ .item = .{
             .role = role,
             .part = .{ .tool_result = .{
                 .id = id,
                 .out = out,
                 .is_err = tr.is_err,
             } },
-        });
+        } });
     }
 
     fn pushToolResultOwned(self: *Hist, tr: providers.ToolResult) !void {
-        try self.items.append(self.alloc, .{
+        try self.items.append(self.alloc, .{ .item = .{
             .role = .tool,
             .part = .{ .tool_result = tr },
-        });
+        } });
+    }
+
+    fn clear(self: *Hist) !void {
+        try self.items.append(self.alloc, .{ .clear = {} });
     }
 
     fn appendFromSession(self: *Hist, ev: session.Event) !void {
@@ -348,17 +360,21 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
         .at_ms = nowMs(opts),
         .data = .{ .prompt = .{ .text = opts.prompt } },
     };
-    opts.store.append(opts.sid, prompt_ev) catch |append_err| {
-        try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+    hist.pushTextDup(.user, opts.prompt) catch |hist_err| {
+        return failWithReport(opts, .store_append, hist_err);
     };
-    onSessionAppend(opts, &append_ct) catch |compact_err| {
+    const prompt_stored = blk: {
+        opts.store.append(opts.sid, prompt_ev) catch |append_err| {
+            try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+            break :blk false;
+        };
+        break :blk true;
+    };
+    onSessionAppend(opts, &append_ct, &hist, prompt_stored) catch |compact_err| {
         return failWithReport(opts, .compact, compact_err);
     };
     opts.mode.push(.{ .session = prompt_ev }) catch |mode_err| {
         return failWithReport(opts, .mode_push, mode_err);
-    };
-    hist.pushTextDup(.user, opts.prompt) catch |hist_err| {
-        return failWithReport(opts, .store_append, hist_err);
     };
 
     // Cache tool schemas — registry is static across turns
@@ -375,7 +391,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
 
     while (opts.max_turns == 0 or turns < opts.max_turns) : (turns +|= 1) {
         if (isCanceled(opts)) {
-            emitCanceled(opts, &append_ct) catch |cancel_err| {
+            emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
                 return failWithReport(opts, .mode_push, cancel_err);
             };
             return .{
@@ -406,7 +422,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
         var saw_tool_call = false;
         while (stream.next() catch |next_err| return failWithReport(opts, .stream_next, next_err)) |ev| {
             if (isCanceled(opts)) {
-                emitCanceled(opts, &append_ct) catch |cancel_err| {
+                emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
                     return failWithReport(opts, .mode_push, cancel_err);
                 };
                 return .{
@@ -420,17 +436,21 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
             };
 
             const sess_ev = mapProviderEv(ev, nowMs(opts));
-            opts.store.append(opts.sid, sess_ev) catch |append_err| {
-                try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+            hist.appendFromProvider(ev) catch |hist_err| {
+                return failWithReport(opts, .stream_next, hist_err);
             };
-            onSessionAppend(opts, &append_ct) catch |compact_err| {
+            const sess_stored = blk: {
+                opts.store.append(opts.sid, sess_ev) catch |append_err| {
+                    try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                    break :blk false;
+                };
+                break :blk true;
+            };
+            onSessionAppend(opts, &append_ct, &hist, sess_stored) catch |compact_err| {
                 return failWithReport(opts, .compact, compact_err);
             };
             opts.mode.push(.{ .session = sess_ev }) catch |mode_err| {
                 return failWithReport(opts, .mode_push, mode_err);
-            };
-            hist.appendFromProvider(ev) catch |hist_err| {
-                return failWithReport(opts, .stream_next, hist_err);
             };
 
             switch (ev) {
@@ -453,10 +473,14 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
                     };
 
                     const tr_sess_ev = mapProviderEv(tr_ev, nowMs(opts));
-                    opts.store.append(opts.sid, tr_sess_ev) catch |append_err| {
-                        try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                    const tr_stored = blk: {
+                        opts.store.append(opts.sid, tr_sess_ev) catch |append_err| {
+                            try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                            break :blk false;
+                        };
+                        break :blk true;
                     };
-                    onSessionAppend(opts, &append_ct) catch |compact_err| {
+                    onSessionAppend(opts, &append_ct, &hist, tr_stored) catch |compact_err| {
                         return failWithReport(opts, .compact, compact_err);
                     };
                     opts.mode.push(.{ .session = tr_sess_ev }) catch |mode_err| {
@@ -487,7 +511,7 @@ fn isCanceled(opts: Opts) bool {
     return false;
 }
 
-fn emitCanceled(opts: Opts, append_ct: *u64) !void {
+fn emitCanceled(opts: Opts, append_ct: *u64, hist: *Hist) !void {
     const pev: providers.Ev = .{
         .stop = .{
             .reason = .canceled,
@@ -497,16 +521,17 @@ fn emitCanceled(opts: Opts, append_ct: *u64) !void {
 
     const sev = mapProviderEv(pev, nowMs(opts));
     try opts.store.append(opts.sid, sev);
-    try onSessionAppend(opts, append_ct);
+    try onSessionAppend(opts, append_ct, hist, true);
     try opts.mode.push(.{ .session = sev });
 }
 
-fn onSessionAppend(opts: Opts, append_ct: *u64) !void {
+fn onSessionAppend(opts: Opts, append_ct: *u64, hist: *Hist, refresh_hist: bool) !void {
     append_ct.* += 1;
     if (opts.compactor) |compactor| {
         if (opts.compact_every == 0) return error.InvalidCompactEvery;
         if (append_ct.* % opts.compact_every == 0) {
             try compactor.run(opts.sid, nowMs(opts));
+            if (refresh_hist) try reloadHist(opts, hist);
         }
     }
 }
@@ -553,27 +578,57 @@ fn freePart(alloc: std.mem.Allocator, part: providers.Part) void {
 
 fn buildReqMsgs(
     alloc: std.mem.Allocator,
-    hist: []const HistItem,
+    hist: []const HistEnt,
     system_prompt: ?[]const u8,
 ) ![]providers.Msg {
     const sys: usize = if (system_prompt != null) 1 else 0;
-    const msgs = try alloc.alloc(providers.Msg, hist.len + sys);
-    const parts = try alloc.alloc(providers.Part, hist.len + sys);
+    var start: usize = 0;
+    for (hist, 0..) |ent, idx| {
+        if (ent == .clear) start = idx + 1;
+    }
+
+    var live_len: usize = 0;
+    for (hist[start..]) |ent| {
+        if (ent == .item) live_len += 1;
+    }
+
+    const msgs = try alloc.alloc(providers.Msg, live_len + sys);
+    const parts = try alloc.alloc(providers.Part, live_len + sys);
 
     if (system_prompt) |sp| {
         parts[0] = .{ .text = sp };
         msgs[0] = .{ .role = .system, .parts = parts[0..1] };
     }
 
-    for (hist, 0..) |item, idx| {
-        parts[sys + idx] = item.part;
-        msgs[sys + idx] = .{
-            .role = item.role,
-            .parts = parts[sys + idx .. sys + idx + 1],
+    var idx: usize = sys;
+    for (hist[start..]) |ent| {
+        const item = switch (ent) {
+            .item => |item| item,
+            .clear => continue,
         };
+        parts[idx] = item.part;
+        msgs[idx] = .{
+            .role = item.role,
+            .parts = parts[idx .. idx + 1],
+        };
+        idx += 1;
     }
 
     return msgs;
+}
+
+fn reloadHist(opts: Opts, hist: *Hist) !void {
+    try hist.clear();
+    var replay = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
+        error.FileNotFound, error.NotFound => null,
+        else => return replay_err,
+    };
+    if (replay) |*rdr| {
+        defer rdr.deinit();
+        while (try rdr.next()) |ev| {
+            try hist.appendFromSession(ev);
+        }
+    }
 }
 
 fn buildReqTools(
@@ -889,6 +944,36 @@ fn hasToolResult(req: providers.Req, id: []const u8, out: []const u8) bool {
         }
     }
     return false;
+}
+
+fn fmtReqMsgs(alloc: std.mem.Allocator, msgs: []const providers.Msg) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+
+    for (msgs) |msg| {
+        for (msg.parts) |part| {
+            switch (part) {
+                .text => |text| try buf.writer(alloc).print("{s}|text|{s}\n", .{
+                    @tagName(msg.role),
+                    text,
+                }),
+                .tool_call => |tc| try buf.writer(alloc).print("{s}|tool_call|{s}|{s}|{s}\n", .{
+                    @tagName(msg.role),
+                    tc.id,
+                    tc.name,
+                    tc.args,
+                }),
+                .tool_result => |tr| try buf.writer(alloc).print("{s}|tool_result|{s}|{s}|{}\n", .{
+                    @tagName(msg.role),
+                    tr.id,
+                    tr.out,
+                    tr.is_err,
+                }),
+            }
+        }
+    }
+
+    return try buf.toOwnedSlice(alloc);
 }
 
 test "mapProviderEv preserves usage cache counters" {
@@ -1724,6 +1809,312 @@ test "loop compaction trigger runs at configured append cadence" {
     try std.testing.expectEqual(@as(u16, 1), out.turns);
     try std.testing.expectEqual(@as(usize, 1), comp_impl.run_ct);
     try std.testing.expectEqualStrings("sid-comp", comp_impl.sid);
+}
+
+test "buildReqMsgs HistClear resets request history to the last segment" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var hist = Hist{
+        .alloc = std.testing.allocator,
+    };
+    defer hist.deinit();
+
+    try hist.pushTextDup(.user, "old-user");
+    try hist.pushTextDup(.assistant, "old-assistant");
+    try hist.clear();
+    try hist.pushTextDup(.assistant, "compact-1");
+    try hist.clear();
+    try hist.pushTextDup(.user, "compact-2");
+    try hist.pushToolResultDup(.tool, .{
+        .id = "call-1",
+        .out = "tool-ok",
+        .is_err = false,
+    });
+
+    const msgs = try buildReqMsgs(std.testing.allocator, hist.items.items, "sys");
+    defer {
+        std.testing.allocator.free(msgs[0].parts.ptr[0..msgs.len]);
+        std.testing.allocator.free(msgs);
+    }
+
+    const snap = try fmtReqMsgs(std.testing.allocator, msgs);
+    defer std.testing.allocator.free(snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "system|text|sys
+        \\user|text|compact-2
+        \\tool|tool_result|call-1|tool-ok|false
+        \\"
+    ).expectEqual(snap);
+}
+
+test "loop reloads history from compacted replay across repeated compactions" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const ReaderImpl = struct {
+        evs: []const session.Event = &.{},
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?session.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        alloc: std.mem.Allocator,
+        events: std.ArrayListUnmanaged(session.Event) = .{},
+        append_ct: usize = 0,
+        replay_ct: usize = 0,
+        rdr: ReaderImpl = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            self.append_ct += 1;
+            try self.events.append(self.alloc, try ev.dupe(self.alloc));
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            self.replay_ct += 1;
+            self.rdr = .{
+                .evs = self.events.items,
+                .idx = 0,
+            };
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn reset(self: *@This(), evs: []const session.Event) !void {
+            self.freeAll();
+            for (evs) |ev| {
+                try self.events.append(self.alloc, try ev.dupe(self.alloc));
+            }
+        }
+
+        fn freeAll(self: *@This()) void {
+            for (self.events.items) |ev| ev.free(self.alloc);
+            self.events.clearRetainingCapacity();
+        }
+
+        fn deinit(self: *@This()) void {
+            self.freeAll();
+            self.events.deinit(self.alloc);
+        }
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Ev = &.{},
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Ev {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        turn1: []const providers.Ev,
+        turn2: []const providers.Ev,
+        stream: StreamImpl = .{},
+        start_ct: usize = 0,
+        req_snap: [2]?[]u8 = .{ null, null },
+
+        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+            const slot = self.start_ct;
+            if (slot >= self.req_snap.len) return error.TestUnexpectedResult;
+            self.req_snap[slot] = try fmtReqMsgs(std.testing.allocator, req.msgs);
+            self.start_ct += 1;
+            self.stream = .{
+                .evs = if (self.start_ct == 1) self.turn1 else self.turn2,
+                .idx = 0,
+            };
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const DispatchImpl = struct {
+        out: [1]tools.Output = undefined,
+
+        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+            self.out[0] = .{
+                .call_id = call.id,
+                .seq = 0,
+                .at_ms = call.at_ms,
+                .stream = .stdout,
+                .chunk = "tool-ok",
+                .truncated = false,
+            };
+            return .{
+                .call_id = call.id,
+                .started_at_ms = call.at_ms,
+                .ended_at_ms = call.at_ms,
+                .out = self.out[0..],
+                .final = .{ .ok = .{ .code = 0 } },
+            };
+        }
+    };
+
+    const replay = [_]session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "replay-user" } } },
+        .{ .at_ms = 2, .data = .{ .text = .{ .text = "replay-assistant" } } },
+    };
+    const compact_1 = [_]session.Event{
+        .{ .at_ms = 10, .data = .{ .prompt = .{ .text = "compact-1-user" } } },
+        .{ .at_ms = 11, .data = .{ .text = .{ .text = "compact-1-assistant" } } },
+    };
+    const compact_2 = [_]session.Event{
+        .{ .at_ms = 20, .data = .{ .text = .{ .text = "compact-2-assistant" } } },
+        .{ .at_ms = 21, .data = .{ .tool_call = .{
+            .id = "call-1",
+            .name = "read",
+            .args = "{\"path\":\"a.txt\"}",
+        } } },
+    };
+    const compact_3 = [_]session.Event{
+        .{ .at_ms = 30, .data = .{ .text = .{ .text = "compact-3-assistant" } } },
+        .{ .at_ms = 31, .data = .{ .tool_result = .{
+            .id = "call-1",
+            .out = "tool-ok",
+            .is_err = false,
+        } } },
+    };
+    const turn1 = [_]providers.Ev{
+        .{ .tool_call = .{
+            .id = "call-1",
+            .name = "read",
+            .args = "{\"path\":\"a.txt\"}",
+        } },
+    };
+    const turn2 = [_]providers.Ev{};
+
+    const ModeImpl = struct {
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+
+    const CompactorImpl = struct {
+        store: *StoreImpl,
+        run_ct: usize = 0,
+
+        fn run(self: *@This(), _: []const u8, _: i64) !void {
+            self.run_ct += 1;
+            switch (self.run_ct) {
+                1 => try self.store.reset(&compact_1),
+                2 => try self.store.reset(&compact_2),
+                3 => try self.store.reset(&compact_3),
+                else => {},
+            }
+        }
+    };
+
+    var store_impl = StoreImpl{
+        .alloc = std.testing.allocator,
+    };
+    defer store_impl.deinit();
+    try store_impl.reset(&replay);
+
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var provider_impl = ProviderImpl{
+        .turn1 = turn1[0..],
+        .turn2 = turn2[0..],
+    };
+    defer for (provider_impl.req_snap) |snap| {
+        if (snap) |s| std.testing.allocator.free(s);
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var dispatch_impl = DispatchImpl{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "read",
+            .kind = .read,
+            .spec = .{
+                .kind = .read,
+                .desc = "read file",
+                .params = &.{},
+                .out = .{
+                    .max_bytes = 4096,
+                    .stream = false,
+                },
+                .timeout_ms = 1000,
+                .destructive = false,
+            },
+            .dispatch = tools.Dispatch.from(
+                DispatchImpl,
+                &dispatch_impl,
+                DispatchImpl.run,
+            ),
+        },
+    };
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var comp_impl = CompactorImpl{
+        .store = &store_impl,
+    };
+    const comp = Compactor.from(CompactorImpl, &comp_impl, CompactorImpl.run);
+
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-hist-compact",
+        .prompt = "live-user",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .compactor = comp,
+        .compact_every = 1,
+    });
+
+    try std.testing.expectEqual(@as(u16, 2), out.turns);
+    try std.testing.expectEqual(@as(u32, 1), out.tool_calls);
+    try std.testing.expectEqual(@as(usize, 3), comp_impl.run_ct);
+    try std.testing.expectEqual(@as(usize, 4), store_impl.replay_ct);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "user|text|compact-1-user
+        \\assistant|text|compact-1-assistant
+        \\"
+    ).expectEqual(provider_impl.req_snap[0] orelse return error.TestUnexpectedResult);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "assistant|text|compact-3-assistant
+        \\tool|tool_result|call-1|tool-ok|false
+        \\"
+    ).expectEqual(provider_impl.req_snap[1] orelse return error.TestUnexpectedResult);
 }
 
 test "loop unified runtime error reporting appends stage-tagged error event" {

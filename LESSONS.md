@@ -10,6 +10,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - Landing worker results with `jj restore --from <commit> <file>` kept dot merges exact and avoided stale workspace side-data.
 - Replacing `git` shell-outs in `build.zig` with `jj log` made test runs work inside `jj workspace` siblings without fake `.git` hacks.
 - For seeded `pbt` self-tests, snapshot the actual fixed-seed success stream and shrunk witness from the harness instead of guessing expected bytes.
+- For TUI `ask`, keep the tool thread on a waitable handoff and let the main loop answer through its existing `tui_input.Reader`; pausing the ESC watcher only while the main loop owns stdin preserves single-reader semantics and avoids editor/ask interleaving.
 
 ### Did Not Work
 - Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.
