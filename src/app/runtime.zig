@@ -1494,6 +1494,8 @@ const AuditHooks = struct {
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
     auth_home: ?[]const u8 = null,
+    share_gist: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = shareGist,
+    run_upgrade: *const fn (std.mem.Allocator, update_mod.AuditHooks) anyerror!update_mod.Outcome = update_mod.runOutcomeAudited,
 
     fn auth(self: AuditHooks) core.providers.auth.Hooks {
         return .{
@@ -1555,6 +1557,34 @@ fn runtimeCfgResName() core.audit.Str {
 
 fn runtimeSessResName() core.audit.Str {
     return .{ .text = "session", .vis = .@"pub" };
+}
+
+fn runtimeExportResName() core.audit.Str {
+    return .{ .text = "session-export", .vis = .@"pub" };
+}
+
+fn runtimeShareResName() core.audit.Str {
+    return .{ .text = "gist", .vis = .@"pub" };
+}
+
+fn runtimeUpgradeResName() core.audit.Str {
+    return .{ .text = "upgrade", .vis = .@"pub" };
+}
+
+fn exportAuditHooks(hooks: AuditHooks) core.session.@"export".AuditHooks {
+    return .{
+        .emit_audit_ctx = hooks.emit_audit_ctx,
+        .emit_audit = hooks.emit_audit,
+        .now_ms = hooks.now_ms,
+    };
+}
+
+fn updateAuditHooks(hooks: AuditHooks) update_mod.AuditHooks {
+    return .{
+        .emit_audit_ctx = hooks.emit_audit_ctx,
+        .emit_audit = hooks.emit_audit,
+        .now_ms = hooks.now_ms,
+    };
 }
 
 fn runtimeCtlStart(
@@ -3463,7 +3493,18 @@ fn runRpc(
                 });
             },
             .upgrade => {
-                const outcome = update_mod.runOutcome(alloc) catch |err| {
+                try runtimeCtlStart(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+                const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks)) catch |err| {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "upgrade",
+                        .cmd,
+                        runtimeUpgradeResName(),
+                        null,
+                        .{ .text = @errorName(err), .vis = .mask },
+                        &.{},
+                    );
                     const err_msg = try report.rpc(alloc, "upgrade", err);
                     defer alloc.free(err_msg);
                     try writeJsonLine(alloc, out, .{
@@ -3476,6 +3517,7 @@ fn runRpc(
                 };
                 defer outcome.deinit(alloc);
                 if (outcome.ok) {
+                    try runtimeCtlSuccess(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
                     try writeJsonLine(alloc, out, .{
                         .type = "rpc_upgrade",
                         .id = req.id,
@@ -3483,6 +3525,16 @@ fn runRpc(
                         .msg = outcome.msg,
                     });
                 } else {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "upgrade",
+                        .cmd,
+                        runtimeUpgradeResName(),
+                        null,
+                        .{ .text = outcome.msg, .vis = .mask },
+                        &.{},
+                    );
                     try writeJsonLine(alloc, out, .{
                         .type = "rpc_error",
                         .id = req.id,
@@ -4128,8 +4180,35 @@ fn handleSlashCommand(
             try out.writeAll(bg_out);
         },
         .upgrade => {
-            const outcome = try update_mod.runOutcome(alloc);
+            try runtimeCtlStart(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+            const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks)) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "upgrade",
+                    .cmd,
+                    runtimeUpgradeResName(),
+                    null,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
+                return err;
+            };
             defer outcome.deinit(alloc);
+            if (outcome.ok) {
+                try runtimeCtlSuccess(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+            } else {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "upgrade",
+                    .cmd,
+                    runtimeUpgradeResName(),
+                    null,
+                    .{ .text = outcome.msg, .vis = .mask },
+                    &.{},
+                );
+            }
             try out.writeAll(outcome.msg);
         },
         .new => {
@@ -4241,7 +4320,19 @@ fn handleSlashCommand(
             return .compacted;
         },
         .@"export" => {
+            const argv = if (arg.len > 0) core.audit.Str{ .text = arg, .vis = .mask } else null;
+            try runtimeCtlStart(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, &.{});
             const session_dir = requireSessionDir(session_dir_path, no_session) catch {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "export",
+                    .file,
+                    runtimeExportResName(),
+                    argv,
+                    .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "export session", error.SessionDisabled);
                 defer alloc.free(em);
                 try out.writeAll(em);
@@ -4250,13 +4341,27 @@ fn handleSlashCommand(
             var dir = try std.fs.cwd().openDir(session_dir, .{});
             defer dir.close();
             const out_path = if (arg.len > 0) arg else null;
-            const path = core.session.exportMarkdown(alloc, dir, sid.*, out_path) catch |err| {
+            const path = core.session.@"export".toMarkdownAudited(alloc, dir, sid.*, out_path, exportAuditHooks(audit_hooks)) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "export",
+                    .file,
+                    runtimeExportResName(),
+                    argv,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "export session", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
                 return .handled;
             };
             defer alloc.free(path);
+            const attrs = [_]core.audit.Attr{
+                .{ .key = "path", .vis = .mask, .val = .{ .str = path } },
+            };
+            try runtimeCtlSuccess(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, &attrs);
             try writeTextLine(alloc, out, "exported to {s}\n", .{path});
         },
         .settings => return .select_settings,
@@ -4356,7 +4461,18 @@ fn handleSlashCommand(
         },
         .reload => return .reload,
         .share => {
+            try runtimeCtlStart(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, &.{});
             const session_dir = requireSessionDir(session_dir_path, no_session) catch {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "share",
+                    .net,
+                    runtimeShareResName(),
+                    null,
+                    .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "share session", error.SessionDisabled);
                 defer alloc.free(em);
                 try out.writeAll(em);
@@ -4364,20 +4480,44 @@ fn handleSlashCommand(
             };
             var dir = try std.fs.cwd().openDir(session_dir, .{});
             defer dir.close();
-            const md_path = core.session.exportMarkdown(alloc, dir, sid.*, null) catch |err| {
+            const md_path = core.session.@"export".toMarkdownAudited(alloc, dir, sid.*, null, exportAuditHooks(audit_hooks)) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "share",
+                    .net,
+                    runtimeShareResName(),
+                    null,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "share session", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
                 return .handled;
             };
             defer alloc.free(md_path);
-            const gist_url = shareGist(alloc, md_path) catch |err| {
+            const gist_url = audit_hooks.share_gist(alloc, md_path) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "share",
+                    .net,
+                    runtimeShareResName(),
+                    null,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "publish gist", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
                 return .handled;
             };
             defer alloc.free(gist_url);
+            const attrs = [_]core.audit.Attr{
+                .{ .key = "url", .vis = .mask, .val = .{ .str = gist_url } },
+            };
+            try runtimeCtlSuccess(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, &attrs);
             try writeTextLine(alloc, out, "shared: {s}\n", .{gist_url});
         },
         .changelog => {
@@ -7484,6 +7624,8 @@ test "runtime blocks tool dispatch under verified policy" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
+    const root_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root_abs);
     var pol = try RuntimePolicy.load(std.testing.allocator);
     defer pol.deinit();
     const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
@@ -7557,6 +7699,8 @@ test "subagent stub inherits effective policy hash" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
+    const root_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root_abs);
 
     var pol = try RuntimePolicy.load(std.testing.allocator);
     defer pol.deinit();
@@ -8585,6 +8729,195 @@ test "handleSlashCommand blocks builtins under verified policy" {
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "blocked by policy: /share") != null);
 }
 
+test "handleSlashCommand export share and upgrade emit audited redacted records" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "authorization: bearer sk-live-secret" } } },
+        .{ .at_ms = 2, .data = .{ .text = .{ .text = "<script>alert(1)</script>" } } },
+        .{ .at_ms = 3, .data = .{ .stop = .{ .reason = .done } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/100.jsonl", &events);
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
+
+    const root_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root_abs);
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var sid = try std.testing.allocator.dupe(u8, "100");
+    defer std.testing.allocator.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |buf| std.testing.allocator.free(buf);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |buf| std.testing.allocator.free(buf);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    defer bg_mgr.deinit();
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 999;
+            }
+        }.f,
+        .share_gist = struct {
+            fn ok(alloc: std.mem.Allocator, _: []const u8) ![]u8 {
+                return try alloc.dupe(u8, "https://gist.github.test/private/secret-url");
+            }
+        }.ok,
+        .run_upgrade = struct {
+            fn ok(alloc: std.mem.Allocator, _: update_mod.AuditHooks) !update_mod.Outcome {
+                return .{
+                    .ok = true,
+                    .msg = try alloc.dupe(u8, "already up to date\n"),
+                };
+            }
+        }.ok,
+    } };
+    var out_buf: [1024]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    _ = try handleSlashCommand(
+        std.testing.allocator,
+        "/export team.md",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &pol,
+        &tools_rt,
+        &bg_mgr,
+        sess_abs,
+        false,
+        null,
+        out_fbs.writer().any(),
+        ctl_audit.hooks,
+        &ctl_audit,
+    );
+
+    ctl_audit.hooks.share_gist = struct {
+        fn fail(_: std.mem.Allocator, _: []const u8) ![]u8 {
+            return error.GistFailed;
+        }
+    }.fail;
+
+    _ = try handleSlashCommand(
+        std.testing.allocator,
+        "/share",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &pol,
+        &tools_rt,
+        &bg_mgr,
+        sess_abs,
+        false,
+        null,
+        out_fbs.writer().any(),
+        ctl_audit.hooks,
+        &ctl_audit,
+    );
+
+    _ = try handleSlashCommand(
+        std.testing.allocator,
+        "/upgrade",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &pol,
+        &tools_rt,
+        &bg_mgr,
+        sess_abs,
+        false,
+        null,
+        out_fbs.writer().any(),
+        ctl_audit.hooks,
+        &ctl_audit,
+    );
+
+    ctl_audit.hooks.run_upgrade = struct {
+        fn fail(alloc: std.mem.Allocator, _: update_mod.AuditHooks) !update_mod.Outcome {
+            return .{
+                .ok = false,
+                .msg = try alloc.dupe(u8, "upgrade blocked by policy\n"),
+            };
+        }
+    }.fail;
+
+    _ = try handleSlashCommand(
+        std.testing.allocator,
+        "/upgrade",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &pol,
+        &tools_rt,
+        &bg_mgr,
+        sess_abs,
+        false,
+        null,
+        out_fbs.writer().any(),
+        ctl_audit.hooks,
+        &ctl_audit,
+    );
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    const export_abs = try std.fs.path.join(std.testing.allocator, &.{ root_abs, "team.md" });
+    defer std.testing.allocator.free(export_abs);
+    const share_abs = try std.fs.path.join(std.testing.allocator, &.{ sess_abs, "100.md" });
+    defer std.testing.allocator.free(share_abs);
+    const export_tag = try core.audit.redactTextAlloc(std.testing.allocator, export_abs, .mask);
+    defer std.testing.allocator.free(export_tag);
+    const share_tag = try core.audit.redactTextAlloc(std.testing.allocator, share_abs, .mask);
+    defer std.testing.allocator.free(share_tag);
+    const norm_export = try std.mem.replaceOwned(u8, std.testing.allocator, joined, export_tag, "[mask:EXPORT_PATH]");
+    defer std.testing.allocator.free(norm_export);
+    const norm = try std.mem.replaceOwned(u8, std.testing.allocator, norm_export, share_tag, "[mask:SHARE_PATH]");
+    defer std.testing.allocator.free(norm);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":999,"sid":"runtime","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"session-export","vis":"pub"},"op":"export"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"export","argv":{"text":"[mask:96832bf7da08afc9]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:EXPORT_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:EXPORT_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:EXPORT_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:EXPORT_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":2,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"session-export","vis":"pub"},"op":"export"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"export","argv":{"text":"[mask:96832bf7da08afc9]","vis":"mask"}},"attrs":[{"key":"path","vis":"mask","ty":"str","val":"[mask:EXPORT_PATH]"}]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"net","name":{"text":"gist","vis":"pub"},"op":"share"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"share"},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:SHARE_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:SHARE_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:SHARE_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:SHARE_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":4,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"net","name":{"text":"gist","vis":"pub"},"op":"share"},"msg":{"text":"[mask:f32272af783cb16f]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"share"},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":6,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":7,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":8,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"[mask:6570e9c86ff68452]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
+    ).expectEqual(norm);
+}
+
 test "runtime tui bg command starts and lists background jobs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9081,7 +9414,9 @@ test "runtime rpc control commands emit audited redacted control records" {
             "{\"id\":\"7\",\"cmd\":\"compact\"}\n" ++
             "{\"id\":\"8\",\"cmd\":\"new\"}\n" ++
             "{\"id\":\"9\",\"cmd\":\"resume\",\"arg\":\"404\"}\n" ++
-            "{\"id\":\"10\",\"cmd\":\"quit\"}\n",
+            "{\"id\":\"10\",\"cmd\":\"upgrade\"}\n" ++
+            "{\"id\":\"11\",\"cmd\":\"upgrade\"}\n" ++
+            "{\"id\":\"12\",\"cmd\":\"quit\"}\n",
     );
     var out_buf: [32768]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
@@ -9099,6 +9434,23 @@ test "runtime rpc control commands emit audited redacted control records" {
             .now_ms = struct {
                 fn f() i64 {
                     return 888;
+                }
+            }.f,
+            .run_upgrade = struct {
+                var n: usize = 0;
+
+                fn f(alloc: std.mem.Allocator, _: update_mod.AuditHooks) !update_mod.Outcome {
+                    defer n += 1;
+                    if (n == 0) {
+                        return .{
+                            .ok = true,
+                            .msg = try alloc.dupe(u8, "already up to date\n"),
+                        };
+                    }
+                    return .{
+                        .ok = false,
+                        .msg = try alloc.dupe(u8, "upgrade blocked by policy\n"),
+                    };
                 }
             }.f,
         },
@@ -9132,7 +9484,11 @@ test "runtime rpc control commands emit audited redacted control records" {
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":15,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"new"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"new"},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":16,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"new"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"new"},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":17,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":18,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:bd710b2156a1699e]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}"
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":18,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:bd710b2156a1699e]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":19,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":20,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":21,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":22,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"[mask:6570e9c86ff68452]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
     ).expectEqual(joined);
 }
 
