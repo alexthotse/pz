@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -138,7 +139,7 @@ const Acc = struct {
 };
 
 fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) Err!Selected {
-    var file = std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |open_err| {
+    var file = path_guard.openFile(path, .{ .mode = .read_only }) catch |open_err| {
         return mapReadErr(open_err);
     };
     defer file.close();
@@ -184,7 +185,7 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
 fn mapReadErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied => error.Denied,
+        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
     };
@@ -205,6 +206,8 @@ fn satAddU32(a: u32, b: u32) u32 {
 test "read handler returns selected lines with deterministic timestamps" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "in.txt", .data = "a\nb\nc\n" });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
@@ -332,6 +335,8 @@ test "read handler returns kind mismatch for wrong call kind" {
 test "read handler truncates oversized output instead of failing TooLarge" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     var text = std.ArrayList(u8).empty;
     defer text.deinit(std.testing.allocator);
@@ -376,6 +381,8 @@ test "read handler truncates oversized output instead of failing TooLarge" {
 test "read handler can target a line in very large file without TooLarge" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     var txt = std.ArrayList(u8).empty;
     defer txt.deinit(std.testing.allocator);

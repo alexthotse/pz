@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -29,7 +30,7 @@ pub const Handler = struct {
         const args = call.args.write;
         if (args.path.len == 0) return error.InvalidArgs;
 
-        var file = std.fs.cwd().createFile(args.path, .{
+        var file = path_guard.createFile(args.path, .{
             .truncate = !args.append,
         }) catch |open_err| {
             return mapOpenErr(open_err);
@@ -59,7 +60,7 @@ pub const Handler = struct {
 fn mapOpenErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => error.Denied,
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem, error.SymLinkLoop => error.Denied,
         else => error.Io,
     };
 }
@@ -87,6 +88,8 @@ test "write handler overwrites file with deterministic timestamps" {
     const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "out.txt", .data = "old" });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "out.txt");
@@ -142,6 +145,8 @@ test "write handler overwrites file with deterministic timestamps" {
 test "write handler appends when append is true" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "out.txt", .data = "a" });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "out.txt");
@@ -200,6 +205,8 @@ test "write handler returns invalid args for empty path" {
 test "write handler returns not found for missing parent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir_path);

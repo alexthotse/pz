@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 fn noopSink() tools.Sink {
@@ -24,6 +25,8 @@ fn expectResultEnvelope(call: tools.Call, res: tools.Result) !void {
 test "tool contract handlers emit deterministic envelopes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(path);
@@ -184,6 +187,114 @@ test "tool contract handlers emit deterministic envelopes" {
     const grep_res = try grep_h.run(grep_call, sink);
     defer grep_h.deinitResult(grep_res);
     try expectResultEnvelope(grep_call, grep_res);
+}
+
+test "tool contract handlers deny nested symlink escapes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var outer = std.testing.tmpDir(.{});
+    defer outer.cleanup();
+
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.makePath("safe/nest");
+    try outer.dir.writeFile(.{ .sub_path = "secret.txt", .data = "top-secret\n" });
+
+    const outer_root = try outer.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(outer_root);
+    try tmp.dir.symLink(outer_root, "safe/nest/link", .{ .is_directory = true });
+
+    const cwd_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_root);
+    const escaped_dir = try std.fs.path.join(std.testing.allocator, &.{ cwd_root, "safe/nest/link" });
+    defer std.testing.allocator.free(escaped_dir);
+    const escaped_file = try std.fs.path.join(std.testing.allocator, &.{ cwd_root, "safe/nest/link/secret.txt" });
+    defer std.testing.allocator.free(escaped_file);
+
+    const sink = noopSink();
+
+    const rd = @import("read.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    try std.testing.expectError(error.Denied, rd.run(.{
+        .id = "r-deny",
+        .kind = .read,
+        .args = .{ .read = .{ .path = escaped_file } },
+        .src = .system,
+        .at_ms = 0,
+    }, sink));
+
+    const wr = @import("write.zig").Handler.init(.{});
+    try std.testing.expectError(error.Denied, wr.run(.{
+        .id = "w-deny",
+        .kind = .write,
+        .args = .{ .write = .{
+            .path = escaped_file,
+            .text = "overwrite",
+        } },
+        .src = .system,
+        .at_ms = 0,
+    }, sink));
+
+    const ed = @import("edit.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    try std.testing.expectError(error.Denied, ed.run(.{
+        .id = "e-deny",
+        .kind = .edit,
+        .args = .{ .edit = .{
+            .path = escaped_file,
+            .old = "top",
+            .new = "low",
+        } },
+        .src = .system,
+        .at_ms = 0,
+    }, sink));
+
+    const ls_h = @import("ls.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    try std.testing.expectError(error.Denied, ls_h.run(.{
+        .id = "l-deny",
+        .kind = .ls,
+        .args = .{ .ls = .{ .path = escaped_dir } },
+        .src = .system,
+        .at_ms = 0,
+    }, sink));
+
+    const find_h = @import("find.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    try std.testing.expectError(error.Denied, find_h.run(.{
+        .id = "f-deny",
+        .kind = .find,
+        .args = .{ .find = .{
+            .path = escaped_dir,
+            .name = "secret",
+        } },
+        .src = .system,
+        .at_ms = 0,
+    }, sink));
+
+    const grep_h = @import("grep.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    try std.testing.expectError(error.Denied, grep_h.run(.{
+        .id = "g-deny",
+        .kind = .grep,
+        .args = .{ .grep = .{
+            .path = escaped_dir,
+            .pattern = "secret",
+        } },
+        .src = .system,
+        .at_ms = 0,
+    }, sink));
 }
 
 test "tool contract registry emits start output finish ordering" {

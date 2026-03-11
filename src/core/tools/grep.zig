@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -39,7 +40,7 @@ pub const Handler = struct {
         if (args.pattern.len == 0) return error.InvalidArgs;
         if (args.max_results == 0) return error.InvalidArgs;
 
-        var root = std.fs.cwd().openDir(args.path, .{ .iterate = true }) catch |open_err| {
+        var root = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
             return mapFsErr(open_err);
         };
         defer root.close();
@@ -56,7 +57,7 @@ pub const Handler = struct {
         while (walk.next() catch |next_err| return mapFsErr(next_err)) |ent| {
             if (hit_ct >= args.max_results) break;
             if (ent.kind != .file) continue;
-            try grepFile(self, &root, ent.path, args, &hit_ct, &acc);
+            try grepFile(self, ent.path, args, &hit_ct, &acc);
         }
 
         const data = acc.takeOwned() catch return error.OutOfMemory;
@@ -117,13 +118,15 @@ pub const Handler = struct {
 
 fn grepFile(
     self: Handler,
-    root: *const std.fs.Dir,
     rel_path: []const u8,
     args: tools.Call.GrepArgs,
     hit_ct: *u32,
     acc: *Acc,
 ) Err!void {
-    var file = root.openFile(rel_path, .{ .mode = .read_only }) catch |open_err| {
+    const full_path = try std.fs.path.join(self.alloc, &.{ args.path, rel_path });
+    defer self.alloc.free(full_path);
+
+    var file = path_guard.openFile(full_path, .{ .mode = .read_only }) catch |open_err| {
         return mapFsErr(open_err);
     };
     defer file.close();
@@ -231,7 +234,7 @@ fn satAdd(a: usize, b: usize) usize {
 fn mapFsErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied => error.Denied,
+        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
     };
@@ -240,6 +243,8 @@ fn mapFsErr(err: anyerror) Err {
 test "grep handler finds matching lines with file and line numbers" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.makePath("src");
     try tmp.dir.writeFile(.{ .sub_path = "src/a.txt", .data = "alpha\nbeta\n" });

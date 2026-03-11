@@ -7,6 +7,7 @@ const edit = @import("edit.zig");
 const grep = @import("grep.zig");
 const find = @import("find.zig");
 const ls = @import("ls.zig");
+const path_guard = @import("path_guard.zig");
 
 const default_max_bytes: usize = 64 * 1024;
 pub const mask_read: u16 = 1 << 0;
@@ -521,6 +522,8 @@ test "builtin runtime registry exposes all core tools" {
 test "builtin runtime uses call timestamp in result envelope" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{
         .sub_path = "in.txt",

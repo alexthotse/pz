@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -38,7 +39,7 @@ pub const Handler = struct {
         if (args.name.len == 0) return error.InvalidArgs;
         if (args.max_results == 0) return error.InvalidArgs;
 
-        var root = std.fs.cwd().openDir(args.path, .{ .iterate = true }) catch |open_err| {
+        var root = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
             return mapFsErr(open_err);
         };
         defer root.close();
@@ -185,7 +186,7 @@ fn satMul(a: usize, b: usize) usize {
 fn mapFsErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied => error.Denied,
+        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
     };
@@ -194,6 +195,8 @@ fn mapFsErr(err: anyerror) Err {
 test "find handler lists matching paths in sorted order" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.makePath("src/lib");
     try tmp.dir.writeFile(.{ .sub_path = "src/a.zig", .data = "" });
@@ -266,6 +269,8 @@ test "find handler validates args and handles missing roots" {
 test "find handler truncates on high hit count instead of erroring" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     // Create more files than max_results * 8
     try tmp.dir.makePath("d");

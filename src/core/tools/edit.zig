@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -38,8 +39,13 @@ pub const Handler = struct {
         if (args.path.len == 0) return error.InvalidArgs;
         if (args.old.len == 0) return error.InvalidArgs;
 
-        const full = std.fs.cwd().readFileAlloc(self.alloc, args.path, self.max_bytes) catch |read_err| {
+        var src = path_guard.openFile(args.path, .{ .mode = .read_only }) catch |read_err| {
             return mapReadErr(read_err);
+        };
+        defer src.close();
+        const full = src.readToEndAlloc(self.alloc, self.max_bytes) catch |read_err| switch (read_err) {
+            error.FileTooBig => return error.TooLarge,
+            else => return mapReadErr(read_err),
         };
         defer self.alloc.free(full);
 
@@ -49,7 +55,7 @@ pub const Handler = struct {
             try replaceFirstAlloc(self.alloc, full, args.old, args.new);
         defer self.alloc.free(updated);
 
-        var file = std.fs.cwd().openFile(args.path, .{ .mode = .write_only }) catch |open_err| {
+        var file = path_guard.openFile(args.path, .{ .mode = .write_only }) catch |open_err| {
             return mapWriteErr(open_err);
         };
         defer file.close();
@@ -110,7 +116,7 @@ fn replaceAllAlloc(
 fn mapReadErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied => error.Denied,
+        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
         error.FileTooBig => error.TooLarge,
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
@@ -124,6 +130,7 @@ fn mapWriteErr(err: anyerror) Err {
         error.PermissionDenied,
         error.ReadOnlyFileSystem,
         error.LockViolation,
+        error.SymLinkLoop,
         => error.Denied,
         else => error.Io,
     };
@@ -132,6 +139,8 @@ fn mapWriteErr(err: anyerror) Err {
 test "edit handler replaces first match with deterministic timestamps" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "in.txt", .data = "a x a x" });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
@@ -180,6 +189,8 @@ test "edit handler replaces first match with deterministic timestamps" {
 test "edit handler replaces all matches when all is true" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "in.txt", .data = "ab ab ab" });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
@@ -219,6 +230,8 @@ test "edit handler replaces all matches when all is true" {
 test "edit handler returns not found when old text is absent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "in.txt", .data = "abc" });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");

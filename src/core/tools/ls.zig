@@ -1,4 +1,5 @@
 const std = @import("std");
+const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -37,7 +38,7 @@ pub const Handler = struct {
         const args = call.args.ls;
         if (args.path.len == 0) return error.InvalidArgs;
 
-        var dir = std.fs.cwd().openDir(args.path, .{ .iterate = true }) catch |open_err| {
+        var dir = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
             return mapDirErr(open_err);
         };
         defer dir.close();
@@ -179,7 +180,7 @@ fn satAdd(a: usize, b: usize) usize {
 fn mapDirErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied => error.Denied,
+        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
         error.OutOfMemory => error.OutOfMemory,
         else => error.Io,
     };
@@ -190,6 +191,8 @@ test "ls handler lists entries in deterministic order and marks directories" {
     const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.makePath("d");
     try tmp.dir.writeFile(.{ .sub_path = "b.txt", .data = "b" });
@@ -276,6 +279,8 @@ test "ls handler emits truncation metadata when output exceeds limit" {
     const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
 
     try tmp.dir.writeFile(.{ .sub_path = "one", .data = "" });
     try tmp.dir.writeFile(.{ .sub_path = "two", .data = "" });
