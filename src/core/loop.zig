@@ -3574,6 +3574,69 @@ test "CmdCache respects max_commands limit" {
     }));
 }
 
+test "property: CmdCache approval keys bind repo cwd policy and session" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            cmd: zc.Id,
+            loc: zc.Id,
+            sess: zc.Id,
+            hash: zc.Id,
+        }) bool {
+            var cache = CmdCache.init(std.testing.allocator);
+            defer cache.deinit();
+
+            const cwd = std.fmt.allocPrint(std.testing.allocator, "/repo/{s}", .{args.loc.slice()}) catch return false;
+            defer std.testing.allocator.free(cwd);
+            const repo = std.fmt.allocPrint(std.testing.allocator, "/repo-root/{s}", .{args.loc.slice()}) catch return false;
+            defer std.testing.allocator.free(repo);
+            const other_hash = std.fmt.allocPrint(std.testing.allocator, "{s}-other", .{args.hash.slice()}) catch return false;
+            defer std.testing.allocator.free(other_hash);
+            const other_sess = std.fmt.allocPrint(std.testing.allocator, "{s}-other", .{args.sess.slice()}) catch return false;
+            defer std.testing.allocator.free(other_sess);
+
+            const base: CmdCache.Key = .{
+                .tool = .bash,
+                .cmd = args.cmd.slice(),
+                .loc = .{ .cwd = cwd },
+                .policy = .{ .hash = args.hash.slice() },
+                .life = .{ .session = args.sess.slice() },
+            };
+
+            cache.add(base) catch return false;
+            if (!cache.contains(base)) return false;
+            if (cache.contains(.{
+                .tool = .bash,
+                .cmd = args.cmd.slice(),
+                .loc = .{ .repo_root = repo },
+                .policy = .{ .hash = args.hash.slice() },
+                .life = .{ .session = args.sess.slice() },
+            })) return false;
+            if (cache.contains(.{
+                .tool = .bash,
+                .cmd = args.cmd.slice(),
+                .loc = .{ .cwd = cwd },
+                .policy = .{ .hash = other_hash },
+                .life = .{ .session = args.sess.slice() },
+            })) return false;
+            if (cache.contains(.{
+                .tool = .bash,
+                .cmd = args.cmd.slice(),
+                .loc = .{ .cwd = cwd },
+                .policy = .{ .hash = args.hash.slice() },
+                .life = .{ .session = other_sess },
+            })) return false;
+            return !cache.contains(.{
+                .tool = .bash,
+                .cmd = args.cmd.slice(),
+                .loc = .{ .cwd = cwd },
+                .policy = .{ .hash = args.hash.slice() },
+                .life = .{ .expires_at_ms = 42 },
+            });
+        }
+    }.prop, .{ .iterations = 1500 });
+}
+
 test "parseCallArgs parses skill args" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};

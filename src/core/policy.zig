@@ -1097,6 +1097,8 @@ test "loadResolved returns stable empty effective hash" {
     try testing.expect(!resolved.doc.lock.system_prompt);
     try testing.expectEqualStrings("6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103", resolved.hash_hex[0..]);
 }
+
+const empty_eff_hash = "6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103";
 // ── Snapshot tests (ohsnap) ────────────────────────────────────────────
 
 fn snapEsc(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
@@ -1346,6 +1348,74 @@ test "property: evalEnv last-match-wins consistency" {
             return r1 == .allow and r2 == .deny;
         }
     }.prop, .{ .iterations = 2000 });
+}
+
+test "property: hashDoc is stable for identical docs" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            a: zc.Id,
+            b: zc.Id,
+            allow_a: bool,
+            allow_b: bool,
+            lock_cfg: bool,
+            lock_ctx: bool,
+        }) bool {
+            const rules = [_]Rule{
+                .{ .pattern = args.a.slice(), .effect = if (args.allow_a) .allow else .deny },
+                .{ .pattern = args.b.slice(), .effect = if (args.allow_b) .allow else .deny, .tool = "bash" },
+            };
+            const doc: Doc = .{
+                .rules = &rules,
+                .lock = .{
+                    .cfg = args.lock_cfg,
+                    .context = args.lock_ctx,
+                },
+            };
+            const h1 = hashDoc(testing.allocator, doc) catch return false;
+            const h2 = hashDoc(testing.allocator, doc) catch return false;
+            return std.mem.eql(u8, h1[0..], h2[0..]);
+        }
+    }.prop, .{ .iterations = 1000 });
+}
+
+test "property: empty effective hash and bind stay stable" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(_: struct { n: u8 }) bool {
+            const a = loadResolved(testing.allocator, null, null) catch return false;
+            defer deinitResolved(testing.allocator, a);
+            const b = loadResolved(testing.allocator, null, null) catch return false;
+            defer deinitResolved(testing.allocator, b);
+
+            if (a.has_files or b.has_files) return false;
+            if (!std.mem.eql(u8, a.hash_hex[0..], empty_eff_hash)) return false;
+            if (!std.mem.eql(u8, b.hash_hex[0..], empty_eff_hash)) return false;
+            return a.bind().eql(b.bind());
+        }
+    }.prop, .{ .iterations = 256 });
+}
+
+test "property: evaluate runtime tool rules honors exact tool filters" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { tool_name: zc.Id, other: zc.Id }) bool {
+            const tool_name = args.tool_name.slice();
+            const other = if (std.mem.eql(u8, tool_name, args.other.slice())) "other-tool" else args.other.slice();
+
+            const path = std.fmt.allocPrint(testing.allocator, "runtime/tool/{s}", .{tool_name}) catch return false;
+            defer testing.allocator.free(path);
+
+            const rules = [_]Rule{
+                .{ .pattern = path, .effect = .deny, .tool = tool_name },
+                .{ .pattern = "*", .effect = .allow },
+            };
+
+            if (evaluate(&rules, path, tool_name) != .deny) return false;
+            if (evaluate(&rules, path, other) != .allow) return false;
+            return evaluate(&rules, "runtime/tool/other-tool", tool_name) == .allow;
+        }
+    }.prop, .{ .iterations = 1500 });
 }
 
 test "network policy blocks local and private ranges" {
