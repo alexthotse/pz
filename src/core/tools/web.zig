@@ -25,6 +25,17 @@ pub const Request = struct {
     max_redirects: u8 = 5,
 };
 
+pub fn requiresEscalationApproval(req: Request) bool {
+    return switch (req.method) {
+        .GET, .HEAD, .OPTIONS => req.body != null,
+        .POST, .PUT, .PATCH, .DELETE => true,
+    };
+}
+
+pub fn approvalSummaryAlloc(alloc: std.mem.Allocator, req: Request) error{OutOfMemory}![]u8 {
+    return std.fmt.allocPrint(alloc, "web {s} {s}", .{ @tagName(req.method), req.url });
+}
+
 pub const Response = struct {
     status: u16,
     headers: []const Header = &.{},
@@ -285,6 +296,36 @@ test "parseUrl returns normalized fields for request targets" {
     try std.testing.expectEqualStrings("/api/v1", url.path);
     try std.testing.expect(url.query != null);
     try std.testing.expectEqualStrings("q=ok", url.query.?);
+}
+
+test "requiresEscalationApproval only allows silent safe reads" {
+    try std.testing.expect(!requiresEscalationApproval(.{
+        .method = .GET,
+        .url = "https://example.test/page",
+    }));
+    try std.testing.expect(!requiresEscalationApproval(.{
+        .method = .HEAD,
+        .url = "https://example.test/page",
+    }));
+    try std.testing.expect(requiresEscalationApproval(.{
+        .method = .POST,
+        .url = "https://example.test/form",
+    }));
+    try std.testing.expect(requiresEscalationApproval(.{
+        .method = .GET,
+        .url = "https://example.test/page",
+        .body = "unexpected",
+    }));
+}
+
+test "approvalSummaryAlloc includes method and url" {
+    const got = try approvalSummaryAlloc(std.testing.allocator, .{
+        .method = .PATCH,
+        .url = "https://example.test/api",
+    });
+    defer std.testing.allocator.free(got);
+
+    try std.testing.expectEqualStrings("web PATCH https://example.test/api", got);
 }
 
 test "nextRedirectTargetAlloc follows safe local redirect chain" {

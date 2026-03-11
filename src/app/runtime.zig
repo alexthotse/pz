@@ -126,6 +126,7 @@ const missing_provider_msg = "provider unavailable; choose anthropic/openai with
 const missing_anthropic_provider_msg = "anthropic credentials missing; set ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN, run /login anthropic, or set --provider-cmd/PZ_PROVIDER_CMD";
 const missing_openai_provider_msg = "openai credentials missing; set OPENAI_API_KEY, run /login openai, or set --provider-cmd/PZ_PROVIDER_CMD";
 const unsupported_native_provider_msg = "native provider unavailable for this provider label; use anthropic/openai or set --provider-cmd/PZ_PROVIDER_CMD";
+const policy_denied_msg = "blocked by policy";
 
 fn missingProviderMsgForInitErr(kind: NativeProviderKind, err: anyerror) []const u8 {
     return switch (kind) {
@@ -138,6 +139,146 @@ fn missingProviderMsgForInitErr(kind: NativeProviderKind, err: anyerror) []const
             else => missing_provider_msg,
         },
     };
+}
+
+const RuntimePolicy = struct {
+    alloc: std.mem.Allocator,
+    resolved: core.policy.Resolved,
+
+    fn load(alloc: std.mem.Allocator) !RuntimePolicy {
+        const cwd = try std.process.getCwdAlloc(alloc);
+        defer alloc.free(cwd);
+        const home = if (builtin.is_test) null else std.posix.getenv("HOME");
+        return .{
+            .alloc = alloc,
+            .resolved = try core.policy.loadResolved(alloc, cwd, home),
+        };
+    }
+
+    fn deinit(self: *RuntimePolicy) void {
+        core.policy.deinitResolved(self.alloc, self.resolved);
+        self.* = undefined;
+    }
+
+    fn hash(self: *const RuntimePolicy) []const u8 {
+        return self.resolved.hash_hex[0..];
+    }
+
+    fn bind(self: *const RuntimePolicy) core.policy.ApprovalBind {
+        return self.resolved.bind();
+    }
+
+    fn enforced(self: *const RuntimePolicy) bool {
+        return self.resolved.has_files;
+    }
+
+    fn allows(self: *const RuntimePolicy, path: []const u8, tool: ?[]const u8) bool {
+        if (!self.enforced()) return true;
+        return core.policy.evaluate(self.resolved.doc.rules, path, tool) == .allow;
+    }
+
+    fn allowsCmd(self: *const RuntimePolicy, name: []const u8) bool {
+        var buf: [128]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "runtime/cmd/{s}", .{name}) catch return false;
+        return self.allows(path, null);
+    }
+
+    fn allowsSubagent(self: *const RuntimePolicy, agent_id: []const u8) bool {
+        var buf: [128]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "runtime/subagent/{s}", .{agent_id}) catch return false;
+        return self.allows(path, null);
+    }
+
+    fn allowsTool(self: *const RuntimePolicy, name: []const u8, call: core.tools.Call) bool {
+        var buf: [256]u8 = undefined;
+        const path = toolPolicyPath(&buf, name, call) catch return false;
+        return self.allows(path, name);
+    }
+};
+
+fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]const u8 {
+    return switch (call.args) {
+        .read => |args| args.path,
+        .write => |args| args.path,
+        .bash => |args| args.cwd orelse try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
+        .edit => |args| args.path,
+        .grep => |args| args.path,
+        .find => |args| args.path,
+        .ls => |args| args.path,
+        .web => try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
+        .ask => try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
+        .skill => |args| try std.fmt.bufPrint(buf, "runtime/skill/{s}", .{args.name}),
+    };
+}
+
+const PolicyToolDispatch = struct {
+    pol: *const RuntimePolicy,
+    name: []const u8,
+    inner: core.tools.Dispatch,
+
+    fn run(self: *@This(), call: core.tools.Call, sink: core.tools.Sink) !core.tools.Result {
+        if (!self.pol.allowsTool(self.name, call)) {
+            return .{
+                .call_id = call.id,
+                .started_at_ms = call.at_ms,
+                .ended_at_ms = call.at_ms,
+                .out = &.{},
+                .final = .{ .failed = .{
+                    .kind = .denied,
+                    .msg = policy_denied_msg,
+                } },
+            };
+        }
+        return self.inner.run(call, sink);
+    }
+};
+
+const PolicyToolRegistry = struct {
+    ctxs: [9]PolicyToolDispatch = undefined,
+    entries: [9]core.tools.Entry = undefined,
+    reg: core.tools.Registry = undefined,
+
+    fn init(self: *PolicyToolRegistry, pol: *const RuntimePolicy, base: core.tools.Registry) void {
+        for (base.entries, 0..) |entry, i| {
+            self.ctxs[i] = .{
+                .pol = pol,
+                .name = entry.name,
+                .inner = entry.dispatch,
+            };
+            self.entries[i] = entry;
+            self.entries[i].dispatch = core.tools.Dispatch.from(
+                PolicyToolDispatch,
+                &self.ctxs[i],
+                PolicyToolDispatch.run,
+            );
+        }
+        self.reg = core.tools.Registry.init(self.entries[0..base.entries.len]);
+    }
+
+    fn registry(self: *const PolicyToolRegistry) core.tools.Registry {
+        return self.reg;
+    }
+};
+
+const PolicyToolAuth = struct {
+    pol: *const RuntimePolicy,
+
+    fn check(self: *@This(), name: []const u8, kind: core.tools.Kind, parsed_args: core.tools.Call.Args) !void {
+        const call: core.tools.Call = .{
+            .id = "",
+            .kind = kind,
+            .args = parsed_args,
+            .src = .model,
+            .at_ms = 0,
+            .cancel = null,
+        };
+        if (!self.pol.allowsTool(name, call)) return error.PolicyDenied;
+    }
+};
+
+fn initSubagentStub(pol: *const RuntimePolicy, agent_id: []const u8) !core.agent.Stub {
+    if (!pol.allowsSubagent(agent_id)) return error.PolicyDenied;
+    return try core.agent.Stub.init(agent_id, pol.hash());
 }
 
 const MissingProvider = struct {
@@ -1364,6 +1505,177 @@ const AuditHooks = struct {
     }
 };
 
+const RuntimeCtlAudit = struct {
+    hooks: AuditHooks,
+    seq: u64 = 1,
+
+    const Req = struct {
+        op: []const u8,
+        res_kind: core.audit.ResKind,
+        res_name: core.audit.Str,
+        out: core.audit.Out = .ok,
+        sev: core.audit.Sev = .info,
+        msg: core.audit.Str,
+        argv: ?core.audit.Str = null,
+        attrs: []const core.audit.Attr = &.{},
+    };
+
+    fn emit(self: *RuntimeCtlAudit, alloc: std.mem.Allocator, req: Req) !void {
+        const emit_fn = self.hooks.emit_audit orelse return;
+        const seq = self.seq;
+        self.seq +%= 1;
+        try emit_fn(self.hooks.emit_audit_ctx.?, alloc, .{
+            .ts_ms = self.hooks.now_ms(),
+            .sid = "runtime",
+            .seq = seq,
+            .sev = req.sev,
+            .out = req.out,
+            .actor = .{ .kind = .sys },
+            .res = .{
+                .kind = req.res_kind,
+                .name = req.res_name,
+                .op = req.op,
+            },
+            .msg = req.msg,
+            .data = .{
+                .tool = .{
+                    .name = .{ .text = "runtime", .vis = .@"pub" },
+                    .call_id = req.op,
+                    .argv = req.argv,
+                },
+            },
+            .attrs = req.attrs,
+        });
+    }
+};
+
+fn runtimeCfgResName() core.audit.Str {
+    return .{ .text = "runtime", .vis = .@"pub" };
+}
+
+fn runtimeSessResName() core.audit.Str {
+    return .{ .text = "session", .vis = .@"pub" };
+}
+
+fn runtimeCtlStart(
+    audit: *RuntimeCtlAudit,
+    alloc: std.mem.Allocator,
+    op: []const u8,
+    res_kind: core.audit.ResKind,
+    res_name: core.audit.Str,
+    argv: ?core.audit.Str,
+    attrs: []const core.audit.Attr,
+) !void {
+    try audit.emit(alloc, .{
+        .op = op,
+        .res_kind = res_kind,
+        .res_name = res_name,
+        .msg = .{ .text = "runtime control start", .vis = .@"pub" },
+        .argv = argv,
+        .attrs = attrs,
+    });
+}
+
+fn runtimeCtlSuccess(
+    audit: *RuntimeCtlAudit,
+    alloc: std.mem.Allocator,
+    op: []const u8,
+    res_kind: core.audit.ResKind,
+    res_name: core.audit.Str,
+    argv: ?core.audit.Str,
+    attrs: []const core.audit.Attr,
+) !void {
+    try audit.emit(alloc, .{
+        .op = op,
+        .res_kind = res_kind,
+        .res_name = res_name,
+        .sev = .notice,
+        .msg = .{ .text = "runtime control success", .vis = .@"pub" },
+        .argv = argv,
+        .attrs = attrs,
+    });
+}
+
+fn runtimeCtlFail(
+    audit: *RuntimeCtlAudit,
+    alloc: std.mem.Allocator,
+    op: []const u8,
+    res_kind: core.audit.ResKind,
+    res_name: core.audit.Str,
+    argv: ?core.audit.Str,
+    msg: core.audit.Str,
+    attrs: []const core.audit.Attr,
+) !void {
+    try audit.emit(alloc, .{
+        .op = op,
+        .res_kind = res_kind,
+        .res_name = res_name,
+        .out = .fail,
+        .sev = .err,
+        .msg = msg,
+        .argv = argv,
+        .attrs = attrs,
+    });
+}
+
+fn replaceOwnedText(
+    alloc: std.mem.Allocator,
+    current: *([]const u8),
+    owned: *?[]u8,
+    next: []const u8,
+) !void {
+    const dup = try alloc.dupe(u8, next);
+    if (owned.*) |old| alloc.free(old);
+    owned.* = dup;
+    current.* = dup;
+}
+
+const ReloadRes = enum {
+    loaded,
+    empty,
+};
+
+fn reloadContextWithAudit(
+    alloc: std.mem.Allocator,
+    sys_prompt: *?[]const u8,
+    sys_prompt_owned: *?[]u8,
+    audit: *RuntimeCtlAudit,
+    load_fn: *const fn (std.mem.Allocator) anyerror!?[]u8,
+) !ReloadRes {
+    try runtimeCtlStart(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &.{});
+    const next_ctx = load_fn(alloc) catch |err| {
+        try runtimeCtlFail(
+            audit,
+            alloc,
+            "reload",
+            .cfg,
+            runtimeCfgResName(),
+            null,
+            .{ .text = @errorName(err), .vis = .mask },
+            &.{},
+        );
+        return err;
+    };
+    if (next_ctx) |new_ctx| {
+        if (sys_prompt_owned.*) |old| alloc.free(old);
+        sys_prompt_owned.* = new_ctx;
+        sys_prompt.* = new_ctx;
+        const attrs = [_]core.audit.Attr{
+            .{ .key = "loaded", .vis = .@"pub", .val = .{ .bool = true } },
+        };
+        try runtimeCtlSuccess(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &attrs);
+        return .loaded;
+    }
+    if (sys_prompt_owned.*) |old| alloc.free(old);
+    sys_prompt_owned.* = null;
+    sys_prompt.* = null;
+    const attrs = [_]core.audit.Attr{
+        .{ .key = "loaded", .vis = .@"pub", .val = .{ .bool = false } },
+    };
+    try runtimeCtlSuccess(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &attrs);
+    return .empty;
+}
+
 pub fn exec(alloc: std.mem.Allocator, run_cmd: cli.Run) (Err || anyerror)![]u8 {
     return execWithIo(alloc, run_cmd, null, null);
 }
@@ -1403,6 +1715,9 @@ fn execWithIoHooks(
     var has_native_rt = false;
     defer if (has_provider_rt) provider_rt.deinit();
     defer if (has_native_rt) native_rt.deinit();
+
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
 
     var tools_rt = core.tools.builtin.Runtime.init(.{
         .alloc = alloc,
@@ -1490,6 +1805,7 @@ fn execWithIoHooks(
                     sid,
                     provider,
                     sess_store,
+                    &pol,
                     &tools_rt,
                     writer,
                     sys_prompt,
@@ -1500,6 +1816,7 @@ fn execWithIoHooks(
                     sid,
                     provider,
                     sess_store,
+                    &pol,
                     &tools_rt,
                     reader,
                     writer,
@@ -1511,6 +1828,7 @@ fn execWithIoHooks(
                     &sid,
                     provider,
                     sess_store,
+                    &pol,
                     &tools_rt,
                     reader,
                     writer,
@@ -1526,6 +1844,7 @@ fn execWithIoHooks(
                     &sid,
                     provider,
                     sess_store,
+                    &pol,
                     &tools_rt,
                     reader,
                     writer,
@@ -1550,6 +1869,7 @@ fn runPrint(
     sid: []const u8,
     provider: core.providers.Provider,
     store: core.session.SessionStore,
+    pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     out: std.Io.AnyWriter,
     sys_prompt: ?[]const u8,
@@ -1561,6 +1881,15 @@ fn runPrint(
     sink_impl.fmt.verbose = run_cmd.verbose;
 
     const mode = core.loop.ModeSink.from(PrintSink, &sink_impl, PrintSink.push);
+    var reg: PolicyToolRegistry = undefined;
+    reg.init(pol, tools_rt.registry());
+    var tool_auth_impl = PolicyToolAuth{ .pol = pol };
+    var cmd_cache = core.loop.CmdCache.init(alloc);
+    defer cmd_cache.deinit();
+    const approval_bind = try loadApprovalBindAlloc(alloc);
+    defer approval_bind.deinit(alloc);
+    const approval_loc = try getApprovalLocAlloc(alloc);
+    defer freeApprovalLoc(alloc, approval_loc);
 
     _ = try core.loop.run(.{
         .alloc = alloc,
@@ -1570,11 +1899,17 @@ fn runPrint(
         .provider_label = run_cmd.cfg.provider,
         .provider = provider,
         .store = store,
-        .reg = tools_rt.registry(),
+        .reg = reg.registry(),
+        .tool_auth = core.loop.ToolAuth.from(PolicyToolAuth, &tool_auth_impl, PolicyToolAuth.check),
         .mode = mode,
         .system_prompt = sys_prompt,
         .provider_opts = run_cmd.thinking.toProviderOpts(),
         .max_turns = run_cmd.max_turns,
+        .cmd_cache = &cmd_cache,
+        .approval = .{
+            .loc = approval_loc,
+            .policy = approval_bind,
+        },
     });
 
     try sink_impl.fmt.finish();
@@ -1583,12 +1918,114 @@ fn runPrint(
     }
 }
 
+const PromptAskCtx = struct {
+    ask_ui: *AskUiCtx,
+    reader: *tui_input.Reader,
+
+    fn run(self: *PromptAskCtx, args: core.tools.Call.AskArgs) ![]u8 {
+        return self.ask_ui.runOnMain(self.reader, args);
+    }
+};
+
+const ApprovalAnswer = struct {
+    cancelled: bool = false,
+    answers: []const struct {
+        index: usize = 0,
+    } = &.{},
+};
+
+const HookApprover = struct {
+    alloc: std.mem.Allocator,
+    hook: core.tools.builtin.AskHook,
+    cache: *core.loop.CmdCache,
+
+    fn check(self: *@This(), key: core.loop.CmdCache.Key, cached: bool) !void {
+        if (cached) return;
+
+        const summary = try approvalSummaryFromKeyAlloc(self.alloc, key);
+        defer self.alloc.free(summary);
+        const question = try std.fmt.allocPrint(
+            self.alloc,
+            "Run {s}? This action was derived from untrusted input.",
+            .{summary},
+        );
+        defer self.alloc.free(question);
+
+        const options = [_]core.tools.Call.AskArgs.Option{
+            .{ .label = "Approve" },
+            .{ .label = "Deny" },
+        };
+        const questions = [_]core.tools.Call.AskArgs.Question{
+            .{
+                .id = "approve",
+                .header = "Approval required",
+                .question = question,
+                .options = options[0..],
+                .allow_other = false,
+            },
+        };
+
+        const raw = try self.hook.run(.{ .questions = questions[0..] });
+        defer self.alloc.free(raw);
+
+        var parsed = try std.json.parseFromSlice(ApprovalAnswer, self.alloc, raw, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        if (parsed.value.cancelled) return error.ApprovalDenied;
+        if (parsed.value.answers.len == 0) return error.ApprovalDenied;
+        if (parsed.value.answers[0].index != 0) return error.ApprovalDenied;
+        try self.cache.add(key);
+    }
+};
+
+fn approvalSummaryFromKeyAlloc(alloc: std.mem.Allocator, key: core.loop.CmdCache.Key) ![]u8 {
+    return switch (key.tool) {
+        .write => blk: {
+            var parsed = try std.json.parseFromSlice(core.tools.Call.WriteArgs, alloc, key.cmd, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            break :blk std.fmt.allocPrint(alloc, "write {s}", .{parsed.value.path});
+        },
+        .bash => blk: {
+            var parsed = try std.json.parseFromSlice(core.tools.Call.BashArgs, alloc, key.cmd, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            break :blk std.fmt.allocPrint(alloc, "bash `{s}`", .{parsed.value.cmd});
+        },
+        .edit => blk: {
+            var parsed = try std.json.parseFromSlice(core.tools.Call.EditArgs, alloc, key.cmd, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            break :blk std.fmt.allocPrint(alloc, "edit {s}", .{parsed.value.path});
+        },
+        .web => blk: {
+            var parsed = try std.json.parseFromSlice(core.tools.Call.WebArgs, alloc, key.cmd, .{
+                .allocate = .alloc_always,
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            break :blk core.tools.web.approvalSummaryAlloc(alloc, parsed.value);
+        },
+        else => alloc.dupe(u8, key.cmd),
+    };
+}
+
 fn runJson(
     alloc: std.mem.Allocator,
     run_cmd: cli.Run,
     sid: []const u8,
     provider: core.providers.Provider,
     store: core.session.SessionStore,
+    pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     in: std.Io.AnyReader,
     out: std.Io.AnyWriter,
@@ -1610,6 +2047,7 @@ fn runJson(
         .alloc = alloc,
         .provider = provider,
         .store = store,
+        .pol = pol,
         .tools_rt = tools_rt,
         .mode = mode,
         .max_turns = run_cmd.max_turns,
@@ -1658,6 +2096,7 @@ fn runTui(
     sid: *([]u8),
     provider: core.providers.Provider,
     store: core.session.SessionStore,
+    pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     in: std.Io.AnyReader,
     out: std.Io.AnyWriter,
@@ -1667,6 +2106,7 @@ fn runTui(
     is_sub: bool,
     audit_hooks: AuditHooks,
 ) !void {
+    var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
     var model_owned: ?[]u8 = null;
     defer if (model_owned) |m| alloc.free(m);
@@ -1733,18 +2173,6 @@ fn runTui(
     defer approval_bind.deinit(alloc);
     const approval_loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, approval_loc);
-    const tctx = TurnCtx{
-        .alloc = alloc,
-        .provider = provider,
-        .store = store,
-        .tools_rt = tools_rt,
-        .mode = mode,
-        .max_turns = run_cmd.max_turns,
-        .cancel = cancel,
-        .cmd_cache = &cmd_cache,
-        .approval_bind = approval_bind,
-        .approval_loc = approval_loc,
-    };
     var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
         .emit_audit = audit_hooks.emit_audit,
@@ -1758,6 +2186,32 @@ fn runTui(
         .ui = &ui,
         .out = out,
         .watcher = &watcher,
+    };
+    var prompt_reader = tui_input.Reader.init(stdin_fd);
+    var prompt_ask_ctx = PromptAskCtx{
+        .ask_ui = &ask_ui_ctx,
+        .reader = &prompt_reader,
+    };
+    const prompt_ask_hook = core.tools.builtin.AskHook.from(PromptAskCtx, &prompt_ask_ctx, PromptAskCtx.run);
+    var prompt_approver_impl = HookApprover{
+        .alloc = alloc,
+        .hook = prompt_ask_hook,
+        .cache = &cmd_cache,
+    };
+    const prompt_approver = core.loop.Approver.from(HookApprover, &prompt_approver_impl, HookApprover.check);
+    const tctx = TurnCtx{
+        .alloc = alloc,
+        .provider = provider,
+        .store = store,
+        .pol = pol,
+        .tools_rt = tools_rt,
+        .mode = mode,
+        .max_turns = run_cmd.max_turns,
+        .cancel = cancel,
+        .cmd_cache = &cmd_cache,
+        .approval_bind = approval_bind,
+        .approval_loc = approval_loc,
+        .approver = prompt_approver,
     };
     defer tools_rt.ask_hook = null;
     var thinking = run_cmd.thinking;
@@ -1806,6 +2260,7 @@ fn runTui(
             &model_owned,
             &provider_label,
             &provider_owned,
+            pol,
             tools_rt,
             &bg_mgr,
             session_dir_path,
@@ -1813,6 +2268,7 @@ fn runTui(
             sys_prompt,
             init_cmd_fbs.writer().any(),
             audit_hooks,
+            &ctl_audit,
         );
         if (cmd == .quit) return;
         if (cmd == .clear) {
@@ -1825,7 +2281,11 @@ fn runTui(
             try showCost(alloc, &ui);
         }
         if (cmd == .reload) {
-            // Reload context and continue to input loop
+            const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load);
+            switch (reloaded) {
+                .loaded => try ui.tr.infoText("[context reloaded]"),
+                .empty => try ui.tr.infoText("[context reloaded (no files)]"),
+            }
         }
         if (cmd == .resumed) {
             _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
@@ -1911,10 +2371,11 @@ fn runTui(
         defer live_approval_bind.deinit(alloc);
         const live_approval_loc = try getApprovalLocAlloc(alloc);
         defer freeApprovalLoc(alloc, live_approval_loc);
-        const live_tctx = TurnCtx{
+        var live_tctx = TurnCtx{
             .alloc = alloc,
             .provider = provider,
             .store = store,
+            .pol = pol,
             .tools_rt = tools_rt,
             .mode = live_mode,
             .max_turns = run_cmd.max_turns,
@@ -1929,6 +2390,13 @@ fn runTui(
             .live = &live_turn,
         };
         tools_rt.ask_hook = core.tools.builtin.AskHook.from(LiveAskCtx, &live_ask_ctx, LiveAskCtx.run);
+        var live_approver_impl = HookApprover{
+            .alloc = alloc,
+            .hook = tools_rt.ask_hook.?,
+            .cache = &live_cmd_cache,
+        };
+        const live_approver = core.loop.Approver.from(HookApprover, &live_approver_impl, HookApprover.check);
+        live_tctx.approver = live_approver;
         var pending = PendingQueue{};
         defer pending.deinit(alloc);
         const input_mode: tui_panels.InputMode = .steering;
@@ -1960,20 +2428,26 @@ fn runTui(
                                 };
                                 switch (ui.ov.?.kind) {
                                     .model => {
-                                        const new = try alloc.dupe(u8, sel);
-                                        if (model_owned) |old| alloc.free(old);
-                                        model_owned = new;
-                                        model = new;
+                                        const argv: core.audit.Str = .{ .text = sel, .vis = .@"pub" };
+                                        try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
+                                        try replaceOwnedText(alloc, &model, &model_owned, sel);
+                                        const attrs = [_]core.audit.Attr{
+                                            .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider_label } },
+                                        };
+                                        try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
                                         ui.pn.ctx_limit = modelCtxWindow(model);
                                         try ui.setModel(model);
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
                                     .session => {
+                                        const argv: core.audit.Str = .{ .text = sel, .vis = .mask };
+                                        try runtimeCtlStart(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
                                         const next_sid = try alloc.dupe(u8, sel);
                                         alloc.free(sid.*);
                                         sid.* = next_sid;
                                         _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
+                                        try runtimeCtlSuccess(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
                                         const msg = try std.fmt.allocPrint(alloc, "resumed session {s}", .{sid.*});
                                         defer alloc.free(msg);
                                         try ui.tr.infoText(msg);
@@ -1986,6 +2460,7 @@ fn runTui(
                                         applySettingsToggle(&ui, ui.ov.?.sel, ui.ov.?.getToggle(ui.ov.?.sel) orelse false, &auto_compact_on);
                                     },
                                     .fork => {
+                                        try runtimeCtlStart(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, &.{});
                                         const next_sid = try newSid(alloc);
                                         errdefer alloc.free(next_sid);
                                         if (session_dir_path) |sdp| {
@@ -1995,6 +2470,7 @@ fn runTui(
                                         sid.* = next_sid;
                                         try ui.ed.setText(sel);
                                         try ui.tr.infoText("[forked session]");
+                                        try runtimeCtlSuccess(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, &.{});
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
@@ -2014,7 +2490,7 @@ fn runTui(
                                     .logout => {
                                         // Remove credentials for selected provider
                                         if (parseAuthProvider(sel)) |prov| {
-                                            try core.providers.auth.logout(alloc, prov);
+                                            try core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth());
                                             const msg2 = try std.fmt.allocPrint(alloc, "logged out of {s}", .{core.providers.auth.providerName(prov)});
                                             defer alloc.free(msg2);
                                             try ui.tr.infoText(msg2);
@@ -2128,6 +2604,7 @@ fn runTui(
                                 &model_owned,
                                 &provider_label,
                                 &provider_owned,
+                                pol,
                                 tools_rt,
                                 &bg_mgr,
                                 session_dir_path,
@@ -2135,6 +2612,7 @@ fn runTui(
                                 sys_prompt,
                                 cmd_fbs.writer().any(),
                                 audit_hooks,
+                                &ctl_audit,
                             );
                             if (cmd == .quit) return;
                             if (cmd == .clear) {
@@ -2153,17 +2631,10 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .reload) {
-                                // Reload context files
-                                if (try core.context.load(alloc)) |new_ctx| {
-                                    if (sys_prompt_owned) |old| alloc.free(old);
-                                    sys_prompt_owned = new_ctx;
-                                    sys_prompt = new_ctx;
-                                    try ui.tr.infoText("[context reloaded]");
-                                } else {
-                                    if (sys_prompt_owned) |old| alloc.free(old);
-                                    sys_prompt_owned = null;
-                                    sys_prompt = null;
-                                    try ui.tr.infoText("[context reloaded (no files)]");
+                                const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load);
+                                switch (reloaded) {
+                                    .loaded => try ui.tr.infoText("[context reloaded]"),
+                                    .empty => try ui.tr.infoText("[context reloaded (no files)]"),
                                 }
                                 try ui.draw(out);
                                 continue;
@@ -2584,6 +3055,7 @@ fn runTui(
                 &model_owned,
                 &provider_label,
                 &provider_owned,
+                pol,
                 tools_rt,
                 &bg_mgr,
                 session_dir_path,
@@ -2591,6 +3063,7 @@ fn runTui(
                 sys_prompt,
                 out,
                 audit_hooks,
+                &ctl_audit,
             );
             if (cmd == .quit) return;
             if (cmd == .clear) {
@@ -2612,15 +3085,7 @@ fn runTui(
                 continue;
             }
             if (cmd == .reload) {
-                if (try core.context.load(alloc)) |new_ctx| {
-                    if (sys_prompt_owned) |old| alloc.free(old);
-                    sys_prompt_owned = new_ctx;
-                    sys_prompt = new_ctx;
-                } else {
-                    if (sys_prompt_owned) |old| alloc.free(old);
-                    sys_prompt_owned = null;
-                    sys_prompt = null;
-                }
+                _ = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load);
                 try ui.draw(out);
                 cmd_ct += 1;
                 continue;
@@ -2667,6 +3132,7 @@ fn runRpc(
     sid: *([]u8),
     provider: core.providers.Provider,
     store: core.session.SessionStore,
+    pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     in: std.Io.AnyReader,
     out: std.Io.AnyWriter,
@@ -2675,6 +3141,7 @@ fn runRpc(
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
 ) !void {
+    var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
     var model_owned: ?[]u8 = null;
     defer if (model_owned) |m| alloc.free(m);
@@ -2698,6 +3165,7 @@ fn runRpc(
         .alloc = alloc,
         .provider = provider,
         .store = store,
+        .pol = pol,
         .tools_rt = tools_rt,
         .mode = mode,
         .max_turns = run_cmd.max_turns,
@@ -2786,6 +3254,16 @@ fn runRpc(
             continue;
         };
 
+        if (!pol.allowsCmd(cmd)) {
+            try writeJsonLine(alloc, out, .{
+                .type = "rpc_error",
+                .id = req.id,
+                .cmd = raw_cmd,
+                .msg = policy_denied_msg,
+            });
+            continue;
+        }
+
         switch (resolved) {
             .prompt => {
                 const prompt = req.text orelse req.arg orelse "";
@@ -2813,19 +3291,28 @@ fn runRpc(
                 });
             },
             .model => {
-                if (isSetModelAlias(raw_cmd)) {
-                    if (req.provider) |prov| {
-                        if (prov.len > 0) {
-                            const prov_dup = try alloc.dupe(u8, prov);
-                            if (provider_owned) |curr| alloc.free(curr);
-                            provider_owned = prov_dup;
-                            provider_label = prov_dup;
-                        }
-                    }
-                }
-
                 const next = req.model_id orelse req.model orelse req.arg orelse "";
+                const argv = if (next.len > 0) core.audit.Str{ .text = next, .vis = .@"pub" } else null;
+                const has_alias_provider = isSetModelAlias(raw_cmd) and req.provider != null and req.provider.?.len > 0;
+                if (has_alias_provider) {
+                    const start_attrs = [_]core.audit.Attr{
+                        .{ .key = "provider", .vis = .@"pub", .val = .{ .str = req.provider.? } },
+                    };
+                    try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &start_attrs);
+                } else {
+                    try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
+                }
                 if (next.len == 0) {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "model",
+                        .cfg,
+                        runtimeCfgResName(),
+                        null,
+                        .{ .text = "missing model value", .vis = .mask },
+                        &.{},
+                    );
                     try writeJsonLine(alloc, out, .{
                         .type = "rpc_error",
                         .id = req.id,
@@ -2834,10 +3321,14 @@ fn runRpc(
                     });
                     continue;
                 }
-                const dup = try alloc.dupe(u8, next);
-                if (model_owned) |curr| alloc.free(curr);
-                model_owned = dup;
-                model = dup;
+                if (has_alias_provider) {
+                    try replaceOwnedText(alloc, &provider_label, &provider_owned, req.provider.?);
+                }
+                try replaceOwnedText(alloc, &model, &model_owned, next);
+                const done_attrs = [_]core.audit.Attr{
+                    .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider_label } },
+                };
+                try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &done_attrs);
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -2848,7 +3339,19 @@ fn runRpc(
             },
             .provider => {
                 const next = req.provider orelse req.arg orelse "";
+                const argv = if (next.len > 0) core.audit.Str{ .text = next, .vis = .@"pub" } else null;
+                try runtimeCtlStart(&ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
                 if (next.len == 0) {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "provider",
+                        .cfg,
+                        runtimeCfgResName(),
+                        null,
+                        .{ .text = "missing provider value", .vis = .mask },
+                        &.{},
+                    );
                     try writeJsonLine(alloc, out, .{
                         .type = "rpc_error",
                         .id = req.id,
@@ -2857,10 +3360,8 @@ fn runRpc(
                     });
                     continue;
                 }
-                const dup = try alloc.dupe(u8, next);
-                if (provider_owned) |curr| alloc.free(curr);
-                provider_owned = dup;
-                provider_label = dup;
+                try replaceOwnedText(alloc, &provider_label, &provider_owned, next);
+                try runtimeCtlSuccess(&ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -2871,7 +3372,19 @@ fn runRpc(
             .tools => {
                 const raw = req.tools orelse req.arg orelse "";
                 if (raw.len != 0) {
+                    const argv: core.audit.Str = .{ .text = raw, .vis = .@"pub" };
+                    try runtimeCtlStart(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &.{});
                     const mask = parseCmdToolMask(raw) catch {
+                        try runtimeCtlFail(
+                            &ctl_audit,
+                            alloc,
+                            "tools",
+                            .cfg,
+                            runtimeCfgResName(),
+                            argv,
+                            .{ .text = "invalid tools value", .vis = .mask },
+                            &.{},
+                        );
                         try writeJsonLine(alloc, out, .{
                             .type = "rpc_error",
                             .id = req.id,
@@ -2884,6 +3397,13 @@ fn runRpc(
                 }
                 const tool_csv = try toolMaskCsvAlloc(alloc, tools_rt.tool_mask);
                 defer alloc.free(tool_csv);
+                if (raw.len != 0) {
+                    const argv: core.audit.Str = .{ .text = raw, .vis = .@"pub" };
+                    const attrs = [_]core.audit.Attr{
+                        .{ .key = "tools", .vis = .@"pub", .val = .{ .str = tool_csv } },
+                    };
+                    try runtimeCtlSuccess(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &attrs);
+                }
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -2972,9 +3492,11 @@ fn runRpc(
                 }
             },
             .new => {
+                try runtimeCtlStart(&ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
                 const next_sid = try newSid(alloc);
                 alloc.free(sid.*);
                 sid.* = next_sid;
+                try runtimeCtlSuccess(&ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -2984,7 +3506,21 @@ fn runRpc(
             },
             .@"resume" => {
                 const token = req.session_path orelse req.session orelse req.sid orelse req.arg;
+                if (token) |raw| {
+                    const argv: core.audit.Str = .{ .text = raw, .vis = .mask };
+                    try runtimeCtlStart(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+                }
                 applyResumeSid(alloc, sid, session_dir_path, no_session, token) catch |err| {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "resume",
+                        .sess,
+                        runtimeSessResName(),
+                        if (token) |raw| .{ .text = raw, .vis = .mask } else null,
+                        .{ .text = @errorName(err), .vis = .mask },
+                        &.{},
+                    );
                     const err_msg = try report.rpc(alloc, "resume session", err);
                     defer alloc.free(err_msg);
                     try writeJsonLine(alloc, out, .{
@@ -2995,6 +3531,15 @@ fn runRpc(
                     });
                     continue;
                 };
+                try runtimeCtlSuccess(
+                    &ctl_audit,
+                    alloc,
+                    "resume",
+                    .sess,
+                    runtimeSessResName(),
+                    if (token) |raw| .{ .text = raw, .vis = .mask } else null,
+                    &.{},
+                );
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -3042,7 +3587,22 @@ fn runRpc(
                 });
             },
             .fork => {
+                const fork_arg = req.sid orelse req.arg;
+                if (fork_arg) |raw| {
+                    const argv: core.audit.Str = .{ .text = raw, .vis = .mask };
+                    try runtimeCtlStart(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, &.{});
+                }
                 applyForkSid(alloc, sid, session_dir_path, no_session, req.sid orelse req.arg) catch |err| {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "fork",
+                        .sess,
+                        runtimeSessResName(),
+                        if (fork_arg) |raw| .{ .text = raw, .vis = .mask } else null,
+                        .{ .text = @errorName(err), .vis = .mask },
+                        &.{},
+                    );
                     const err_msg = try report.rpc(alloc, "fork session", err);
                     defer alloc.free(err_msg);
                     try writeJsonLine(alloc, out, .{
@@ -3053,6 +3613,15 @@ fn runRpc(
                     });
                     continue;
                 };
+                try runtimeCtlSuccess(
+                    &ctl_audit,
+                    alloc,
+                    "fork",
+                    .sess,
+                    runtimeSessResName(),
+                    if (fork_arg) |raw| .{ .text = raw, .vis = .mask } else null,
+                    &.{},
+                );
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -3061,7 +3630,18 @@ fn runRpc(
                 });
             },
             .compact => {
+                try runtimeCtlStart(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &.{});
                 const session_dir = requireSessionDir(session_dir_path, no_session) catch {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "compact",
+                        .sess,
+                        runtimeSessResName(),
+                        null,
+                        .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
+                        &.{},
+                    );
                     const err_msg = try report.rpc(alloc, "compact session", error.SessionDisabled);
                     defer alloc.free(err_msg);
                     try writeJsonLine(alloc, out, .{
@@ -3074,7 +3654,24 @@ fn runRpc(
                 };
                 var dir = try std.fs.cwd().openDir(session_dir, .{});
                 defer dir.close();
-                const ck = try core.session.compactSession(alloc, dir, sid.*, std.time.milliTimestamp());
+                const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms()) catch |err| {
+                    try runtimeCtlFail(
+                        &ctl_audit,
+                        alloc,
+                        "compact",
+                        .sess,
+                        runtimeSessResName(),
+                        null,
+                        .{ .text = @errorName(err), .vis = .mask },
+                        &.{},
+                    );
+                    return err;
+                };
+                const attrs = [_]core.audit.Attr{
+                    .{ .key = "in_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.in_lines) } },
+                    .{ .key = "out_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.out_lines) } },
+                };
+                try runtimeCtlSuccess(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &attrs);
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_compact",
                     .id = req.id,
@@ -3347,6 +3944,7 @@ fn handleSlashCommand(
     model_owned: *?[]u8,
     provider: *([]const u8),
     provider_owned: *?[]u8,
+    pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     bg_mgr: *bg.Mgr,
     session_dir_path: ?[]const u8,
@@ -3354,6 +3952,7 @@ fn handleSlashCommand(
     _: ?[]const u8, // sys_prompt (unused after settings became interactive)
     out: std.Io.AnyWriter,
     audit_hooks: AuditHooks,
+    ctl_audit: *RuntimeCtlAudit,
 ) !CmdRes {
     if (line.len == 0 or line[0] != '/') return .unhandled;
 
@@ -3396,12 +3995,20 @@ fn handleSlashCommand(
 
     const resolved = cmd_map.get(cmd) orelse {
         switch (try loadSlashSkill(alloc, cmd)) {
-            .allowed => return .unhandled,
+            .allowed => {
+                if (pol.allowsCmd(cmd)) return .unhandled;
+                try writeTextLine(alloc, out, "blocked by policy: /{s}\n", .{cmd});
+            },
             .blocked => try writeTextLine(alloc, out, "skill blocked: /{s}\n", .{cmd}),
             .missing => try writeTextLine(alloc, out, "unknown command: /{s}\n", .{cmd}),
         }
         return .handled;
     };
+
+    if (!pol.allowsCmd(cmd)) {
+        try writeTextLine(alloc, out, "blocked by policy: /{s}\n", .{cmd});
+        return .handled;
+    }
 
     switch (resolved) {
         .help => {
@@ -3451,32 +4058,51 @@ fn handleSlashCommand(
         },
         .model => {
             if (arg.len == 0) return .select_model;
-            const dup = try alloc.dupe(u8, arg);
-            if (model_owned.*) |curr| alloc.free(curr);
-            model_owned.* = dup;
-            model.* = dup;
-            try writeTextLine(alloc, out, "model set to {s}\n", .{dup});
+            const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
+            try runtimeCtlStart(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
+            try replaceOwnedText(alloc, model, model_owned, arg);
+            const attrs = [_]core.audit.Attr{
+                .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider.* } },
+            };
+            try runtimeCtlSuccess(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
+            try writeTextLine(alloc, out, "model set to {s}\n", .{model.*});
         },
         .provider => {
             if (arg.len == 0) {
                 try writeTextLine(alloc, out, "provider {s}\n", .{provider.*});
                 return .handled;
             }
-            const dup = try alloc.dupe(u8, arg);
-            if (provider_owned.*) |curr| alloc.free(curr);
-            provider_owned.* = dup;
-            provider.* = dup;
-            try writeTextLine(alloc, out, "provider set to {s}\n", .{dup});
+            const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
+            try runtimeCtlStart(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
+            try replaceOwnedText(alloc, provider, provider_owned, arg);
+            try runtimeCtlSuccess(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
+            try writeTextLine(alloc, out, "provider set to {s}\n", .{provider.*});
         },
         .tools => {
             if (arg.len != 0) {
+                const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
+                try runtimeCtlStart(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &.{});
                 const mask = parseCmdToolMask(arg) catch {
+                    try runtimeCtlFail(
+                        ctl_audit,
+                        alloc,
+                        "tools",
+                        .cfg,
+                        runtimeCfgResName(),
+                        argv,
+                        .{ .text = "invalid tools value", .vis = .mask },
+                        &.{},
+                    );
                     try out.writeAll("error: invalid tools value; use all, none, or comma list of read,write,bash,edit,grep,find,ls,ask,skill\n");
                     return .handled;
                 };
                 tools_rt.tool_mask = mask;
                 const tool_csv = try toolMaskCsvAlloc(alloc, tools_rt.tool_mask);
                 defer alloc.free(tool_csv);
+                const attrs = [_]core.audit.Attr{
+                    .{ .key = "tools", .vis = .@"pub", .val = .{ .str = tool_csv } },
+                };
+                try runtimeCtlSuccess(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &attrs);
                 try writeTextLine(alloc, out, "tools set to {s}\n", .{tool_csv});
                 return .handled;
             }
@@ -3507,19 +4133,34 @@ fn handleSlashCommand(
             try out.writeAll(outcome.msg);
         },
         .new => {
+            try runtimeCtlStart(ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
             const next_sid = try newSid(alloc);
             alloc.free(sid.*);
             sid.* = next_sid;
+            try runtimeCtlSuccess(ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
             try writeTextLine(alloc, out, "new session {s}\n", .{sid.*});
         },
         .@"resume" => {
             if (arg.len == 0) return .select_session;
+            const argv: core.audit.Str = .{ .text = arg, .vis = .mask };
+            try runtimeCtlStart(ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
             applyResumeSid(alloc, sid, session_dir_path, no_session, arg) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "resume",
+                    .sess,
+                    runtimeSessResName(),
+                    argv,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "resume session", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
                 return .handled;
             };
+            try runtimeCtlSuccess(ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
             try writeTextLine(alloc, out, "resumed session {s}\n", .{sid.*});
             return .resumed;
         },
@@ -3537,16 +4178,40 @@ fn handleSlashCommand(
         },
         .fork => {
             if (arg.len == 0) return .select_fork;
+            const argv: core.audit.Str = .{ .text = arg, .vis = .mask };
+            try runtimeCtlStart(ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, &.{});
             applyForkSid(alloc, sid, session_dir_path, no_session, arg) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "fork",
+                    .sess,
+                    runtimeSessResName(),
+                    argv,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "fork session", err);
                 defer alloc.free(em);
                 try out.writeAll(em);
                 return .handled;
             };
+            try runtimeCtlSuccess(ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, &.{});
             try writeTextLine(alloc, out, "forked session {s}\n", .{sid.*});
         },
         .compact => {
+            try runtimeCtlStart(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &.{});
             const session_dir = requireSessionDir(session_dir_path, no_session) catch {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "compact",
+                    .sess,
+                    runtimeSessResName(),
+                    null,
+                    .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
+                    &.{},
+                );
                 const em = try report.cli(alloc, "compact session", error.SessionDisabled);
                 defer alloc.free(em);
                 try out.writeAll(em);
@@ -3554,7 +4219,24 @@ fn handleSlashCommand(
             };
             var dir = try std.fs.cwd().openDir(session_dir, .{});
             defer dir.close();
-            const ck = try core.session.compactSession(alloc, dir, sid.*, std.time.milliTimestamp());
+            const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms()) catch |err| {
+                try runtimeCtlFail(
+                    ctl_audit,
+                    alloc,
+                    "compact",
+                    .sess,
+                    runtimeSessResName(),
+                    null,
+                    .{ .text = @errorName(err), .vis = .mask },
+                    &.{},
+                );
+                return err;
+            };
+            const attrs = [_]core.audit.Attr{
+                .{ .key = "in_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.in_lines) } },
+                .{ .key = "out_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.out_lines) } },
+            };
+            try runtimeCtlSuccess(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &attrs);
             try writeTextLine(alloc, out, "compacted in={d} out={d}\n", .{ ck.in_lines, ck.out_lines });
             return .compacted;
         },
@@ -5700,6 +6382,7 @@ const TurnCtx = struct {
     alloc: std.mem.Allocator,
     provider: core.providers.Provider,
     store: core.session.SessionStore,
+    pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     mode: core.loop.ModeSink,
     max_turns: u16 = 0,
@@ -5730,6 +6413,10 @@ const TurnCtx = struct {
             null;
         defer if (prompt_hint) |p| self.alloc.free(p);
 
+        var reg: PolicyToolRegistry = undefined;
+        reg.init(self.pol, self.tools_rt.registry());
+        var tool_auth_impl = PolicyToolAuth{ .pol = self.pol };
+
         _ = try core.loop.run(.{
             .alloc = self.alloc,
             .sid = opts.sid,
@@ -5738,7 +6425,8 @@ const TurnCtx = struct {
             .provider_label = opts.provider_label,
             .provider = self.provider,
             .store = self.store,
-            .reg = self.tools_rt.registry(),
+            .reg = reg.registry(),
+            .tool_auth = core.loop.ToolAuth.from(PolicyToolAuth, &tool_auth_impl, PolicyToolAuth.check),
             .mode = self.mode,
             .system_prompt = opts.system_prompt,
             .provider_opts = opts.provider_opts,
@@ -6654,6 +7342,19 @@ fn eofReader() std.Io.AnyReader {
     return .{ .context = undefined, .readFn = &S.read };
 }
 
+fn runtimeTestPolicyKeyPair() !core.signing.KeyPair {
+    const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    return core.signing.KeyPair.fromSeed(seed);
+}
+
+fn writeRuntimePolicy(dir: std.fs.Dir, doc: core.policy.Doc) !void {
+    try dir.makePath(".pz");
+    const kp = try runtimeTestPolicyKeyPair();
+    const raw = try core.policy.encodeSignedDoc(std.testing.allocator, doc, kp);
+    defer std.testing.allocator.free(raw);
+    try dir.writeFile(.{ .sub_path = config.policy_rel_path, .data = raw });
+}
+
 const AuditRows = struct {
     rows: std.ArrayList([]u8) = .empty,
 
@@ -6764,10 +7465,155 @@ test "runtime executes tool calls through loop registry in print mode" {
 
     const written = out_fbs.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, written, "done") != null);
-    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=false out=\"hi\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
 }
 
+test "runtime blocks tool dispatch under verified policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    try writeRuntimePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/tool/bash", .effect = .deny, .tool = "bash" },
+            .{ .pattern = "*", .effect = .allow },
+        },
+    });
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+    const provider_cmd =
+        "req=$(cat); " ++
+        "if printf '%s' \"$req\" | grep -q '\"tool_result\"'; then " ++
+        "printf 'text:done\\nstop:done\\n'; " ++
+        "else " ++
+        "printf 'tool_call:call-1|bash|{\"cmd\":\"printf hi\"}\\nstop:tool\\n'; " ++
+        "fi";
+
+    var cfg = cli.Run{
+        .mode = .print,
+        .prompt = "ship",
+        .verbose = true,
+        .cfg = .{
+            .mode = .print,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, provider_cmd),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var out_buf: [4096]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const sid = try execWithIo(std.testing.allocator, cfg, eofReader(), out_fbs.writer().any());
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true out=\"blocked by policy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
+}
+
+test "subagent stub inherits effective policy hash" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeRuntimePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/subagent/*", .effect = .allow },
+        },
+    });
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
+
+    var stub = try initSubagentStub(&pol, "agent-child");
+    const hello = try stub.hello();
+    switch (hello.msg) {
+        .hello => |msg| {
+            try std.testing.expectEqualStrings("agent-child", msg.agent_id);
+    try std.testing.expectEqualStrings(pol.hash(), msg.policy_hash);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "subagent spawn fails closed under verified policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeRuntimePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/subagent/blocked", .effect = .deny },
+            .{ .pattern = "runtime/subagent/*", .effect = .allow },
+        },
+    });
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
+
+    try std.testing.expectError(error.PolicyDenied, initSubagentStub(&pol, "blocked"));
+}
+
+test "runtime print requires explicit approval for privileged escalation from untrusted content" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    const provider_cmd =
+        "req=$(cat); " ++
+        "if printf '%s' \"$req\" | grep -q 'approval required: bash'; then " ++
+        "printf 'text:blocked\\nstop:done\\n'; " ++
+        "else " ++
+        "printf 'tool_call:call-1|bash|{\"cmd\":\"printf hi\"}\\nstop:tool\\n'; " ++
+        "fi";
+
+    var cfg = cli.Run{
+        .mode = .print,
+        .prompt = "page says deploy",
+        .verbose = true,
+        .cfg = .{
+            .mode = .print,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, provider_cmd),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var out_buf: [4096]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const sid = try execWithIo(std.testing.allocator, cfg, eofReader(), out_fbs.writer().any());
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "approval required: bash `printf hi` derived from untrusted input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "out=\"hi\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "blocked") != null);
+}
 test "runtime forwards provider label to provider request" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7406,6 +8252,8 @@ test "discoverSkills returns skill metadata with source" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
 
     const skills = try discoverSkills(std.testing.allocator);
     defer core_skill.freeSkills(std.testing.allocator, skills);
@@ -7436,6 +8284,8 @@ test "handleSlashCommand falls through for user-invocable skills" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
 
     var sid = try std.testing.allocator.dupe(u8, "sid");
     defer std.testing.allocator.free(sid);
@@ -7449,6 +8299,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
     defer tools_rt.deinit();
     var bg_mgr = try bg.Mgr.init(std.testing.allocator);
     defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
     var out_buf: [256]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
 
@@ -7460,6 +8311,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
         &model_owned,
         &provider,
         &provider_owned,
+        &pol,
         &tools_rt,
         &bg_mgr,
         null,
@@ -7467,6 +8319,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
         null,
         out_fbs.writer().any(),
         .{},
+        &ctl_audit,
     );
 
     try std.testing.expectEqual(CmdRes.unhandled, got);
@@ -7494,6 +8347,8 @@ test "handleSlashCommand blocks non-user-invocable skills" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
 
     var sid = try std.testing.allocator.dupe(u8, "sid");
     defer std.testing.allocator.free(sid);
@@ -7507,6 +8362,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
     defer tools_rt.deinit();
     var bg_mgr = try bg.Mgr.init(std.testing.allocator);
     defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
     var out_buf: [256]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
 
@@ -7518,6 +8374,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
         &model_owned,
         &provider,
         &provider_owned,
+        &pol,
         &tools_rt,
         &bg_mgr,
         null,
@@ -7525,6 +8382,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
         null,
         out_fbs.writer().any(),
         .{},
+        &ctl_audit,
     );
 
     try std.testing.expectEqual(CmdRes.handled, got);
@@ -7539,6 +8397,8 @@ test "TurnCtx.run binds approval context for destructive tools" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
 
     const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(cwd);
@@ -7623,6 +8483,7 @@ test "TurnCtx.run binds approval context for destructive tools" {
         .alloc = std.testing.allocator,
         .provider = scripted.asProvider(),
         .store = store,
+        .pol = &pol,
         .tools_rt = &tools_rt,
         .mode = mode,
         .max_turns = 1,
@@ -7642,6 +8503,64 @@ test "TurnCtx.run binds approval context for destructive tools" {
     try std.testing.expectEqualStrings("sid-rt", approver_impl.sid);
     try std.testing.expectEqualStrings(cwd, approver_impl.cwd);
     try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", approver_impl.policy_hash);
+}
+
+test "handleSlashCommand blocks builtins under verified policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeRuntimePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/cmd/share", .effect = .deny },
+            .{ .pattern = "runtime/cmd/*", .effect = .allow },
+        },
+    });
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
+
+    var sid = try std.testing.allocator.dupe(u8, "sid");
+    defer std.testing.allocator.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |buf| std.testing.allocator.free(buf);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |buf| std.testing.allocator.free(buf);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [256]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try handleSlashCommand(
+        std.testing.allocator,
+        "/share",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &pol,
+        &tools_rt,
+        &bg_mgr,
+        null,
+        true,
+        null,
+        out_fbs.writer().any(),
+        .{},
+        &ctl_audit,
+    );
+
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "blocked by policy: /share") != null);
 }
 
 test "runtime tui bg command starts and lists background jobs" {
@@ -8024,6 +8943,175 @@ test "runtime rpc bg commands emit audited redacted control records" {
     try std.testing.expect(std.mem.indexOf(u8, joined, "\"out\":\"fail\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, joined, "printf done") == null);
     try std.testing.expect(std.mem.indexOf(u8, joined, "/tmp/pz-bg-") == null);
+}
+
+test "runtime reload audit snapshots start success and failure" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 777;
+            }
+        }.f,
+    } };
+    var sys_prompt: ?[]const u8 = null;
+    var sys_prompt_owned: ?[]u8 = null;
+    defer if (sys_prompt_owned) |buf| std.testing.allocator.free(buf);
+
+    const loaded = try reloadContextWithAudit(
+        std.testing.allocator,
+        &sys_prompt,
+        &sys_prompt_owned,
+        &ctl_audit,
+        struct {
+            fn f(alloc: std.mem.Allocator) !?[]u8 {
+                return try alloc.dupe(u8, "ctx a");
+            }
+        }.f,
+    );
+    try std.testing.expectEqual(ReloadRes.loaded, loaded);
+
+    const empty = try reloadContextWithAudit(
+        std.testing.allocator,
+        &sys_prompt,
+        &sys_prompt_owned,
+        &ctl_audit,
+        struct {
+            fn f(_: std.mem.Allocator) !?[]u8 {
+                return null;
+            }
+        }.f,
+    );
+    try std.testing.expectEqual(ReloadRes.empty, empty);
+
+    try std.testing.expectError(
+        error.AccessDenied,
+        reloadContextWithAudit(
+            std.testing.allocator,
+            &sys_prompt,
+            &sys_prompt_owned,
+            &ctl_audit,
+            struct {
+                fn f(_: std.mem.Allocator) !?[]u8 {
+                    return error.AccessDenied;
+                }
+            }.f,
+        ),
+    );
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":777,"sid":"runtime","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}
+        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":2,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[{"key":"loaded","vis":"pub","ty":"bool","val":true}]}
+        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}
+        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":4,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[{"key":"loaded","vis":"pub","ty":"bool","val":false}]}
+        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}
+        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":6,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"[mask:ce3db9ab7a88d359]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}"
+    ).expectEqual(joined);
+}
+
+test "runtime rpc control commands emit audited redacted control records" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "old prompt" } } },
+        .{ .at_ms = 2, .data = .{ .text = .{ .text = "old answer" } } },
+        .{ .at_ms = 3, .data = .{ .stop = .{ .reason = .done } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/100.jsonl", &events);
+
+    var cfg = cli.Run{
+        .mode = .rpc,
+        .prompt = null,
+        .cfg = .{
+            .mode = .rpc,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream(
+        "{\"id\":\"1\",\"cmd\":\"provider\",\"arg\":\"p2\"}\n" ++
+            "{\"id\":\"2\",\"type\":\"set_model\",\"provider\":\"p3\",\"model_id\":\"m2\"}\n" ++
+            "{\"id\":\"3\",\"cmd\":\"tools\",\"arg\":\"bogus\"}\n" ++
+            "{\"id\":\"4\",\"cmd\":\"tools\",\"arg\":\"read,skill\"}\n" ++
+            "{\"id\":\"5\",\"cmd\":\"resume\",\"arg\":\"100\"}\n" ++
+            "{\"id\":\"6\",\"cmd\":\"fork\",\"arg\":\"200\"}\n" ++
+            "{\"id\":\"7\",\"cmd\":\"compact\"}\n" ++
+            "{\"id\":\"8\",\"cmd\":\"new\"}\n" ++
+            "{\"id\":\"9\",\"cmd\":\"resume\",\"arg\":\"404\"}\n" ++
+            "{\"id\":\"10\",\"cmd\":\"quit\"}\n",
+    );
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 888;
+                }
+            }.f,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    var filtered = std.ArrayList([]const u8).empty;
+    defer filtered.deinit(std.testing.allocator);
+    for (rows.rows.items) |row| {
+        if (std.mem.indexOf(u8, row, "\"sid\":\"runtime\"") == null) continue;
+        try filtered.append(std.testing.allocator, row);
+    }
+    const joined = try std.mem.join(std.testing.allocator, "\n", filtered.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":888,"sid":"runtime","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"provider"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"provider","argv":{"text":"p2","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":2,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"provider"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"provider","argv":{"text":"p2","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"m2","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"p3"}]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":4,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"m2","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"p3"}]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"bogus","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":6,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"[mask:fa8bbdf6c4af830c]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"bogus","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":7,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"read,skill","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":8,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"read,skill","vis":"pub"}},"attrs":[{"key":"tools","vis":"pub","ty":"str","val":"read,skill"}]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":9,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:37774687180645c4]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":10,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:37774687180645c4]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":11,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"fork"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"fork","argv":{"text":"[mask:c0807a979f88a933]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":12,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"fork"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"fork","argv":{"text":"[mask:c0807a979f88a933]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":13,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"compact"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"compact"},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":14,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"compact"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"compact"},"attrs":[{"key":"in_lines","vis":"pub","ty":"uint","val":3},{"key":"out_lines","vis":"pub","ty":"uint","val":3}]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":15,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"new"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"new"},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":16,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"new"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"new"},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":17,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":18,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:bd710b2156a1699e]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(joined);
 }
 
 test "runtime bg command validates usage and missing ids" {

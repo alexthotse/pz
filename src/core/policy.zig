@@ -243,6 +243,16 @@ pub const SignedDoc = struct {
     sig: signing.Signature,
 };
 
+pub const Resolved = struct {
+    doc: Doc,
+    hash_hex: [64]u8,
+    has_files: bool,
+
+    pub fn bind(self: *const Resolved) ApprovalBind {
+        return .{ .hash = self.hash_hex[0..] };
+    }
+};
+
 fn trustedPolicyPk() !signing.PublicKey {
     return signing.PublicKey.parseHex(build_options.policy_pk_hex);
 }
@@ -449,19 +459,115 @@ pub fn encodeSignedDoc(alloc: std.mem.Allocator, doc: Doc, kp: signing.KeyPair) 
     return try buf.toOwnedSlice(alloc);
 }
 
-pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!Lock {
-    var lock = Lock{};
+pub fn hashDoc(alloc: std.mem.Allocator, doc: Doc) ![64]u8 {
+    const raw = try encodeDoc(alloc, doc);
+    defer alloc.free(raw);
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(raw, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!Resolved {
+    var docs: [2]?SignedDoc = .{ null, null };
+    var doc_n: usize = 0;
+    errdefer {
+        for (docs[0..doc_n]) |maybe_doc| {
+            deinitSignedDoc(alloc, maybe_doc.?);
+        }
+    }
+
     if (home) |home_path| {
         const path = try std.fs.path.join(alloc, &.{ home_path, policy_rel_path });
         defer alloc.free(path);
-        lock = lock.merge(try loadLockFile(alloc, path));
+        if (try loadSignedDocFile(alloc, path)) |doc| {
+            docs[doc_n] = doc;
+            doc_n += 1;
+        }
     }
     if (cwd) |cwd_path| {
         const path = try std.fs.path.join(alloc, &.{ cwd_path, policy_rel_path });
         defer alloc.free(path);
-        lock = lock.merge(try loadLockFile(alloc, path));
+        if (try loadSignedDocFile(alloc, path)) |doc| {
+            docs[doc_n] = doc;
+            doc_n += 1;
+        }
     }
-    return lock;
+
+    var total_rules: usize = 0;
+    var lock = Lock{};
+    for (docs[0..doc_n]) |maybe_doc| {
+        const doc = maybe_doc.?;
+        total_rules += doc.doc.rules.len;
+        lock = lock.merge(doc.doc.lock);
+    }
+
+    const rules = try alloc.alloc(Rule, total_rules);
+    var init_n: usize = 0;
+    errdefer {
+        for (rules[0..init_n]) |rule| {
+            alloc.free(rule.pattern);
+            if (rule.tool) |tool| alloc.free(tool);
+        }
+        alloc.free(rules);
+    }
+
+    for (docs[0..doc_n]) |maybe_doc| {
+        const doc = maybe_doc.?;
+        for (doc.doc.rules) |rule| {
+            rules[init_n] = try dupRule(alloc, rule);
+            init_n += 1;
+        }
+    }
+
+    const merged = Doc{
+        .version = ver_current,
+        .rules = rules,
+        .lock = lock,
+    };
+    errdefer deinitDoc(alloc, merged);
+
+    const hash_hex = try hashDoc(alloc, merged);
+
+    for (docs[0..doc_n]) |maybe_doc| {
+        deinitSignedDoc(alloc, maybe_doc.?);
+    }
+
+    return .{
+        .doc = merged,
+        .hash_hex = hash_hex,
+        .has_files = doc_n != 0,
+    };
+}
+
+pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!Lock {
+    const resolved = try loadResolved(alloc, cwd, home);
+    defer deinitResolved(alloc, resolved);
+    return resolved.doc.lock;
+}
+
+fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8) anyerror!?SignedDoc {
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return error.InvalidPolicy,
+    };
+    defer file.close();
+
+    const raw = try file.readToEndAlloc(alloc, 256 * 1024);
+    defer alloc.free(raw);
+
+    return parseSignedDoc(alloc, raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+}
+
+fn dupRule(alloc: std.mem.Allocator, rule: Rule) !Rule {
+    return .{
+        .pattern = try alloc.dupe(u8, rule.pattern),
+        .effect = rule.effect,
+        .tool = if (rule.tool) |tool| try alloc.dupe(u8, tool) else null,
+    };
 }
 
 pub fn loadApprovalBind(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!ApprovalBind {
@@ -485,24 +591,6 @@ pub fn loadApprovalBind(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]con
     const hex_txt = std.fmt.bytesToHex(dig, .lower);
     const hex = try alloc.dupe(u8, &hex_txt);
     return .{ .hash = hex };
-}
-
-fn loadLockFile(alloc: std.mem.Allocator, path: []const u8) anyerror!Lock {
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .{},
-        else => return error.InvalidPolicy,
-    };
-    defer file.close();
-
-    const raw = try file.readToEndAlloc(alloc, 256 * 1024);
-    defer alloc.free(raw);
-
-    const doc = parseSignedDoc(alloc, raw) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidPolicy,
-    };
-    defer deinitSignedDoc(alloc, doc);
-    return doc.doc.lock;
 }
 
 fn hashPolicyFile(
@@ -562,6 +650,10 @@ pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {
 
 pub fn deinitSignedDoc(alloc: std.mem.Allocator, doc: SignedDoc) void {
     deinitDoc(alloc, doc.doc);
+}
+
+pub fn deinitResolved(alloc: std.mem.Allocator, resolved: Resolved) void {
+    deinitDoc(alloc, resolved.doc);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -864,6 +956,11 @@ test "signed policy bundle rejects untrusted signer" {
     try testing.expectError(error.UntrustedSigner, parseSignedDoc(testing.allocator, json));
 }
 
+fn testKeyPair() !signing.KeyPair {
+    const seed = try signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    return signing.KeyPair.fromSeed(seed);
+}
+
 test "loadApprovalBind falls back to version without signed policy" {
     const bind = try loadApprovalBind(testing.allocator, null, null);
     defer bind.deinit(testing.allocator);
@@ -882,8 +979,7 @@ test "loadApprovalBind hashes verified home and cwd policy docs" {
     const repo = try tmp.dir.realpathAlloc(testing.allocator, "repo");
     defer testing.allocator.free(repo);
 
-    const seed = try signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
-    const kp = try signing.KeyPair.fromSeed(seed);
+    const kp = try testKeyPair();
 
     const home_rules = [_]Rule{.{ .pattern = "*.zig", .effect = .allow }};
     const repo_rules_a = [_]Rule{.{ .pattern = "*.md", .effect = .deny }};
@@ -910,6 +1006,97 @@ test "loadApprovalBind hashes verified home and cwd policy docs" {
     try testing.expect(!std.mem.eql(u8, bind_a.hash, bind_b.hash));
 }
 
+test "loadResolved merges verified bundles and hashes effective doc" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("cwd/.pz");
+
+    const kp = try testKeyPair();
+    const home_raw = try encodeSignedDoc(testing.allocator, .{
+        .rules = &.{
+            .{ .pattern = "runtime/cmd/*", .effect = .allow },
+        },
+        .lock = .{ .cfg = true },
+    }, kp);
+    defer testing.allocator.free(home_raw);
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pz/policy.json", .data = home_raw });
+
+    const cwd_raw = try encodeSignedDoc(testing.allocator, .{
+        .rules = &.{
+            .{ .pattern = "runtime/subagent/*", .effect = .deny },
+        },
+        .lock = .{ .cli = true },
+    }, kp);
+    defer testing.allocator.free(cwd_raw);
+    try tmp.dir.writeFile(.{ .sub_path = "cwd/.pz/policy.json", .data = cwd_raw });
+
+    const home_abs = try tmp.dir.realpathAlloc(testing.allocator, "home");
+    defer testing.allocator.free(home_abs);
+    const cwd_abs = try tmp.dir.realpathAlloc(testing.allocator, "cwd");
+    defer testing.allocator.free(cwd_abs);
+
+    const resolved = try loadResolved(testing.allocator, cwd_abs, home_abs);
+    defer deinitResolved(testing.allocator, resolved);
+
+    const Snap = struct {
+        has_files: bool,
+        hash_hex: []const u8,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+        pat1: []const u8,
+        eff1: Effect,
+        lock_cfg: bool,
+        lock_cli: bool,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.loadResolved merges verified bundles and hashes effective doc.Snap
+        \\  .has_files: bool = true
+        \\  .hash_hex: []const u8
+        \\    "d23f10456d00f7df571bf9251b5a024d8a8cffba0c30a4829ef011fe2d6df86b"
+        \\  .n_rules: usize = 2
+        \\  .pat0: []const u8
+        \\    "runtime/cmd/*"
+        \\  .eff0: core.policy.Effect
+        \\    .allow
+        \\  .pat1: []const u8
+        \\    "runtime/subagent/*"
+        \\  .eff1: core.policy.Effect
+        \\    .deny
+        \\  .lock_cfg: bool = true
+        \\  .lock_cli: bool = true
+    ).expectEqual(Snap{
+        .has_files = resolved.has_files,
+        .hash_hex = resolved.hash_hex[0..],
+        .n_rules = resolved.doc.rules.len,
+        .pat0 = resolved.doc.rules[0].pattern,
+        .eff0 = resolved.doc.rules[0].effect,
+        .pat1 = resolved.doc.rules[1].pattern,
+        .eff1 = resolved.doc.rules[1].effect,
+        .lock_cfg = resolved.doc.lock.cfg,
+        .lock_cli = resolved.doc.lock.cli,
+    });
+}
+
+test "loadResolved returns stable empty effective hash" {
+    const resolved = try loadResolved(testing.allocator, null, null);
+    defer deinitResolved(testing.allocator, resolved);
+
+    try testing.expect(!resolved.has_files);
+    try testing.expectEqual(@as(usize, 0), resolved.doc.rules.len);
+    try testing.expect(!resolved.doc.lock.cfg);
+    try testing.expect(!resolved.doc.lock.env);
+    try testing.expect(!resolved.doc.lock.cli);
+    try testing.expect(!resolved.doc.lock.context);
+    try testing.expect(!resolved.doc.lock.system_prompt);
+    try testing.expectEqualStrings("6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103", resolved.hash_hex[0..]);
+}
 // ── Snapshot tests (ohsnap) ────────────────────────────────────────────
 
 fn snapEsc(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {

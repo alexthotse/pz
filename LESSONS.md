@@ -8,6 +8,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 
 ### Worked Well
 - For cross-feature audit proof, keep the E2E harness under `src/test/`, feed it a mixed row set from real hook emitters where public (`auth`, `bg`) plus manual control fixtures where hooks stay private, and verify the sealed syslog bodies round-trip exactly through both UDP and TCP mocks.
+- For signed runtime-policy checks, map slash/tool/subagent actions onto a synthetic namespace like `runtime/...`; it stays outside policy self-protection and gives stable paths for hashable authority decisions.
 - Landing worker results with `jj restore --from <commit> <file>` kept dot merges exact and avoided stale workspace side-data.
 - Replacing `git` shell-outs in `build.zig` with `jj log` made test runs work inside `jj workspace` siblings without fake `.git` hacks.
 - For seeded `pbt` self-tests, snapshot the actual fixed-seed success stream and shrunk witness from the harness instead of guessing expected bytes.
@@ -20,9 +21,12 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - A tiny one-shot local HTTP server under `src/test/http_mock.zig` is enough to unblock update/share/redirect testing; land the harness before trying to write higher-level E2E around it.
 - Contract helpers added under `src/core/providers/contract.zig` are not automatically visible through `src/core/providers/mod.zig`; owned callers should import the contract directly unless the module surface is intentionally widened.
 - When a test frees a companion `parts` buffer by deriving its size from `msgs.len`, any change that allows multi-part system messages must update that free path too or the debug allocator will catch a mismatched free/leak.
+- Approval caches for privileged tool calls need the full raw arg payload plus session/location/policy binding; anything narrower silently broadens the grant surface.
 - For shipped audit E2E, capture multiple collector frames, extract the syslog body back out, and verify the sealed chain from the collected payloads; that proves transport + redaction together instead of only unit-encoding them.
+- For runtime control audit, route slash commands, RPC commands, and overlay selections through one shared helper with its own sequence counter; otherwise one UI path will bypass privileged audit again.
 
 ### Did Not Work
+- Using synthetic policy paths under `.pz/runtime/...` for runtime actions was wrong because policy self-protection denies any `.pz` path before rule evaluation.
 - Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.
 - For raw string snapshots, writing only the body text is wrong. `ohsnap` expects the full typed shape like `[]u8` plus the value line.
 - Escaping JSON quotes inside raw multiline `ohsnap` snapshots is wrong. After `\\`, the quotes are literal snapshot content.

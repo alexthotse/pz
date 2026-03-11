@@ -1248,6 +1248,69 @@ test "encoding escapes control bytes and stays stable" {
     ).expectEqual(raw_a);
 }
 
+test "snapshot: runtime control entries encode canonically" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const talloc = testing.allocator;
+
+    const cfg_raw = try encodeAlloc(talloc, .{
+        .ts_ms = 88,
+        .sid = "runtime",
+        .seq = 1,
+        .sev = .notice,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .cfg,
+            .name = .{ .text = "runtime", .vis = .@"pub" },
+            .op = "model",
+        },
+        .msg = .{ .text = "runtime control success", .vis = .@"pub" },
+        .data = .{
+            .tool = .{
+                .name = .{ .text = "runtime", .vis = .@"pub" },
+                .call_id = "model",
+                .argv = .{ .text = "claude-opus-4-6", .vis = .@"pub" },
+            },
+        },
+        .attrs = &.{
+            .{ .key = "provider", .val = .{ .str = "anthropic" } },
+        },
+    });
+    defer talloc.free(cfg_raw);
+
+    const sess_raw = try encodeAlloc(talloc, .{
+        .ts_ms = 89,
+        .sid = "runtime",
+        .seq = 2,
+        .sev = .err,
+        .out = .fail,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .sess,
+            .name = .{ .text = "session", .vis = .@"pub" },
+            .op = "resume",
+        },
+        .msg = .{ .text = "SessionNotFound", .vis = .mask },
+        .data = .{
+            .tool = .{
+                .name = .{ .text = "runtime", .vis = .@"pub" },
+                .call_id = "resume",
+                .argv = .{ .text = "/tmp/pz/sess/100.jsonl", .vis = .mask },
+            },
+        },
+        .attrs = &.{},
+    });
+    defer talloc.free(sess_raw);
+
+    const snap = try std.fmt.allocPrint(talloc, "cfg={s} | sess={s}", .{ cfg_raw, sess_raw });
+    defer talloc.free(snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "cfg={"v":1,"ts_ms":88,"sid":"runtime","seq":1,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"claude-opus-4-6","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"anthropic"}]} | sess={"v":1,"ts_ms":89,"sid":"runtime","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:bd710b2156a1699e]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:3208ed5235fe5d94]","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(snap);
+}
+
 test "snapshot: audit payload ships through syslog canonically" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
