@@ -2,6 +2,7 @@ const std = @import("std");
 const providers = @import("providers/mod.zig");
 const session = @import("session/mod.zig");
 const tools = @import("tools/mod.zig");
+const provider_mock = @import("../test/provider_mock.zig");
 
 pub const Err = error{
     EmptySessionId,
@@ -2423,54 +2424,6 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
         fn deinit(_: *@This()) void {}
     };
 
-    const StreamImpl = struct {
-        wake_r: std.posix.fd_t,
-        wake_w: std.posix.fd_t,
-        sent_first: bool = false,
-        aborted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-        fn next(self: *@This()) !?providers.Ev {
-            if (!self.sent_first) {
-                self.sent_first = true;
-                return .{ .text = "Hello" };
-            }
-
-            var fds = [1]std.posix.pollfd{.{
-                .fd = self.wake_r,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            _ = try std.posix.poll(&fds, -1);
-            var buf: [8]u8 = undefined;
-            _ = std.posix.read(self.wake_r, &buf) catch {};
-            if (self.aborted.load(.acquire)) return null;
-            return .{ .stop = .{ .reason = .done } };
-        }
-
-        fn abort(self: *@This()) void {
-            self.aborted.store(true, .release);
-            _ = std.posix.write(self.wake_w, "\x01") catch {};
-        }
-
-        fn deinit(_: *@This()) void {}
-    };
-
-    const ProviderImpl = struct {
-        stream: StreamImpl,
-
-        fn start(self: *@This(), _: providers.Req) !providers.Stream {
-            self.stream.sent_first = false;
-            self.stream.aborted.store(false, .release);
-            return providers.Stream.fromAbortable(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-                StreamImpl.abort,
-            );
-        }
-    };
-
     const ModeImpl = struct {
         canceled_ct: usize = 0,
 
@@ -2506,24 +2459,13 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
         }
     };
 
-    const pipe = try std.posix.pipe2(.{
-        .CLOEXEC = true,
-        .NONBLOCK = true,
-    });
-    defer std.posix.close(pipe[0]);
-    defer std.posix.close(pipe[1]);
-
-    var provider_impl = ProviderImpl{
-        .stream = .{
-            .wake_r = pipe[0],
-            .wake_w = pipe[1],
-        },
+    const steps = [_]provider_mock.Step{
+        .{ .ev = .{ .text = "Hello" } },
+        .{ .block = {} },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    var provider_impl = try provider_mock.ScriptedProvider.init(steps[0..]);
+    defer provider_impl.deinit();
+    const provider = provider_impl.asProvider();
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(

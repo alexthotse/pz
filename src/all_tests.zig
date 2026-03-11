@@ -27,6 +27,7 @@ const core_watcher = @import("core/watcher.zig");
 const tool_web = @import("core/tools/web.zig");
 const session_file = @import("core/session/session_file.zig");
 const test_syslog_mock = @import("test/syslog_mock.zig");
+const test_provider_mock = @import("test/provider_mock.zig");
 
 test "all module tests" {
     _ = app_cli;
@@ -58,4 +59,5 @@ test "all module tests" {
     _ = tool_web;
     _ = session_file;
     _ = test_syslog_mock;
+    _ = test_provider_mock;
 }
