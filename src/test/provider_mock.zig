@@ -108,3 +108,7 @@ test "scripted provider emits events then aborts blocked stream" {
     defer thr.join();
     try std.testing.expect((try stream.next()) == null);
 }
+
+test "audit e2e module loads" {
+    _ = @import("audit_e2e.zig");
+}
