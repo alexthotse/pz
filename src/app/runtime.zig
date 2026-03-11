@@ -231,7 +231,7 @@ const AskUiCtx = struct {
     alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
     out: std.Io.AnyWriter,
-    pause: *std.atomic.Value(bool),
+    watcher: *InputWatcher,
 
     const Answer = struct {
         id: []const u8,
@@ -276,8 +276,8 @@ const AskUiCtx = struct {
     fn runOnMain(self: *AskUiCtx, reader: *tui_input.Reader, args: core.tools.Call.AskArgs) anyerror![]u8 {
         if (args.questions.len == 0) return error.InvalidArgs;
 
-        self.pause.store(true, .release);
-        defer self.pause.store(false, .release);
+        self.watcher.setPaused(true);
+        defer self.watcher.setPaused(false);
         return self.runWithReader(reader, args);
     }
 
@@ -623,22 +623,36 @@ fn buildAskResult(alloc: std.mem.Allocator, cancelled: bool, answers: []const As
 const InputWatcher = struct {
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    paused: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
     fd: std.posix.fd_t,
-    pause: ?*std.atomic.Value(bool) = null,
+    wake_r: std.posix.fd_t,
+    wake_w: std.posix.fd_t,
     /// Buffer for non-ESC bytes consumed during streaming, replayed after join().
     stash: [64]u8 = undefined,
     stash_len: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
-    fn init(fd: std.posix.fd_t) InputWatcher {
-        return .{ .fd = fd };
-    }
-
-    fn initWithPause(fd: std.posix.fd_t, pause: *std.atomic.Value(bool)) InputWatcher {
+    fn init(fd: std.posix.fd_t) !InputWatcher {
+        const pipe = try std.posix.pipe2(.{
+            .NONBLOCK = true,
+            .CLOEXEC = true,
+        });
+        errdefer {
+            std.posix.close(pipe[0]);
+            std.posix.close(pipe[1]);
+        }
         return .{
             .fd = fd,
-            .pause = pause,
+            .wake_r = pipe[0],
+            .wake_w = pipe[1],
         };
+    }
+
+    fn deinit(self: *InputWatcher) void {
+        self.join(null);
+        std.posix.close(self.wake_r);
+        std.posix.close(self.wake_w);
+        self.* = undefined;
     }
 
     /// Start watching stdin for ESC on a background thread.
@@ -646,7 +660,9 @@ const InputWatcher = struct {
     fn start(self: *InputWatcher) bool {
         self.canceled.store(false, .release);
         self.stop.store(false, .release);
+        self.paused.store(false, .release);
         self.stash_len.store(0, .release);
+        drainWake(self.wake_r);
         self.thread = std.Thread.spawn(.{}, watchFn, .{self}) catch return false;
         return true;
     }
@@ -654,6 +670,7 @@ const InputWatcher = struct {
     /// Stop the watcher, join the thread, replay stashed bytes into reader.
     fn join(self: *InputWatcher, reader: ?*tui_input.Reader) void {
         self.stop.store(true, .release);
+        signalWake(self.wake_w);
         if (self.thread) |t| {
             t.join();
             self.thread = null;
@@ -668,29 +685,44 @@ const InputWatcher = struct {
         return self.canceled.load(.acquire);
     }
 
+    fn setPaused(self: *InputWatcher, paused: bool) void {
+        self.paused.store(paused, .release);
+        signalWake(self.wake_w);
+    }
+
+    fn isPaused(self: *InputWatcher) bool {
+        return self.paused.load(.acquire);
+    }
+
     fn watchFn(self: *InputWatcher) void {
         while (!self.stop.load(.acquire)) {
-            if (self.pause) |pause| {
-                if (pause.load(.acquire)) {
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
-                    continue;
-                }
+            const paused = self.paused.load(.acquire);
+            var fds = [2]std.posix.pollfd{
+                .{
+                    .fd = self.wake_r,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                },
+                .{
+                    .fd = self.fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                },
+            };
+            const nfd: usize = if (paused) 1 else 2;
+            const n = std.posix.poll(fds[0..nfd], -1) catch break;
+            if (n == 0) continue;
+            if ((fds[0].revents & std.posix.POLL.IN) != 0) {
+                drainWake(self.wake_r);
+                continue;
             }
-            // poll with 100ms timeout so join() can stop us promptly.
-            var fds = [1]std.posix.pollfd{.{
-                .fd = self.fd,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            const n = std.posix.poll(&fds, 100) catch break;
-            if (n == 0) continue; // timeout — recheck stop flag
+            if (paused or (fds[1].revents & std.posix.POLL.IN) == 0) continue;
             var buf: [1]u8 = undefined;
             const r = std.posix.read(self.fd, &buf) catch break;
             if (r == 1 and buf[0] == 0x1b) {
                 self.canceled.store(true, .release);
                 return;
             }
-            // Stash non-ESC byte for replay
             if (r == 1) {
                 const cur = self.stash_len.load(.acquire);
                 if (cur < self.stash.len) {
@@ -701,6 +733,20 @@ const InputWatcher = struct {
         }
     }
 };
+
+fn signalWake(fd: std.posix.fd_t) void {
+    _ = std.posix.write(fd, "\x01") catch {};
+}
+
+fn drainWake(fd: std.posix.fd_t) void {
+    var buf: [32]u8 = undefined;
+    while (true) {
+        _ = std.posix.read(fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return,
+        };
+    }
+}
 
 const TurnCancelFlag = struct {
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -1587,8 +1633,8 @@ fn runTui(
     }
     defer if (is_tty) tui_term.restore(stdin_fd);
 
-    var ask_pause = std.atomic.Value(bool).init(false);
-    var watcher = InputWatcher.initWithPause(stdin_fd, &ask_pause);
+    var watcher = try InputWatcher.init(stdin_fd);
+    defer watcher.deinit();
     const cancel = core.loop.CancelSrc.from(InputWatcher, &watcher, InputWatcher.isCanceled);
     const tctx = TurnCtx{
         .alloc = alloc,
@@ -1607,7 +1653,7 @@ fn runTui(
         .alloc = alloc,
         .ui = &ui,
         .out = out,
-        .pause = &ask_pause,
+        .watcher = &watcher,
     };
     defer tools_rt.ask_hook = null;
     var thinking = run_cmd.thinking;
@@ -5540,21 +5586,21 @@ test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
     defer ui.deinit();
     try ui.ed.setText("draft");
 
-    var pause = std.atomic.Value(bool).init(false);
     var out_buf: [16384]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
+    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+    defer std.posix.close(pipe[0]);
+    defer std.posix.close(pipe[1]);
+    var watcher = try InputWatcher.init(pipe[0]);
+    defer watcher.deinit();
     var ask_ui_ctx = AskUiCtx{
         .alloc = std.testing.allocator,
         .ui = &ui,
         .out = out_fbs.writer().any(),
-        .pause = &pause,
+        .watcher = &watcher,
     };
-
-    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
-    defer std.posix.close(pipe[0]);
-    defer std.posix.close(pipe[1]);
     _ = try std.posix.write(pipe[1], "\r\x1b[B\r");
-    var reader = tui_input.Reader.init(pipe[0]);
+    var reader = tui_input.Reader.init(watcher.fd);
 
     var ctx = Ctx{ .live = &live };
     const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
@@ -5570,8 +5616,44 @@ test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
         ctx.out.?,
     );
     try std.testing.expectEqualStrings("draft", ui.ed.text());
-    try std.testing.expect(!pause.load(.acquire));
+    try std.testing.expect(!watcher.isPaused());
     try std.testing.expect(ui.ov == null);
+}
+
+test "input watcher join wakes promptly while paused" {
+    const in_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+    defer std.posix.close(in_pipe[0]);
+    defer std.posix.close(in_pipe[1]);
+
+    var watcher = try InputWatcher.init(in_pipe[0]);
+    defer watcher.deinit();
+    try std.testing.expect(watcher.start());
+    watcher.setPaused(true);
+
+    const done_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    defer std.posix.close(done_pipe[0]);
+    defer std.posix.close(done_pipe[1]);
+
+    const Ctx = struct {
+        watcher: *InputWatcher,
+        fd: std.posix.fd_t,
+
+        fn run(self: *@This()) void {
+            self.watcher.join(null);
+            _ = std.posix.write(self.fd, "\x01") catch {};
+        }
+    };
+    var ctx = Ctx{ .watcher = &watcher, .fd = done_pipe[1] };
+    const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+    defer thr.join();
+
+    var fds = [1]std.posix.pollfd{.{
+        .fd = done_pipe[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ready = try std.posix.poll(&fds, 20);
+    try std.testing.expectEqual(@as(usize, 1), ready);
 }
 
 test "parseBashCmd single bang" {
