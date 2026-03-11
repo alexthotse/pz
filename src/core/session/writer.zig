@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const schema = @import("schema.zig");
 const sid_path = @import("path.zig");
 const fs_secure = @import("../fs_secure.zig");
@@ -48,8 +49,12 @@ pub const Writer = struct {
         });
         defer file.close();
         try file.seekFromEnd(0);
-        try file.writeAll(raw);
-        try file.writeAll("\n");
+        const nl = "\n";
+        var iov = [_]posix.iovec_const{
+            .{ .base = raw.ptr, .len = raw.len },
+            .{ .base = nl.ptr, .len = nl.len },
+        };
+        try file.writevAll(&iov);
 
         switch (self.flush) {
             .always => {

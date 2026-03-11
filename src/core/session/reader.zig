@@ -45,8 +45,11 @@ pub const ReplayReader = struct {
             if (self.io_pos >= self.io_len) {
                 if (self.eof) {
                     if (self.line_buf.items.len == 0 and !self.line_too_long) return null;
-                    const ev = try self.finishLine();
-                    return ev;
+                    if (self.line_too_long) {
+                        const ev = try self.finishLine();
+                        return ev;
+                    }
+                    return error.TornReplayLine;
                 }
 
                 self.io_len = try self.file.read(&self.io_buf);
@@ -267,7 +270,7 @@ test "jsonl replay rejects zero max line bytes" {
     ));
 }
 
-test "jsonl replay handles final line without trailing newline" {
+test "jsonl replay rejects final line without trailing newline" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -286,10 +289,8 @@ test "jsonl replay handles final line without trailing newline" {
     var rdr = try ReplayReader.init(std.testing.allocator, tmp.dir, "tail", .{});
     defer rdr.deinit();
 
-    const first = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(first.data == .text);
-    try std.testing.expectEqualStrings("ok", first.data.text.text);
-    try std.testing.expect((try rdr.next()) == null);
+    try std.testing.expectError(error.TornReplayLine, rdr.next());
+    try std.testing.expectEqual(@as(usize, 0), rdr.line());
 }
 
 test "jsonl replay enforces max line bytes in streaming mode" {

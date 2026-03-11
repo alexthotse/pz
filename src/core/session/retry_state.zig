@@ -59,6 +59,7 @@ pub fn load(
         else => return read_err,
     };
     defer alloc.free(raw);
+    if (raw.len == 0 or raw[raw.len - 1] != '\n') return error.TornRetryState;
 
     const parsed = try std.json.parseFromSlice(State, alloc, raw, .{
         .allocate = .alloc_always,
@@ -117,4 +118,16 @@ test "retry state rejects invalid counters" {
             .fail_ct = 2,
         },
     ));
+}
+
+test "retry state rejects torn file without trailing newline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "s1.retry.json",
+        .data = "{\"version\":1,\"tries_done\":1,\"fail_ct\":1,\"next_wait_ms\":0,\"last_err\":\"none\"}",
+    });
+
+    try std.testing.expectError(error.TornRetryState, load(std.testing.allocator, tmp.dir, "s1"));
 }

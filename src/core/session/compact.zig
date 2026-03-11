@@ -87,6 +87,7 @@ pub fn loadCheckpoint(
         else => return read_err,
     };
     defer alloc.free(raw);
+    if (raw.len == 0 or raw[raw.len - 1] != '\n') return error.TornCheckpoint;
 
     const parsed = try std.json.parseFromSlice(Checkpoint, alloc, raw, .{
         .allocate = .alloc_always,
@@ -423,6 +424,18 @@ test "compaction checkpoint returns null when absent" {
     defer tmp.cleanup();
 
     try std.testing.expect((try loadCheckpoint(std.testing.allocator, tmp.dir, "missing")) == null);
+}
+
+test "compaction checkpoint rejects torn file without trailing newline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "s1.compact.json",
+        .data = "{\"version\":1,\"in_lines\":1,\"out_lines\":1,\"in_bytes\":1,\"out_bytes\":1,\"compacted_at_ms\":1}",
+    });
+
+    try std.testing.expectError(error.TornCheckpoint, loadCheckpoint(std.testing.allocator, tmp.dir, "s1"));
 }
 
 test "escapeXml escapes mixed content" {
