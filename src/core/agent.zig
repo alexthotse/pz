@@ -87,6 +87,25 @@ pub const Err = struct {
     fatal: bool = true,
 };
 
+pub const Req = struct {
+    id: []const u8,
+    prompt: []const u8,
+};
+
+pub const Ev = union(Tag) {
+    ready: Hello,
+    out: Out,
+    done: Done,
+    err: Err,
+
+    pub const Tag = enum {
+        ready,
+        out,
+        done,
+        err,
+    };
+};
+
 pub const DecodeError = std.json.ParseError(std.json.Scanner) || error{
     UnsupportedVersion,
     InvalidId,
@@ -95,6 +114,146 @@ pub const DecodeError = std.json.ParseError(std.json.Scanner) || error{
     EmptyText,
     EmptyCode,
     EmptyMessage,
+};
+
+pub const StubError = DecodeError || error{
+    InvalidState,
+    UnexpectedMsg,
+    UnexpectedRole,
+    UnexpectedId,
+    SeqOrder,
+    PolicyMismatch,
+};
+
+pub const Stub = struct {
+    agent_id: []const u8,
+    policy_hash: []const u8,
+    send_seq: u32 = 1,
+    recv_seq: u32 = 0,
+    state: State = .init,
+    run_id: ?[]const u8 = null,
+
+    pub const State = enum {
+        init,
+        wait_hello,
+        idle,
+        running,
+    };
+
+    pub fn init(agent_id: []const u8, policy_hash: []const u8) DecodeError!Stub {
+        try validateId(agent_id);
+        try validateHash(policy_hash);
+        return .{
+            .agent_id = agent_id,
+            .policy_hash = policy_hash,
+        };
+    }
+
+    pub fn activeId(self: Stub) ?[]const u8 {
+        return self.run_id;
+    }
+
+    pub fn hello(self: *Stub) StubError!Frame {
+        if (self.state != .init) return error.InvalidState;
+        self.state = .wait_hello;
+        return self.next(.{
+            .hello = .{
+                .role = .parent,
+                .agent_id = self.agent_id,
+                .policy_hash = self.policy_hash,
+            },
+        });
+    }
+
+    pub fn run(self: *Stub, req: Req) StubError!Frame {
+        if (self.state != .idle) return error.InvalidState;
+        try validateId(req.id);
+        if (req.prompt.len == 0) return error.EmptyPrompt;
+        self.state = .running;
+        self.run_id = req.id;
+        return self.next(.{
+            .run = .{
+                .id = req.id,
+                .prompt = req.prompt,
+            },
+        });
+    }
+
+    pub fn cancel(self: *Stub) StubError!Frame {
+        if (self.state != .running) return error.InvalidState;
+        const id = self.run_id orelse return error.InvalidState;
+        return self.next(.{
+            .cancel = .{
+                .id = id,
+            },
+        });
+    }
+
+    pub fn recv(self: *Stub, frame: Frame) StubError!Ev {
+        try validateFrame(frame);
+        if (frame.seq <= self.recv_seq) return error.SeqOrder;
+        self.recv_seq = frame.seq;
+
+        return switch (frame.msg) {
+            .hello => |msg| try self.recvHello(msg),
+            .out => |out| try self.recvOut(out),
+            .done => |done| try self.recvDone(done),
+            .err => |rpc_err| try self.recvErr(rpc_err),
+            .run, .cancel => error.UnexpectedMsg,
+        };
+    }
+
+    fn next(self: *Stub, msg: Msg) Frame {
+        const seq = self.send_seq;
+        self.send_seq += 1;
+        return Frame.init(seq, msg);
+    }
+
+    fn recvHello(self: *Stub, msg: Hello) StubError!Ev {
+        if (self.state != .wait_hello) return error.UnexpectedMsg;
+        if (msg.role != .child) return error.UnexpectedRole;
+        if (!std.mem.eql(u8, msg.policy_hash, self.policy_hash)) return error.PolicyMismatch;
+        self.state = .idle;
+        return .{ .ready = msg };
+    }
+
+    fn recvOut(self: *Stub, out: Out) StubError!Ev {
+        const id = self.run_id orelse return error.InvalidState;
+        if (self.state != .running) return error.UnexpectedMsg;
+        if (!std.mem.eql(u8, out.id, id)) return error.UnexpectedId;
+        return .{ .out = out };
+    }
+
+    fn recvDone(self: *Stub, done: Done) StubError!Ev {
+        const id = self.run_id orelse return error.InvalidState;
+        if (self.state != .running) return error.UnexpectedMsg;
+        if (!std.mem.eql(u8, done.id, id)) return error.UnexpectedId;
+        self.state = .idle;
+        self.run_id = null;
+        return .{ .done = done };
+    }
+
+    fn recvErr(self: *Stub, rpc_err: Err) StubError!Ev {
+        switch (self.state) {
+            .wait_hello => {
+                if (rpc_err.id != null) return error.UnexpectedId;
+                self.state = .init;
+                return .{ .err = rpc_err };
+            },
+            .running => {
+                const id = self.run_id orelse return error.InvalidState;
+                if (rpc_err.id) |got| {
+                    if (!std.mem.eql(u8, got, id)) return error.UnexpectedId;
+                } else if (!rpc_err.fatal) {
+                    return error.UnexpectedMsg;
+                }
+                self.state = .idle;
+                self.run_id = null;
+                return .{ .err = rpc_err };
+            },
+            else => return error.UnexpectedMsg,
+        }
+    }
 };
 
 pub fn encodeAlloc(alloc: std.mem.Allocator, frame: Frame) error{OutOfMemory}![]u8 {
@@ -120,9 +279,13 @@ pub fn decodeSlice(alloc: std.mem.Allocator, raw: []const u8) DecodeError!std.js
     });
     errdefer parsed.deinit();
 
-    if (parsed.value.protocol_version != protocol_version) return error.UnsupportedVersion;
-    try validate(parsed.value);
+    try validateFrame(parsed.value);
     return parsed;
+}
+
+fn validateFrame(frame: Frame) DecodeError!void {
+    if (frame.protocol_version != protocol_version) return error.UnsupportedVersion;
+    try validate(frame);
 }
 
 fn validate(frame: Frame) DecodeError!void {
@@ -268,4 +431,195 @@ test "info output and truncation survive roundtrip" {
         },
         else => try testing.expect(false),
     }
+}
+
+test "stub handshake run output done flow" {
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var stub = try Stub.init("tool-parent", hash);
+
+    const hello = try stub.hello();
+    try testing.expectEqual(@as(u32, 1), hello.seq);
+    try testing.expectEqual(Stub.State.wait_hello, stub.state);
+    try testing.expect(stub.activeId() == null);
+    switch (hello.msg) {
+        .hello => |msg| {
+            try testing.expectEqual(Role.parent, msg.role);
+            try testing.expectEqualStrings("tool-parent", msg.agent_id);
+            try testing.expectEqualStrings(hash, msg.policy_hash);
+        },
+        else => try testing.expect(false),
+    }
+
+    const ready = try stub.recv(Frame.init(4, .{
+        .hello = .{
+            .role = .child,
+            .agent_id = "agent-child",
+            .policy_hash = hash,
+        },
+    }));
+    try testing.expectEqual(Stub.State.idle, stub.state);
+    switch (ready) {
+        .ready => |msg| {
+            try testing.expectEqual(Role.child, msg.role);
+            try testing.expectEqualStrings("agent-child", msg.agent_id);
+            try testing.expectEqualStrings(hash, msg.policy_hash);
+        },
+        else => try testing.expect(false),
+    }
+
+    const run = try stub.run(.{
+        .id = "job-1",
+        .prompt = "delegate this",
+    });
+    try testing.expectEqual(@as(u32, 2), run.seq);
+    try testing.expectEqual(Stub.State.running, stub.state);
+    try testing.expectEqualStrings("job-1", stub.activeId().?);
+    switch (run.msg) {
+        .run => |msg| {
+            try testing.expectEqualStrings("job-1", msg.id);
+            try testing.expectEqualStrings("delegate this", msg.prompt);
+        },
+        else => try testing.expect(false),
+    }
+
+    const out_ev = try stub.recv(Frame.init(5, .{
+        .out = .{
+            .id = "job-1",
+            .kind = .info,
+            .text = "delegated to child agent",
+        },
+    }));
+    switch (out_ev) {
+        .out => |out| {
+            try testing.expectEqual(OutKind.info, out.kind);
+            try testing.expectEqualStrings("job-1", out.id);
+            try testing.expectEqualStrings("delegated to child agent", out.text);
+        },
+        else => try testing.expect(false),
+    }
+
+    const done_ev = try stub.recv(Frame.init(6, .{
+        .done = .{
+            .id = "job-1",
+            .stop = .done,
+            .truncated = false,
+        },
+    }));
+    try testing.expectEqual(Stub.State.idle, stub.state);
+    try testing.expect(stub.activeId() == null);
+    switch (done_ev) {
+        .done => |done| {
+            try testing.expectEqual(Stop.done, done.stop);
+            try testing.expect(!done.truncated);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "stub rejects run before child hello" {
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var stub = try Stub.init("tool-parent", hash);
+
+    try testing.expectError(error.InvalidState, stub.run(.{
+        .id = "job-1",
+        .prompt = "delegate this",
+    }));
+}
+
+test "stub cancel keeps run live until terminal frame" {
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var stub = try Stub.init("tool-parent", hash);
+    _ = try stub.hello();
+    _ = try stub.recv(Frame.init(1, .{
+        .hello = .{
+            .role = .child,
+            .agent_id = "agent-child",
+            .policy_hash = hash,
+        },
+    }));
+    _ = try stub.run(.{
+        .id = "job-2",
+        .prompt = "delegate this too",
+    });
+
+    const cancel = try stub.cancel();
+    try testing.expectEqual(@as(u32, 3), cancel.seq);
+    try testing.expectEqual(Stub.State.running, stub.state);
+    try testing.expectEqualStrings("job-2", stub.activeId().?);
+    switch (cancel.msg) {
+        .cancel => |msg| try testing.expectEqualStrings("job-2", msg.id),
+        else => try testing.expect(false),
+    }
+
+    const done_ev = try stub.recv(Frame.init(2, .{
+        .done = .{
+            .id = "job-2",
+            .stop = .canceled,
+            .truncated = true,
+        },
+    }));
+    try testing.expectEqual(Stub.State.idle, stub.state);
+    try testing.expect(stub.activeId() == null);
+    switch (done_ev) {
+        .done => |done| {
+            try testing.expectEqual(Stop.canceled, done.stop);
+            try testing.expect(done.truncated);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "stub rejects mismatched run id" {
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var stub = try Stub.init("tool-parent", hash);
+    _ = try stub.hello();
+    _ = try stub.recv(Frame.init(1, .{
+        .hello = .{
+            .role = .child,
+            .agent_id = "agent-child",
+            .policy_hash = hash,
+        },
+    }));
+    _ = try stub.run(.{
+        .id = "job-3",
+        .prompt = "delegate again",
+    });
+
+    try testing.expectError(error.UnexpectedId, stub.recv(Frame.init(2, .{
+        .out = .{
+            .id = "job-x",
+            .kind = .text,
+            .text = "wrong job",
+        },
+    })));
+}
+
+test "stub rejects out of order inbound seq" {
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var stub = try Stub.init("tool-parent", hash);
+    _ = try stub.hello();
+    _ = try stub.recv(Frame.init(7, .{
+        .hello = .{
+            .role = .child,
+            .agent_id = "agent-child",
+            .policy_hash = hash,
+        },
+    }));
+    _ = try stub.run(.{
+        .id = "job-4",
+        .prompt = "delegate seq",
+    });
+
+    try testing.expectError(error.SeqOrder, stub.recv(Frame.init(7, .{
+        .out = .{
+            .id = "job-4",
+            .kind = .text,
+            .text = "late frame",
+        },
+    })));
 }
