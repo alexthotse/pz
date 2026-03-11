@@ -1,7 +1,14 @@
 const std = @import("std");
+const audit = @import("../audit.zig");
 const schema = @import("schema.zig");
 const reader_mod = @import("reader.zig");
 const sid_path = @import("path.zig");
+
+const Hooks = struct {
+    emit_audit_ctx: ?*anyopaque = null,
+    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,
+    now_ms: *const fn () i64 = nowMs,
+};
 
 /// Export a session to markdown.
 /// Returns the absolute path to the written file (caller owns).
@@ -10,6 +17,16 @@ pub fn toMarkdown(
     dir: std.fs.Dir,
     sid: []const u8,
     out_path: ?[]const u8,
+) ![]u8 {
+    return toMarkdownWith(alloc, dir, sid, out_path, .{});
+}
+
+fn toMarkdownWith(
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    sid: []const u8,
+    out_path: ?[]const u8,
+    hooks: Hooks,
 ) ![]u8 {
     var rdr = try reader_mod.ReplayReader.init(alloc, dir, sid, .{});
     defer rdr.deinit();
@@ -113,12 +130,71 @@ pub fn toMarkdown(
     };
     errdefer alloc.free(dest);
 
-    // Write file
-    const file = try std.fs.createFileAbsolute(dest, .{ .truncate = true });
+    try emitAudit(alloc, hooks, audit.Entry{
+        .ts_ms = hooks.now_ms(),
+        .sid = sid,
+        .seq = 1,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .file,
+            .name = .{ .text = dest, .vis = .mask },
+            .op = "write",
+        },
+        .msg = .{ .text = "export start", .vis = .@"pub" },
+        .data = .{
+            .tool = .{
+                .name = .{ .text = "export", .vis = .@"pub" },
+                .call_id = sid,
+                .argv = .{ .text = dest, .vis = .mask },
+            },
+        },
+    });
+
+    const file = std.fs.createFileAbsolute(dest, .{ .truncate = true }) catch |err| {
+        try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .fail, @errorName(err)));
+        return err;
+    };
     defer file.close();
-    try file.writeAll(buf.items);
+    file.writeAll(buf.items) catch |err| {
+        try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .fail, @errorName(err)));
+        return err;
+    };
+
+    try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .ok, null));
 
     return dest;
+}
+
+fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.Out, err_name: ?[]const u8) audit.Entry {
+    return .{
+        .ts_ms = ts_ms,
+        .sid = sid,
+        .seq = 2,
+        .out = out,
+        .sev = if (out == .ok) .info else .err,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .file,
+            .name = .{ .text = dest, .vis = .mask },
+            .op = "write",
+        },
+        .msg = .{ .text = if (out == .ok) "export complete" else err_name.?, .vis = if (out == .ok) .@"pub" else .mask },
+        .data = .{
+            .tool = .{
+                .name = .{ .text = "export", .vis = .@"pub" },
+                .call_id = sid,
+                .argv = .{ .text = dest, .vis = .mask },
+            },
+        },
+    };
+}
+
+fn emitAudit(alloc: std.mem.Allocator, hooks: Hooks, ent: audit.Entry) !void {
+    if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, ent);
+}
+
+fn nowMs() i64 {
+    return std.time.milliTimestamp();
 }
 
 test "export session to markdown" {
@@ -187,4 +263,120 @@ test "export default path uses sid.md" {
     // File should exist
     const f = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
     f.close();
+}
+
+test "export audit emits start and success entries" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const writer_mod = @import("writer.zig");
+
+    const Capture = struct {
+        rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+        fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            for (self.rows.items) |row| alloc.free(row);
+            self.rows.deinit(alloc);
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
+        .flush = .{ .always = {} },
+    });
+    try wr.append("ex2", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "hello" } } });
+    try wr.append("ex2", .{ .at_ms = 2, .data = .{ .text = .{ .text = "world" } } });
+
+    var cap = Capture{};
+    defer cap.deinit(std.testing.allocator);
+    const real = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(real);
+    const dest = try std.fs.path.join(std.testing.allocator, &.{ real, "audit.md" });
+    defer std.testing.allocator.free(dest);
+
+    const path = try toMarkdownWith(std.testing.allocator, tmp.dir, "ex2", dest, .{
+        .emit_audit_ctx = &cap,
+        .emit_audit = struct {
+            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
+                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
+                const raw = try audit.encodeAlloc(alloc, ent);
+                try cap_ptr.rows.append(alloc, raw);
+            }
+        }.f,
+        .now_ms = struct {
+            fn f() i64 {
+                return 123;
+            }
+        }.f,
+    });
+    defer std.testing.allocator.free(path);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    const scrubbed = try std.mem.replaceOwned(u8, std.testing.allocator, joined, real, "/tmp/TMP");
+    defer std.testing.allocator.free(scrubbed);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":123,"sid":"ex2","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"/tmp/TMP/audit.md","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":123,"sid":"ex2","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"/tmp/TMP/audit.md","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(scrubbed);
+}
+
+test "export audit emits failure entry on write failure" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const writer_mod = @import("writer.zig");
+
+    const Capture = struct {
+        rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+        fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            for (self.rows.items) |row| alloc.free(row);
+            self.rows.deinit(alloc);
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
+        .flush = .{ .always = {} },
+    });
+    try wr.append("ex3", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "hello" } } });
+
+    var cap = Capture{};
+    defer cap.deinit(std.testing.allocator);
+    const real = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(real);
+    const bad = try std.fs.path.join(std.testing.allocator, &.{ real, "missing", "audit.md" });
+    defer std.testing.allocator.free(bad);
+
+    try std.testing.expectError(error.FileNotFound, toMarkdownWith(std.testing.allocator, tmp.dir, "ex3", bad, .{
+        .emit_audit_ctx = &cap,
+        .emit_audit = struct {
+            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
+                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
+                const raw = try audit.encodeAlloc(alloc, ent);
+                try cap_ptr.rows.append(alloc, raw);
+            }
+        }.f,
+        .now_ms = struct {
+            fn f() i64 {
+                return 456;
+            }
+        }.f,
+    }));
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    const scrubbed = try std.mem.replaceOwned(u8, std.testing.allocator, joined, real, "/tmp/TMP");
+    defer std.testing.allocator.free(scrubbed);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":456,"sid":"ex3","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"},"op":"write"},"msg":{"text":"FileNotFound","vis":"mask"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"/tmp/TMP/missing/audit.md","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(scrubbed);
 }
