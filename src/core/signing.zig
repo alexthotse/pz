@@ -18,6 +18,9 @@ pub const PkError = error{
     BadHexLen,
     BadHex,
     BadPk,
+    BadPem,
+    BadPemType,
+    BadSsh,
 };
 
 pub const SigError = error{
@@ -83,6 +86,15 @@ pub const PublicKey = struct {
         return parse(buf[0..]);
     }
 
+    pub fn parseText(txt: []const u8) PkError!PublicKey {
+        const trimmed = std.mem.trim(u8, txt, " \t\r\n");
+        if (trimmed.len == 0) return error.BadPkLen;
+        if (std.mem.startsWith(u8, trimmed, "ssh-ed25519 ")) return parseSsh(trimmed);
+        if (std.mem.indexOf(u8, trimmed, "-----BEGIN ")) |_| return parsePem(trimmed);
+        if (trimmed.len == pk_len * 2) return parseHex(trimmed);
+        return parse(trimmed);
+    }
+
     pub fn bytes(self: PublicKey) [pk_len]u8 {
         return self.raw;
     }
@@ -95,6 +107,65 @@ pub const PublicKey = struct {
         return Ed25519.PublicKey.fromBytes(self.raw) catch return error.BadPk;
     }
 };
+
+const pem_begin = "-----BEGIN PUBLIC KEY-----";
+const pem_end = "-----END PUBLIC KEY-----";
+const ed25519_spki_prefix = [_]u8{ 0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00 };
+
+fn parsePem(txt: []const u8) PkError!PublicKey {
+    if (!std.mem.startsWith(u8, txt, pem_begin)) return error.BadPemType;
+    const end_idx = std.mem.indexOf(u8, txt, pem_end) orelse return error.BadPem;
+    const body = txt[pem_begin.len..end_idx];
+
+    var b64_buf: [256]u8 = undefined;
+    var n: usize = 0;
+    for (body) |c| switch (c) {
+        ' ', '\t', '\r', '\n' => {},
+        else => {
+            if (n >= b64_buf.len) return error.BadPem;
+            b64_buf[n] = c;
+            n += 1;
+        },
+    };
+    if (n == 0) return error.BadPem;
+
+    const dec_len = std.base64.standard.Decoder.calcSizeForSlice(b64_buf[0..n]) catch return error.BadPem;
+    var der_buf: [128]u8 = undefined;
+    if (dec_len > der_buf.len) return error.BadPem;
+    _ = std.base64.standard.Decoder.decode(der_buf[0..dec_len], b64_buf[0..n]) catch return error.BadPem;
+    if (dec_len != ed25519_spki_prefix.len + pk_len) return error.BadPem;
+    if (!std.mem.eql(u8, der_buf[0..ed25519_spki_prefix.len], ed25519_spki_prefix[0..])) return error.BadPemType;
+    return PublicKey.parse(der_buf[ed25519_spki_prefix.len..dec_len]);
+}
+
+fn parseSsh(txt: []const u8) PkError!PublicKey {
+    var it = std.mem.tokenizeAny(u8, txt, " \t\r\n");
+    const kind = it.next() orelse return error.BadSsh;
+    const b64 = it.next() orelse return error.BadSsh;
+    if (!std.mem.eql(u8, kind, "ssh-ed25519")) return error.BadSsh;
+
+    const dec_len = std.base64.standard.Decoder.calcSizeForSlice(b64) catch return error.BadSsh;
+    var blob: [128]u8 = undefined;
+    if (dec_len > blob.len) return error.BadSsh;
+    _ = std.base64.standard.Decoder.decode(blob[0..dec_len], b64) catch return error.BadSsh;
+
+    var off: usize = 0;
+    const name = readSshStr(blob[0..dec_len], &off) catch return error.BadSsh;
+    if (!std.mem.eql(u8, name, "ssh-ed25519")) return error.BadSsh;
+    const key = readSshStr(blob[0..dec_len], &off) catch return error.BadSsh;
+    if (off != dec_len) return error.BadSsh;
+    return PublicKey.parse(key);
+}
+
+fn readSshStr(buf: []const u8, off: *usize) error{BadSsh}![]const u8 {
+    if (off.* + 4 > buf.len) return error.BadSsh;
+    const n = std.mem.readInt(u32, buf[off.*..][0..4], .big);
+    off.* += 4;
+    if (off.* + n > buf.len) return error.BadSsh;
+    const out = buf[off.*..][0..n];
+    off.* += n;
+    return out;
+}
 
 pub const Signature = struct {
     raw: [sig_len]u8,
@@ -166,6 +237,12 @@ pub fn verifyDetached(msg: []const u8, sig: Signature, pk: PublicKey) VerifyErro
 const seed_hex = "8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166";
 const pk_hex = "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083";
 const sig_hex = "10a442b4a80cc4225b154f43bef28d2472ca80221951262eb8e0df9091575e2687cc486e77263c3418c757522d54f84b0359236abbbd4acd20dc297fdca66808";
+const pk_pem =
+    \\-----BEGIN PUBLIC KEY-----
+    \\MCowBQYDK2VwAyEALW90Vdl7SjoQ1yk5CdGk8gWMuaNw5D+oFUuygNuDkIM=
+    \\-----END PUBLIC KEY-----
+;
+const pk_ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC1vdFXZe0o6ENcpOQnRpPIFjLmjcOQ/qBVLsoDbg5CD fixture@example";
 
 fn fixtureSeed() !Seed {
     return Seed.parseHex(seed_hex);
@@ -237,4 +314,39 @@ test "verify rejects malformed signature bytes" {
     const sig = try Signature.parse(raw[0..]);
 
     try testing.expectError(error.BadSig, verifyDetached("test", sig, pk));
+}
+
+test "parseText accepts fixture key in hex pem and ssh forms" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const hex = try PublicKey.parseText(pk_hex);
+    const pem = try PublicKey.parseText(pk_pem);
+    const ssh = try PublicKey.parseText(pk_ssh);
+
+    const snap = try std.fmt.allocPrint(testing.allocator, "{x}{x}{x}\n{x}{x}{x}\n{x}{x}{x}\n", .{
+        hex.raw[0], hex.raw[1], hex.raw[2],
+        pem.raw[0], pem.raw[1], pem.raw[2],
+        ssh.raw[0], ssh.raw[1], ssh.raw[2],
+    });
+    defer testing.allocator.free(snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "2d6f74
+        \\2d6f74
+        \\2d6f74
+        \\"
+    ).expectEqual(snap);
+}
+
+test "parseText rejects wrong pem type and malformed ssh payload" {
+    const bad_pem =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        \\-----END PRIVATE KEY-----
+    ;
+
+    try testing.expectError(error.BadPemType, PublicKey.parseText(bad_pem));
+    try testing.expectError(error.BadSsh, PublicKey.parseText("ssh-ed25519 AAAA"));
 }
