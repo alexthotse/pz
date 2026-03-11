@@ -27,3 +27,5 @@ pub const SummaryReq = c.SummaryReq;
 pub const SummaryResult = c.SummaryResult;
 pub const Provider = c.Provider;
 pub const Stream = c.Stream;
+pub const Aborter = c.Aborter;
+pub const AbortSlot = c.AbortSlot;

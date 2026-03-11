@@ -178,7 +178,7 @@ pub const Client = struct {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
         }
 
-        return providers.Stream.from(SseStream, stream, SseStream.next, SseStream.deinit);
+        return providers.Stream.fromAbortable(SseStream, stream, SseStream.next, SseStream.deinit, SseStream.abort);
     }
 };
 
@@ -472,6 +472,12 @@ const SseStream = struct {
         self.req.deinit();
         self.arena.deinit();
         alloc.destroy(self);
+    }
+
+    fn abort(self: *SseStream) void {
+        if (self.req.connection) |conn| {
+            std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {};
+        }
     }
 };
 

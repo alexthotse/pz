@@ -53,6 +53,50 @@ pub const Opts = struct {
     thinking_budget: u32 = 0, // 0 = default per mode
 };
 
+pub const Aborter = struct {
+    ctx: *anyopaque,
+    abort_fn: *const fn (ctx: *anyopaque) void,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime abort_fn: fn (ctx: *T) void,
+    ) Aborter {
+        const Wrap = struct {
+            fn abort(raw: *anyopaque) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                abort_fn(typed);
+            }
+        };
+        return .{
+            .ctx = ctx,
+            .abort_fn = Wrap.abort,
+        };
+    }
+
+    pub fn abort(self: Aborter) void {
+        self.abort_fn(self.ctx);
+    }
+};
+
+pub const AbortSlot = struct {
+    mu: @import("std").Thread.Mutex = .{},
+    cur: ?Aborter = null,
+
+    pub fn set(self: *AbortSlot, aborter: ?Aborter) void {
+        self.mu.lock();
+        self.cur = aborter;
+        self.mu.unlock();
+    }
+
+    pub fn abort(self: *AbortSlot) void {
+        self.mu.lock();
+        const aborter = self.cur;
+        self.mu.unlock();
+        if (aborter) |a| a.abort();
+    }
+};
+
 pub const Ev = union(enum) {
     text: []const u8,
     thinking: []const u8,
@@ -152,6 +196,7 @@ pub const Stream = struct {
     pub const Vt = struct {
         next: *const fn (ctx: *anyopaque) anyerror!?Ev,
         deinit: *const fn (ctx: *anyopaque) void,
+        abort: ?*const fn (ctx: *anyopaque) void = null,
     };
 
     pub fn from(
@@ -189,6 +234,50 @@ pub const Stream = struct {
 
     pub fn deinit(self: *Stream) void {
         self.vt.deinit(self.ctx);
+    }
+
+    pub fn fromAbortable(
+        comptime T: type,
+        ctx: *T,
+        comptime next_fn: fn (ctx: *T) anyerror!?Ev,
+        comptime deinit_fn: fn (ctx: *T) void,
+        comptime abort_fn: fn (ctx: *T) void,
+    ) Stream {
+        const Wrap = struct {
+            fn next(raw: *anyopaque) anyerror!?Ev {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return next_fn(typed);
+            }
+
+            fn deinit(raw: *anyopaque) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                deinit_fn(typed);
+            }
+
+            fn abort(raw: *anyopaque) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                abort_fn(typed);
+            }
+
+            const vt = Vt{
+                .next = @This().next,
+                .deinit = @This().deinit,
+                .abort = @This().abort,
+            };
+        };
+
+        return .{
+            .ctx = ctx,
+            .vt = &Wrap.vt,
+        };
+    }
+
+    pub fn aborter(self: Stream) ?Aborter {
+        const abort_fn = self.vt.abort orelse return null;
+        return .{
+            .ctx = self.ctx,
+            .abort_fn = abort_fn,
+        };
     }
 };
 

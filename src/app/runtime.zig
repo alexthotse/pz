@@ -801,6 +801,7 @@ const LiveTurn = struct {
     wake_r: std.posix.fd_t,
     wake_w: std.posix.fd_t,
     cancel_flag: TurnCancelFlag = .{},
+    abort_slot: core.providers.AbortSlot = .{},
     last_stop: ?core.providers.StopReason = null,
     last_err: ?[]u8 = null,
     last_model: ?[]u8 = null,
@@ -876,6 +877,7 @@ const LiveTurn = struct {
 
     fn requestCancel(self: *LiveTurn) void {
         self.cancel_flag.request();
+        self.abort_slot.abort();
     }
 
     fn ask(self: *LiveTurn, args: core.tools.Call.AskArgs) ![]u8 {
@@ -1808,6 +1810,7 @@ fn runTui(
             .mode = live_mode,
             .max_turns = run_cmd.max_turns,
             .cancel = live_cancel,
+            .abort_slot = &live_turn.abort_slot,
         };
         var reader = tui_input.Reader.initWithNotify2(stdin_fd, bg_mgr.wakeFd(), live_turn.wakeFd());
         var live_ask_ctx = LiveAskCtx{
@@ -5279,6 +5282,7 @@ const TurnCtx = struct {
     mode: core.loop.ModeSink,
     max_turns: u16 = 0,
     cancel: ?core.loop.CancelSrc = null,
+    abort_slot: ?*core.providers.AbortSlot = null,
 
     const TurnOpts = struct {
         sid: []const u8,
@@ -5314,6 +5318,7 @@ const TurnCtx = struct {
             .provider_opts = opts.provider_opts,
             .max_turns = self.max_turns,
             .cancel = self.cancel,
+            .abort_slot = self.abort_slot,
         });
     }
 };

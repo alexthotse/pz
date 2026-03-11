@@ -201,6 +201,7 @@ pub const Opts = struct {
     max_turns: u16 = 0, // 0 = unlimited
     time: ?TimeSrc = null,
     cancel: ?CancelSrc = null,
+    abort_slot: ?*providers.AbortSlot = null,
     compactor: ?Compactor = null,
     compact_every: u32 = 0,
     cmd_cache: ?*CmdCache = null,
@@ -418,6 +419,8 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
             return failWithReport(opts, .provider_start, start_err);
         };
         defer stream.deinit();
+        if (opts.abort_slot) |slot| slot.set(stream.aborter());
+        defer if (opts.abort_slot) |slot| slot.set(null);
 
         var saw_tool_call = false;
         while (stream.next() catch |next_err| return failWithReport(opts, .stream_next, next_err)) |ev| {
@@ -489,6 +492,16 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
                 },
                 else => {},
             }
+        }
+
+        if (isCanceled(opts)) {
+            emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
+                return failWithReport(opts, .mode_push, cancel_err);
+            };
+            return .{
+                .turns = turns,
+                .tool_calls = tool_calls,
+            };
         }
 
         if (!saw_tool_call) {
@@ -2365,6 +2378,196 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     // Session persists partial — turns is 0 because cancel happened mid-first-turn
     try std.testing.expectEqual(@as(u16, 0), out.turns);
     try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
+}
+
+test "abort slot cancels blocked provider stream quickly and preserves partial text" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        text_ct: usize = 0,
+        canceled_ct: usize = 0,
+        last_text: [128]u8 = [_]u8{0} ** 128,
+        last_text_len: usize = 0,
+        rdr: ReaderImpl = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            switch (ev.data) {
+                .text => |t| {
+                    self.text_ct += 1;
+                    const len = @min(t.text.len, self.last_text.len);
+                    @memcpy(self.last_text[0..len], t.text[0..len]);
+                    self.last_text_len = len;
+                },
+                .stop => |s| {
+                    if (s.reason == .canceled) self.canceled_ct += 1;
+                },
+                else => {},
+            }
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        wake_r: std.posix.fd_t,
+        wake_w: std.posix.fd_t,
+        sent_first: bool = false,
+        aborted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn next(self: *@This()) !?providers.Ev {
+            if (!self.sent_first) {
+                self.sent_first = true;
+                return .{ .text = "Hello" };
+            }
+
+            var fds = [1]std.posix.pollfd{.{
+                .fd = self.wake_r,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            _ = try std.posix.poll(&fds, -1);
+            var buf: [8]u8 = undefined;
+            _ = std.posix.read(self.wake_r, &buf) catch {};
+            if (self.aborted.load(.acquire)) return null;
+            return .{ .stop = .{ .reason = .done } };
+        }
+
+        fn abort(self: *@This()) void {
+            self.aborted.store(true, .release);
+            _ = std.posix.write(self.wake_w, "\x01") catch {};
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+            self.stream.sent_first = false;
+            self.stream.aborted.store(false, .release);
+            return providers.Stream.fromAbortable(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+                StreamImpl.abort,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        canceled_ct: usize = 0,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .stop => |s| {
+                        if (s.reason == .canceled) self.canceled_ct += 1;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    const CancelImpl = struct {
+        canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn isCanceled(self: *@This()) bool {
+            return self.canceled.load(.acquire);
+        }
+    };
+
+    const CancelCtx = struct {
+        cancel: *CancelImpl,
+        slot: *providers.AbortSlot,
+
+        fn run(self: *@This()) void {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            self.cancel.canceled.store(true, .release);
+            self.slot.abort();
+        }
+    };
+
+    const pipe = try std.posix.pipe2(.{
+        .CLOEXEC = true,
+        .NONBLOCK = true,
+    });
+    defer std.posix.close(pipe[0]);
+    defer std.posix.close(pipe[1]);
+
+    var provider_impl = ProviderImpl{
+        .stream = .{
+            .wake_r = pipe[0],
+            .wake_w = pipe[1],
+        },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var cancel_impl = CancelImpl{};
+    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+    var abort_slot = providers.AbortSlot{};
+    var cancel_ctx = CancelCtx{
+        .cancel = &cancel_impl,
+        .slot = &abort_slot,
+    };
+    const cancel_thr = try std.Thread.spawn(.{}, CancelCtx.run, .{&cancel_ctx});
+    defer cancel_thr.join();
+
+    const start_ns = std.time.nanoTimestamp();
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-block-cancel",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+        .cancel = cancel,
+        .abort_slot = &abort_slot,
+    });
+    const elapsed_ms: i128 = @divTrunc(std.time.nanoTimestamp() - start_ns, std.time.ns_per_ms);
+
+    try std.testing.expect(elapsed_ms < 200);
+    try std.testing.expectEqual(@as(usize, 1), store_impl.text_ct);
+    try std.testing.expectEqualStrings("Hello", store_impl.last_text[0..store_impl.last_text_len]);
+    try std.testing.expectEqual(@as(usize, 1), store_impl.canceled_ct);
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.canceled_ct);
+    try std.testing.expectEqual(@as(u16, 0), out.turns);
 }
 
 test "CmdCache approve echo hi does not approve echo rm -rf" {
