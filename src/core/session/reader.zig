@@ -37,6 +37,8 @@ pub const ReplayReader = struct {
         };
     }
 
+    /// Returns an event whose string slices borrow from the reader arena.
+    /// That storage is invalidated by the next `next()` or `nextDup()` call.
     pub fn next(self: *ReplayReader) !?Event {
         self.arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.alloc);
@@ -71,6 +73,12 @@ pub const ReplayReader = struct {
             try self.appendLinePart(slice);
             self.io_pos = self.io_len;
         }
+    }
+
+    /// Returns an event fully detached from the reader arena.
+    pub fn nextDup(self: *ReplayReader, alloc: std.mem.Allocator) !?Event {
+        const ev = (try self.next()) orelse return null;
+        return try ev.dupe(alloc);
     }
 
     pub fn line(self: *const ReplayReader) usize {
@@ -189,6 +197,40 @@ test "jsonl replay preserves event stream exactly" {
         try expectSameEvent(events[idx], ev);
     }
     try std.testing.expectEqual(@as(usize, events.len), idx);
+}
+
+test "nextDup keeps prior event stable across later reads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const events = [_]Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "first borrowed payload" } } },
+        .{ .at_ms = 2, .data = .{ .text = .{ .text = "second borrowed payload" } } },
+        .{ .at_ms = 3, .data = .{ .tool_call = .{
+            .id = "tc-1",
+            .name = "bash",
+            .args = "{\"cmd\":\"echo hi\"}",
+        } } },
+    };
+
+    {
+        const file = try tmp.dir.createFile("own.jsonl", .{});
+        defer file.close();
+        for (events) |ev| try encodeLine(file, ev);
+    }
+
+    var rdr = try ReplayReader.init(std.testing.allocator, tmp.dir, "own", .{});
+    defer rdr.deinit();
+
+    const first = (try rdr.nextDup(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    defer first.free(std.testing.allocator);
+    const second = (try rdr.nextDup(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    defer second.free(std.testing.allocator);
+    const third = (try rdr.next()) orelse return error.TestUnexpectedResult;
+
+    try expectSameEvent(events[0], first);
+    try expectSameEvent(events[1], second);
+    try expectSameEvent(events[2], third);
 }
 
 fn expectMalformedReplay(dir: std.fs.Dir) !void {
