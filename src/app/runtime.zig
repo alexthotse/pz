@@ -4430,7 +4430,12 @@ fn handleSlashCommand(
                 try writeTextLine(alloc, out, "unknown provider: {s}\n", .{prov_name});
                 return .handled;
             };
-            try runLoginFlow(alloc, out, req, audit_hooks.auth());
+            runLoginFlow(alloc, out, req, audit_hooks.auth()) catch |err| {
+                const em = try report.cli(alloc, "login", err);
+                defer alloc.free(em);
+                try out.writeAll(em);
+                return .handled;
+            };
             return .handled;
         },
         .logout => {
@@ -4439,7 +4444,12 @@ fn handleSlashCommand(
                     try writeTextLine(alloc, out, "unknown provider: {s}\n", .{arg});
                     return .handled;
                 };
-                try core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth());
+                core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth()) catch |err| {
+                    const em = try report.cli(alloc, "logout", err);
+                    defer alloc.free(em);
+                    try out.writeAll(em);
+                    return .handled;
+                };
                 try writeTextLine(alloc, out, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
                 return .handled;
             }
@@ -4453,7 +4463,12 @@ fn handleSlashCommand(
 
             const active_name = resolveDefaultProvider(provider.*);
             if (chooseLogoutProvider(active_name, logged_in)) |prov| {
-                try core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth());
+                core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth()) catch |err| {
+                    const em = try report.cli(alloc, "logout", err);
+                    defer alloc.free(em);
+                    try out.writeAll(em);
+                    return .handled;
+                };
                 try writeTextLine(alloc, out, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
                 return .handled;
             }
@@ -7511,6 +7526,118 @@ const AuditRows = struct {
     }
 };
 
+const AuditAttrSnap = struct {
+    key: []const u8,
+    vis: core.audit.Vis,
+    ty: []const u8,
+};
+
+const AuditEntrySnap = struct {
+    sid: []const u8,
+    seq: u64,
+    kind: core.audit.Kind,
+    sev: core.audit.Sev,
+    out: core.audit.Out,
+    res_kind: ?core.audit.ResKind = null,
+    res_name: ?[]const u8 = null,
+    op: ?[]const u8 = null,
+    msg: ?[]const u8 = null,
+    data_name: ?[]const u8 = null,
+    call_id: ?[]const u8 = null,
+    auth_mech: ?[]const u8 = null,
+    attrs: []const AuditAttrSnap = &.{},
+};
+
+fn auditTraceSnap(alloc: std.mem.Allocator, rows: []const []const u8) ![]AuditEntrySnap {
+    const out = try alloc.alloc(AuditEntrySnap, rows.len);
+    for (rows, 0..) |row, i| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, row, .{});
+        const root = parsed.value;
+        if (root != .object) return error.UnexpectedToken;
+
+        const kind_txt = jsonStr(root.object, "kind") orelse return error.UnexpectedToken;
+        const sev_txt = jsonStr(root.object, "sev") orelse return error.UnexpectedToken;
+        const out_txt = jsonStr(root.object, "out") orelse return error.UnexpectedToken;
+        const kind = std.meta.stringToEnum(core.audit.Kind, kind_txt) orelse return error.UnexpectedToken;
+        const sev = std.meta.stringToEnum(core.audit.Sev, sev_txt) orelse return error.UnexpectedToken;
+        const out_tag = std.meta.stringToEnum(core.audit.Out, out_txt) orelse return error.UnexpectedToken;
+
+        const attrs_val = root.object.get("attrs") orelse return error.UnexpectedToken;
+        if (attrs_val != .array) return error.UnexpectedToken;
+        const attrs = try alloc.alloc(AuditAttrSnap, attrs_val.array.items.len);
+        for (attrs_val.array.items, 0..) |attr, j| {
+            if (attr != .object) return error.UnexpectedToken;
+            attrs[j] = .{
+                .key = jsonStr(attr.object, "key") orelse return error.UnexpectedToken,
+                .vis = std.meta.stringToEnum(core.audit.Vis, jsonStr(attr.object, "vis") orelse return error.UnexpectedToken) orelse return error.UnexpectedToken,
+                .ty = jsonStr(attr.object, "ty") orelse return error.UnexpectedToken,
+            };
+        }
+
+        const res_obj = jsonObj(root.object, "res");
+        const msg_obj = jsonObj(root.object, "msg");
+        const data_obj = jsonObj(root.object, "data") orelse return error.UnexpectedToken;
+        out[i] = .{
+            .sid = jsonStr(root.object, "sid") orelse return error.UnexpectedToken,
+            .seq = jsonU64(root.object, "seq") orelse return error.UnexpectedToken,
+            .kind = kind,
+            .sev = sev,
+            .out = out_tag,
+            .res_kind = if (res_obj) |obj| std.meta.stringToEnum(core.audit.ResKind, jsonStr(obj, "kind") orelse return error.UnexpectedToken) else null,
+            .res_name = if (res_obj) |obj| jsonVisText(obj, "name") else null,
+            .op = if (res_obj) |obj| jsonStr(obj, "op") else null,
+            .msg = if (msg_obj) |obj| jsonVisText(obj, null) else null,
+            .data_name = switch (kind) {
+                .tool, .ship => jsonVisText(data_obj, "name"),
+                else => null,
+            },
+            .call_id = switch (kind) {
+                .tool => jsonStr(data_obj, "call_id"),
+                else => null,
+            },
+            .auth_mech = switch (kind) {
+                .auth => jsonStr(data_obj, "mech"),
+                else => null,
+            },
+            .attrs = attrs,
+        };
+    }
+    return out;
+}
+
+fn jsonObj(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    const v = obj.get(key) orelse return null;
+    return if (v == .object) v.object else null;
+}
+
+fn jsonStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+fn jsonU64(obj: std.json.ObjectMap, key: []const u8) ?u64 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .integer => |n| @intCast(n),
+        else => null,
+    };
+}
+
+fn jsonVisText(obj: std.json.ObjectMap, key: ?[]const u8) ?[]const u8 {
+    const txt = if (key) |k| blk: {
+        const v = obj.get(k) orelse return null;
+        if (v != .object) return null;
+        break :blk v.object;
+    } else obj;
+    const text = jsonStr(txt, "text") orelse return null;
+    const vis_txt = jsonStr(txt, "vis") orelse return null;
+    const vis = std.meta.stringToEnum(core.audit.Vis, vis_txt) orelse return null;
+    return switch (vis) {
+        .@"pub" => text,
+        .mask, .hash, .secret => "[mask]",
+    };
+}
+
 test "runtime executes print mode and persists session events" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9116,6 +9243,9 @@ test "runtime rpc bg command starts lists and stops jobs" {
 }
 
 test "runtime rpc auth commands emit audited success and failure records" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -9219,19 +9349,464 @@ test "runtime rpc auth commands emit audited success and failure records" {
     const fail_written = fail_out_fbs.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, fail_written, "\"type\":\"rpc_error\"") != null);
 
-    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
-    defer std.testing.allocator.free(joined);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"sid\":\"auth\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"save_api_key\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "api key save start") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "api key save complete") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"out\":\"fail\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"text\":\"[mask:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"logout\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "sk-openai-secret") == null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const trace = try auditTraceSnap(arena.allocator(), rows.rows.items);
+    try oh.snap(@src(),
+        \\[]app.runtime.AuditEntrySnap
+        \\  [0]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [1]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [2]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "api key save start"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [3]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .notice
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "api key save complete"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [4]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 3
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [5]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 4
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [6]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "logout"
+        \\    .msg: ?[]const u8
+        \\      "logout start"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "stored"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [7]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .notice
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "logout"
+        \\    .msg: ?[]const u8
+        \\      "logout complete"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "stored"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [8]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 5
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [9]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 6
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [10]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [11]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [12]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "api key save start"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [13]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .err
+        \\    .out: core.audit.Out
+        \\      .fail
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "[mask]"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [14]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 3
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [15]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 4
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+    ).expectEqual(trace);
 }
 
 test "runtime rpc bg commands emit audited redacted control records" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -9285,21 +9860,1517 @@ test "runtime rpc bg commands emit audited redacted control records" {
     try std.testing.expect(std.mem.indexOf(u8, written, "bg started id=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "bg not found id=42") != null);
 
-    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
-    defer std.testing.allocator.free(joined);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"sid\":\"bg\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"start\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"msg\":{\"text\":\"bg control start\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"msg\":{\"text\":\"bg control success\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"key\":\"cwd\",\"vis\":\"mask\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"key\":\"log_path\",\"vis\":\"mask\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"argv\":{\"text\":\"[mask:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"stop\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "\"out\":\"fail\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "printf done") == null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "/tmp/pz-bg-") == null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const trace = try auditTraceSnap(arena.allocator(), rows.rows.items);
+    try oh.snap(@src(),
+        \\[]app.runtime.AuditEntrySnap
+        \\  [0]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [1]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [2]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 3
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "start"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "start"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "cwd"
+        \\        .vis: core.audit.Vis
+        \\          .mask
+        \\        .ty: []const u8
+        \\          "str"
+        \\  [3]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 4
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "start"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "start"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "job_id"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\      [1]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "pid"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\      [2]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "cwd"
+        \\        .vis: core.audit.Vis
+        \\          .mask
+        \\        .ty: []const u8
+        \\          "str"
+        \\      [3]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "log_path"
+        \\        .vis: core.audit.Vis
+        \\          .mask
+        \\        .ty: []const u8
+        \\          "str"
+        \\  [4]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 5
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [5]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 6
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [6]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 7
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [7]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 8
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [8]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 9
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [9]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 10
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [10]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 11
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "stop"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "stop"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "job_id"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [11]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 12
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .err
+        \\    .out: core.audit.Out
+        \\      .fail
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "stop"
+        \\    .msg: ?[]const u8
+        \\      "bg not found"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "stop"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "job_id"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\      [1]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "status"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "str"
+        \\  [12]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 13
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [13]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 14
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "drain"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "drain"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+    ).expectEqual(trace);
 }
 
+test "runtime tui auth commands emit audited success and failure records" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    try tmp.dir.makePath("home");
+    {
+        var bad = try tmp.dir.createFile("home-bad", .{});
+        bad.close();
+    }
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+    const bad_home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home-bad");
+    defer std.testing.allocator.free(bad_home_abs);
+
+    var cfg = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "openai"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream("/login openai sk-openai-secret\n/logout openai\n/quit\n");
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 432;
+                }
+            }.f,
+            .auth_home = home_abs,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "API key saved for openai") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "logged out of openai") != null);
+
+    var fail_cfg = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "openai"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer fail_cfg.cfg.deinit(std.testing.allocator);
+
+    var fail_in_fbs = std.io.fixedBufferStream("/login openai sk-openai-secret\n/quit\n");
+    var fail_out_buf: [32768]u8 = undefined;
+    var fail_out_fbs = std.io.fixedBufferStream(&fail_out_buf);
+
+    const fail_sid = try execWithIoHooks(
+        std.testing.allocator,
+        fail_cfg,
+        fail_in_fbs.reader().any(),
+        fail_out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 432;
+                }
+            }.f,
+            .auth_home = bad_home_abs,
+        },
+    );
+    defer std.testing.allocator.free(fail_sid);
+
+    const fail_written = fail_out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, fail_written, "error: login failed") != null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const trace = try auditTraceSnap(arena.allocator(), rows.rows.items);
+    try oh.snap(@src(),
+        \\[]app.runtime.AuditEntrySnap
+        \\  [0]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [1]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [2]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "api key save start"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [3]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .notice
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "api key save complete"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [4]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 3
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [5]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 4
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [6]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "logout"
+        \\    .msg: ?[]const u8
+        \\      "logout start"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "stored"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [7]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .notice
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "logout"
+        \\    .msg: ?[]const u8
+        \\      "logout complete"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "stored"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [8]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 5
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [9]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 6
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [10]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [11]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [12]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "api key save start"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [13]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "auth"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .auth
+        \\    .sev: core.audit.Sev
+        \\      .err
+        \\    .out: core.audit.Out
+        \\      .fail
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .auth
+        \\    .res_name: ?[]const u8
+        \\      "openai"
+        \\    .op: ?[]const u8
+        \\      "save_api_key"
+        \\    .msg: ?[]const u8
+        \\      "[mask]"
+        \\    .data_name: ?[]const u8
+        \\      null
+        \\    .call_id: ?[]const u8
+        \\      null
+        \\    .auth_mech: ?[]const u8
+        \\      "api_key"
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [14]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 3
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [15]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 4
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+    ).expectEqual(trace);
+}
+
+test "runtime tui bg commands emit audited redacted control records" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var cfg = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream("/bg run printf done\n/bg list\n/bg stop 42\n/quit\n");
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 765;
+                }
+            }.f,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "bg started id=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "bg not found id=42") != null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const trace = try auditTraceSnap(arena.allocator(), rows.rows.items);
+    try oh.snap(@src(),
+        \\[]app.runtime.AuditEntrySnap
+        \\  [0]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 1
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [1]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 2
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [2]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 3
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "start"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "start"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "cwd"
+        \\        .vis: core.audit.Vis
+        \\          .mask
+        \\        .ty: []const u8
+        \\          "str"
+        \\  [3]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 4
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "start"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "start"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "job_id"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\      [1]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "pid"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\      [2]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "cwd"
+        \\        .vis: core.audit.Vis
+        \\          .mask
+        \\        .ty: []const u8
+        \\          "str"
+        \\      [3]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "log_path"
+        \\        .vis: core.audit.Vis
+        \\          .mask
+        \\        .ty: []const u8
+        \\          "str"
+        \\  [4]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 5
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [5]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 6
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [6]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 7
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [7]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 8
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [8]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 9
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [9]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 10
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [10]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 11
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "stop"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "stop"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "job_id"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\  [11]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 12
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .err
+        \\    .out: core.audit.Out
+        \\      .fail
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "stop"
+        \\    .msg: ?[]const u8
+        \\      "bg not found"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "stop"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "job_id"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+        \\      [1]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "status"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "str"
+        \\  [12]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 13
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control start"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      (empty)
+        \\  [13]: app.runtime.AuditEntrySnap
+        \\    .sid: []const u8
+        \\      "bg"
+        \\    .seq: u64 = 14
+        \\    .kind: core.audit.Kind
+        \\      .tool
+        \\    .sev: core.audit.Sev
+        \\      .info
+        \\    .out: core.audit.Out
+        \\      .ok
+        \\    .res_kind: ?core.audit.ResKind
+        \\      .cmd
+        \\    .res_name: ?[]const u8
+        \\      "bg"
+        \\    .op: ?[]const u8
+        \\      "list"
+        \\    .msg: ?[]const u8
+        \\      "bg control success"
+        \\    .data_name: ?[]const u8
+        \\      "bg"
+        \\    .call_id: ?[]const u8
+        \\      "list"
+        \\    .auth_mech: ?[]const u8
+        \\      null
+        \\    .attrs: []const app.runtime.AuditAttrSnap
+        \\      [0]: app.runtime.AuditAttrSnap
+        \\        .key: []const u8
+        \\          "count"
+        \\        .vis: core.audit.Vis
+        \\          .pub
+        \\        .ty: []const u8
+        \\          "uint"
+    ).expectEqual(trace);
+}
 test "runtime reload audit snapshots start success and failure" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
