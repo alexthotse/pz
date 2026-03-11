@@ -199,6 +199,18 @@ test "registry lookup resolves by name and kind" {
 test "registry run dispatches to named handler" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
+    const SinkSnap = struct {
+        ct: usize,
+        last: u8,
+    };
+    const Snap = struct {
+        res: TResult,
+        missing: []const u8,
+        mismatch: []const u8,
+        read_ct: usize,
+        write_ct: usize,
+        sink: SinkSnap,
+    };
     const SinkImpl = struct {
         ct: usize = 0,
         last: u8 = 0,
@@ -243,30 +255,43 @@ test "registry run dispatches to named handler" {
     const reg = TReg.Registry.init(entries[0..]);
 
     const res = try reg.run("write", .{ .kind = .write, .value = 7 }, sink);
-    const snap = try std.fmt.allocPrint(std.testing.allocator, "code={d}\nread={d}\nwrite={d}\nsink={d}|{d}\n", .{
-        res.code,
-        read_impl.ct,
-        write_impl.ct,
-        sink_impl.ct,
-        sink_impl.last,
-    });
-    defer std.testing.allocator.free(snap);
+    const missing = blk: {
+        _ = reg.run("missing", .{ .kind = .read, .value = 1 }, sink) catch |err| {
+            if (err != TReg.Err.NotFound) return err;
+            break :blk @errorName(err);
+        };
+        return error.TestUnexpectedResult;
+    };
+    const mismatch = blk: {
+        _ = reg.run("read", .{ .kind = .write, .value = 1 }, sink) catch |err| {
+            if (err != TReg.Err.KindMismatch) return err;
+            break :blk @errorName(err);
+        };
+        return error.TestUnexpectedResult;
+    };
+    const snap = Snap{
+        .res = res,
+        .missing = missing,
+        .mismatch = mismatch,
+        .read_ct = read_impl.ct,
+        .write_ct = write_impl.ct,
+        .sink = .{
+            .ct = sink_impl.ct,
+            .last = sink_impl.last,
+        },
+    };
     try oh.snap(@src(),
-        \\[]u8
-        \\  "code=27
-        \\read=0
-        \\write=1
-        \\sink=1|2
-        \\"
+        \\core.tools.registry.test.registry run dispatches to named handler.Snap
+        \\  .res: core.tools.registry.TResult
+        \\    .code: i32 = 27
+        \\  .missing: []const u8
+        \\    "NotFound"
+        \\  .mismatch: []const u8
+        \\    "KindMismatch"
+        \\  .read_ct: usize = 0
+        \\  .write_ct: usize = 1
+        \\  .sink: core.tools.registry.test.registry run dispatches to named handler.SinkSnap
+        \\    .ct: usize = 1
+        \\    .last: u8 = 2
     ).expectEqual(snap);
-
-    try std.testing.expectError(
-        TReg.Err.NotFound,
-        reg.run("missing", .{ .kind = .read, .value = 1 }, sink),
-    );
-    try std.testing.expectError(
-        TReg.Err.KindMismatch,
-        reg.run("read", .{ .kind = .write, .value = 1 }, sink),
-    );
-    try std.testing.expectEqual(@as(usize, 0), read_impl.ct);
 }
