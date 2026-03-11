@@ -220,39 +220,124 @@ test "pbt drawN respects shared generator bounds" {
     }
 }
 
-test "pbt expectShrunk returns reduced counterexamples" {
+test "pbt expectShrunk yields stable minimal counterexamples" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const Prop = struct {
         fn prop(args: struct { a: u8 }) bool {
             return args.a == 0;
         }
     };
 
-    const fail = try expectShrunk(Prop.prop, .{
+    const fail_a = try expectShrunk(Prop.prop, .{
+        .iterations = 50,
+        .seed = 12345,
+    });
+    const fail_b = try expectShrunk(Prop.prop, .{
         .iterations = 50,
         .seed = 12345,
     });
 
-    try std.testing.expectEqual(@as(u64, 12345), fail.seed);
-    try std.testing.expect(fail.original.a != 0);
-    try std.testing.expectEqual(@as(u8, 1), fail.shrunk.a);
+    try std.testing.expectEqual(@as(u64, 12345), fail_a.seed);
+    try std.testing.expectEqual(fail_a.seed, fail_b.seed);
+    try std.testing.expectEqual(fail_a.iteration, fail_b.iteration);
+    try std.testing.expectEqual(fail_a.original.a, fail_b.original.a);
+    try std.testing.expectEqual(fail_a.shrunk.a, fail_b.shrunk.a);
+    try std.testing.expect(fail_a.original.a != 0);
+    try std.testing.expectEqual(@as(u8, 1), fail_a.shrunk.a);
+
+    const got = try valueAlloc(std.testing.allocator, .{
+        .seed = fail_a.seed,
+        .iteration = fail_a.iteration,
+        .original = fail_a.original,
+        .shrunk = fail_a.shrunk,
+    });
+    defer std.testing.allocator.free(got);
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  ".{seed=12345, iteration=0, original=.{a=160}, shrunk=.{a=1}}"
+    ).expectEqual(got);
+}
+
+test "pbt run replays successful iterations deterministically" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const Prop = struct {
+        var vals: [8]u8 = undefined;
+        var n: usize = 0;
+
+        fn reset() void {
+            n = 0;
+        }
+
+        fn prop(args: struct { a: u8 }) bool {
+            vals[n] = args.a;
+            n += 1;
+            return true;
+        }
+    };
+
+    Prop.reset();
+    try run(Prop.prop, .{
+        .iterations = Prop.vals.len,
+        .seed = 0xC0DE_1234,
+    });
+    const first = Prop.vals;
+    const first_n = Prop.n;
+
+    Prop.reset();
+    try run(Prop.prop, .{
+        .iterations = Prop.vals.len,
+        .seed = 0xC0DE_1234,
+    });
+    const second = Prop.vals;
+    const second_n = Prop.n;
+
+    try std.testing.expectEqual(@as(usize, Prop.vals.len), first_n);
+    try std.testing.expectEqual(first_n, second_n);
+    try std.testing.expectEqualSlices(u8, first[0..first_n], second[0..second_n]);
+
+    const got = try valueAlloc(std.testing.allocator, first);
+    defer std.testing.allocator.free(got);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[230, 116, 6, 27, 0, 70, 79, 119]"
+    ).expectEqual(got);
 }
 
 test "pbt reportAlloc includes failure details" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const Prop = struct {
         fn prop(args: struct { a: u8 }) bool {
             return args.a == 0;
         }
     };
 
-    const fail = try expectShrunk(Prop.prop, .{
+    const fail_a = try expectShrunk(Prop.prop, .{
+        .iterations = 50,
+        .seed = 12345,
+    });
+    const fail_b = try expectShrunk(Prop.prop, .{
         .iterations = 50,
         .seed = 12345,
     });
 
-    const report = try reportAlloc(std.testing.allocator, Prop.prop, fail);
-    defer std.testing.allocator.free(report);
+    const report_a = try reportAlloc(std.testing.allocator, Prop.prop, fail_a);
+    defer std.testing.allocator.free(report_a);
+    const report_b = try reportAlloc(std.testing.allocator, Prop.prop, fail_b);
+    defer std.testing.allocator.free(report_b);
 
-    try std.testing.expect(std.mem.indexOf(u8, report, "seed=12345\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, report, "original=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, report, "shrunk=.{a=1}\n") != null);
+    try std.testing.expectEqualStrings(report_a, report_b);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "seed=12345
+        \\iteration=0
+        \\original=.{a=160}
+        \\shrunk=.{a=1}
+        \\"
+    ).expectEqual(report_a);
 }
