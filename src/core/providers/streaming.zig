@@ -282,6 +282,8 @@ fn mkPol(max_tries: u16) !Pol {
 }
 
 test "stream run retries transient transport and parses frames" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{
             .start_err = error.TransportTransient,
@@ -306,32 +308,47 @@ test "stream run retries transient transport and parses frames" {
         waits.asSleeper(),
     );
     defer out.deinit();
-
-    try std.testing.expectEqual(@as(u16, 2), out.tries);
-    try std.testing.expectEqual(@as(usize, 2), tr.start_ct);
-    try std.testing.expectEqual(@as(usize, 1), waits.len);
-    try std.testing.expectEqual(@as(u64, 10), waits.waits[0]);
-    try std.testing.expectEqual(@as(usize, 3), out.evs.len);
-
-    switch (out.evs[0]) {
-        .text => |txt| try std.testing.expectEqualStrings("hello", txt),
+    const txt = switch (out.evs[0]) {
+        .text => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[1]) {
-        .usage => |usage| {
-            try std.testing.expectEqual(@as(u64, 3), usage.in_tok);
-            try std.testing.expectEqual(@as(u64, 5), usage.out_tok);
-            try std.testing.expectEqual(@as(u64, 8), usage.tot_tok);
-        },
+    };
+    const usage = switch (out.evs[1]) {
+        .usage => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[2]) {
-        .stop => |stop| try std.testing.expect(stop.reason == .done),
+    };
+    const stop = switch (out.evs[2]) {
+        .stop => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "tries={d}\nstarts={d}\nwaits={d}|{d}\nevs={d}\ntext={s}\nusage={d}|{d}|{d}\nstop={s}\n", .{
+        out.tries,
+        tr.start_ct,
+        waits.len,
+        waits.waits[0],
+        out.evs.len,
+        txt,
+        usage.in_tok,
+        usage.out_tok,
+        usage.tot_tok,
+        @tagName(stop.reason),
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "tries=2
+        \\starts=2
+        \\waits=1|10
+        \\evs=3
+        \\text=hello
+        \\usage=3|5|8
+        \\stop=done
+        \\"
+    ).expectEqual(snap);
 }
 
 test "stream run drops partial events from failed retry attempt" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{
             .chunks = &.{"text:bad\n"},
@@ -355,19 +372,31 @@ test "stream run drops partial events from failed retry attempt" {
         waits.asSleeper(),
     );
     defer out.deinit();
-
-    try std.testing.expectEqual(@as(u16, 2), out.tries);
-    try std.testing.expectEqual(@as(usize, 2), out.evs.len);
-    try std.testing.expectEqual(@as(usize, 1), waits.len);
-
-    switch (out.evs[0]) {
-        .text => |txt| try std.testing.expectEqualStrings("ok", txt),
+    const txt = switch (out.evs[0]) {
+        .text => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[1]) {
-        .stop => |stop| try std.testing.expect(stop.reason == .done),
+    };
+    const stop = switch (out.evs[1]) {
+        .stop => |ev| ev,
         else => return error.TestUnexpectedResult,
-    }
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "tries={d}\nevs={d}\nwaits={d}\ntext={s}\nstop={s}\n", .{
+        out.tries,
+        out.evs.len,
+        waits.len,
+        txt,
+        @tagName(stop.reason),
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "tries=2
+        \\evs=2
+        \\waits=1
+        \\text=ok
+        \\stop=done
+        \\"
+    ).expectEqual(snap);
 }
 
 test "stream run does not retry parser failures" {

@@ -122,24 +122,43 @@ fn mapRaw(ctx: *MapCtx, err: anyerror) Err {
 }
 
 test "taxonomy class and retry classification" {
-    try std.testing.expect(class(error.TransportTransient) == .retryable_transport);
-    try std.testing.expect(class(error.TransportFatal) == .fatal_transport);
-    try std.testing.expect(class(error.BadFrame) == .parse);
-
-    try std.testing.expect(retryable(error.TransportTransient));
-    try std.testing.expect(!retryable(error.TransportFatal));
-    try std.testing.expect(!retryable(error.BadFrame));
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}|{s}|{s}\n{}|{}|{}\n", .{
+        @tagName(class(error.TransportTransient)),
+        @tagName(class(error.TransportFatal)),
+        @tagName(class(error.BadFrame)),
+        retryable(error.TransportTransient),
+        retryable(error.TransportFatal),
+        retryable(error.BadFrame),
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "retryable_transport|fatal_transport|parse
+        \\true|false|false
+        \\"
+    ).expectEqual(snap);
 }
 
 test "adapter maps provider errors into canonical taxonomy" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ctx = MapCtx{};
     const ad = Adapter.from(MapCtx, &ctx, mapRaw);
-
-    try std.testing.expectEqual(error.TransportTransient, ad.map(error.Timeout));
-    try std.testing.expectEqual(error.TransportTransient, ad.map(error.WireBreak));
-    try std.testing.expectEqual(error.TransportFatal, ad.map(error.Closed));
-    try std.testing.expectEqual(error.OutOfMemory, ad.map(error.OutOfMemory));
-    try std.testing.expectEqual(@as(usize, 4), ctx.calls);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}|{s}|{s}|{s}|{d}\n", .{
+        @errorName(ad.map(error.Timeout)),
+        @errorName(ad.map(error.WireBreak)),
+        @errorName(ad.map(error.Closed)),
+        @errorName(ad.map(error.OutOfMemory)),
+        ctx.calls,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "TransportTransient|TransportTransient|TransportFatal|OutOfMemory|4
+        \\"
+    ).expectEqual(snap);
 }
 
 test "isOverflowError: anthropic JSON" {

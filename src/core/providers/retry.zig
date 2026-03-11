@@ -112,6 +112,8 @@ fn retryOnTransient(err: RetryErr) bool {
 }
 
 test "retry policy retries retryable errors until max tries" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const pol = try RetryPolicy.init(.{
         .max_tries = 3,
         .backoff = .{
@@ -141,13 +143,38 @@ test "retry policy retries retryable errors until max tries" {
     }
 
     const fatal_step = try pol.next(error.Fatal, 1);
-    switch (fatal_step) {
-        .fail => {},
-        .retry_after_ms => try std.testing.expect(false),
-    }
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "step1={d}\nstep2={d}\nstep3={s}\nfatal={s}\n", .{
+        switch (step1) {
+            .retry_after_ms => |wait_ms| wait_ms,
+            .fail => return error.TestUnexpectedResult,
+        },
+        switch (step2) {
+            .retry_after_ms => |wait_ms| wait_ms,
+            .fail => return error.TestUnexpectedResult,
+        },
+        switch (step3) {
+            .fail => "fail",
+            .retry_after_ms => return error.TestUnexpectedResult,
+        },
+        switch (fatal_step) {
+            .fail => "fail",
+            .retry_after_ms => return error.TestUnexpectedResult,
+        },
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "step1=10
+        \\step2=20
+        \\step3=fail
+        \\fatal=fail
+        \\"
+    ).expectEqual(snap);
 }
 
 test "retry policy backoff is capped by max delay" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const pol = try RetryPolicy.init(.{
         .max_tries = 5,
         .backoff = .{
@@ -162,18 +189,26 @@ test "retry policy backoff is capped by max delay" {
     const step2 = try pol.next(error.Transient, 2);
     const step3 = try pol.next(error.Transient, 3);
 
-    switch (step1) {
-        .retry_after_ms => |wait_ms| try std.testing.expectEqual(@as(u64, 10), wait_ms),
-        .fail => try std.testing.expect(false),
-    }
-    switch (step2) {
-        .retry_after_ms => |wait_ms| try std.testing.expectEqual(@as(u64, 25), wait_ms),
-        .fail => try std.testing.expect(false),
-    }
-    switch (step3) {
-        .retry_after_ms => |wait_ms| try std.testing.expectEqual(@as(u64, 25), wait_ms),
-        .fail => try std.testing.expect(false),
-    }
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{d}|{d}|{d}\n", .{
+        switch (step1) {
+            .retry_after_ms => |wait_ms| wait_ms,
+            .fail => return error.TestUnexpectedResult,
+        },
+        switch (step2) {
+            .retry_after_ms => |wait_ms| wait_ms,
+            .fail => return error.TestUnexpectedResult,
+        },
+        switch (step3) {
+            .retry_after_ms => |wait_ms| wait_ms,
+            .fail => return error.TestUnexpectedResult,
+        },
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "10|25|25
+        \\"
+    ).expectEqual(snap);
 }
 
 test "retry policy validates config and attempt counters" {
