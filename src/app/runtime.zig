@@ -802,6 +802,7 @@ const LiveTurn = struct {
     wake_w: std.posix.fd_t,
     cancel_flag: TurnCancelFlag = .{},
     abort_slot: core.providers.AbortSlot = .{},
+    last_req: ?Req = null,
     last_stop: ?core.providers.StopReason = null,
     last_err: ?[]u8 = null,
     last_model: ?[]u8 = null,
@@ -859,6 +860,7 @@ const LiveTurn = struct {
         if (self.err_name) |name| self.alloc.free(name);
         if (self.last_err) |e| self.alloc.free(e);
         if (self.last_model) |m| self.alloc.free(m);
+        if (self.last_req) |*req| req.deinit(self.alloc);
         self.mu.unlock();
         std.posix.close(self.wake_r);
         std.posix.close(self.wake_w);
@@ -1004,7 +1006,17 @@ const LiveTurn = struct {
         return out;
     }
 
+    fn cloneReq(self: *LiveTurn, alloc: std.mem.Allocator) !?Req {
+        self.mu.lock();
+        defer self.mu.unlock();
+        const req = self.last_req orelse return null;
+        return try dupStoredReq(alloc, req);
+    }
+
     fn start(self: *LiveTurn, tctx: *const TurnCtx, opts: TurnCtx.TurnOpts) !void {
+        var saved_req = try dupReq(self.alloc, opts);
+        errdefer saved_req.deinit(self.alloc);
+
         self.mu.lock();
         if (self.running) {
             self.mu.unlock();
@@ -1053,6 +1065,8 @@ const LiveTurn = struct {
         };
 
         self.mu.lock();
+        if (self.last_req) |*req| req.deinit(self.alloc);
+        self.last_req = saved_req;
         self.thr = thr;
         self.mu.unlock();
     }
@@ -1129,6 +1143,28 @@ fn dupReq(alloc: std.mem.Allocator, opts: TurnCtx.TurnOpts) !LiveTurn.Req {
         .model = model,
         .provider_label = provider_label,
         .provider_opts = opts.provider_opts,
+        .system_prompt = system_prompt,
+    };
+}
+
+fn dupStoredReq(alloc: std.mem.Allocator, req: LiveTurn.Req) !LiveTurn.Req {
+    const sid = try alloc.dupe(u8, req.sid);
+    errdefer alloc.free(sid);
+    const prompt = try alloc.dupe(u8, req.prompt);
+    errdefer alloc.free(prompt);
+    const model = try alloc.dupe(u8, req.model);
+    errdefer alloc.free(model);
+    const provider_label = try alloc.dupe(u8, req.provider_label);
+    errdefer alloc.free(provider_label);
+    const system_prompt = if (req.system_prompt) |sp| try alloc.dupe(u8, sp) else null;
+    errdefer if (system_prompt) |sp| alloc.free(sp);
+
+    return .{
+        .sid = sid,
+        .prompt = prompt,
+        .model = model,
+        .provider_label = provider_label,
+        .provider_opts = req.provider_opts,
         .system_prompt = system_prompt,
     };
 }
@@ -1820,6 +1856,7 @@ fn runTui(
         var pending = PendingQueue{};
         defer pending.deinit(alloc);
         const input_mode: tui_panels.InputMode = .steering;
+        var retried_overflow = false;
         syncInputFooter(&ui, input_mode, pending.total());
 
         while (true) {
@@ -2150,6 +2187,7 @@ fn runTui(
                                 .provider_opts = popts,
                                 .system_prompt = sys_prompt,
                             });
+                            retried_overflow = false;
                             ui.pn.run_state = .streaming;
                             try ui.draw(out);
                         },
@@ -2332,12 +2370,50 @@ fn runTui(
                     if (live_turn.takeCompletion()) |done| {
                         defer if (done.err_name) |name| alloc.free(name);
 
+                        if (shouldRetryOverflow(alloc, &live_turn, model, retried_overflow)) {
+                            if (try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session, true)) {
+                                const retry_req = (try live_turn.cloneReq(alloc)) orelse return error.TestUnexpectedResult;
+                                defer {
+                                    var req = retry_req;
+                                    req.deinit(alloc);
+                                }
+                                try ui.tr.infoText("[overflow detected: compacting and retrying]");
+                                live_turn.start(&live_tctx, .{
+                                    .sid = retry_req.sid,
+                                    .prompt = retry_req.prompt,
+                                    .model = retry_req.model,
+                                    .provider_label = retry_req.provider_label,
+                                    .provider_opts = retry_req.provider_opts,
+                                    .system_prompt = retry_req.system_prompt,
+                                }) catch |start_err| {
+                                    const detail = try report.inlineMsg(alloc, start_err);
+                                    defer alloc.free(detail);
+                                    const msg = try std.fmt.allocPrint(alloc, "[retry start failed: {s}]", .{detail});
+                                    defer alloc.free(msg);
+                                    try ui.tr.infoText(msg);
+                                    ui.pn.run_state = .idle;
+                                    retried_overflow = false;
+                                    try flushBgDone(alloc, &ui, &bg_mgr);
+                                    try syncBgFooter(alloc, &ui, &bg_mgr);
+                                    try ui.draw(out);
+                                    continue;
+                                };
+                                retried_overflow = true;
+                                ui.pn.run_state = .streaming;
+                                try flushBgDone(alloc, &ui, &bg_mgr);
+                                try syncBgFooter(alloc, &ui, &bg_mgr);
+                                try ui.draw(out);
+                                continue;
+                            }
+                        }
+
+                        retried_overflow = false;
                         if (done.err_name) |name| {
                             const msg = try std.fmt.allocPrint(alloc, "[turn failed: {s}]", .{name});
                             defer alloc.free(msg);
                             try ui.tr.infoText(msg);
                         } else if (auto_compact_on) {
-                            try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session);
+                            _ = try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session, false);
                         }
 
                         if (pending.popNext()) |next_turn| {
@@ -2362,6 +2438,7 @@ fn runTui(
                                 try ui.draw(out);
                                 continue;
                             };
+                            retried_overflow = false;
                             ui.pn.run_state = .streaming;
                             try ui.tr.infoText(if (next_turn.kind == .steering) "(sending queued steering message)" else "(sending queued follow-up message)");
                         } else {
@@ -2499,7 +2576,7 @@ fn runTui(
                 .provider_opts = popts,
                 .system_prompt = sys_prompt,
             });
-            if (auto_compact_on) try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session);
+            if (auto_compact_on) _ = try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session, false);
             turn_ct += 1;
         }
         if (turn_ct == 0 and cmd_ct == 0 and run_cmd.prompt == null) return error.EmptyPrompt;
@@ -4815,18 +4892,38 @@ fn pipeToCmd(alloc: std.mem.Allocator, cmd: []const u8, text: []const u8) !bool 
 
 const compact_threshold_pct: u32 = 80;
 
+fn shouldRetryOverflow(
+    alloc: std.mem.Allocator,
+    live: *const LiveTurn,
+    model: []const u8,
+    retried: bool,
+) bool {
+    if (retried) return false;
+    if (live.last_model) |last_model| {
+        if (!std.mem.eql(u8, last_model, model)) return false;
+    } else return false;
+    if (live.last_stop == .max_out) return true;
+    if (live.last_err) |last_err| {
+        return core.providers.types.isOverflowError(alloc, last_err);
+    }
+    return false;
+}
+
 fn autoCompact(
     alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
     sid: []const u8,
     session_dir_path: ?[]const u8,
     no_session: bool,
-) !void {
-    if (no_session or session_dir_path == null) return;
-    if (ui.pn.ctx_limit == 0) return;
-    if (!ui.pn.has_usage) return;
-    const pct = ui.pn.cum_tok *| 100 / ui.pn.ctx_limit;
-    if (pct < compact_threshold_pct) return;
+    force: bool,
+) !bool {
+    if (no_session or session_dir_path == null) return false;
+    if (!force) {
+        if (ui.pn.ctx_limit == 0) return false;
+        if (!ui.pn.has_usage) return false;
+        const pct = ui.pn.cum_tok *| 100 / ui.pn.ctx_limit;
+        if (pct < compact_threshold_pct) return false;
+    }
 
     var dir = try std.fs.cwd().openDir(session_dir_path.?, .{});
     defer dir.close();
@@ -4837,10 +4934,11 @@ fn autoCompact(
         const msg = try std.fmt.allocPrint(alloc, "[auto-compact failed: {s}]", .{detail});
         defer alloc.free(msg);
         try ui.tr.infoText(msg);
-        return;
+        return false;
     };
     ui.pn.noteCompaction();
     try ui.tr.infoText("[session compacted]");
+    return true;
 }
 
 fn syncInputFooter(ui: *tui_harness.Ui, mode: tui_panels.InputMode, queued_len: usize) void {
@@ -7535,4 +7633,67 @@ test "LiveTurn tracks last_stop last_err and last_model" {
     try std.testing.expect(lt.last_stop == null);
     try std.testing.expect(lt.last_err == null);
     try std.testing.expectEqualStrings("claude-opus-4-20250918", lt.last_model.?);
+}
+
+test "LiveTurn cloneReq duplicates retained request" {
+    const alloc = std.testing.allocator;
+    var lt = try LiveTurn.init(alloc);
+    defer lt.deinit();
+
+    lt.last_req = .{
+        .sid = try alloc.dupe(u8, "sess-1"),
+        .prompt = try alloc.dupe(u8, "hello"),
+        .model = try alloc.dupe(u8, "m-1"),
+        .provider_label = try alloc.dupe(u8, "p-1"),
+        .provider_opts = .{ .temp = 0.2, .max_out = 42 },
+        .system_prompt = try alloc.dupe(u8, "sys"),
+    };
+
+    const dup = (try lt.cloneReq(alloc)) orelse return error.TestUnexpectedResult;
+    defer {
+        var req = dup;
+        req.deinit(alloc);
+    }
+
+    try std.testing.expectEqualStrings("sess-1", dup.sid);
+    try std.testing.expectEqualStrings("hello", dup.prompt);
+    try std.testing.expectEqualStrings("m-1", dup.model);
+    try std.testing.expectEqualStrings("p-1", dup.provider_label);
+    try std.testing.expectEqual(@as(f32, 0.2), dup.provider_opts.temp.?);
+    try std.testing.expectEqual(@as(u32, 42), dup.provider_opts.max_out.?);
+    try std.testing.expectEqualStrings("sys", dup.system_prompt.?);
+}
+
+test "shouldRetryOverflow gates retry to real overflow in same model once" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const alloc = std.testing.allocator;
+    var lt = try LiveTurn.init(alloc);
+    defer lt.deinit();
+
+    lt.last_model = try alloc.dupe(u8, "m-1");
+    lt.last_stop = .max_out;
+    const a = shouldRetryOverflow(alloc, &lt, "m-1", false);
+    const b = shouldRetryOverflow(alloc, &lt, "m-2", false);
+    const c = shouldRetryOverflow(alloc, &lt, "m-1", true);
+
+    lt.last_stop = null;
+    lt.last_err = try alloc.dupe(u8, "{\"error\":{\"code\":\"context_length_exceeded\"}}");
+    const d = shouldRetryOverflow(alloc, &lt, "m-1", false);
+
+    alloc.free(lt.last_err.?);
+    lt.last_err = try alloc.dupe(u8, "400 Bad Request");
+    const e = shouldRetryOverflow(alloc, &lt, "m-1", false);
+
+    const snap = try std.fmt.allocPrint(alloc, "{any}\n{any}\n{any}\n{any}\n{any}\n", .{ a, b, c, d, e });
+    defer alloc.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "true
+        \\false
+        \\false
+        \\true
+        \\false
+        \\"
+    ).expectEqual(snap);
 }
