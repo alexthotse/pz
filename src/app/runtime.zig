@@ -4898,13 +4898,24 @@ fn shouldRetryOverflow(
     model: []const u8,
     retried: bool,
 ) bool {
+    return shouldRetryOverflowState(alloc, live.last_model, live.last_stop, live.last_err, model, retried);
+}
+
+fn shouldRetryOverflowState(
+    alloc: std.mem.Allocator,
+    last_model: ?[]const u8,
+    last_stop: ?core.providers.StopReason,
+    last_err: ?[]const u8,
+    model: []const u8,
+    retried: bool,
+) bool {
     if (retried) return false;
-    if (live.last_model) |last_model| {
-        if (!std.mem.eql(u8, last_model, model)) return false;
+    if (last_model) |prev_model| {
+        if (!std.mem.eql(u8, prev_model, model)) return false;
     } else return false;
-    if (live.last_stop == .max_out) return true;
-    if (live.last_err) |last_err| {
-        return core.providers.types.isOverflowError(alloc, last_err);
+    if (last_stop == .max_out) return true;
+    if (last_err) |err_text| {
+        return core.providers.types.isOverflowError(alloc, err_text);
     }
     return false;
 }
@@ -7803,6 +7814,60 @@ test "shouldRetryOverflow gates retry to real overflow in same model once" {
         \\false
         \\"
     ).expectEqual(snap);
+}
+
+test "shouldRetryOverflowState property: retried disables retry" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            err_text: zc.String,
+            stop_max_out: bool,
+        }) bool {
+            return !shouldRetryOverflowState(
+                std.testing.allocator,
+                "m",
+                if (args.stop_max_out) .max_out else null,
+                args.err_text.slice(),
+                "m",
+                true,
+            );
+        }
+    }.prop, .{ .iterations = 300 });
+}
+
+test "shouldRetryOverflowState property: model mismatch disables retry" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            err_text: zc.String,
+            stop_max_out: bool,
+        }) bool {
+            return !shouldRetryOverflowState(
+                std.testing.allocator,
+                "model-a",
+                if (args.stop_max_out) .max_out else null,
+                args.err_text.slice(),
+                "model-b",
+                false,
+            );
+        }
+    }.prop, .{ .iterations = 300 });
+}
+
+test "shouldRetryOverflowState property: max_out forces retry in same model" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { err_text: zc.String }) bool {
+            return shouldRetryOverflowState(
+                std.testing.allocator,
+                "m",
+                .max_out,
+                args.err_text.slice(),
+                "m",
+                false,
+            );
+        }
+    }.prop, .{ .iterations = 300 });
 }
 
 test "autoCompact draws compacting notice before compactor runs" {
