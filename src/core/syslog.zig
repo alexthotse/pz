@@ -141,8 +141,11 @@ pub const Sender = struct {
     pub fn sendRaw(self: *Sender, raw: []const u8) !void {
         switch (self.transport) {
             .udp => {
-                const sent = try std.posix.sendto(self.fd, raw, 0, &self.addr.any, self.addr.getOsSockLen());
-                if (sent != raw.len) return error.ShortWrite;
+                const fit = try fitUdpAlloc(self.alloc, raw);
+                defer fit.deinit(self.alloc);
+
+                const sent = try std.posix.sendto(self.fd, fit.raw, 0, &self.addr.any, self.addr.getOsSockLen());
+                if (sent != fit.raw.len) return error.ShortWrite;
             },
             .tcp => {
                 var prefix_buf: [32]u8 = undefined;
@@ -153,6 +156,146 @@ pub const Sender = struct {
         }
     }
 };
+
+const udp_max_len: usize = 1024;
+const trunc_sd_id = "trunc@32473";
+
+const UdpFit = struct {
+    raw: []const u8,
+    own: ?[]u8 = null,
+
+    fn deinit(self: UdpFit, alloc: std.mem.Allocator) void {
+        if (self.own) |buf| alloc.free(buf);
+    }
+};
+
+const FrameView = struct {
+    pre_sd: []const u8,
+    sd: []const u8,
+    msg: ?[]const u8,
+};
+
+fn fitUdpAlloc(alloc: std.mem.Allocator, raw: []const u8) !UdpFit {
+    if (raw.len <= udp_max_len) return .{ .raw = raw };
+
+    const view = try splitFrame(raw);
+
+    var orig_buf: [32]u8 = undefined;
+    const orig_len = try std.fmt.bufPrint(&orig_buf, "{d}", .{raw.len});
+
+    var marker_buf: [96]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&marker_buf, "[{s} transport=\"udp\" orig_len=\"{s}\"]", .{
+        trunc_sd_id,
+        orig_len,
+    });
+
+    const keep_sd = !std.mem.eql(u8, view.sd, nil);
+    const has_msg = view.msg != null;
+    const fixed_len = view.pre_sd.len +
+        (if (keep_sd) view.sd.len else @as(usize, 0)) +
+        marker.len +
+        @as(usize, @intFromBool(has_msg));
+    if (fixed_len > udp_max_len) return error.UdpFrameTooLarge;
+
+    var out = std.ArrayListUnmanaged(u8).empty;
+    errdefer out.deinit(alloc);
+
+    try out.ensureTotalCapacityPrecise(alloc, udp_max_len);
+    try out.appendSlice(alloc, view.pre_sd);
+    if (keep_sd) try out.appendSlice(alloc, view.sd);
+    try out.appendSlice(alloc, marker);
+
+    if (view.msg) |msg| {
+        const budget = udp_max_len - fixed_len;
+        try out.append(alloc, ' ');
+        try out.appendSlice(alloc, msg[0..budget]);
+    }
+
+    const own = try out.toOwnedSlice(alloc);
+    return .{
+        .raw = own,
+        .own = own,
+    };
+}
+
+fn splitFrame(raw: []const u8) !FrameView {
+    var off: usize = 0;
+    var spaces: usize = 0;
+    while (spaces < 6) : (off += 1) {
+        if (off >= raw.len) return error.InvalidFrame;
+        if (raw[off] == ' ') spaces += 1;
+    }
+
+    const sd_start = off;
+    if (sd_start >= raw.len) return error.InvalidFrame;
+
+    if (raw[sd_start] == '-') {
+        const sd_end = sd_start + 1;
+        if (sd_end > raw.len) return error.InvalidFrame;
+        if (sd_end == raw.len) {
+            return .{
+                .pre_sd = raw[0..sd_start],
+                .sd = raw[sd_start..sd_end],
+                .msg = null,
+            };
+        }
+        if (raw[sd_end] != ' ') return error.InvalidFrame;
+        return .{
+            .pre_sd = raw[0..sd_start],
+            .sd = raw[sd_start..sd_end],
+            .msg = raw[sd_end + 1 ..],
+        };
+    }
+
+    if (raw[sd_start] != '[') return error.InvalidFrame;
+
+    var depth: usize = 0;
+    var in_quote = false;
+    var i = sd_start;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
+        if (in_quote) {
+            if (c == '\\') {
+                i += 1;
+                if (i >= raw.len) return error.InvalidFrame;
+                continue;
+            }
+            if (c == '"') in_quote = false;
+            continue;
+        }
+
+        switch (c) {
+            '[' => depth += 1,
+            ']' => {
+                if (depth == 0) return error.InvalidFrame;
+                depth -= 1;
+                if (depth != 0) continue;
+
+                const sd_end = i + 1;
+                if (sd_end == raw.len) {
+                    return .{
+                        .pre_sd = raw[0..sd_start],
+                        .sd = raw[sd_start..sd_end],
+                        .msg = null,
+                    };
+                }
+
+                if (raw[sd_end] == '[') continue;
+                if (raw[sd_end] != ' ') return error.InvalidFrame;
+
+                return .{
+                    .pre_sd = raw[0..sd_start],
+                    .sd = raw[sd_start..sd_end],
+                    .msg = raw[sd_end + 1 ..],
+                };
+            },
+            '"' => in_quote = true,
+            else => {},
+        }
+    }
+
+    return error.InvalidFrame;
+}
 
 pub fn encodeAlloc(alloc: std.mem.Allocator, msg: Message) ![]u8 {
     var out = std.ArrayList(u8).empty;
@@ -296,7 +439,7 @@ fn validateSdName(raw: []const u8) !void {
 const UdpCollector = struct {
     fd: std.posix.socket_t,
     addr: std.net.Address,
-    buf: [2048]u8 = undefined,
+    buf: [4096]u8 = undefined,
     len: usize = 0,
 
     fn init() !UdpCollector {
@@ -336,7 +479,7 @@ const UdpCollector = struct {
 
 const TcpCollector = struct {
     server: std.net.Server,
-    buf: [2048]u8 = undefined,
+    buf: [4096]u8 = undefined,
     len: usize = 0,
 
     fn init() !TcpCollector {
@@ -499,4 +642,91 @@ test "tcp sender emits octet-counted frame to local collector" {
         "<179>1 1970-01-01T00:00:00.000Z node2 pz 999 FAIL - tcp path",
         collector.message(),
     );
+}
+
+test "udp sender truncates only the payload and annotates metadata" {
+    var collector = try UdpCollector.init();
+    defer collector.deinit();
+
+    const t = try std.Thread.spawn(.{}, UdpCollector.run, .{&collector});
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .transport = .udp,
+        .host = "127.0.0.1",
+        .port = collector.port(),
+    });
+    defer sender.deinit();
+
+    const msg = try std.testing.allocator.alloc(u8, udp_max_len * 2);
+    defer std.testing.allocator.free(msg);
+    @memset(msg, 'x');
+
+    const raw = try encodeAlloc(std.testing.allocator, .{
+        .pri = .{ .facility = .local5, .severity = .notice },
+        .timestamp_ms = 0,
+        .hostname = "node3",
+        .app_name = "pz",
+        .procid = "1001",
+        .msgid = "AUDIT",
+        .structured_data = &.{
+            .{
+                .id = "meta",
+                .params = &.{
+                    .{ .name = "seq", .value = "9" },
+                },
+            },
+        },
+        .msg = msg,
+    });
+    defer std.testing.allocator.free(raw);
+
+    try sender.sendRaw(raw);
+    t.join();
+
+    try std.testing.expectEqual(udp_max_len, collector.message().len);
+    try std.testing.expect(std.mem.indexOf(u8, collector.message(), "[trunc@32473 transport=\"udp\" orig_len=\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, collector.message(), msg[0..64]) != null);
+}
+
+test "tcp sender preserves the full payload for large messages" {
+    var collector = try TcpCollector.init();
+    defer collector.deinit();
+
+    const t = try std.Thread.spawn(.{}, TcpCollector.run, .{&collector});
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .transport = .tcp,
+        .host = "127.0.0.1",
+        .port = collector.port(),
+    });
+    defer sender.deinit();
+
+    const msg = try std.testing.allocator.alloc(u8, udp_max_len * 2);
+    defer std.testing.allocator.free(msg);
+    @memset(msg, 'y');
+
+    const raw = try encodeAlloc(std.testing.allocator, .{
+        .pri = .{ .facility = .local6, .severity = .warning },
+        .timestamp_ms = 0,
+        .hostname = "node4",
+        .app_name = "pz",
+        .procid = "1002",
+        .msgid = "AUDIT",
+        .structured_data = &.{
+            .{
+                .id = "meta",
+                .params = &.{
+                    .{ .name = "seq", .value = "10" },
+                },
+            },
+        },
+        .msg = msg,
+    });
+    defer std.testing.allocator.free(raw);
+
+    try sender.sendRaw(raw);
+    t.join();
+
+    try std.testing.expectEqualStrings(raw, collector.message());
+    try std.testing.expect(std.mem.indexOf(u8, collector.message(), trunc_sd_id) == null);
 }
