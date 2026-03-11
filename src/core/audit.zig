@@ -804,14 +804,30 @@ fn detectPubRedact(txt: []const u8) ?[]const u8 {
         containsNoCase(txt, "refresh_token") or
         containsNoCase(txt, "api_key") or
         containsNoCase(txt, "apikey") or
-        std.mem.startsWith(u8, txt, "sk-") or
-        std.mem.startsWith(u8, txt, "ghp_") or
-        std.mem.startsWith(u8, txt, "xoxb-") or
+        std.mem.indexOf(u8, txt, "sk-") != null or
+        std.mem.indexOf(u8, txt, "ghp_") != null or
+        std.mem.indexOf(u8, txt, "xoxb-") != null or
         std.mem.indexOf(u8, txt, "AKIA") != null)
     {
         return "secret";
     }
     return null;
+}
+
+fn taggedTextAlloc(alloc: Allocator, tag: []const u8, txt: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, "[{s}:{x:0>16}]", .{ tag, std.hash.Wyhash.hash(0, txt) });
+}
+
+pub fn redactTextAlloc(alloc: Allocator, txt: []const u8, vis: Vis) ![]u8 {
+    return switch (vis) {
+        .@"pub" => if (detectPubRedact(txt)) |tag|
+            try taggedTextAlloc(alloc, tag, txt)
+        else
+            try alloc.dupe(u8, txt),
+        .mask => try taggedTextAlloc(alloc, "mask", txt),
+        .hash => try taggedTextAlloc(alloc, "hash", txt),
+        .secret => try taggedTextAlloc(alloc, "secret", txt),
+    };
 }
 
 fn writeTaggedJsonStr(w: anytype, tag: []const u8, txt: []const u8) !void {

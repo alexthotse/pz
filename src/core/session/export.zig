@@ -39,77 +39,48 @@ fn toMarkdownWith(
     try buf.appendSlice(alloc, sid);
     try buf.appendSlice(alloc, "\n\n");
 
-    var in_tool = false;
     while (try rdr.next()) |ev| {
         switch (ev.data) {
             .prompt => |p| {
-                if (in_tool) {
-                    try buf.appendSlice(alloc, "```\n\n");
-                    in_tool = false;
-                }
-                try buf.appendSlice(alloc, "## User\n\n");
-                try buf.appendSlice(alloc, p.text);
-                try buf.appendSlice(alloc, "\n\n");
+                try appendSection(alloc, &buf, "User", p.text);
             },
             .text => |t| {
-                if (in_tool) {
-                    try buf.appendSlice(alloc, "```\n\n");
-                    in_tool = false;
-                }
-                try buf.appendSlice(alloc, "## Assistant\n\n");
-                try buf.appendSlice(alloc, t.text);
-                try buf.appendSlice(alloc, "\n\n");
+                try appendSection(alloc, &buf, "Assistant", t.text);
             },
             .thinking => |t| {
-                if (in_tool) {
-                    try buf.appendSlice(alloc, "```\n\n");
-                    in_tool = false;
-                }
                 try buf.appendSlice(alloc, "<details><summary>Thinking</summary>\n\n");
-                try buf.appendSlice(alloc, t.text);
-                try buf.appendSlice(alloc, "\n\n</details>\n\n");
+                try appendFence(alloc, &buf, t.text);
+                try buf.appendSlice(alloc, "\n</details>\n\n");
             },
             .tool_call => |tc| {
-                if (in_tool) {
-                    try buf.appendSlice(alloc, "```\n\n");
-                }
                 try buf.appendSlice(alloc, "### Tool: ");
-                try buf.appendSlice(alloc, tc.name);
-                try buf.appendSlice(alloc, "\n\n```\n");
-                in_tool = true;
-                try buf.appendSlice(alloc, tc.args);
+                const safe_name = try audit.redactTextAlloc(alloc, tc.name, .@"pub");
+                defer alloc.free(safe_name);
+                try buf.appendSlice(alloc, safe_name);
+                try buf.appendSlice(alloc, "\n\n");
+                try appendFence(alloc, &buf, tc.args);
                 try buf.appendSlice(alloc, "\n");
             },
             .tool_result => |tr| {
-                if (tr.is_err) {
-                    try buf.appendSlice(alloc, "ERROR: ");
-                }
+                try buf.appendSlice(alloc, if (tr.is_err) "#### Error\n\n" else "#### Result\n\n");
                 // Truncate very long tool output
                 const max_out = 2000;
+                const raw_out = if (tr.out.len > max_out) tr.out[0..max_out] else tr.out;
+                const safe_out = try audit.redactTextAlloc(alloc, raw_out, .@"pub");
+                defer alloc.free(safe_out);
+                try appendFence(alloc, &buf, safe_out);
                 if (tr.out.len > max_out) {
-                    try buf.appendSlice(alloc, tr.out[0..max_out]);
                     const trunc_msg = try std.fmt.allocPrint(alloc, "\n... ({d} bytes truncated)", .{tr.out.len - max_out});
                     defer alloc.free(trunc_msg);
                     try buf.appendSlice(alloc, trunc_msg);
-                } else {
-                    try buf.appendSlice(alloc, tr.out);
                 }
                 try buf.appendSlice(alloc, "\n");
             },
             .err => |e| {
-                if (in_tool) {
-                    try buf.appendSlice(alloc, "```\n\n");
-                    in_tool = false;
-                }
-                try buf.appendSlice(alloc, "> **Error:** ");
-                try buf.appendSlice(alloc, e.text);
-                try buf.appendSlice(alloc, "\n\n");
+                try appendSection(alloc, &buf, "Error", e.text);
             },
             .usage, .stop, .noop => {},
         }
-    }
-    if (in_tool) {
-        try buf.appendSlice(alloc, "```\n\n");
     }
 
     // Determine output path (resolve relative to cwd)
@@ -165,6 +136,46 @@ fn toMarkdownWith(
     return dest;
 }
 
+fn appendSection(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), title: []const u8, txt: []const u8) !void {
+    try buf.appendSlice(alloc, "## ");
+    try buf.appendSlice(alloc, title);
+    try buf.appendSlice(alloc, "\n\n");
+    try appendFence(alloc, buf, txt);
+    try buf.appendSlice(alloc, "\n");
+}
+
+fn appendFence(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), txt: []const u8) !void {
+    const safe = try audit.redactTextAlloc(alloc, txt, .@"pub");
+    defer alloc.free(safe);
+
+    const n = fenceLen(safe);
+    var fence = std.ArrayListUnmanaged(u8){};
+    defer fence.deinit(alloc);
+    try fence.resize(alloc, n);
+    @memset(fence.items, '`');
+
+    try buf.appendSlice(alloc, fence.items);
+    try buf.appendSlice(alloc, "\n");
+    try buf.appendSlice(alloc, safe);
+    if (safe.len == 0 or safe[safe.len - 1] != '\n') try buf.appendSlice(alloc, "\n");
+    try buf.appendSlice(alloc, fence.items);
+    try buf.appendSlice(alloc, "\n\n");
+}
+
+fn fenceLen(txt: []const u8) usize {
+    var best: usize = 0;
+    var run: usize = 0;
+    for (txt) |c| {
+        if (c == '`') {
+            run += 1;
+            if (run > best) best = run;
+        } else {
+            run = 0;
+        }
+    }
+    return @max(@as(usize, 3), best + 1);
+}
+
 fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.Out, err_name: ?[]const u8) audit.Entry {
     return .{
         .ts_ms = ts_ms,
@@ -198,6 +209,8 @@ fn nowMs() i64 {
 }
 
 test "export session to markdown" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const writer_mod = @import("writer.zig");
 
     var tmp = std.testing.tmpDir(.{});
@@ -207,11 +220,12 @@ test "export session to markdown" {
         .flush = .{ .always = {} },
     });
 
-    try wr.append("ex1", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "hello" } } });
-    try wr.append("ex1", .{ .at_ms = 2, .data = .{ .text = .{ .text = "Hi there!" } } });
-    try wr.append("ex1", .{ .at_ms = 3, .data = .{ .tool_call = .{ .id = "c1", .name = "bash", .args = "ls -la" } } });
-    try wr.append("ex1", .{ .at_ms = 4, .data = .{ .tool_result = .{ .id = "c1", .out = "file.txt\ndir/", .is_err = false } } });
-    try wr.append("ex1", .{ .at_ms = 5, .data = .{ .stop = .{ .reason = .done } } });
+    try wr.append("ex1", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "Authorization: Bearer sk-secret" } } });
+    try wr.append("ex1", .{ .at_ms = 2, .data = .{ .text = .{ .text = "# hi\n<script>alert(1)</script>" } } });
+    try wr.append("ex1", .{ .at_ms = 3, .data = .{ .thinking = .{ .text = "```internal```" } } });
+    try wr.append("ex1", .{ .at_ms = 4, .data = .{ .tool_call = .{ .id = "c1", .name = "bash", .args = "cat ~/.pz/auth.json" } } });
+    try wr.append("ex1", .{ .at_ms = 5, .data = .{ .tool_result = .{ .id = "c1", .out = "```\nraw\n```", .is_err = false } } });
+    try wr.append("ex1", .{ .at_ms = 6, .data = .{ .stop = .{ .reason = .done } } });
 
     // Export to a specific path
     const real = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -230,14 +244,48 @@ test "export session to markdown" {
     const md = try content.readToEndAlloc(std.testing.allocator, 64 * 1024);
     defer std.testing.allocator.free(md);
 
-    try std.testing.expect(std.mem.indexOf(u8, md, "# Session ex1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "## User") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "hello") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "## Assistant") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "Hi there!") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "### Tool: bash") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "ls -la") != null);
-    try std.testing.expect(std.mem.indexOf(u8, md, "file.txt") != null);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "# Session ex1
+        \\
+        \\## User
+        \\
+        \\```
+        \\[secret:427dbdce96c1386f]
+        \\```
+        \\
+        \\## Assistant
+        \\
+        \\```
+        \\# hi
+        \\<script>alert(1)</script>
+        \\```
+        \\
+        \\<details><summary>Thinking</summary>
+        \\
+        \\````
+        \\```internal```
+        \\````
+        \\
+        \\</details>
+        \\
+        \\### Tool: bash
+        \\
+        \\```
+        \\[path:edaee5b4fbed2103]
+        \\```
+        \\
+        \\#### Result
+        \\
+        \\````
+        \\```
+        \\raw
+        \\```
+        \\````
+        \\
+        \\
+        \\"
+    ).expectEqual(md);
 }
 
 test "export default path uses sid.md" {
@@ -263,6 +311,68 @@ test "export default path uses sid.md" {
     // File should exist
     const f = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
     f.close();
+}
+
+test "export markdown redacts secrets and neutralizes markdown" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const writer_mod = @import("writer.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
+        .flush = .{ .always = {} },
+    });
+    try wr.append("sec1", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "# heading\nsk-live-secret" } } });
+    try wr.append("sec1", .{ .at_ms = 2, .data = .{ .text = .{ .text = "<script>alert(1)</script>\n```boom```" } } });
+    try wr.append("sec1", .{ .at_ms = 3, .data = .{ .tool_call = .{ .id = "c1", .name = "bash", .args = "cat ~/.pz/auth.json" } } });
+    try wr.append("sec1", .{ .at_ms = 4, .data = .{ .tool_result = .{ .id = "c1", .out = "authorization: bearer sk-test", .is_err = true } } });
+
+    const real = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(real);
+    const dest = try std.fs.path.join(std.testing.allocator, &.{ real, "sec1.md" });
+    defer std.testing.allocator.free(dest);
+
+    const path = try toMarkdown(std.testing.allocator, tmp.dir, "sec1", dest);
+    defer std.testing.allocator.free(path);
+    const content = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+    defer content.close();
+    const md = try content.readToEndAlloc(std.testing.allocator, 64 * 1024);
+    defer std.testing.allocator.free(md);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "# Session sec1
+        \\
+        \\## User
+        \\
+        \\```
+        \\[secret:f5576993961d7f31]
+        \\```
+        \\
+        \\## Assistant
+        \\
+        \\````
+        \\<script>alert(1)</script>
+        \\```boom```
+        \\````
+        \\
+        \\### Tool: bash
+        \\
+        \\```
+        \\[path:edaee5b4fbed2103]
+        \\```
+        \\
+        \\#### Error
+        \\
+        \\```
+        \\[secret:7ac2c068fc811ef1]
+        \\```
+        \\
+        \\
+        \\"
+    ).expectEqual(md);
 }
 
 test "export audit emits start and success entries" {
