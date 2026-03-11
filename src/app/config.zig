@@ -1,5 +1,6 @@
 const std = @import("std");
 const args = @import("args.zig");
+const core = @import("../core/mod.zig");
 
 pub const model_default = "default";
 pub const provider_default = "default";
@@ -97,12 +98,12 @@ pub const PzState = struct {
         const home = home_override orelse return;
         const dir_path = std.fs.path.join(alloc, &.{ home, pz_state_dir }) catch return;
         defer alloc.free(dir_path);
-        std.fs.cwd().makePath(dir_path) catch return;
+        core.fs_secure.ensureDirPath(dir_path) catch return;
         const path = std.fs.path.join(alloc, &.{ dir_path, pz_state_file }) catch return;
         defer alloc.free(path);
         const json = std.json.Stringify.valueAlloc(alloc, self, .{}) catch return;
         defer alloc.free(json);
-        const file = std.fs.cwd().createFile(path, .{}) catch return;
+        const file = core.fs_secure.createFilePath(path, .{ .truncate = true }) catch return;
         defer file.close();
         file.writeAll(json) catch return;
     }
@@ -135,6 +136,32 @@ test "pz state save and load are home-overrideable" {
     var loaded = PzState.loadForHome(std.testing.allocator, home) orelse return error.TestUnexpectedResult;
     defer loaded.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("abc123", loaded.last_hash orelse return error.TestUnexpectedResult);
+}
+
+test "pz state save locks dir and file modes" {
+    if (@import("builtin").os.tag == .windows) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home");
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home);
+
+    var state = PzState{ .last_hash = try std.testing.allocator.dupe(u8, "abc123") };
+    defer state.deinit(std.testing.allocator);
+    state.saveForHome(std.testing.allocator, home);
+
+    const dir_path = try std.fs.path.join(std.testing.allocator, &.{ home, pz_state_dir });
+    defer std.testing.allocator.free(dir_path);
+    var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
+    defer dir.close();
+    try std.testing.expectEqual(@as(std.fs.File.Mode, core.fs_secure.dir_mode), (try dir.stat()).mode & 0o777);
+
+    const file_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, pz_state_file });
+    defer std.testing.allocator.free(file_path);
+    const st = try std.fs.cwd().statFile(file_path);
+    try std.testing.expectEqual(@as(std.fs.File.Mode, core.fs_secure.file_mode), st.mode & 0o777);
 }
 
 test "pz state load returns null without overrideable home" {

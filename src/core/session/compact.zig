@@ -4,6 +4,7 @@ const schema = @import("schema.zig");
 const reader = @import("reader.zig");
 const sid_path = @import("path.zig");
 const providers = @import("../providers/mod.zig");
+const fs_secure = @import("../fs_secure.zig");
 
 pub const checkpoint_version: u16 = 1;
 
@@ -38,7 +39,7 @@ pub fn run(
     var rdr = try reader.ReplayReader.init(alloc, dir, sid, .{});
     defer rdr.deinit();
 
-    var out_file = try dir.createFile(tmp_path, .{
+    var out_file = try fs_secure.createFileAt(dir, tmp_path, .{
         .truncate = true,
     });
     defer out_file.close();
@@ -108,7 +109,7 @@ fn saveCheckpoint(
     const raw = try std.json.Stringify.valueAlloc(alloc, ck, .{});
     defer alloc.free(raw);
 
-    var file = try dir.createFile(path, .{
+    var file = try fs_secure.createFileAt(dir, path, .{
         .truncate = true,
     });
     defer file.close();

@@ -1,6 +1,7 @@
 const std = @import("std");
 const schema = @import("schema.zig");
 const sid_path = @import("path.zig");
+const fs_secure = @import("../fs_secure.zig");
 
 pub const Event = schema.Event;
 
@@ -41,7 +42,7 @@ pub const Writer = struct {
         const raw = try schema.encodeAlloc(self.alloc, ev);
         defer self.alloc.free(raw);
 
-        var file = try self.dir.createFile(path, .{
+        var file = try fs_secure.createFileAt(self.dir, path, .{
             .read = false,
             .truncate = false,
         });
@@ -125,6 +126,10 @@ test "jsonl append preserves event order" {
     }
 
     try std.testing.expectEqual(@as(usize, 3), idx);
+    if (@import("builtin").os.tag != .windows) {
+        const st = try tmp.dir.statFile("s1.jsonl");
+        try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
+    }
 }
 
 test "writer rejects invalid flush policy" {

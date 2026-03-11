@@ -6,6 +6,7 @@ pub const context = @import("context.zig");
 pub const policy = @import("policy.zig");
 pub const shell = @import("shell.zig");
 pub const lru = @import("lru.zig");
+pub const fs_secure = @import("fs_secure.zig");
 pub const audit = @import("audit.zig");
 pub const syslog = @import("syslog.zig");
 pub const signing = @import("signing.zig");

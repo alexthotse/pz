@@ -1,5 +1,6 @@
 const std = @import("std");
 const sid_path = @import("path.zig");
+const fs_secure = @import("../fs_secure.zig");
 
 pub const version_current: u16 = 1;
 
@@ -36,7 +37,7 @@ pub fn save(
     const raw = try std.json.Stringify.valueAlloc(alloc, out, .{});
     defer alloc.free(raw);
 
-    var file = try dir.createFile(path, .{
+    var file = try fs_secure.createFileAt(dir, path, .{
         .truncate = true,
     });
     defer file.close();
@@ -90,6 +91,10 @@ test "retry state persists and restores counters after reload" {
     try std.testing.expectEqual(@as(u16, 3), out.fail_ct);
     try std.testing.expectEqual(@as(u64, 250), out.next_wait_ms);
     try std.testing.expect(out.last_err == .transient);
+    if (@import("builtin").os.tag != .windows) {
+        const st = try tmp.dir.statFile("s1.retry.json");
+        try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
+    }
 }
 
 test "retry state load returns null when file is absent" {

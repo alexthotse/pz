@@ -1337,7 +1337,7 @@ pub fn execWithIo(
                 sid = plan.sid;
                 session_dir_path = plan.dir_path;
 
-                try std.fs.cwd().makePath(plan.dir_path);
+                try core.fs_secure.ensureDirPath(plan.dir_path);
                 var session_dir = try std.fs.cwd().openDir(plan.dir_path, .{ .iterate = true });
                 errdefer session_dir.close();
                 fs_store_impl = try core.session.fs_store.Store.init(.{

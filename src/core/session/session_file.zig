@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const fs_secure = @import("../fs_secure.zig");
 
 /// Wraps a session file path with lifecycle tracking.
 /// If `close()` is never called, `deinit()` logs a warning and deletes the orphan.
@@ -14,7 +15,7 @@ pub const SessionFile = struct {
         errdefer alloc.free(owned);
 
         // Create the file to establish it on disk.
-        var f = try dir.createFile(owned, .{ .truncate = false });
+        var f = try fs_secure.createFileAt(dir, owned, .{ .truncate = false });
         errdefer dir.deleteFile(owned) catch {};
         f.close();
 
@@ -84,6 +85,20 @@ test "close then deinit preserves the file" {
     // File should still exist.
     const stat = try tmp.dir.statFile("test-sess.jsonl");
     try std.testing.expect(stat.size == 0);
+}
+
+test "session file uses 0600 mode" {
+    if (builtin.os.tag == .windows) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var sf = try SessionFile.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
+    sf.close();
+    sf.deinit();
+
+    const stat = try tmp.dir.statFile("test-sess.jsonl");
+    try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), stat.mode & 0o777);
 }
 
 test "cleanOrphanTmpFiles removes compact.tmp files" {
