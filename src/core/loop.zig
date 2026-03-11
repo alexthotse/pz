@@ -6,6 +6,7 @@ const session = @import("session/mod.zig");
 const tools = @import("tools/mod.zig");
 const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
+const time_mock = @import("../test/time_mock.zig");
 
 pub const Err = error{
     EmptySessionId,
@@ -1036,12 +1037,9 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
         };
     };
 
-    std.debug.print("TOOL_AUTH present={}\n", .{opts.tool_auth != null});
     if (opts.tool_auth) |tool_auth| {
-        std.debug.print("TOOL_AUTH check name={s}\n", .{entry.name});
         tool_auth.check(entry.name, entry.kind, parsed_args) catch |auth_err| switch (auth_err) {
             error.PolicyDenied => {
-                std.debug.print("TOOL_AUTH denied\n", .{});
                 return .{
                     .id = try opts.alloc.dupe(u8, tc.id),
                     .out = try opts.alloc.dupe(u8, "blocked by policy"),
@@ -1565,14 +1563,6 @@ test "loop smoke composes replay provider tool and mode" {
         }
     };
 
-    const ClockImpl = struct {
-        now_ms: i64 = 900,
-
-        fn nowMs(self: *@This()) i64 {
-            return self.now_ms;
-        }
-    };
-
     const replay = [_]session.Event{
         .{
             .at_ms = 1,
@@ -1651,7 +1641,7 @@ test "loop smoke composes replay provider tool and mode" {
         ModeImpl.push,
     );
 
-    var clock_impl = ClockImpl{};
+    var clock_impl = time_mock.FixedMs{ .now_ms = 900 };
     const out = try run(.{
         .alloc = std.testing.allocator,
         .sid = "sid-1",
@@ -1662,7 +1652,7 @@ test "loop smoke composes replay provider tool and mode" {
         .reg = reg,
         .mode = mode,
         .max_turns = 4,
-        .time = TimeSrc.from(ClockImpl, &clock_impl, ClockImpl.nowMs),
+        .time = TimeSrc.from(time_mock.FixedMs, &clock_impl, time_mock.FixedMs.nowMs),
     });
 
     try std.testing.expectEqual(@as(u16, 2), out.turns);

@@ -795,6 +795,36 @@ fn writeRes(w: anytype, res: Res) !void {
     try w.writeByte('}');
 }
 
+const path_marks = [_][]const u8{
+    ".ssh/",
+    "id_rsa",
+    "id_ed25519",
+    ".aws/credentials",
+    ".kube/config",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".env",
+    ".pz/auth.json",
+    ".pz/policy.json",
+    ".pz/settings.json",
+};
+
+const secret_marks = [_][]const u8{
+    "authorization:",
+    "bearer ",
+    "cookie:",
+    "access_token",
+    "refresh_token",
+    "token=",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "secret_key",
+    "password",
+    "passwd",
+};
+
 fn containsNoCase(hay: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > hay.len) return false;
@@ -805,30 +835,33 @@ fn containsNoCase(hay: []const u8, needle: []const u8) bool {
     return false;
 }
 
+fn hasAnyNoCase(hay: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (containsNoCase(hay, needle)) return true;
+    }
+    return false;
+}
+
+fn hasAny(hay: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, hay, needle) != null) return true;
+    }
+    return false;
+}
+
 fn detectPubRedact(txt: []const u8) ?[]const u8 {
-    if (containsNoCase(txt, ".ssh/") or
-        containsNoCase(txt, "id_rsa") or
-        containsNoCase(txt, "id_ed25519") or
-        containsNoCase(txt, ".aws/credentials") or
-        containsNoCase(txt, ".pz/auth.json") or
-        containsNoCase(txt, ".pz/policy.json"))
-    {
-        return "path";
-    }
-    if (containsNoCase(txt, "authorization:") or
-        containsNoCase(txt, "bearer ") or
-        containsNoCase(txt, "cookie:") or
-        containsNoCase(txt, "access_token") or
-        containsNoCase(txt, "refresh_token") or
-        containsNoCase(txt, "api_key") or
-        containsNoCase(txt, "apikey") or
-        std.mem.indexOf(u8, txt, "sk-") != null or
-        std.mem.indexOf(u8, txt, "ghp_") != null or
-        std.mem.indexOf(u8, txt, "xoxb-") != null or
-        std.mem.indexOf(u8, txt, "AKIA") != null)
-    {
-        return "secret";
-    }
+    if (hasAnyNoCase(txt, &path_marks)) return "path";
+    if (hasAnyNoCase(txt, &secret_marks) or
+        hasAny(txt, &.{
+            "sk-",
+            "ghp_",
+            "gho_",
+            "github_pat_",
+            "xoxb-",
+            "xoxp-",
+            "AKIA",
+            "ASIA",
+        })) return "secret";
     return null;
 }
 
@@ -1118,6 +1151,64 @@ test "snapshot: canonical tool entry encoding" {
         \\[]u8
         \\  "kind=tool | redact=true | json={"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"[mask:2aa5dc7ee92f3807]","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"[secret:8c3b19aca7d7c3f8]","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"[mask:bdfd41dd2fcacdeb]"}]}"
     ).expectEqual(snap);
+}
+
+test "detectPubRedact flags expanded secret markers" {
+    try testing.expectEqualStrings("secret", detectPubRedact("client_secret=s3cr3t").?);
+    try testing.expectEqualStrings("secret", detectPubRedact("password=letmein").?);
+    try testing.expectEqualStrings("secret", detectPubRedact("GET /cb?token=abc").?);
+    try testing.expectEqualStrings("secret", detectPubRedact("github_pat_deadbeef").?);
+}
+
+test "detectPubRedact flags expanded path markers" {
+    try testing.expectEqualStrings("path", detectPubRedact("cat ~/.kube/config").?);
+    try testing.expectEqualStrings("path", detectPubRedact("load .env before start").?);
+    try testing.expectEqualStrings("path", detectPubRedact("npm token lives in .npmrc").?);
+}
+
+test "property: redactTextAlloc leaves plain ids unchanged" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { s: zc.Id }) bool {
+            const txt = args.s.slice();
+            const red = redactTextAlloc(testing.allocator, txt, .@"pub") catch return false;
+            defer testing.allocator.free(red);
+            return std.mem.eql(u8, txt, red);
+        }
+    }.prop, .{ .iterations = 1000 });
+}
+
+test "property: redactTextAlloc hides secret-bearing text" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { s: zc.Id }) bool {
+            const txt = std.fmt.allocPrint(testing.allocator, "authorization: bearer {s}", .{args.s.slice()}) catch return false;
+            defer testing.allocator.free(txt);
+            const red = redactTextAlloc(testing.allocator, txt, .@"pub") catch return false;
+            defer testing.allocator.free(red);
+            return std.mem.indexOf(u8, red, "[secret:") != null and std.mem.indexOf(u8, red, args.s.slice()) == null;
+        }
+    }.prop, .{ .iterations = 1000 });
+}
+
+test "property: redactTextAlloc hides path-bearing text" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { s: zc.Id }) bool {
+            const txt = std.fmt.allocPrint(testing.allocator, "cp /tmp/{s}/.env backup", .{args.s.slice()}) catch return false;
+            defer testing.allocator.free(txt);
+            const red = redactTextAlloc(testing.allocator, txt, .@"pub") catch return false;
+            defer testing.allocator.free(red);
+            return std.mem.indexOf(u8, red, "[path:") != null and std.mem.indexOf(u8, red, args.s.slice()) == null;
+        }
+    }.prop, .{ .iterations = 1000 });
+}
+
+test "redactTextAlloc with mask emits tagged surrogate" {
+    const red = try redactTextAlloc(testing.allocator, "plain text", .mask);
+    defer testing.allocator.free(red);
+    try testing.expect(std.mem.indexOf(u8, red, "[mask:") != null);
+    try testing.expect(!std.mem.eql(u8, red, "plain text"));
 }
 
 test "snapshot: variant encodings stay canonical" {

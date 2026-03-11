@@ -7519,6 +7519,28 @@ test "runtime blocks tool dispatch under verified policy" {
     const written = out_fbs.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true out=\"blocked by policy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
+
+    const sess_dir = try tmp.dir.openDir("sess", .{});
+    var fs_store = try core.session.fs_store.Store.init(.{
+        .alloc = std.testing.allocator,
+        .dir = sess_dir,
+    });
+    defer fs_store.deinit();
+
+    var rdr = try fs_store.asSessionStore().replay(sid);
+    defer rdr.deinit();
+    var saw_blocked = false;
+    while (try rdr.next()) |ev| {
+        switch (ev.data) {
+            .tool_result => |tr| {
+                if (std.mem.eql(u8, tr.id, "call-1") and tr.is_err and std.mem.eql(u8, tr.out, "blocked by policy")) {
+                    saw_blocked = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_blocked);
 }
 
 test "subagent stub inherits effective policy hash" {
