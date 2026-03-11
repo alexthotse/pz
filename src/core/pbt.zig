@@ -247,16 +247,24 @@ test "pbt expectShrunk yields stable minimal counterexamples" {
     try std.testing.expect(fail_a.original.a != 0);
     try std.testing.expectEqual(@as(u8, 1), fail_a.shrunk.a);
 
-    const got = try valueAlloc(std.testing.allocator, .{
+    const Snap = struct {
+        seed: u64,
+        iteration: usize,
+        original: u8,
+        shrunk: u8,
+    };
+    const got = Snap{
         .seed = fail_a.seed,
         .iteration = fail_a.iteration,
-        .original = fail_a.original,
-        .shrunk = fail_a.shrunk,
-    });
-    defer std.testing.allocator.free(got);
+        .original = fail_a.original.a,
+        .shrunk = fail_a.shrunk.a,
+    };
     try oh.snap(@src(),
-        \\[]const u8
-        \\  ".{seed=12345, iteration=0, original=.{a=160}, shrunk=.{a=1}}"
+        \\core.pbt.test.pbt expectShrunk yields stable minimal counterexamples.Snap
+        \\  .seed: u64 = 12345
+        \\  .iteration: usize = 0
+        \\  .original: u8 = 160
+        \\  .shrunk: u8 = 1
     ).expectEqual(got);
 }
 
@@ -307,7 +315,7 @@ test "pbt run replays successful iterations deterministically" {
     ).expectEqual(got);
 }
 
-test "pbt reportAlloc includes failure details" {
+test "pbt reportAlloc formatting is deterministic" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
