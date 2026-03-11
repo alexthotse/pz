@@ -36,6 +36,38 @@ pub const Lock = struct {
 
 pub const policy_rel_path = ".pz/policy.json";
 
+pub const ApprovalBind = union(enum) {
+    version: u16,
+    hash: []const u8,
+
+    pub fn eql(a: ApprovalBind, b: ApprovalBind) bool {
+        return switch (a) {
+            .version => |av| switch (b) {
+                .version => |bv| av == bv,
+                .hash => false,
+            },
+            .hash => |ah| switch (b) {
+                .version => false,
+                .hash => |bh| std.mem.eql(u8, ah, bh),
+            },
+        };
+    }
+
+    pub fn dupe(self: ApprovalBind, alloc: std.mem.Allocator) !ApprovalBind {
+        return switch (self) {
+            .version => |v| .{ .version = v },
+            .hash => |txt| .{ .hash = try alloc.dupe(u8, txt) },
+        };
+    }
+
+    pub fn deinit(self: ApprovalBind, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .version => {},
+            .hash => |txt| alloc.free(txt),
+        }
+    }
+};
+
 pub const Policy = struct {
     rules: []const Rule,
 
@@ -1043,7 +1075,23 @@ test "network policy blocks local and private ranges" {
 test "network policy allows public addresses" {
     try testing.expect(!isBlockedNetAddr(std.net.Address.initIp4(.{ 34, 117, 59, 81 }, 443)));
     try testing.expect(!isBlockedNetAddr(std.net.Address.initIp6(.{
-        0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
-        0, 0, 0, 0, 0, 0, 0x88, 0x88,
+        0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0,    0,
+        0,    0,    0,    0,    0,    0,    0x88, 0x88,
     }, 443, 0, 0)));
+}
+
+test "ApprovalBind hash dupe preserves payload" {
+    const bind = ApprovalBind{ .hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
+    const duped = try bind.dupe(testing.allocator);
+    defer duped.deinit(testing.allocator);
+
+    try testing.expect(bind.eql(duped));
+}
+
+test "ApprovalBind version and hash are distinct" {
+    const ver = ApprovalBind{ .version = 1 };
+    const ver_same = ApprovalBind{ .version = 7 };
+
+    try testing.expect(!ver.eql(.{ .hash = "1" }));
+    try testing.expect(ver_same.eql(.{ .version = 7 }));
 }

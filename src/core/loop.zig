@@ -1,4 +1,5 @@
 const std = @import("std");
+const policy = @import("policy.zig");
 const providers = @import("providers/mod.zig");
 const prov_contract = @import("providers/contract.zig");
 const session = @import("session/mod.zig");
@@ -155,37 +156,204 @@ const Stage = enum {
 pub const CmdCache = struct {
     const max_cmds = 1024;
 
-    set: std.AutoArrayHashMapUnmanaged(u64, void) = .{},
+    entries: std.ArrayListUnmanaged(Entry) = .{},
     alloc: std.mem.Allocator,
+
+    pub const Key = struct {
+        tool: tools.Kind,
+        cmd: []const u8,
+        loc: Loc,
+        policy: policy.ApprovalBind,
+        life: Life,
+    };
+
+    pub const Loc = union(enum) {
+        cwd: []const u8,
+        repo_root: []const u8,
+    };
+
+    pub const Life = union(enum) {
+        session: []const u8,
+        expires_at_ms: i64,
+    };
+
+    const Entry = struct {
+        hash: u64,
+        key: Key,
+    };
 
     pub fn init(alloc: std.mem.Allocator) CmdCache {
         return .{ .alloc = alloc };
     }
 
     pub fn deinit(self: *CmdCache) void {
-        self.set.deinit(self.alloc);
+        for (self.entries.items) |item| freeKey(self.alloc, item.key);
+        self.entries.deinit(self.alloc);
     }
 
-    pub fn contains(self: *const CmdCache, cmd: []const u8) bool {
-        return self.set.contains(hash(cmd));
-    }
-
-    pub fn add(self: *CmdCache, cmd: []const u8) !void {
-        const h = hash(cmd);
-        if (self.set.contains(h)) return;
-        if (self.set.count() >= max_cmds) {
-            self.set.orderedRemoveAt(0);
+    pub fn contains(self: *const CmdCache, key: Key) bool {
+        const key_hash = hash(key);
+        for (self.entries.items) |item| {
+            if (item.hash == key_hash and eql(item.key, key)) return true;
         }
-        try self.set.put(self.alloc, h, {});
+        return false;
+    }
+
+    pub fn add(self: *CmdCache, key: Key) !void {
+        const key_hash = hash(key);
+        for (self.entries.items) |item| {
+            if (item.hash == key_hash and eql(item.key, key)) return;
+        }
+        if (self.entries.items.len >= max_cmds) {
+            freeKey(self.alloc, self.entries.items[0].key);
+            _ = self.entries.orderedRemove(0);
+        }
+
+        try self.entries.append(self.alloc, .{
+            .hash = key_hash,
+            .key = try dupKey(self.alloc, key),
+        });
     }
 
     pub fn count(self: *const CmdCache) usize {
-        return self.set.count();
+        return self.entries.items.len;
     }
 
-    fn hash(cmd: []const u8) u64 {
-        const trimmed = std.mem.trimRight(u8, cmd, &std.ascii.whitespace);
-        return std.hash.Wyhash.hash(0, trimmed);
+    pub fn peek(self: *const CmdCache, idx: usize) ?Key {
+        if (idx >= self.entries.items.len) return null;
+        return self.entries.items[idx].key;
+    }
+
+    fn dupKey(alloc: std.mem.Allocator, key: Key) !Key {
+        const cmd = try alloc.dupe(u8, trimCmd(key.cmd));
+        errdefer alloc.free(cmd);
+
+        const loc: Loc = switch (key.loc) {
+            .cwd => |cwd| .{ .cwd = try alloc.dupe(u8, cwd) },
+            .repo_root => |root| .{ .repo_root = try alloc.dupe(u8, root) },
+        };
+        errdefer freeLoc(alloc, loc);
+
+        const pol = try key.policy.dupe(alloc);
+        errdefer pol.deinit(alloc);
+
+        const life: Life = switch (key.life) {
+            .session => |sid| .{ .session = try alloc.dupe(u8, sid) },
+            .expires_at_ms => |at_ms| .{ .expires_at_ms = at_ms },
+        };
+        errdefer freeLife(alloc, life);
+
+        return .{
+            .tool = key.tool,
+            .cmd = cmd,
+            .loc = loc,
+            .policy = pol,
+            .life = life,
+        };
+    }
+
+    fn freeKey(alloc: std.mem.Allocator, key: Key) void {
+        alloc.free(key.cmd);
+        freeLoc(alloc, key.loc);
+        key.policy.deinit(alloc);
+        freeLife(alloc, key.life);
+    }
+
+    fn freeLoc(alloc: std.mem.Allocator, loc: Loc) void {
+        switch (loc) {
+            .cwd => |cwd| alloc.free(cwd),
+            .repo_root => |root| alloc.free(root),
+        }
+    }
+
+    fn freeLife(alloc: std.mem.Allocator, life: Life) void {
+        switch (life) {
+            .session => |sid| alloc.free(sid),
+            .expires_at_ms => {},
+        }
+    }
+
+    fn eql(a: Key, b: Key) bool {
+        if (a.tool != b.tool) return false;
+        if (!std.mem.eql(u8, trimCmd(a.cmd), trimCmd(b.cmd))) return false;
+        if (!eqlLoc(a.loc, b.loc)) return false;
+        if (!a.policy.eql(b.policy)) return false;
+        return eqlLife(a.life, b.life);
+    }
+
+    fn eqlLoc(a: Loc, b: Loc) bool {
+        return switch (a) {
+            .cwd => |acwd| switch (b) {
+                .cwd => |bcwd| std.mem.eql(u8, acwd, bcwd),
+                .repo_root => false,
+            },
+            .repo_root => |aroot| switch (b) {
+                .cwd => false,
+                .repo_root => |broot| std.mem.eql(u8, aroot, broot),
+            },
+        };
+    }
+
+    fn eqlLife(a: Life, b: Life) bool {
+        return switch (a) {
+            .session => |asid| switch (b) {
+                .session => |bsid| std.mem.eql(u8, asid, bsid),
+                .expires_at_ms => false,
+            },
+            .expires_at_ms => |aat| switch (b) {
+                .session => false,
+                .expires_at_ms => |bat| aat == bat,
+            },
+        };
+    }
+
+    fn hash(key: Key) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(@tagName(key.tool));
+        hasher.update("\x00");
+        hasher.update(trimCmd(key.cmd));
+        hasher.update("\x00");
+        switch (key.loc) {
+            .cwd => |cwd| {
+                hasher.update("cwd");
+                hasher.update("\x00");
+                hasher.update(cwd);
+            },
+            .repo_root => |root| {
+                hasher.update("repo_root");
+                hasher.update("\x00");
+                hasher.update(root);
+            },
+        }
+        hasher.update("\x00");
+        switch (key.policy) {
+            .version => |ver| {
+                hasher.update("version");
+                hasher.update(std.mem.asBytes(&ver));
+            },
+            .hash => |txt| {
+                hasher.update("hash");
+                hasher.update("\x00");
+                hasher.update(txt);
+            },
+        }
+        hasher.update("\x00");
+        switch (key.life) {
+            .session => |sid| {
+                hasher.update("session");
+                hasher.update("\x00");
+                hasher.update(sid);
+            },
+            .expires_at_ms => |at_ms| {
+                hasher.update("expires_at_ms");
+                hasher.update(std.mem.asBytes(&at_ms));
+            },
+        }
+        return hasher.final();
+    }
+
+    fn trimCmd(cmd: []const u8) []const u8 {
+        return std.mem.trimRight(u8, cmd, &std.ascii.whitespace);
     }
 };
 
@@ -1170,10 +1338,8 @@ test "loop smoke composes replay provider tool and mode" {
                 1 => {
                     try std.testing.expectEqual(@as(usize, 3), req.msgs.len);
                     try expectGuardMsg(req.msgs[0], null);
-                    try expectMsgText(req.msgs[1], .user,
-                        "<untrusted-input kind=\"user-prompt\">\nprev\n</untrusted-input>");
-                    try expectMsgText(req.msgs[2], .user,
-                        "<untrusted-input kind=\"user-prompt\">\nship-it\n</untrusted-input>");
+                    try expectMsgText(req.msgs[1], .user, "<untrusted-input kind=\"user-prompt\">\nprev\n</untrusted-input>");
+                    try expectMsgText(req.msgs[2], .user, "<untrusted-input kind=\"user-prompt\">\nship-it\n</untrusted-input>");
                     self.stream.evs = self.turn1;
                     self.stream.idx = 0;
                 },
@@ -1434,8 +1600,7 @@ test "loop smoke finishes single turn with no tools" {
             self.start_ct += 1;
             try std.testing.expectEqual(@as(usize, 2), req.msgs.len);
             try expectGuardMsg(req.msgs[0], null);
-            try expectMsgText(req.msgs[1], .user,
-                "<untrusted-input kind=\"user-prompt\">\nhello\n</untrusted-input>");
+            try expectMsgText(req.msgs[1], .user, "<untrusted-input kind=\"user-prompt\">\nhello\n</untrusted-input>");
             try std.testing.expectEqual(@as(usize, 0), req.tools.len);
 
             self.stream.idx = 0;
@@ -2588,32 +2753,168 @@ test "CmdCache approve echo hi does not approve echo rm -rf" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
 
-    try cache.add("echo hi");
-    try std.testing.expect(cache.contains("echo hi"));
-    try std.testing.expect(!cache.contains("echo rm -rf"));
+    const base: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    };
+
+    try cache.add(base);
+    try std.testing.expect(cache.contains(base));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo rm -rf",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
 }
 
 test "CmdCache approved command auto-approved on second check" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
 
-    try std.testing.expect(!cache.contains("echo hi"));
-    try cache.add("echo hi");
-    try std.testing.expect(cache.contains("echo hi"));
+    const key: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    };
+
+    try std.testing.expect(!cache.contains(key));
+    try cache.add(key);
+    try std.testing.expect(cache.contains(key));
     // Adding again is idempotent
-    try cache.add("echo hi");
+    try cache.add(key);
     try std.testing.expectEqual(@as(usize, 1), cache.count());
-    try std.testing.expect(cache.contains("echo hi"));
+    try std.testing.expect(cache.contains(key));
 }
 
-test "CmdCache trims trailing whitespace for key" {
+test "CmdCache approval key trims trailing whitespace for command" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
 
-    try cache.add("echo hi   ");
-    try std.testing.expect(cache.contains("echo hi"));
-    try std.testing.expect(cache.contains("echo hi\t\n"));
+    try cache.add(.{
+        .tool = .bash,
+        .cmd = "echo hi   ",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    });
+    try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi\t\n",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
     try std.testing.expectEqual(@as(usize, 1), cache.count());
+}
+
+test "CmdCache approval key binds tool loc policy and session" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const base: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = 1 },
+        .life = .{ .session = "sess-a" },
+    };
+
+    try cache.add(base);
+    try std.testing.expect(!cache.contains(.{
+        .tool = .read,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = 1 },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/other" },
+        .policy = .{ .version = 1 },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .repo_root = "/tmp/pz" },
+        .policy = .{ .version = 1 },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = 2 },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .hash = "policy-hash-b" },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = 1 },
+        .life = .{ .session = "sess-b" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = 1 },
+        .life = .{ .expires_at_ms = 42 },
+    }));
+}
+
+test "snapshot: CmdCache stores approval context" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    try cache.add(.{
+        .tool = .bash,
+        .cmd = "echo hi   ",
+        .loc = .{ .repo_root = "/work/pz" },
+        .policy = .{ .hash = "6e3413f4a6fa5d1be653c4f6adf4de55fd8d6f41a9652c09fdb4684f2f42c59f" },
+        .life = .{ .expires_at_ms = 1700000123 },
+    });
+
+    try oh.snap(@src(),
+        \\core.loop.CmdCache.Key
+        \\  .tool: core.tools.mod.Kind
+        \\    .bash
+        \\  .cmd: []const u8
+        \\    "echo hi"
+        \\  .loc: core.loop.CmdCache.Loc
+        \\    .repo_root: []const u8
+        \\      "/work/pz"
+        \\  .policy: core.policy.ApprovalBind
+        \\    .hash: []const u8
+        \\      "6e3413f4a6fa5d1be653c4f6adf4de55fd8d6f41a9652c09fdb4684f2f42c59f"
+        \\  .life: core.loop.CmdCache.Life
+        \\    .expires_at_ms: i64 = 1700000123
+    ).expectEqual(cache.peek(0).?);
 }
 
 test "CmdCache respects max_commands limit" {
@@ -2624,16 +2925,46 @@ test "CmdCache respects max_commands limit" {
     for (0..CmdCache.max_cmds) |i| {
         var buf: [32]u8 = undefined;
         const cmd = try std.fmt.bufPrint(&buf, "cmd-{d}", .{i});
-        try cache.add(cmd);
+        try cache.add(.{
+            .tool = .bash,
+            .cmd = cmd,
+            .loc = .{ .cwd = "/tmp/pz" },
+            .policy = .{ .version = policy.ver_current },
+            .life = .{ .session = "sess-a" },
+        });
     }
     try std.testing.expectEqual(@as(usize, CmdCache.max_cmds), cache.count());
 
     // Adding one more evicts the oldest
-    try cache.add("overflow");
+    try cache.add(.{
+        .tool = .bash,
+        .cmd = "overflow",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    });
     try std.testing.expectEqual(@as(usize, CmdCache.max_cmds), cache.count());
-    try std.testing.expect(cache.contains("overflow"));
-    try std.testing.expect(!cache.contains("cmd-0")); // evicted
-    try std.testing.expect(cache.contains("cmd-1")); // still present
+    try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "overflow",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
+        .tool = .bash,
+        .cmd = "cmd-0",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "cmd-1",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
 }
 
 test "parseCallArgs parses skill args" {
