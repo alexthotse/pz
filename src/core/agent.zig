@@ -3,6 +3,16 @@ const testing = std.testing;
 
 pub const protocol_version: u16 = 1;
 pub const hash_hex_len: usize = 64;
+pub const version_mismatch_exit_code: u8 = 78;
+
+pub fn driverPathAlloc(alloc: std.mem.Allocator) ![]u8 {
+    return std.fs.selfExePathAlloc(alloc);
+}
+
+pub fn exitOnVersionMismatch(err: DecodeError) void {
+    if (err != error.UnsupportedVersion) return;
+    std.process.exit(version_mismatch_exit_code);
+}
 
 /// JSON-line wire frame for parent/child agent RPC.
 pub const Frame = struct {
@@ -366,6 +376,14 @@ test "decode rejects future protocol version" {
     const raw =
         "{\"protocol_version\":9,\"seq\":1,\"msg\":{\"run\":{\"id\":\"job-1\",\"prompt\":\"hi\"}}}";
     try testing.expectError(error.UnsupportedVersion, decodeSlice(testing.allocator, raw));
+}
+
+test "driver path resolves current executable" {
+    const path = try driverPathAlloc(testing.allocator);
+    defer testing.allocator.free(path);
+
+    try testing.expect(path.len > 0);
+    try testing.expect(std.fs.path.isAbsolute(path));
 }
 
 test "decode rejects unknown fields" {

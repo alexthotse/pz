@@ -69,6 +69,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run pz");
     run_step.dependOn(&run_cmd.step);
 
+    const agent_exit_harness = b.addExecutable(.{
+        .name = "agent-exit-harness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test/agent_exit_harness.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_exit_harness.root_module.addImport("core_agent", b.createModule(.{
+        .root_source_file = b.path("src/core/agent.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -95,6 +109,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_suite_tests.step);
+    const run_agent_exit_version = b.addRunArtifact(agent_exit_harness);
+    run_agent_exit_version.addArg("version");
+    run_agent_exit_version.expectExitCode(78);
+    test_step.dependOn(&run_agent_exit_version.step);
+    const run_agent_exit_other = b.addRunArtifact(agent_exit_harness);
+    run_agent_exit_other.addArg("other");
+    run_agent_exit_other.expectExitCode(0);
+    test_step.dependOn(&run_agent_exit_other.step);
 
     const perf_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -113,6 +135,7 @@ pub fn build(b: *std.Build) void {
 
     const check_step = b.step("check", "Compile executable and tests");
     check_step.dependOn(&exe.step);
+    check_step.dependOn(&agent_exit_harness.step);
     check_step.dependOn(&exe_tests.step);
     check_step.dependOn(&suite_tests.step);
     check_step.dependOn(&perf_tests.step);
