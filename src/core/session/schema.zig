@@ -338,3 +338,54 @@ test "schema property: dupe preserves tool_call encode" {
         }
     }.prop, .{ .iterations = 200 });
 }
+
+test "schema property: tool_result event roundtrip" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { id: zc.Id, out: zc.String, is_err: bool }) bool {
+            const alloc = std.testing.allocator;
+            const ev = Event{
+                .at_ms = 100,
+                .data = .{ .tool_result = .{
+                    .id = args.id.slice(),
+                    .out = args.out.slice(),
+                    .is_err = args.is_err,
+                } },
+            };
+            const raw = encodeAlloc(alloc, ev) catch return true;
+            defer alloc.free(raw);
+            var parsed = decodeSlice(alloc, raw) catch return false;
+            defer parsed.deinit();
+            return switch (parsed.value.data) {
+                .tool_result => |tr| std.mem.eql(u8, tr.id, args.id.slice()) and
+                    std.mem.eql(u8, tr.out, args.out.slice()) and
+                    tr.is_err == args.is_err,
+                else => false,
+            };
+        }
+    }.prop, .{ .iterations = 200 });
+}
+
+test "schema property: dupe preserves tool_result encode" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { id: zc.Id, out: zc.String, is_err: bool }) bool {
+            const alloc = std.testing.allocator;
+            const ev = Event{
+                .at_ms = 100,
+                .data = .{ .tool_result = .{
+                    .id = args.id.slice(),
+                    .out = args.out.slice(),
+                    .is_err = args.is_err,
+                } },
+            };
+            const dup = ev.dupe(alloc) catch return true;
+            defer dup.free(alloc);
+            const a = encodeAlloc(alloc, ev) catch return true;
+            defer alloc.free(a);
+            const b = encodeAlloc(alloc, dup) catch return true;
+            defer alloc.free(b);
+            return std.mem.eql(u8, a, b);
+        }
+    }.prop, .{ .iterations = 200 });
+}

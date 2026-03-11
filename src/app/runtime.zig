@@ -6037,6 +6037,31 @@ test "sanitizeUtf8LossyAlloc replaces invalid bytes" {
     try std.testing.expectEqualStrings("o?k?", out);
 }
 
+test "sanitizeUtf8LossyAlloc property: output is valid utf8" {
+    const zc = @import("zcheck");
+    const pbt = @import("../core/pbt.zig");
+    try zc.check(struct {
+        fn prop(args: struct { raw: pbt.Bytes(64) }) bool {
+            const alloc = std.testing.allocator;
+            const out = sanitizeUtf8LossyAlloc(alloc, args.raw.slice()) catch return false;
+            defer alloc.free(out);
+            return std.unicode.utf8ValidateSlice(out);
+        }
+    }.prop, .{ .iterations = 200 });
+}
+
+test "sanitizeUtf8LossyAlloc property: valid utf8 is preserved" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { text: zc.String }) bool {
+            const alloc = std.testing.allocator;
+            const out = sanitizeUtf8LossyAlloc(alloc, args.text.slice()) catch return false;
+            defer alloc.free(out);
+            return std.mem.eql(u8, out, args.text.slice());
+        }
+    }.prop, .{ .iterations = 200 });
+}
+
 test "infoTextSafe accepts invalid utf8 command output" {
     var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
