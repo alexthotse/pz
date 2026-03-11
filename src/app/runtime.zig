@@ -2371,7 +2371,7 @@ fn runTui(
                         defer if (done.err_name) |name| alloc.free(name);
 
                         if (shouldRetryOverflow(alloc, &live_turn, model, retried_overflow)) {
-                            if (try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session, true)) {
+                            if (try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, true)) {
                                 const retry_req = (try live_turn.cloneReq(alloc)) orelse return error.TestUnexpectedResult;
                                 defer {
                                     var req = retry_req;
@@ -2413,7 +2413,7 @@ fn runTui(
                             defer alloc.free(msg);
                             try ui.tr.infoText(msg);
                         } else if (auto_compact_on) {
-                            _ = try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session, false);
+                            _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false);
                         }
 
                         if (pending.popNext()) |next_turn| {
@@ -2576,7 +2576,7 @@ fn runTui(
                 .provider_opts = popts,
                 .system_prompt = sys_prompt,
             });
-            if (auto_compact_on) _ = try autoCompact(alloc, &ui, sid.*, session_dir_path, no_session, false);
+            if (auto_compact_on) _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false);
             turn_ct += 1;
         }
         if (turn_ct == 0 and cmd_ct == 0 and run_cmd.prompt == null) return error.EmptyPrompt;
@@ -4909,13 +4909,46 @@ fn shouldRetryOverflow(
     return false;
 }
 
+const CompactFn = *const fn (
+    ctx: ?*anyopaque,
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    sid: []const u8,
+    now: i64,
+) anyerror!void;
+
+fn compactNow(
+    _: ?*anyopaque,
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    sid: []const u8,
+    now: i64,
+) !void {
+    _ = try core.session.compactSession(alloc, dir, sid, now);
+}
+
 fn autoCompact(
     alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
+    out: std.Io.AnyWriter,
     sid: []const u8,
     session_dir_path: ?[]const u8,
     no_session: bool,
     force: bool,
+) !bool {
+    return autoCompactWith(alloc, ui, out, sid, session_dir_path, no_session, force, null, compactNow);
+}
+
+fn autoCompactWith(
+    alloc: std.mem.Allocator,
+    ui: *tui_harness.Ui,
+    out: std.Io.AnyWriter,
+    sid: []const u8,
+    session_dir_path: ?[]const u8,
+    no_session: bool,
+    force: bool,
+    compact_ctx: ?*anyopaque,
+    compact_fn: CompactFn,
 ) !bool {
     if (no_session or session_dir_path == null) return false;
     if (!force) {
@@ -4925,10 +4958,13 @@ fn autoCompact(
         if (pct < compact_threshold_pct) return false;
     }
 
+    try ui.tr.infoText("[compacting...]");
+    try ui.draw(out);
+
     var dir = try std.fs.cwd().openDir(session_dir_path.?, .{});
     defer dir.close();
     const now = std.time.milliTimestamp();
-    _ = core.session.compactSession(alloc, dir, sid, now) catch |err| {
+    compact_fn(compact_ctx, alloc, dir, sid, now) catch |err| {
         const detail = try report.inlineMsg(alloc, err);
         defer alloc.free(detail);
         const msg = try std.fmt.allocPrint(alloc, "[auto-compact failed: {s}]", .{detail});
@@ -7767,4 +7803,54 @@ test "shouldRetryOverflow gates retry to real overflow in same model once" {
         \\false
         \\"
     ).expectEqual(snap);
+}
+
+test "autoCompact draws compacting notice before compactor runs" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.pn.ctx_limit = 100;
+    ui.pn.cum_tok = 90;
+    ui.pn.has_usage = true;
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const Ctx = struct {
+        ui: *tui_harness.Ui,
+        saw_notice: bool = false,
+
+        fn run(raw: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            for (self.ui.tr.blocks.items) |blk| {
+                if (std.mem.eql(u8, blk.buf.items, "[compacting...]")) {
+                    self.saw_notice = true;
+                    return;
+                }
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    var ctx = Ctx{ .ui = &ui };
+    try std.testing.expect(try autoCompactWith(
+        alloc,
+        &ui,
+        out_fbs.writer().any(),
+        "sess-1",
+        sess_abs,
+        false,
+        false,
+        &ctx,
+        Ctx.run,
+    ));
+    try std.testing.expect(ctx.saw_notice);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "[compacting...]") != null);
 }
