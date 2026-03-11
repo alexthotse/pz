@@ -136,7 +136,8 @@ const Backend = if (is_macos) struct {
 pub const Watcher = struct {
     alloc: std.mem.Allocator,
     poll_ns: u64,
-    debounce_ns: i128,
+    quiet_ns: i128,
+    max_ns: i128,
     paths: [][]u8,
     states: []State,
     backend: Backend,
@@ -146,7 +147,8 @@ pub const Watcher = struct {
     pub const Init = struct {
         paths: []const []const u8,
         poll_ms: u32 = 25,
-        debounce_ms: u32 = 100,
+        quiet_ms: u32 = 100,
+        max_ms: u32 = 1000,
     };
 
     const Snap = struct {
@@ -158,7 +160,8 @@ pub const Watcher = struct {
     const State = struct {
         snap: Snap = .{},
         pending: ?Kind = null,
-        dirty_at_ns: ?i128 = null,
+        first_dirty_at_ns: ?i128 = null,
+        last_dirty_at_ns: ?i128 = null,
     };
 
     pub fn init(alloc: std.mem.Allocator, cfg: Init) InitError!Self {
@@ -197,7 +200,8 @@ pub const Watcher = struct {
         return .{
             .alloc = alloc,
             .poll_ns = @as(u64, cfg.poll_ms) * std.time.ns_per_ms,
-            .debounce_ns = @as(i128, cfg.debounce_ms) * std.time.ns_per_ms,
+            .quiet_ns = @as(i128, cfg.quiet_ms) * std.time.ns_per_ms,
+            .max_ns = @as(i128, cfg.max_ms) * std.time.ns_per_ms,
             .paths = paths,
             .states = states,
             .backend = backend,
@@ -292,23 +296,29 @@ pub const Watcher = struct {
         var state = &self.states[idx];
         if (state.pending) |pending| {
             state.pending = mergeKind(pending, kind);
+            state.last_dirty_at_ns = now;
             return;
         }
         state.pending = kind;
-        state.dirty_at_ns = now;
+        state.first_dirty_at_ns = now;
+        state.last_dirty_at_ns = now;
     }
 
     fn flushOne(self: *Self, idx: usize, now: i128, sink: Sink) void {
         var state = &self.states[idx];
         if (state.pending) |pending| {
-            const dirty_at = state.dirty_at_ns orelse now;
-            if (now - dirty_at < self.debounce_ns) return;
+            const first_dirty_at = state.first_dirty_at_ns orelse now;
+            const last_dirty_at = state.last_dirty_at_ns orelse first_dirty_at;
+            const quiet_ok = now - last_dirty_at >= self.quiet_ns;
+            const max_ok = now - first_dirty_at >= self.max_ns;
+            if (!quiet_ok and !max_ok) return;
             sink.onEvent(.{
                 .kind = pending,
                 .path = self.paths[idx],
             });
             state.pending = null;
-            state.dirty_at_ns = null;
+            state.first_dirty_at_ns = null;
+            state.last_dirty_at_ns = null;
         }
     }
 };
@@ -394,6 +404,35 @@ const WriteCtx = struct {
     }
 };
 
+const BurstWriteCtx = struct {
+    dir: std.fs.Dir,
+    sub_path: []const u8,
+    start_ms: u64,
+    step_ms: u64,
+    count: usize,
+    ok: bool = true,
+
+    fn run(self: *BurstWriteCtx) void {
+        std.Thread.sleep(self.start_ms * std.time.ns_per_ms);
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            var buf: [32]u8 = undefined;
+            const data = std.fmt.bufPrint(buf[0..], "storm-{d}", .{i}) catch {
+                self.ok = false;
+                return;
+            };
+            self.dir.writeFile(.{
+                .sub_path = self.sub_path,
+                .data = data,
+            }) catch {
+                self.ok = false;
+                return;
+            };
+            if (i + 1 < self.count) std.Thread.sleep(self.step_ms * std.time.ns_per_ms);
+        }
+    }
+};
+
 const DeleteCtx = struct {
     dir: std.fs.Dir,
     sub_path: []const u8,
@@ -458,7 +497,8 @@ test "watchLoop emits debounced write event" {
     var watcher = try Watcher.init(testing.allocator, .{
         .paths = &.{path},
         .poll_ms = 5,
-        .debounce_ms = 20,
+        .quiet_ms = 20,
+        .max_ms = 100,
     });
     defer watcher.deinit();
 
@@ -496,6 +536,60 @@ test "watchLoop emits debounced write event" {
     ).expectEqual(snap);
 }
 
+test "watchLoop flushes write storm after max window" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "watched.txt",
+        .data = "seed",
+    });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "watched.txt");
+    defer testing.allocator.free(path);
+
+    var watcher = try Watcher.init(testing.allocator, .{
+        .paths = &.{path},
+        .poll_ms = 5,
+        .quiet_ms = 100,
+        .max_ms = 180,
+    });
+    defer watcher.deinit();
+
+    var stop = std.atomic.Value(bool).init(false);
+    var rec = Recorder{ .stop = &stop };
+    var burst_ctx = BurstWriteCtx{
+        .dir = tmp.dir,
+        .sub_path = "watched.txt",
+        .start_ms = 20,
+        .step_ms = 40,
+        .count = 6,
+    };
+    var deadline_ctx = DeadlineCtx{
+        .stop = &stop,
+        .delay_ms = 1000,
+    };
+
+    const writer = try std.Thread.spawn(.{}, BurstWriteCtx.run, .{&burst_ctx});
+    const deadline = try std.Thread.spawn(.{}, DeadlineCtx.run, .{&deadline_ctx});
+    defer writer.join();
+    defer deadline.join();
+
+    try watcher.watchLoop(&stop, Sink.from(Recorder, &rec, Recorder.onEvent));
+
+    try testing.expect(burst_ctx.ok);
+    try testing.expectEqual(@as(usize, 1), rec.count);
+
+    const oh = OhSnap{};
+    const snap = rec.snap orelse return error.MissingEvent;
+    try oh.snap(@src(),
+        \\core.watcher.EvSnap
+        \\  .kind: core.watcher.Kind
+        \\    .write
+        \\  .base: []const u8
+        \\    "watched.txt"
+    ).expectEqual(snap);
+}
+
 test "watchLoop emits delete event" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -510,7 +604,8 @@ test "watchLoop emits delete event" {
     var watcher = try Watcher.init(testing.allocator, .{
         .paths = &.{path},
         .poll_ms = 5,
-        .debounce_ms = 20,
+        .quiet_ms = 20,
+        .max_ms = 100,
     });
     defer watcher.deinit();
 
@@ -559,7 +654,8 @@ test "watchLoop emits write event when missing path appears" {
     var watcher = try Watcher.init(testing.allocator, .{
         .paths = &.{path},
         .poll_ms = 5,
-        .debounce_ms = 20,
+        .quiet_ms = 20,
+        .max_ms = 100,
     });
     defer watcher.deinit();
 
@@ -613,7 +709,8 @@ test "watchLoop emits rename event on macOS" {
     var watcher = try Watcher.init(testing.allocator, .{
         .paths = &.{path},
         .poll_ms = 5,
-        .debounce_ms = 20,
+        .quiet_ms = 20,
+        .max_ms = 100,
     });
     defer watcher.deinit();
 
