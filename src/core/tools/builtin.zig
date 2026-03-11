@@ -538,6 +538,79 @@ pub fn maskForName(name: []const u8) ?u16 {
     return map.get(name);
 }
 
+const AskOutSnap = struct {
+    call_id: []const u8,
+    seq: u32,
+    at_ms: i64,
+    stream: tools.Output.Stream,
+    chunk: []const u8,
+    truncated: bool,
+};
+
+const AskFinalSnap = struct {
+    tag: tools.Result.Tag,
+    code: ?i32 = null,
+    err_kind: ?tools.Result.ErrKind = null,
+    msg: ?[]const u8 = null,
+    reason: ?tools.Result.CancelReason = null,
+    limit_ms: ?u32 = null,
+};
+
+const AskResultSnap = struct {
+    call_id: []const u8,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+    final: AskFinalSnap,
+    out: []AskOutSnap,
+};
+
+fn snapAskFinal(final: tools.Result.Final) AskFinalSnap {
+    return switch (final) {
+        .ok => |ok| .{
+            .tag = .ok,
+            .code = ok.code,
+        },
+        .failed => |failed| .{
+            .tag = .failed,
+            .err_kind = failed.kind,
+            .msg = failed.msg,
+        },
+        .cancelled => |cancelled| .{
+            .tag = .cancelled,
+            .reason = cancelled.reason,
+        },
+        .timed_out => |timed_out| .{
+            .tag = .timed_out,
+            .limit_ms = timed_out.limit_ms,
+        },
+    };
+}
+
+fn snapAskResult(alloc: std.mem.Allocator, res: tools.Result) !AskResultSnap {
+    var out = try alloc.alloc(AskOutSnap, res.out.len);
+    for (res.out, 0..) |row, i| {
+        out[i] = .{
+            .call_id = row.call_id,
+            .seq = row.seq,
+            .at_ms = row.at_ms,
+            .stream = row.stream,
+            .chunk = row.chunk,
+            .truncated = row.truncated,
+        };
+    }
+    return .{
+        .call_id = res.call_id,
+        .started_at_ms = res.started_at_ms,
+        .ended_at_ms = res.ended_at_ms,
+        .final = snapAskFinal(res.final),
+        .out = out,
+    };
+}
+
+fn freeAskResultSnap(alloc: std.mem.Allocator, snap: AskResultSnap) void {
+    alloc.free(snap.out);
+}
+
 test "builtin runtime registry exposes all core tools" {
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
@@ -620,6 +693,8 @@ test "builtin runtime supports deterministic tool mask filtering" {
 }
 
 test "ask tool requires interactive hook" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
@@ -653,13 +728,35 @@ test "ask tool requires interactive hook" {
 
     const res = try reg.run("ask", call, sink);
     defer rt.deinitResult(res);
-    switch (res.final) {
-        .failed => |f| try std.testing.expectEqualStrings("ask tool requires interactive TUI mode", f.msg),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try snapAskResult(std.testing.allocator, res);
+    defer freeAskResultSnap(std.testing.allocator, snap);
+    try oh.snap(@src(),
+        \\core.tools.builtin.AskResultSnap
+        \\  .call_id: []const u8
+        \\    "ask-1"
+        \\  .started_at_ms: i64 = 1
+        \\  .ended_at_ms: i64 = 1
+        \\  .final: core.tools.builtin.AskFinalSnap
+        \\    .tag: core.tools.mod.Result.Tag
+        \\      .failed
+        \\    .code: ?i32
+        \\      null
+        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\      .invalid_args
+        \\    .msg: ?[]const u8
+        \\      "ask tool requires interactive TUI mode"
+        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\      null
+        \\    .limit_ms: ?u32
+        \\      null
+        \\  .out: []core.tools.builtin.AskOutSnap
+        \\    (empty)
+    ).expectEqual(snap);
 }
 
 test "ask tool rejects empty question list" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
@@ -681,13 +778,35 @@ test "ask tool rejects empty question list" {
     };
     const res = try reg.run("ask", call, sink);
     defer rt.deinitResult(res);
-    switch (res.final) {
-        .failed => |f| try std.testing.expectEqualStrings("ask tool requires at least one question", f.msg),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try snapAskResult(std.testing.allocator, res);
+    defer freeAskResultSnap(std.testing.allocator, snap);
+    try oh.snap(@src(),
+        \\core.tools.builtin.AskResultSnap
+        \\  .call_id: []const u8
+        \\    "ask-empty"
+        \\  .started_at_ms: i64 = 7
+        \\  .ended_at_ms: i64 = 7
+        \\  .final: core.tools.builtin.AskFinalSnap
+        \\    .tag: core.tools.mod.Result.Tag
+        \\      .failed
+        \\    .code: ?i32
+        \\      null
+        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\      .invalid_args
+        \\    .msg: ?[]const u8
+        \\      "ask tool requires at least one question"
+        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\      null
+        \\    .limit_ms: ?u32
+        \\      null
+        \\  .out: []core.tools.builtin.AskOutSnap
+        \\    (empty)
+    ).expectEqual(snap);
 }
 
 test "ask tool uses hook output" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const AskImpl = struct {
         alloc: std.mem.Allocator,
         seen: usize = 0,
@@ -733,19 +852,45 @@ test "ask tool uses hook output" {
 
     const res = try reg.run("ask", call, sink);
     defer rt.deinitResult(res);
-    switch (res.final) {
-        .ok => {},
-        else => return error.TestUnexpectedResult,
-    }
     try std.testing.expectEqual(@as(usize, 1), impl.seen);
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqualStrings(
-        "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}",
-        res.out[0].chunk,
-    );
+    const snap = try snapAskResult(std.testing.allocator, res);
+    defer freeAskResultSnap(std.testing.allocator, snap);
+    try oh.snap(@src(),
+        \\core.tools.builtin.AskResultSnap
+        \\  .call_id: []const u8
+        \\    "ask-2"
+        \\  .started_at_ms: i64 = 2
+        \\  .ended_at_ms: i64 = 2
+        \\  .final: core.tools.builtin.AskFinalSnap
+        \\    .tag: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .code: ?i32
+        \\      0
+        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\      null
+        \\    .msg: ?[]const u8
+        \\      null
+        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\      null
+        \\    .limit_ms: ?u32
+        \\      null
+        \\  .out: []core.tools.builtin.AskOutSnap
+        \\    [0]: core.tools.builtin.AskOutSnap
+        \\      .call_id: []const u8
+        \\        "ask-2"
+        \\      .seq: u32 = 0
+        \\      .at_ms: i64 = 2
+        \\      .stream: core.tools.mod.Output.Stream
+        \\        .stdout
+        \\      .chunk: []const u8
+        \\        "{"cancelled":false,"answers":[{"id":"scope","answer":"A","index":0}]}"
+        \\      .truncated: bool = false
+    ).expectEqual(snap);
 }
 
 test "ask tool reports hook failure" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const AskImpl = struct {
         fn run(_: *@This(), _: tools.Call.AskArgs) ![]u8 {
             return error.BadInput;
@@ -786,13 +931,35 @@ test "ask tool reports hook failure" {
     };
     const res = try reg.run("ask", call, sink);
     defer rt.deinitResult(res);
-    switch (res.final) {
-        .failed => |f| try std.testing.expectEqualStrings("BadInput", f.msg),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try snapAskResult(std.testing.allocator, res);
+    defer freeAskResultSnap(std.testing.allocator, snap);
+    try oh.snap(@src(),
+        \\core.tools.builtin.AskResultSnap
+        \\  .call_id: []const u8
+        \\    "ask-fail"
+        \\  .started_at_ms: i64 = 8
+        \\  .ended_at_ms: i64 = 8
+        \\  .final: core.tools.builtin.AskFinalSnap
+        \\    .tag: core.tools.mod.Result.Tag
+        \\      .failed
+        \\    .code: ?i32
+        \\      null
+        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\      .io
+        \\    .msg: ?[]const u8
+        \\      "BadInput"
+        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\      null
+        \\    .limit_ms: ?u32
+        \\      null
+        \\  .out: []core.tools.builtin.AskOutSnap
+        \\    (empty)
+    ).expectEqual(snap);
 }
 
 test "ask tool maps cancelled hook output to cancelled final" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const AskImpl = struct {
         alloc: std.mem.Allocator,
 
@@ -836,15 +1003,39 @@ test "ask tool maps cancelled hook output to cancelled final" {
 
     const res = try reg.run("ask", call, sink);
     defer rt.deinitResult(res);
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqualStrings(
-        "{\"cancelled\":true,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}",
-        res.out[0].chunk,
-    );
-    switch (res.final) {
-        .cancelled => |cancelled| try std.testing.expect(cancelled.reason == .user),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try snapAskResult(std.testing.allocator, res);
+    defer freeAskResultSnap(std.testing.allocator, snap);
+    try oh.snap(@src(),
+        \\core.tools.builtin.AskResultSnap
+        \\  .call_id: []const u8
+        \\    "ask-cancel"
+        \\  .started_at_ms: i64 = 9
+        \\  .ended_at_ms: i64 = 9
+        \\  .final: core.tools.builtin.AskFinalSnap
+        \\    .tag: core.tools.mod.Result.Tag
+        \\      .cancelled
+        \\    .code: ?i32
+        \\      null
+        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\      null
+        \\    .msg: ?[]const u8
+        \\      null
+        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\      .user
+        \\    .limit_ms: ?u32
+        \\      null
+        \\  .out: []core.tools.builtin.AskOutSnap
+        \\    [0]: core.tools.builtin.AskOutSnap
+        \\      .call_id: []const u8
+        \\        "ask-cancel"
+        \\      .seq: u32 = 0
+        \\      .at_ms: i64 = 9
+        \\      .stream: core.tools.mod.Output.Stream
+        \\        .stdout
+        \\      .chunk: []const u8
+        \\        "{"cancelled":true,"answers":[{"id":"scope","answer":"A","index":0}]}"
+        \\      .truncated: bool = false
+    ).expectEqual(snap);
 }
 
 test "maskForName validates builtin tool names" {
