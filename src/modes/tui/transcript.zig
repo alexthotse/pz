@@ -16,6 +16,7 @@ const imgproto = @import("imgproto.zig");
 
 const Kind = enum { text, user, thinking, tool, err, meta, image };
 const ToolPhase = enum { none, call, result };
+const LineMode = enum { wrap, ellipsis };
 
 const Span = struct {
     start: usize, // byte offset in buf
@@ -31,6 +32,7 @@ const Block = struct {
     spans: std.ArrayListUnmanaged(Span) = .empty,
     tool_gid: u64 = 0,
     tool_phase: ToolPhase = .none,
+    line_mode: LineMode = .wrap,
 
     pub fn deinit(self: *Block, alloc: std.mem.Allocator) void {
         self.spans.deinit(alloc);
@@ -147,6 +149,9 @@ pub const Transcript = struct {
                     .fg = theme.get().dim,
                     .bg = theme.get().tool_pending_bg,
                 });
+                if (std.mem.eql(u8, tc.name, "bash")) {
+                    self.blocks.items[idx].line_mode = .ellipsis;
+                }
                 self.tagToolAt(idx, toolGroup(tc.id), .call);
             },
             .tool_result => |tr| {
@@ -448,6 +453,24 @@ pub const Transcript = struct {
                     _ = try md.renderLine(frm, content_x, y, line, text_w, b.st);
                     row += 1;
                 }
+            } else if (b.line_mode == .ellipsis) {
+                if (skipped < skip) {
+                    skipped += 1;
+                    continue;
+                }
+                if (row >= rect.h) break;
+
+                const y = rect.y + row;
+
+                if (!b.st.bg.isDefault()) {
+                    var x = rect.x;
+                    while (x < rect.x + rect.w) : (x += 1) {
+                        try frm.set(x, y, ' ', .{ .bg = b.st.bg });
+                    }
+                }
+
+                _ = try writeEllipsisUtf8(frm, content_x, y, text_w, txt, b.st);
+                row += 1;
             } else {
                 var wit = wrapIter(txt, text_w);
                 while (wit.next()) |line| {
@@ -512,6 +535,7 @@ pub const Transcript = struct {
 
     fn blockLineCount(b: *const Block, w: usize) usize {
         if (b.kind == .image) return imgproto.img_rows;
+        if (b.line_mode == .ellipsis) return if (w == 0) 0 else 1;
         if (b.kind == .text or b.kind == .user) return countMdLines(b.text(), w);
         return countLines(b.text(), w);
     }
@@ -1513,6 +1537,38 @@ fn clipCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
     return text[0..i];
 }
 
+fn writeEllipsisUtf8(
+    frm: *frame.Frame,
+    x: usize,
+    y: usize,
+    max_w: usize,
+    text: []const u8,
+    st: frame.Style,
+) (frame.Frame.PosError || error{InvalidUtf8})!usize {
+    if (max_w == 0 or text.len == 0) return 0;
+
+    const fit = try clipCols(text, max_w);
+    if (fit.len == text.len or max_w <= 3) {
+        if (max_w <= 3 and fit.len < text.len) {
+            var i: usize = 0;
+            while (i < max_w) : (i += 1) {
+                try frm.set(x + i, y, '.', st);
+            }
+            return max_w;
+        }
+        return try frm.write(x, y, fit, st);
+    }
+
+    const base = try clipCols(text, max_w - 3);
+    var col = try frm.write(x, y, base, st);
+    var i: usize = 0;
+    while (i < 3 and col < max_w) : (i += 1) {
+        try frm.set(x + col, y, '.', st);
+        col += 1;
+    }
+    return col;
+}
+
 fn rectEndX(frm: *const frame.Frame, rect: Rect) frame.Frame.PosError!usize {
     const x_end = std.math.add(usize, rect.x, rect.w) catch return error.OutOfBounds;
     if (x_end > frm.w) return error.OutOfBounds;
@@ -2429,6 +2485,30 @@ test "tool call pending recolors to success and joins result block" {
     try std.testing.expect(frame.Color.eql(call_done.style.bg, t.tool_success_bg));
     const result_row = try frm.cell(1, 1);
     try std.testing.expect(frame.Color.eql(result_row.style.bg, t.tool_success_bg));
+}
+
+test "bash tool call row truncates with ellipsis and stays single-line" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.append(.{ .tool_call = .{
+        .id = "bash-1",
+        .name = "bash",
+        .args = "{\"cmd\":\"echo abcdefghijklmnopqrstuvwxyz\"}",
+    } });
+
+    var frm = try frame.Frame.init(std.testing.allocator, 18, 2);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 18, .h = 2 });
+
+    var raw: [18]u8 = undefined;
+    const r0 = try rowAscii(&frm, 0, raw[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, r0, "$ echo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r0, "...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r0, "$ bash") == null);
+
+    const r1 = try rowAscii(&frm, 1, raw[0..]);
+    try std.testing.expect(std.mem.trim(u8, r1, " ").len == 0);
 }
 
 test "tool call recolors to error with failed result" {
