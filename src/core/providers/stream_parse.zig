@@ -341,7 +341,7 @@ test "parser fuzz malformed frames return typed errors only" {
     const rnd = prng.random();
 
     var iter: usize = 0;
-    while (iter < 256) : (iter += 1) {
+    while (iter < 4096) : (iter += 1) {
         const n = rnd.intRangeAtMost(usize, 1, 64);
         var raw: [64]u8 = undefined;
         rnd.bytes(raw[0..n]);

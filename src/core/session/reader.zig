@@ -362,7 +362,7 @@ test "jsonl replay property preserves text stream across io buffer splits" {
             return idx == events.len;
         }
     }.prop, .{
-        .iterations = 64,
+        .iterations = 256,
         .seed = 0x5eed_1234,
     });
 }
@@ -399,7 +399,7 @@ test "jsonl replay property rejects encoded lines above max bytes" {
             return true;
         }
     }.prop, .{
-        .iterations = 128,
+        .iterations = 512,
         .seed = 0x0be7_f10a,
     });
 }

@@ -673,7 +673,7 @@ test "property: matchGlob star matches anything" {
         fn prop(args: struct { s: zc.String }) bool {
             return matchGlob("*", args.s.slice());
         }
-    }.prop, .{ .iterations = 500 });
+    }.prop, .{ .iterations = 2000 });
 }
 
 test "property: matchGlob identity (literal self-match)" {
@@ -684,7 +684,7 @@ test "property: matchGlob identity (literal self-match)" {
             const txt = args.s.slice();
             return matchGlob(txt, txt);
         }
-    }.prop, .{ .iterations = 500 });
+    }.prop, .{ .iterations = 2000 });
 }
 
 test "property: evaluate empty rules always denies" {
@@ -694,7 +694,7 @@ test "property: evaluate empty rules always denies" {
             const rules: []const Rule = &.{};
             return evaluate(rules, args.p.slice(), null) == .deny;
         }
-    }.prop, .{ .iterations = 500 });
+    }.prop, .{ .iterations = 2000 });
 }
 
 test "property: evaluate allow-all allows non-protected" {
@@ -709,7 +709,7 @@ test "property: evaluate allow-all allows non-protected" {
             };
             return evaluate(&rules, path, null) == .allow;
         }
-    }.prop, .{ .iterations = 500 });
+    }.prop, .{ .iterations = 2000 });
 }
 
 test "property: evalEnv last-match-wins consistency" {
@@ -733,5 +733,5 @@ test "property: evalEnv last-match-wins consistency" {
             const r2 = evalEnv(&deny_last, key, val);
             return r1 == .allow and r2 == .deny;
         }
-    }.prop, .{ .iterations = 500 });
+    }.prop, .{ .iterations = 2000 });
 }

@@ -96,6 +96,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
+        perf_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
+    }
     perf_tests.root_module.addImport("zcheck", zcheck_mod);
     const run_perf_tests = b.addRunArtifact(perf_tests);
     const perf_step = b.step("perf", "Run performance budget tests");

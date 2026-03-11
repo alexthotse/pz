@@ -1162,7 +1162,7 @@ test "parseSseData fuzz random payloads do not crash parser state" {
     const rnd = prng.random();
 
     var seed: usize = 0;
-    while (seed < 256) : (seed += 1) {
+    while (seed < 4096) : (seed += 1) {
         const len = rnd.intRangeAtMost(usize, 0, 192);
         var buf: [192]u8 = undefined;
         rnd.bytes(buf[0..len]);
