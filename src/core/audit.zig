@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const integrity = @import("audit_integrity.zig");
 const syslog = @import("syslog.zig");
 
 pub const ver_current: u16 = 1;
@@ -621,6 +622,17 @@ pub fn encodeAlloc(alloc: Allocator, ent: Entry) ![]u8 {
     errdefer buf.deinit(alloc);
     try writeEntry(buf.writer(alloc), ent);
     return try buf.toOwnedSlice(alloc);
+}
+
+pub fn sealAlloc(
+    alloc: Allocator,
+    ent: Entry,
+    key: integrity.Key,
+    prev: ?integrity.Tag,
+) ![]u8 {
+    const body = try encodeAlloc(alloc, ent);
+    defer alloc.free(body);
+    return try integrity.sealAlloc(alloc, key, prev, body);
 }
 
 pub fn writeEntry(w: anytype, ent: Entry) !void {
