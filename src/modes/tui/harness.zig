@@ -97,12 +97,24 @@ pub const Ui = struct {
         }
     }
 
-    pub fn onProvider(self: *Ui, ev: core.providers.Ev) !void {
-        try self.tr.append(ev);
+    fn onProviderInner(self: *Ui, seq: ?u64, ev: core.providers.Ev) !void {
+        if (seq) |n| {
+            try self.tr.appendSeq(n, ev);
+        } else {
+            try self.tr.append(ev);
+        }
         try self.pn.append(ev);
         if (ev == .stop and ev.stop.reason == .max_out) {
             try self.tr.infoText("[max tokens reached]");
         }
+    }
+
+    pub fn onProvider(self: *Ui, ev: core.providers.Ev) !void {
+        try self.onProviderInner(null, ev);
+    }
+
+    pub fn onProviderSeq(self: *Ui, seq: u64, ev: core.providers.Ev) !void {
+        try self.onProviderInner(seq, ev);
     }
 
     pub fn onKey(self: *Ui, key: editor.Key) !editor.Action {

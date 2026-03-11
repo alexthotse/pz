@@ -26,9 +26,9 @@ pub const Policy = struct {
 pub const protected = [_][]const u8{
     "*.audit.log",
     "*.session",
-    ".pz/config",
-    ".pz/secrets",
-    ".pz/auth",
+    ".pz",
+    "AGENTS.md",
+    "CLAUDE.md",
 };
 
 /// Glob match: `*` matches any chars, `?` matches single char, `\` escapes.
@@ -112,9 +112,7 @@ pub fn matchEnv(pattern: []const u8, key: []const u8, val: []const u8) bool {
 /// Protected paths are always denied.
 pub fn evaluate(rules: []const Rule, path: []const u8, tool: ?[]const u8) Effect {
     // Self-protection override
-    for (&protected) |pp| {
-        if (matchPath(pp, path)) return .deny;
-    }
+    if (isProtectedPath(path)) return .deny;
     for (rules) |r| {
         // Tool filter: skip rule if tool doesn't match
         if (r.tool) |rt| {
@@ -124,6 +122,13 @@ pub fn evaluate(rules: []const Rule, path: []const u8, tool: ?[]const u8) Effect
         if (matchPath(r.pattern, path)) return r.effect;
     }
     return .deny;
+}
+
+pub fn isProtectedPath(path: []const u8) bool {
+    for (&protected) |pp| {
+        if (matchPath(pp, path)) return true;
+    }
+    return false;
 }
 
 /// Evaluate env key+val against rules using last-match-wins semantics.
@@ -343,9 +348,11 @@ test "self-protection" {
     };
     try testing.expectEqual(Effect.deny, evaluate(&rules, "app.audit.log", null));
     try testing.expectEqual(Effect.deny, evaluate(&rules, "data.session", null));
-    try testing.expectEqual(Effect.deny, evaluate(&rules, ".pz/config", null));
-    try testing.expectEqual(Effect.deny, evaluate(&rules, ".pz/secrets", null));
-    try testing.expectEqual(Effect.deny, evaluate(&rules, ".pz/auth", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, ".pz/settings.json", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "/tmp/.pz/sessions/abc.jsonl", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "AGENTS.md", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "/tmp/AGENTS.md", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "CLAUDE.md", null));
 }
 
 test "Policy struct eval" {
@@ -637,17 +644,17 @@ test "snapshot: protected paths denied under allow-all" {
     const Results = struct {
         audit_log: Effect,
         session: Effect,
-        pz_config: Effect,
-        pz_secrets: Effect,
-        pz_auth: Effect,
+        pz_settings: Effect,
+        pz_session_file: Effect,
+        agents: Effect,
     };
 
     const r = Results{
         .audit_log = evaluate(&rules, "app.audit.log", null),
         .session = evaluate(&rules, "data.session", null),
-        .pz_config = evaluate(&rules, ".pz/config", null),
-        .pz_secrets = evaluate(&rules, ".pz/secrets", null),
-        .pz_auth = evaluate(&rules, ".pz/auth", null),
+        .pz_settings = evaluate(&rules, ".pz/settings.json", null),
+        .pz_session_file = evaluate(&rules, "/tmp/.pz/sessions/abc.jsonl", null),
+        .agents = evaluate(&rules, "/tmp/AGENTS.md", null),
     };
 
     try oh.snap(@src(),
@@ -656,11 +663,11 @@ test "snapshot: protected paths denied under allow-all" {
         \\    .deny
         \\  .session: core.policy.Effect
         \\    .deny
-        \\  .pz_config: core.policy.Effect
+        \\  .pz_settings: core.policy.Effect
         \\    .deny
-        \\  .pz_secrets: core.policy.Effect
+        \\  .pz_session_file: core.policy.Effect
         \\    .deny
-        \\  .pz_auth: core.policy.Effect
+        \\  .agents: core.policy.Effect
         \\    .deny
     ).expectEqual(r);
 }

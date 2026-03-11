@@ -743,8 +743,9 @@ const LiveTurn = struct {
 
     alloc: std.mem.Allocator,
     mu: std.Thread.Mutex = .{},
-    evs: std.ArrayListUnmanaged(core.providers.Ev) = .empty,
+    evs: std.ArrayListUnmanaged(SeqProviderEv) = .empty,
     ev_head: usize = 0,
+    next_seq: u64 = 1,
     done: bool = false,
     running: bool = false,
     err_name: ?[]u8 = null,
@@ -775,6 +776,11 @@ const LiveTurn = struct {
         }
     };
 
+    const SeqProviderEv = struct {
+        seq: u64,
+        ev: core.providers.Ev,
+    };
+
     fn init(alloc: std.mem.Allocator) !LiveTurn {
         const pipe = try std.posix.pipe2(.{
             .NONBLOCK = true,
@@ -799,7 +805,7 @@ const LiveTurn = struct {
             self.thr = null;
         }
         self.mu.lock();
-        for (self.evs.items[self.ev_head..]) |ev| freeProviderEv(self.alloc, ev);
+        for (self.evs.items[self.ev_head..]) |sev| freeProviderEv(self.alloc, sev.ev);
         self.evs.deinit(self.alloc);
         if (self.err_name) |name| self.alloc.free(name);
         if (self.last_err) |e| self.alloc.free(e);
@@ -889,7 +895,12 @@ const LiveTurn = struct {
         errdefer freeProviderEv(self.alloc, dup);
 
         self.mu.lock();
-        self.evs.append(self.alloc, dup) catch |append_err| {
+        const seq = self.next_seq;
+        self.next_seq += 1;
+        self.evs.append(self.alloc, .{
+            .seq = seq,
+            .ev = dup,
+        }) catch |append_err| {
             self.mu.unlock();
             return append_err;
         };
@@ -905,7 +916,7 @@ const LiveTurn = struct {
         self.nudge();
     }
 
-    fn popProvider(self: *LiveTurn) ?core.providers.Ev {
+    fn popProvider(self: *LiveTurn) ?SeqProviderEv {
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -964,9 +975,10 @@ const LiveTurn = struct {
             self.alloc.free(m);
             self.last_model = null;
         }
-        for (self.evs.items[self.ev_head..]) |ev| freeProviderEv(self.alloc, ev);
+        for (self.evs.items[self.ev_head..]) |sev| freeProviderEv(self.alloc, sev.ev);
         self.evs.items.len = 0;
         self.ev_head = 0;
+        self.next_seq = 1;
         self.last_model = self.alloc.dupe(u8, opts.model) catch null;
         self.mu.unlock();
 
@@ -2261,9 +2273,9 @@ fn runTui(
                         live_turn.finishAsk(ask_txn, ask_ui_ctx.runOnMain(&reader, ask_txn.args.view()));
                     }
 
-                    while (live_turn.popProvider()) |pev| {
-                        defer freeProviderEv(alloc, pev);
-                        try ui.onProvider(pev);
+                    while (live_turn.popProvider()) |sev| {
+                        defer freeProviderEv(alloc, sev.ev);
+                        try ui.onProviderSeq(sev.seq, sev.ev);
                     }
 
                     if (live_turn.takeCompletion()) |done| {
@@ -5021,6 +5033,34 @@ fn runBashMode(
     sid: []const u8,
     store: core.session.SessionStore,
 ) !void {
+    if (try core.tools.bash.deniesProtectedCmd(alloc, bcmd.cmd)) {
+        try ui.tr.append(.{ .tool_call = .{
+            .id = "bash",
+            .name = "bash",
+            .args = bcmd.cmd,
+        } });
+        try ui.tr.append(.{ .tool_result = .{
+            .id = "bash",
+            .out = "bash denied: protected path",
+            .is_err = true,
+        } });
+
+        if (bcmd.include) {
+            try store.append(sid, .{ .data = .{ .prompt = .{ .text = bcmd.cmd } } });
+            try store.append(sid, .{ .data = .{ .tool_call = .{
+                .id = "bash",
+                .name = "bash",
+                .args = bcmd.cmd,
+            } } });
+            try store.append(sid, .{ .data = .{ .tool_result = .{
+                .id = "bash",
+                .out = "bash denied: protected path",
+                .is_err = true,
+            } } });
+        }
+        return;
+    }
+
     const result = std.process.Child.run(.{
         .allocator = alloc,
         .argv = &.{ "/bin/bash", "-lc", bcmd.cmd },
@@ -7186,16 +7226,19 @@ test "LiveTurn tracks last_stop last_err and last_model" {
 
     // Drain events
     const ev1 = lt.popProvider().?;
-    defer freeProviderEv(alloc, ev1);
+    defer freeProviderEv(alloc, ev1.ev);
     const ev2 = lt.popProvider().?;
-    defer freeProviderEv(alloc, ev2);
+    defer freeProviderEv(alloc, ev2.ev);
+    try std.testing.expectEqual(@as(u64, 1), ev1.seq);
+    try std.testing.expectEqual(@as(u64, 2), ev2.seq);
     try std.testing.expect(lt.popProvider() == null);
 
     // Overwrite err
     try lt.enqueueProvider(.{ .err = "timeout" });
     try std.testing.expectEqualStrings("timeout", lt.last_err.?);
     const ev3 = lt.popProvider().?;
-    defer freeProviderEv(alloc, ev3);
+    defer freeProviderEv(alloc, ev3.ev);
+    try std.testing.expectEqual(@as(u64, 3), ev3.seq);
 
     // Simulate turn reset
     lt.mu.lock();

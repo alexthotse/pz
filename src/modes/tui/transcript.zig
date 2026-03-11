@@ -24,6 +24,7 @@ const Span = struct {
 };
 
 const Block = struct {
+    seq: u64 = 0,
     kind: Kind,
     buf: std.ArrayListUnmanaged(u8),
     st: frame.Style,
@@ -62,6 +63,7 @@ pub const ImageRef = struct {
 pub const Transcript = struct {
     alloc: std.mem.Allocator,
     blocks: std.ArrayListUnmanaged(Block) = .empty,
+    next_seq: u64 = 1,
     md: markdown.MdRenderer = .{},
     scroll_off: usize = 0,
     show_tools: bool = true,
@@ -103,30 +105,34 @@ pub const Transcript = struct {
     }
 
     pub fn append(self: *Transcript, ev: core.providers.Ev) AppendError!void {
+        return self.appendSeq(self.takeSeq(), ev);
+    }
+
+    pub fn appendSeq(self: *Transcript, seq: u64, ev: core.providers.Ev) AppendError!void {
         switch (ev) {
             .text => |t| {
                 // Coalesce consecutive text events
                 if (self.blocks.items.len > 0) {
                     const last = &self.blocks.items[self.blocks.items.len - 1];
-                    if (last.kind == .text) {
+                    if (last.kind == .text and last.seq <= seq) {
                         try ensureUtf8(t);
                         try last.buf.appendSlice(self.alloc, t);
                         return;
                     }
                 }
-                try self.pushBlock(.text, t, .{});
+                _ = try self.pushBlock(seq, .text, t, .{});
             },
             .thinking => |t| {
                 // Coalesce consecutive thinking events
                 if (self.blocks.items.len > 0) {
                     const last = &self.blocks.items[self.blocks.items.len - 1];
-                    if (last.kind == .thinking) {
+                    if (last.kind == .thinking and last.seq <= seq) {
                         try ensureUtf8(t);
                         try last.buf.appendSlice(self.alloc, t);
                         return;
                     }
                 }
-                try self.pushBlock(.thinking, t, .{
+                _ = try self.pushBlock(seq, .thinking, t, .{
                     .fg = theme.get().thinking_fg,
                     .italic = true,
                 });
@@ -137,28 +143,28 @@ pub const Transcript = struct {
                 const display = fmtToolCall(self.alloc, tc.name, tc.args) catch
                     try std.fmt.allocPrint(self.alloc, " $ {s}", .{tc.name});
                 defer self.alloc.free(display);
-                try self.pushBlock(.tool, display, .{
+                const idx = try self.pushBlock(seq, .tool, display, .{
                     .fg = theme.get().dim,
                     .bg = theme.get().tool_pending_bg,
                 });
-                self.tagLastTool(toolGroup(tc.id), .call);
+                self.tagToolAt(idx, toolGroup(tc.id), .call);
             },
             .tool_result => |tr| {
                 const gid = toolGroup(tr.id);
                 self.setToolCallStatus(gid, tr.is_err);
                 if (tr.is_err) {
-                    try self.pushAnsi(.err, "", .{}, tr.out, .{
+                    const idx = try self.pushAnsi(seq, .err, "", .{}, tr.out, .{
                         .fg = theme.get().err,
                         .bg = theme.get().tool_error_bg,
                     });
-                    self.tagLastTool(gid, .result);
+                    self.tagToolAt(idx, gid, .result);
                 } else {
                     // Show result with collapsing like pi
-                    try self.pushToolResult(tr.out);
-                    self.tagLastTool(gid, .result);
+                    const idx = try self.pushToolResult(seq, tr.out);
+                    self.tagToolAt(idx, gid, .result);
                 }
             },
-            .err => |t| try self.pushFmt(.err, "[err] {s}", .{t}, .{
+            .err => |t| _ = try self.pushFmt(seq, .err, "[err] {s}", .{t}, .{
                 .fg = theme.get().err,
                 .bold = true,
                 .bg = theme.get().tool_error_bg,
@@ -170,23 +176,23 @@ pub const Transcript = struct {
     }
 
     pub fn userText(self: *Transcript, t: []const u8) AppendError!void {
-        try self.pushBlock(.user, t, .{ .bg = theme.get().user_msg_bg });
+        _ = try self.pushBlock(self.takeSeq(), .user, t, .{ .bg = theme.get().user_msg_bg });
     }
 
     pub fn infoText(self: *Transcript, t: []const u8) AppendError!void {
-        try self.pushBlock(.meta, t, .{ .fg = theme.get().dim });
+        _ = try self.pushBlock(self.takeSeq(), .meta, t, .{ .fg = theme.get().dim });
     }
 
     pub fn styledText(self: *Transcript, t: []const u8, st: frame.Style) AppendError!void {
-        try self.pushBlock(.meta, t, st);
+        _ = try self.pushBlock(self.takeSeq(), .meta, t, st);
     }
 
     pub fn imageBlock(self: *Transcript, path: []const u8) AppendError!void {
-        try self.pushBlock(.image, path, .{ .fg = theme.get().dim });
+        _ = try self.pushBlock(self.takeSeq(), .image, path, .{ .fg = theme.get().dim });
     }
 
     pub fn pushAnsiText(self: *Transcript, ansi_text: []const u8) AppendError!void {
-        try self.pushAnsi(.meta, "", .{}, ansi_text, .{});
+        _ = try self.pushAnsi(self.takeSeq(), .meta, "", .{}, ansi_text, .{});
     }
 
     pub fn render(self: *Transcript, frm: *frame.Frame, rect: Rect) RenderError!void {
@@ -510,12 +516,30 @@ pub const Transcript = struct {
         return countLines(b.text(), w);
     }
 
-    fn pushBlock(self: *Transcript, kind: Kind, t: []const u8, st: frame.Style) AppendError!void {
+    fn takeSeq(self: *Transcript) u64 {
+        const seq = self.next_seq;
+        self.next_seq += 1;
+        return seq;
+    }
+
+    fn insertBlock(self: *Transcript, blk: Block) AppendError!usize {
+        if (self.blocks.items.len == 0 or self.blocks.items[self.blocks.items.len - 1].seq <= blk.seq) {
+            try self.blocks.append(self.alloc, blk);
+            return self.blocks.items.len - 1;
+        }
+        var idx: usize = 0;
+        while (idx < self.blocks.items.len and self.blocks.items[idx].seq <= blk.seq) : (idx += 1) {}
+        try self.blocks.insert(self.alloc, idx, blk);
+        return idx;
+    }
+
+    fn pushBlock(self: *Transcript, seq: u64, kind: Kind, t: []const u8, st: frame.Style) AppendError!usize {
         try ensureUtf8(t);
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         try buf.appendSlice(self.alloc, t);
         errdefer buf.deinit(self.alloc);
-        try self.blocks.append(self.alloc, .{
+        return self.insertBlock(.{
+            .seq = seq,
             .kind = kind,
             .buf = buf,
             .st = st,
@@ -524,11 +548,12 @@ pub const Transcript = struct {
 
     fn pushFmt(
         self: *Transcript,
+        seq: u64,
         kind: Kind,
         comptime fmt: []const u8,
         args: anytype,
         st: frame.Style,
-    ) AppendError!void {
+    ) AppendError!usize {
         const txt = try std.fmt.allocPrint(self.alloc, fmt, args);
         ensureUtf8(txt) catch {
             self.alloc.free(txt);
@@ -539,7 +564,8 @@ pub const Transcript = struct {
             .capacity = txt.len,
         };
         errdefer buf.deinit(self.alloc);
-        try self.blocks.append(self.alloc, .{
+        return self.insertBlock(.{
+            .seq = seq,
             .kind = kind,
             .buf = buf,
             .st = st,
@@ -548,12 +574,13 @@ pub const Transcript = struct {
 
     fn pushAnsi(
         self: *Transcript,
+        seq: u64,
         kind: Kind,
         comptime prefix_fmt: []const u8,
         prefix_args: anytype,
         ansi_text: []const u8,
         base_st: frame.Style,
-    ) AppendError!void {
+    ) AppendError!usize {
         const prefix = try std.fmt.allocPrint(self.alloc, prefix_fmt, prefix_args);
         defer self.alloc.free(prefix);
 
@@ -581,7 +608,8 @@ pub const Transcript = struct {
 
         try ensureUtf8(buf.items);
 
-        try self.blocks.append(self.alloc, .{
+        return self.insertBlock(.{
+            .seq = seq,
             .kind = kind,
             .buf = buf,
             .st = base_st,
@@ -591,7 +619,7 @@ pub const Transcript = struct {
 
     /// Show tool result, collapsing long output like pi does:
     /// "... (N earlier lines, ctrl+o to expand)"
-    fn pushToolResult(self: *Transcript, out: []const u8) AppendError!void {
+    fn pushToolResult(self: *Transcript, seq: u64, out: []const u8) AppendError!usize {
         var shown = out;
         var shown_owned: ?[]u8 = null;
         defer if (shown_owned) |buf| self.alloc.free(buf);
@@ -610,11 +638,10 @@ pub const Transcript = struct {
 
         if (lines <= max_tail + 1) {
             // Short enough: show all
-            try self.pushAnsi(.tool, "", .{}, shown, .{
+            return self.pushAnsi(seq, .tool, "", .{}, shown, .{
                 .fg = theme.get().tool_output,
                 .bg = theme.get().tool_success_bg,
             });
-            return;
         }
 
         // Find where the tail starts
@@ -631,7 +658,7 @@ pub const Transcript = struct {
             }
         }
 
-        try self.pushAnsi(.tool, " ... ({d} earlier lines, ctrl+o to expand)\n", .{hidden}, shown[skip..], .{
+        return self.pushAnsi(seq, .tool, " ... ({d} earlier lines, ctrl+o to expand)\n", .{hidden}, shown[skip..], .{
             .fg = theme.get().tool_output,
             .bg = theme.get().tool_success_bg,
         });
@@ -649,9 +676,9 @@ pub const Transcript = struct {
         }
     }
 
-    fn tagLastTool(self: *Transcript, gid: u64, phase: ToolPhase) void {
-        if (self.blocks.items.len == 0) return;
-        var b = &self.blocks.items[self.blocks.items.len - 1];
+    fn tagToolAt(self: *Transcript, idx: usize, gid: u64, phase: ToolPhase) void {
+        if (idx >= self.blocks.items.len) return;
+        var b = &self.blocks.items[idx];
         b.tool_gid = gid;
         b.tool_phase = phase;
     }
@@ -2196,6 +2223,36 @@ test "show_tools hides tool blocks" {
     try std.testing.expect(std.mem.indexOf(u8, r0h, "hello") != null);
     const r2h = try rowAscii(&frm, 2, raw[0..]);
     try std.testing.expect(std.mem.indexOf(u8, r2h, "bye") != null);
+}
+
+test "transcript appendSeq keeps deny blocks in causal order" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.appendSeq(1, .{ .tool_call = .{ .id = "deny-1", .name = "bash", .args = "{\"cmd\":\"cat ~/.ssh/id_rsa\"}" } });
+    try tr.appendSeq(3, .{ .text = "later provider text" });
+    try tr.appendSeq(2, .{ .tool_result = .{ .id = "deny-1", .out = "permission denied", .is_err = true } });
+
+    var frm = try frame.Frame.init(std.testing.allocator, 48, 10);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 48, .h = 10 });
+
+    var raw: [48]u8 = undefined;
+    var call_y: ?usize = null;
+    var deny_y: ?usize = null;
+    var later_y: ?usize = null;
+    var y: usize = 0;
+    while (y < frm.h) : (y += 1) {
+        const row = try rowAscii(&frm, y, raw[0..]);
+        if (call_y == null and std.mem.indexOf(u8, row, "$ bash") != null) call_y = y;
+        if (deny_y == null and std.mem.indexOf(u8, row, "permission denied") != null) deny_y = y;
+        if (later_y == null and std.mem.indexOf(u8, row, "later provider text") != null) later_y = y;
+    }
+    try std.testing.expect(call_y != null);
+    try std.testing.expect(deny_y != null);
+    try std.testing.expect(later_y != null);
+    try std.testing.expect(call_y.? < deny_y.?);
+    try std.testing.expect(deny_y.? < later_y.?);
 }
 
 test "thinking visible by default, hidden when toggled" {

@@ -1,4 +1,6 @@
 const std = @import("std");
+const policy = @import("../policy.zig");
+const shell = @import("../shell.zig");
 const tools = @import("mod.zig");
 
 pub const Err = error{
@@ -44,6 +46,7 @@ pub const Handler = struct {
         for (args.env) |kv| {
             if (!isValidEnv(kv.key, kv.val)) return error.InvalidArgs;
         }
+        if (try deniesProtectedCmd(self.alloc, args.cmd)) return error.Denied;
 
         var env = std.process.getEnvMap(self.alloc) catch |env_err| {
             return mapEnvErr(env_err);
@@ -54,6 +57,9 @@ pub const Handler = struct {
             env.put(kv.key, kv.val) catch |put_err| {
                 return mapEnvErr(put_err);
             };
+        }
+        if (args.cwd) |cwd| {
+            if (policy.isProtectedPath(cwd)) return error.Denied;
         }
 
         const argv = [_][]const u8{ "/bin/bash", "-lc", args.cmd };
@@ -176,6 +182,19 @@ pub const Handler = struct {
         self.alloc.free(res.out);
     }
 };
+
+pub fn deniesProtectedCmd(alloc: std.mem.Allocator, cmd: []const u8) Err!bool {
+    const toks = shell.tokenize(alloc, cmd) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer shell.free(alloc, toks);
+
+    for (toks) |tok| {
+        if (cmdTouchesProtected(tok.cmd)) return true;
+    }
+    return false;
+}
 
 const Capture = struct {
     chunk: []u8,
@@ -410,6 +429,25 @@ fn satAdd(a: usize, b: usize) usize {
     const sum = @addWithOverflow(a, b);
     if (sum[1] == 0) return sum[0];
     return std.math.maxInt(usize);
+}
+
+fn cmdTouchesProtected(cmd: []const u8) bool {
+    var i: usize = 0;
+    while (i < cmd.len) {
+        while (i < cmd.len and isCmdDelim(cmd[i])) i += 1;
+        const start = i;
+        while (i < cmd.len and !isCmdDelim(cmd[i])) i += 1;
+        if (start == i) continue;
+        if (policy.isProtectedPath(cmd[start..i])) return true;
+    }
+    return false;
+}
+
+fn isCmdDelim(c: u8) bool {
+    return std.ascii.isWhitespace(c) or switch (c) {
+        '<', '>', '(', ')', '=', ',' => true,
+        else => false,
+    };
 }
 
 fn isValidEnv(key: []const u8, val: []const u8) bool {
@@ -757,6 +795,56 @@ test "bash handler returns not found for missing cwd" {
     };
 
     try std.testing.expectError(error.NotFound, handler.run(call, sink));
+}
+
+test "bash handler denies direct protected state access" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 128,
+    });
+    const call: tools.Call = .{
+        .id = "b6-deny-direct",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = "cat ./.pz/settings.json AGENTS.md",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    try std.testing.expectError(error.Denied, handler.run(call, sink));
+}
+
+test "bash handler denies wrapped protected state access" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 128,
+    });
+    const call: tools.Call = .{
+        .id = "b6-deny-wrap",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = "bash -c 'cat ~/.pz/settings.json'",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    try std.testing.expectError(error.Denied, handler.run(call, sink));
 }
 
 test "bash handler truncates oversized output and emits metadata" {
