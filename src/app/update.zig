@@ -85,6 +85,9 @@ const Hooks = struct {
     self_exe_path: *const fn (std.mem.Allocator) anyerror![]u8 = std.fs.selfExePathAlloc,
     install_binary: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void = installBinary,
     check_update_allowed: *const fn (std.mem.Allocator) anyerror!void = checkUpdateAllowed,
+    emit_audit_ctx: ?*anyopaque = null,
+    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    now_ms: *const fn () i64 = std.time.milliTimestamp,
 };
 
 fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
@@ -92,41 +95,61 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     defer arena.deinit();
     const ar = arena.allocator();
 
+    try emitUpdateAudit(alloc, hooks, 1, .ok, .info, .{ .text = "upgrade start", .vis = .@"pub" }, null);
+
     hooks.check_update_allowed(alloc) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatPolicyFailure(alloc, err),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .deny,
+            .warn,
+            .{ .text = "policy denied", .vis = .@"pub" },
+            .{ .text = update_policy_path, .vis = .mask },
+            try formatPolicyFailure(alloc, err),
+        );
     };
 
     const release_http = hooks.http_get(alloc, release_latest_url, release_accept, release_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatTransportFailure(
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "metadata fetch failed", .vis = .@"pub" },
+            .{ .text = release_latest_url, .vis = .mask },
+            try formatTransportFailure(
                 alloc,
                 "fetch latest release metadata",
                 release_latest_url,
                 err,
             ),
-        };
+        );
     };
     defer release_http.deinit(alloc);
 
     const release_body = switch (release_http) {
         .ok => |body| body,
         .status => |resp| {
-            return .{
-                .ok = false,
-                .msg = try formatHttpFailure(
+            return try auditOutcome(
+                alloc,
+                hooks,
+                false,
+                .fail,
+                .err,
+                .{ .text = "metadata http failed", .vis = .@"pub" },
+                .{ .text = release_latest_url, .vis = .mask },
+                try formatHttpFailure(
                     alloc,
                     "fetch latest release metadata",
                     release_latest_url,
                     resp.code,
                     resp.body,
                 ),
-            };
+            );
         },
     };
 
@@ -134,120 +157,186 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
         .ignore_unknown_fields = true,
     }) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatParseFailure(alloc, release_body),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "release parse failed", .vis = .@"pub" },
+            null,
+            try formatParseFailure(alloc, release_body),
+        );
     };
     const release = release_parsed.value;
 
     const current = version.parseVersion(cli.version) orelse return error.InvalidCurrentVersion;
     const latest = version.parseVersion(release.tag_name) orelse return error.InvalidLatestVersion;
     if (!latest.isNewer(current)) {
-        return .{
-            .ok = true,
-            .msg = try std.fmt.allocPrint(alloc, "already up to date ({s})\n", .{cli.version}),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            true,
+            .ok,
+            .info,
+            .{ .text = "already up to date", .vis = .@"pub" },
+            null,
+            try std.fmt.allocPrint(alloc, "already up to date ({s})\n", .{cli.version}),
+        );
     }
 
     const asset_name = targetAssetName() orelse {
         const target = try targetLabelAlloc(alloc);
         defer alloc.free(target);
-        return .{
-            .ok = false,
-            .msg = try std.fmt.allocPrint(
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "unsupported target", .vis = .@"pub" },
+            null,
+            try std.fmt.allocPrint(
                 alloc,
                 "upgrade failed: no prebuilt binary for target {s}\nsupported targets: x86_64-linux, aarch64-linux, aarch64-macos\nmanual install: https://github.com/joelreymont/pz/releases/latest\n",
                 .{target},
             ),
-        };
+        );
     };
     const asset_url = findAssetUrl(release.assets, asset_name) orelse {
         const list = try assetListAlloc(alloc, release.assets);
         defer alloc.free(list);
-        return .{
-            .ok = false,
-            .msg = try std.fmt.allocPrint(
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "release asset missing", .vis = .@"pub" },
+            null,
+            try std.fmt.allocPrint(
                 alloc,
                 "upgrade failed: release {s} does not contain asset {s}\navailable assets: {s}\nmanual install: https://github.com/joelreymont/pz/releases/latest\n",
                 .{ release.tag_name, asset_name, list },
             ),
-        };
+        );
     };
 
     const archive_http = hooks.http_get(alloc, asset_url, asset_accept, asset_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatTransportFailure(alloc, "download release archive", asset_url, err),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "archive download failed", .vis = .@"pub" },
+            .{ .text = asset_url, .vis = .mask },
+            try formatTransportFailure(alloc, "download release archive", asset_url, err),
+        );
     };
     defer archive_http.deinit(alloc);
 
     const archive = switch (archive_http) {
         .ok => |body| body,
         .status => |resp| {
-            return .{
-                .ok = false,
-                .msg = try formatHttpFailure(
+            return try auditOutcome(
+                alloc,
+                hooks,
+                false,
+                .fail,
+                .err,
+                .{ .text = "archive http failed", .vis = .@"pub" },
+                .{ .text = asset_url, .vis = .mask },
+                try formatHttpFailure(
                     alloc,
                     "download release archive",
                     asset_url,
                     resp.code,
                     resp.body,
                 ),
-            };
+            );
         },
     };
 
     const sig_name = try std.fmt.allocPrint(ar, "{s}{s}", .{ asset_name, sig_suffix });
     const sig_url = findAssetUrl(release.assets, sig_name) orelse {
-        return .{
-            .ok = false,
-            .msg = try std.fmt.allocPrint(
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "signature asset missing", .vis = .@"pub" },
+            null,
+            try std.fmt.allocPrint(
                 alloc,
                 "upgrade failed: release {s} does not contain signature asset {s}\nnext: retry later or install manually from https://github.com/joelreymont/pz/releases/latest\n",
                 .{ release.tag_name, sig_name },
             ),
-        };
+        );
     };
     const sig_http = hooks.http_get(alloc, sig_url, any_accept, 8 * 1024) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatTransportFailure(alloc, "download release signature", sig_url, err),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "signature download failed", .vis = .@"pub" },
+            .{ .text = sig_url, .vis = .mask },
+            try formatTransportFailure(alloc, "download release signature", sig_url, err),
+        );
     };
     defer sig_http.deinit(alloc);
     const sig_raw = switch (sig_http) {
         .ok => |body| body,
         .status => |resp| {
-            return .{
-                .ok = false,
-                .msg = try formatHttpFailure(
+            return try auditOutcome(
+                alloc,
+                hooks,
+                false,
+                .fail,
+                .err,
+                .{ .text = "signature http failed", .vis = .@"pub" },
+                .{ .text = sig_url, .vis = .mask },
+                try formatHttpFailure(
                     alloc,
                     "download release signature",
                     sig_url,
                     resp.code,
                     resp.body,
                 ),
-            };
+            );
         },
     };
     verifyArchiveSignature(archive, sig_raw) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatVerifyFailure(alloc, err, asset_name),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "signature verify failed", .vis = .@"pub" },
+            .{ .text = asset_name, .vis = .mask },
+            try formatVerifyFailure(alloc, err, asset_name),
+        );
     };
 
     const next_bin = extractPzBinary(alloc, archive) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatExtractFailure(alloc, err, asset_name),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "archive extract failed", .vis = .@"pub" },
+            .{ .text = asset_name, .vis = .mask },
+            try formatExtractFailure(alloc, err, asset_name),
+        );
     };
     defer alloc.free(next_bin);
 
@@ -255,20 +344,78 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     defer alloc.free(exe_path);
     hooks.install_binary(alloc, exe_path, next_bin) catch |err| {
         if (err == error.OutOfMemory) return err;
-        return .{
-            .ok = false,
-            .msg = try formatInstallFailure(alloc, err, exe_path),
-        };
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .fail,
+            .err,
+            .{ .text = "install failed", .vis = .@"pub" },
+            .{ .text = exe_path, .vis = .mask },
+            try formatInstallFailure(alloc, err, exe_path),
+        );
     };
 
-    return .{
-        .ok = true,
-        .msg = try std.fmt.allocPrint(
+    return try auditOutcome(
+        alloc,
+        hooks,
+        true,
+        .ok,
+        .info,
+        .{ .text = "upgrade complete", .vis = .@"pub" },
+        .{ .text = exe_path, .vis = .mask },
+        try std.fmt.allocPrint(
             alloc,
             "updated {s} -> {s}; verified signed archive; restart pz to use the new binary\n",
             .{ cli.version, release.tag_name },
         ),
-    };
+    );
+}
+
+fn auditOutcome(
+    alloc: std.mem.Allocator,
+    hooks: Hooks,
+    ok: bool,
+    out: core.audit.Out,
+    sev: core.audit.Sev,
+    msg: core.audit.Str,
+    argv: ?core.audit.Str,
+    user_msg: []u8,
+) !Outcome {
+    try emitUpdateAudit(alloc, hooks, 2, out, sev, msg, argv);
+    return .{ .ok = ok, .msg = user_msg };
+}
+
+fn emitUpdateAudit(
+    alloc: std.mem.Allocator,
+    hooks: Hooks,
+    seq: u64,
+    out: core.audit.Out,
+    sev: core.audit.Sev,
+    msg: core.audit.Str,
+    argv: ?core.audit.Str,
+) !void {
+    if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, .{
+        .ts_ms = hooks.now_ms(),
+        .sid = "upgrade",
+        .seq = seq,
+        .out = out,
+        .sev = sev,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .cmd,
+            .name = .{ .text = "upgrade", .vis = .@"pub" },
+            .op = "run",
+        },
+        .msg = msg,
+        .data = .{
+            .tool = .{
+                .name = .{ .text = "upgrade", .vis = .@"pub" },
+                .call_id = "upgrade",
+                .argv = argv,
+            },
+        },
+    });
 }
 
 fn checkUpdateAllowed(alloc: std.mem.Allocator) !void {
@@ -944,6 +1091,102 @@ test "formatPolicyFailure reports denied upgrade path" {
     try std.testing.expect(std.mem.indexOf(u8, msg, "upgrade blocked by policy") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, update_policy_tool) != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, update_policy_path) != null);
+}
+
+test "update audit emits start and deny entries on policy block" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const Capture = struct {
+        rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+        fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            for (self.rows.items) |row| alloc.free(row);
+            self.rows.deinit(alloc);
+        }
+    };
+
+    var cap = Capture{};
+    defer cap.deinit(std.testing.allocator);
+
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .check_update_allowed = struct {
+            fn f(_: std.mem.Allocator) !void {
+                return error.UpgradeDisabledByPolicy;
+            }
+        }.f,
+        .emit_audit_ctx = &cap,
+        .emit_audit = struct {
+            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
+                const raw = try core.audit.encodeAlloc(alloc, ent);
+                try cap_ptr.rows.append(alloc, raw);
+            }
+        }.f,
+        .now_ms = struct {
+            fn f() i64 {
+                return 123;
+            }
+        }.f,
+    });
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expect(!out.ok);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":123,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":123,"sid":"upgrade","seq":2,"kind":"tool","sev":"warn","out":"deny","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"policy denied","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":".pz/upgrade","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(joined);
+}
+
+test "update audit emits start and success entries when already current" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const Capture = struct {
+        rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+        fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            for (self.rows.items) |row| alloc.free(row);
+            self.rows.deinit(alloc);
+        }
+    };
+
+    var cap = Capture{};
+    defer cap.deinit(std.testing.allocator);
+
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = struct {
+            fn f(alloc: std.mem.Allocator, _: []const u8, _: []const u8, _: usize) !HttpResult {
+                return .{ .ok = try alloc.dupe(u8, "{\"tag_name\":\"" ++ cli.version ++ "\",\"assets\":[]}") };
+            }
+        }.f,
+        .emit_audit_ctx = &cap,
+        .emit_audit = struct {
+            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
+                const raw = try core.audit.encodeAlloc(alloc, ent);
+                try cap_ptr.rows.append(alloc, raw);
+            }
+        }.f,
+        .now_ms = struct {
+            fn f() i64 {
+                return 456;
+            }
+        }.f,
+    });
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expect(out.ok);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":456,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":456,"sid":"upgrade","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"already up to date","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
+    ).expectEqual(joined);
 }
 
 test "formatVerifyFailure reports signature rejection" {
