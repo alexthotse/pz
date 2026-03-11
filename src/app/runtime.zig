@@ -229,7 +229,6 @@ const AskUiCtx = struct {
     alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
     out: std.Io.AnyWriter,
-    stdin_fd: std.posix.fd_t,
     pause: *std.atomic.Value(bool),
 
     const Answer = struct {
@@ -272,11 +271,16 @@ const AskUiCtx = struct {
         }
     };
 
-    fn run(self: *AskUiCtx, args: core.tools.Call.AskArgs) anyerror![]u8 {
+    fn runOnMain(self: *AskUiCtx, reader: *tui_input.Reader, args: core.tools.Call.AskArgs) anyerror![]u8 {
         if (args.questions.len == 0) return error.InvalidArgs;
 
         self.pause.store(true, .release);
         defer self.pause.store(false, .release);
+        return self.runWithReader(reader, args);
+    }
+
+    fn runWithReader(self: *AskUiCtx, reader: *tui_input.Reader, args: core.tools.Call.AskArgs) anyerror![]u8 {
+        if (args.questions.len == 0) return error.InvalidArgs;
 
         var stored = try self.alloc.alloc(StoredAnswer, args.questions.len);
         defer {
@@ -299,7 +303,6 @@ const AskUiCtx = struct {
             }
         }
 
-        var reader = tui_input.Reader.init(self.stdin_fd);
         var q_idx: usize = 0;
         var typing_other = false;
         var other_ed = tui_editor.Editor.init(self.alloc);
@@ -752,6 +755,25 @@ const LiveTurn = struct {
     last_stop: ?core.providers.StopReason = null,
     last_err: ?[]u8 = null,
     last_model: ?[]u8 = null,
+    ask_txn: ?*AskTxn = null,
+
+    const AskTxn = struct {
+        mu: std.Thread.Mutex = .{},
+        cv: std.Thread.Condition = .{},
+        claimed: bool = false,
+        done: bool = false,
+        args: OwnedAskArgs,
+        out: ?[]u8 = null,
+        err: ?anyerror = null,
+
+        fn wait(self: *AskTxn) ![]u8 {
+            self.mu.lock();
+            defer self.mu.unlock();
+            while (!self.done) self.cv.wait(&self.mu);
+            if (self.err) |err| return err;
+            return self.out orelse error.TerminalSetupFailed;
+        }
+    };
 
     fn init(alloc: std.mem.Allocator) !LiveTurn {
         const pipe = try std.posix.pipe2(.{
@@ -771,6 +793,7 @@ const LiveTurn = struct {
 
     fn deinit(self: *LiveTurn) void {
         self.requestCancel();
+        self.failAsk(error.Canceled);
         if (self.thr) |thr| {
             thr.join();
             self.thr = null;
@@ -799,6 +822,66 @@ const LiveTurn = struct {
 
     fn requestCancel(self: *LiveTurn) void {
         self.cancel_flag.request();
+    }
+
+    fn ask(self: *LiveTurn, args: core.tools.Call.AskArgs) ![]u8 {
+        var tx = AskTxn{
+            .args = try dupAskArgs(self.alloc, args),
+        };
+        defer tx.args.deinit(self.alloc);
+
+        self.mu.lock();
+        if (self.ask_txn != null) {
+            self.mu.unlock();
+            return error.AlreadyRunning;
+        }
+        self.ask_txn = &tx;
+        self.mu.unlock();
+        self.nudge();
+        return tx.wait();
+    }
+
+    fn takeAsk(self: *LiveTurn) ?*AskTxn {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        const tx = self.ask_txn orelse return null;
+        if (tx.claimed) return null;
+        tx.claimed = true;
+        return tx;
+    }
+
+    fn finishAsk(self: *LiveTurn, tx: *AskTxn, out: anyerror![]u8) void {
+        tx.mu.lock();
+        if (out) |text| {
+            tx.out = text;
+        } else |err| {
+            tx.err = err;
+        }
+        tx.done = true;
+        tx.cv.signal();
+        tx.mu.unlock();
+
+        self.mu.lock();
+        if (self.ask_txn == tx) self.ask_txn = null;
+        self.mu.unlock();
+        self.nudge();
+    }
+
+    fn failAsk(self: *LiveTurn, err: anyerror) void {
+        self.mu.lock();
+        const tx = self.ask_txn;
+        self.ask_txn = null;
+        self.mu.unlock();
+        if (tx) |pending| {
+            pending.mu.lock();
+            if (!pending.done) {
+                pending.err = err;
+                pending.done = true;
+                pending.cv.signal();
+            }
+            pending.mu.unlock();
+        }
     }
 
     fn enqueueProvider(self: *LiveTurn, ev: core.providers.Ev) !void {
@@ -958,6 +1041,14 @@ const LiveTurnSink = struct {
     }
 };
 
+const LiveAskCtx = struct {
+    live: *LiveTurn,
+
+    fn run(self: *LiveAskCtx, args: core.tools.Call.AskArgs) ![]u8 {
+        return self.live.ask(args);
+    }
+};
+
 fn dupReq(alloc: std.mem.Allocator, opts: TurnCtx.TurnOpts) !LiveTurn.Req {
     const sid = try alloc.dupe(u8, opts.sid);
     errdefer alloc.free(sid);
@@ -978,6 +1069,76 @@ fn dupReq(alloc: std.mem.Allocator, opts: TurnCtx.TurnOpts) !LiveTurn.Req {
         .provider_opts = opts.provider_opts,
         .system_prompt = system_prompt,
     };
+}
+
+const OwnedAskArgs = struct {
+    questions: []core.tools.Call.AskArgs.Question,
+
+    fn view(self: *const OwnedAskArgs) core.tools.Call.AskArgs {
+        return .{ .questions = self.questions };
+    }
+
+    fn deinit(self: *OwnedAskArgs, alloc: std.mem.Allocator) void {
+        for (self.questions) |q| {
+            alloc.free(q.id);
+            alloc.free(q.header);
+            alloc.free(q.question);
+            for (q.options) |opt| {
+                alloc.free(opt.label);
+                alloc.free(opt.description);
+            }
+            alloc.free(q.options);
+        }
+        alloc.free(self.questions);
+        self.questions = &.{};
+    }
+};
+
+fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAskArgs {
+    const qs = try alloc.alloc(core.tools.Call.AskArgs.Question, args.questions.len);
+    var q_n: usize = 0;
+    errdefer {
+        for (qs[0..q_n]) |q| {
+            alloc.free(q.id);
+            alloc.free(q.header);
+            alloc.free(q.question);
+            for (q.options) |opt| {
+                alloc.free(opt.label);
+                alloc.free(opt.description);
+            }
+            alloc.free(q.options);
+        }
+        alloc.free(qs);
+    }
+
+    for (args.questions, 0..) |q, i| {
+        const opts = try alloc.alloc(core.tools.Call.AskArgs.Option, q.options.len);
+        var opt_n: usize = 0;
+        errdefer {
+            for (opts[0..opt_n]) |opt| {
+                alloc.free(opt.label);
+                alloc.free(opt.description);
+            }
+            alloc.free(opts);
+        }
+        for (q.options, 0..) |opt, j| {
+            opts[j] = .{
+                .label = try alloc.dupe(u8, opt.label),
+                .description = try alloc.dupe(u8, opt.description),
+            };
+            opt_n = j + 1;
+        }
+        qs[i] = .{
+            .id = try alloc.dupe(u8, q.id),
+            .header = try alloc.dupe(u8, q.header),
+            .question = try alloc.dupe(u8, q.question),
+            .options = opts,
+            .allow_other = q.allow_other,
+        };
+        q_n = i + 1;
+    }
+
+    return .{ .questions = qs };
 }
 
 fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Ev) !core.providers.Ev {
@@ -1432,10 +1593,8 @@ fn runTui(
         .alloc = alloc,
         .ui = &ui,
         .out = out,
-        .stdin_fd = stdin_fd,
         .pause = &ask_pause,
     };
-    tools_rt.ask_hook = core.tools.builtin.AskHook.from(AskUiCtx, &ask_ui_ctx, AskUiCtx.run);
     defer tools_rt.ask_hook = null;
     var thinking = run_cmd.thinking;
     var popts = thinking.toProviderOpts();
@@ -1591,6 +1750,10 @@ fn runTui(
             .cancel = live_cancel,
         };
         var reader = tui_input.Reader.initWithNotify2(stdin_fd, bg_mgr.wakeFd(), live_turn.wakeFd());
+        var live_ask_ctx = LiveAskCtx{
+            .live = &live_turn,
+        };
+        tools_rt.ask_hook = core.tools.builtin.AskHook.from(LiveAskCtx, &live_ask_ctx, LiveAskCtx.run);
         var pending = PendingQueue{};
         defer pending.deinit(alloc);
         const input_mode: tui_panels.InputMode = .steering;
@@ -2094,6 +2257,10 @@ fn runTui(
                     try ui.draw(out);
                 },
                 .notify => {
+                    while (live_turn.takeAsk()) |ask_txn| {
+                        live_turn.finishAsk(ask_txn, ask_ui_ctx.runOnMain(&reader, ask_txn.args.view()));
+                    }
+
                     while (live_turn.popProvider()) |pev| {
                         defer freeProviderEv(alloc, pev);
                         try ui.onProvider(pev);
@@ -5210,6 +5377,134 @@ test "collectAskAnswers builds expected ask JSON payload" {
         "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0},{\"id\":\"detail\",\"answer\":\"custom\",\"index\":2}]}",
         payload,
     );
+}
+
+fn waitForAskTxn(live: *LiveTurn) !*LiveTurn.AskTxn {
+    var ask_txn: ?*LiveTurn.AskTxn = null;
+    var spins: usize = 0;
+    while (ask_txn == null and spins < 1000) : (spins += 1) {
+        ask_txn = live.takeAsk();
+        if (ask_txn == null) std.Thread.sleep(std.time.ns_per_ms);
+    }
+    return ask_txn orelse error.TestUnexpectedResult;
+}
+
+test "live turn ask bridge waits for main-thread answer" {
+    var live = try LiveTurn.init(std.testing.allocator);
+    defer live.deinit();
+
+    const opts = [_]core.tools.Call.AskArgs.Option{
+        .{ .label = "A" },
+    };
+    const qs = [_]core.tools.Call.AskArgs.Question{
+        .{
+            .id = "scope",
+            .question = "Pick scope",
+            .options = opts[0..],
+            .allow_other = true,
+        },
+    };
+
+    const Ctx = struct {
+        live: *LiveTurn,
+        out: ?[]u8 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.out = self.live.ask(.{ .questions = qs[0..] }) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var ctx = Ctx{ .live = &live };
+    const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+    const tx = try waitForAskTxn(&live);
+
+    try std.testing.expectEqual(@as(usize, 1), tx.args.questions.len);
+    try std.testing.expectEqualStrings("scope", tx.args.questions[0].id);
+    try std.testing.expectEqualStrings("Pick scope", tx.args.questions[0].question);
+    try std.testing.expectEqual(@as(usize, 1), tx.args.questions[0].options.len);
+    try std.testing.expectEqualStrings("A", tx.args.questions[0].options[0].label);
+
+    const out = try std.testing.allocator.dupe(
+        u8,
+        "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}",
+    );
+    live.finishAsk(tx, out);
+    thr.join();
+
+    if (ctx.err) |err| return err;
+    defer std.testing.allocator.free(ctx.out.?);
+    try std.testing.expectEqualStrings(out, ctx.out.?);
+}
+
+test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
+    var live = try LiveTurn.init(std.testing.allocator);
+    defer live.deinit();
+
+    const opts = [_]core.tools.Call.AskArgs.Option{
+        .{ .label = "A" },
+    };
+    const qs = [_]core.tools.Call.AskArgs.Question{
+        .{
+            .id = "scope",
+            .question = "Pick scope",
+            .options = opts[0..],
+            .allow_other = false,
+        },
+    };
+
+    const Ctx = struct {
+        live: *LiveTurn,
+        out: ?[]u8 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.out = self.live.ask(.{ .questions = qs[0..] }) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
+    defer ui.deinit();
+    try ui.ed.setText("draft");
+
+    var pause = std.atomic.Value(bool).init(false);
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var ask_ui_ctx = AskUiCtx{
+        .alloc = std.testing.allocator,
+        .ui = &ui,
+        .out = out_fbs.writer().any(),
+        .pause = &pause,
+    };
+
+    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+    defer std.posix.close(pipe[0]);
+    defer std.posix.close(pipe[1]);
+    _ = try std.posix.write(pipe[1], "\r\x1b[B\r");
+    var reader = tui_input.Reader.init(pipe[0]);
+
+    var ctx = Ctx{ .live = &live };
+    const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+    const tx = try waitForAskTxn(&live);
+
+    live.finishAsk(tx, ask_ui_ctx.runOnMain(&reader, tx.args.view()));
+    thr.join();
+
+    if (ctx.err) |err| return err;
+    defer std.testing.allocator.free(ctx.out.?);
+    try std.testing.expectEqualStrings(
+        "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}",
+        ctx.out.?,
+    );
+    try std.testing.expectEqualStrings("draft", ui.ed.text());
+    try std.testing.expect(!pause.load(.acquire));
+    try std.testing.expect(ui.ov == null);
 }
 
 test "parseBashCmd single bang" {
