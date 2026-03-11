@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const cli = @import("cli.zig");
+const core = @import("../core/mod.zig");
 const version = @import("version.zig");
 
 const ReleaseAsset = struct {
@@ -20,6 +21,11 @@ const release_limit = 256 * 1024;
 const asset_limit = 256 * 1024 * 1024;
 const body_snip_limit = 220;
 const any_accept = "*/*";
+const sig_suffix = ".sig";
+const update_policy_path = ".pz/upgrade";
+const update_policy_file = ".pz/policy.json";
+const update_policy_tool = "upgrade";
+const update_pk_hex = "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083";
 
 const HeaderMode = enum {
     full,
@@ -44,6 +50,10 @@ pub const UpdateError = error{
     ReleaseApiFailed,
     ArchiveMissingBinary,
     InvalidExecutablePath,
+    MissingSignatureAsset,
+    UpgradeDisabledByPolicy,
+    InvalidPolicy,
+    SignatureVerifyFailed,
 };
 
 const HttpResult = union(enum) {
@@ -67,11 +77,30 @@ pub fn run(alloc: std.mem.Allocator) ![]u8 {
 }
 
 pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
+    return runOutcomeWith(alloc, .{});
+}
+
+const Hooks = struct {
+    http_get: *const fn (std.mem.Allocator, []const u8, []const u8, usize) anyerror!HttpResult = httpGetResult,
+    self_exe_path: *const fn (std.mem.Allocator) anyerror![]u8 = std.fs.selfExePathAlloc,
+    install_binary: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void = installBinary,
+    check_update_allowed: *const fn (std.mem.Allocator) anyerror!void = checkUpdateAllowed,
+};
+
+fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
 
-    const release_http = httpGetResult(alloc, release_latest_url, release_accept, release_limit) catch |err| {
+    hooks.check_update_allowed(alloc) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return .{
+            .ok = false,
+            .msg = try formatPolicyFailure(alloc, err),
+        };
+    };
+
+    const release_http = hooks.http_get(alloc, release_latest_url, release_accept, release_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
         return .{
             .ok = false,
@@ -146,7 +175,7 @@ pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
         };
     };
 
-    const archive_http = httpGetResult(alloc, asset_url, asset_accept, asset_limit) catch |err| {
+    const archive_http = hooks.http_get(alloc, asset_url, asset_accept, asset_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
         return .{
             .ok = false,
@@ -171,6 +200,48 @@ pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
         },
     };
 
+    const sig_name = try std.fmt.allocPrint(ar, "{s}{s}", .{ asset_name, sig_suffix });
+    const sig_url = findAssetUrl(release.assets, sig_name) orelse {
+        return .{
+            .ok = false,
+            .msg = try std.fmt.allocPrint(
+                alloc,
+                "upgrade failed: release {s} does not contain signature asset {s}\nnext: retry later or install manually from https://github.com/joelreymont/pz/releases/latest\n",
+                .{ release.tag_name, sig_name },
+            ),
+        };
+    };
+    const sig_http = hooks.http_get(alloc, sig_url, any_accept, 8 * 1024) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return .{
+            .ok = false,
+            .msg = try formatTransportFailure(alloc, "download release signature", sig_url, err),
+        };
+    };
+    defer sig_http.deinit(alloc);
+    const sig_raw = switch (sig_http) {
+        .ok => |body| body,
+        .status => |resp| {
+            return .{
+                .ok = false,
+                .msg = try formatHttpFailure(
+                    alloc,
+                    "download release signature",
+                    sig_url,
+                    resp.code,
+                    resp.body,
+                ),
+            };
+        },
+    };
+    verifyArchiveSignature(archive, sig_raw) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return .{
+            .ok = false,
+            .msg = try formatVerifyFailure(alloc, err, asset_name),
+        };
+    };
+
     const next_bin = extractPzBinary(alloc, archive) catch |err| {
         if (err == error.OutOfMemory) return err;
         return .{
@@ -180,9 +251,9 @@ pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
     };
     defer alloc.free(next_bin);
 
-    const exe_path = try std.fs.selfExePathAlloc(alloc);
+    const exe_path = try hooks.self_exe_path(alloc);
     defer alloc.free(exe_path);
-    installBinary(alloc, exe_path, next_bin) catch |err| {
+    hooks.install_binary(alloc, exe_path, next_bin) catch |err| {
         if (err == error.OutOfMemory) return err;
         return .{
             .ok = false,
@@ -194,10 +265,54 @@ pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
         .ok = true,
         .msg = try std.fmt.allocPrint(
             alloc,
-            "updated {s} -> {s}; restart pz to use the new binary\n",
+            "updated {s} -> {s}; verified signed archive; restart pz to use the new binary\n",
             .{ cli.version, release.tag_name },
         ),
     };
+}
+
+fn checkUpdateAllowed(alloc: std.mem.Allocator) !void {
+    const cwd_path = update_policy_file;
+    try checkPolicyPath(alloc, cwd_path);
+
+    const home = std.posix.getenv("HOME") orelse return;
+    const home_path = try std.fs.path.join(alloc, &.{ home, update_policy_file });
+    defer alloc.free(home_path);
+    try checkPolicyPath(alloc, home_path);
+}
+
+fn checkPolicyPath(alloc: std.mem.Allocator, path: []const u8) !void {
+    const raw = std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+    defer alloc.free(raw);
+
+    const doc = core.policy.parseDoc(alloc, raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+    defer core.policy.deinitDoc(alloc, doc);
+
+    if (core.policy.evaluate(doc.rules, update_policy_path, update_policy_tool) == .deny) {
+        return error.UpgradeDisabledByPolicy;
+    }
+}
+
+fn trustedUpdatePk() !core.signing.PublicKey {
+    return core.signing.PublicKey.parseHex(update_pk_hex);
+}
+
+fn parseSignatureHex(sig_raw: []const u8) !core.signing.Signature {
+    const trimmed = std.mem.trim(u8, sig_raw, " \t\r\n");
+    return core.signing.Signature.parseHex(trimmed);
+}
+
+fn verifyArchiveSignature(archive: []const u8, sig_raw: []const u8) !void {
+    const pk = trustedUpdatePk() catch return error.SignatureVerifyFailed;
+    const sig = parseSignatureHex(sig_raw) catch return error.SignatureVerifyFailed;
+    _ = core.signing.verifyDetached(archive, sig, pk) catch return error.SignatureVerifyFailed;
 }
 
 fn httpGetResult(
@@ -433,6 +548,41 @@ fn formatTransportFailure(
         "upgrade failed: could not {s}\nreason: {s}\nurl: {s}\nnext: check network/DNS/firewall/proxy settings and retry\n",
         .{ step, @errorName(err), url },
     );
+}
+
+fn formatPolicyFailure(alloc: std.mem.Allocator, err: anyerror) ![]u8 {
+    return switch (err) {
+        error.UpgradeDisabledByPolicy => std.fmt.allocPrint(
+            alloc,
+            "upgrade blocked by policy\nnext: ask your administrator to allow tool {s} on path {s}\n",
+            .{ update_policy_tool, update_policy_path },
+        ),
+        error.InvalidPolicy => std.fmt.allocPrint(
+            alloc,
+            "upgrade blocked by invalid policy\nnext: fix {s} or remove it and retry\n",
+            .{update_policy_file},
+        ),
+        else => std.fmt.allocPrint(
+            alloc,
+            "upgrade blocked by policy check failure\nreason: {s}\nnext: inspect policy settings and retry\n",
+            .{@errorName(err)},
+        ),
+    };
+}
+
+fn formatVerifyFailure(alloc: std.mem.Allocator, err: anyerror, asset_name: []const u8) ![]u8 {
+    return switch (err) {
+        error.SignatureVerifyFailed => std.fmt.allocPrint(
+            alloc,
+            "upgrade failed: signature verification failed for {s}\nnext: retry later or install manually from https://github.com/joelreymont/pz/releases/latest\n",
+            .{asset_name},
+        ),
+        else => std.fmt.allocPrint(
+            alloc,
+            "upgrade failed: could not verify {s}\nreason: {s}\nnext: inspect signing configuration and retry\n",
+            .{ asset_name, @errorName(err) },
+        ),
+    };
 }
 
 fn formatHttpFailure(
@@ -786,6 +936,21 @@ test "formatHttpFailure extracts concise html error text" {
     try std.testing.expect(std.mem.indexOf(u8, msg, "Bad Request - Invalid Header") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "invalid header name") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "<html>") == null);
+}
+
+test "formatPolicyFailure reports denied upgrade path" {
+    const msg = try formatPolicyFailure(std.testing.allocator, error.UpgradeDisabledByPolicy);
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "upgrade blocked by policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, update_policy_tool) != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, update_policy_path) != null);
+}
+
+test "formatVerifyFailure reports signature rejection" {
+    const msg = try formatVerifyFailure(std.testing.allocator, error.SignatureVerifyFailed, "pz.tar.gz");
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "signature verification failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "pz.tar.gz") != null);
 }
 
 test "isBadHeaderBody detects common bad-header responses" {

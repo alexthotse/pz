@@ -80,3 +80,6 @@ Model selector overlay renders directly onto the frame buffer after normal TUI c
 
 ### ESC cancellation needs raw mode + dedicated thread
 Detecting ESC during streaming requires a dedicated InputWatcher thread (mirrors pi's CancellableLoader + AbortController pattern). The thread uses `poll()` with 100ms timeout + `read()` on stdin, setting an atomic bool when ESC (0x1b) is received. Critical: raw mode (`enableRaw`) MUST be set before starting the thread — in canonical mode, `poll()` POLLIN only fires on complete lines, so bare ESC never triggers it. The `enableRaw` call was moved before the `-p` prompt path for this reason. Non-blocking approaches (`fcntl O_NONBLOCK`, inline `pollCancel` in push callback) failed on macOS due to Zig's `read()` wrapper returning `WouldBlock` even when `std.c.read()` returns 0.
+
+### Prefer path helpers that handle absolute paths
+Temp-dir tests often use realpaths. Runtime file loaders should accept both absolute and relative paths instead of assuming `cwd().readFileAlloc()` fits every call site.
