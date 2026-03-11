@@ -1,4 +1,5 @@
 const std = @import("std");
+const signing = @import("signing.zig");
 const testing = std.testing;
 
 pub const ver_current: u16 = 1;
@@ -183,6 +184,12 @@ pub const Doc = struct {
     rules: []const Rule,
 };
 
+pub const SignedDoc = struct {
+    doc: Doc,
+    pk: signing.PublicKey,
+    sig: signing.Signature,
+};
+
 /// Parse a policy document from JSON.
 /// Missing `version` defaults to 1. Unknown versions are rejected.
 pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
@@ -210,6 +217,13 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
     const items = rules_val.array.items;
     const rules = try alloc.alloc(Rule, items.len);
     errdefer alloc.free(rules);
+    var init_n: usize = 0;
+    errdefer {
+        for (rules[0..init_n]) |rule| {
+            if (rule.pattern.len > 0) alloc.free(rule.pattern);
+            if (rule.tool) |t| alloc.free(t);
+        }
+    }
 
     for (items, 0..) |item, i| {
         if (item != .object) return error.UnexpectedToken;
@@ -235,9 +249,45 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         }
 
         rules[i] = rule;
+        init_n += 1;
     }
 
     return .{ .version = ver, .rules = rules };
+}
+
+pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+    if (root != .object) return error.UnexpectedToken;
+
+    const sig_obj = root.object.get("signature") orelse return error.MissingSignature;
+    if (sig_obj != .object) return error.UnexpectedToken;
+
+    const alg = sig_obj.object.get("alg") orelse return error.MissingSignature;
+    if (alg != .string) return error.UnexpectedToken;
+    if (!std.mem.eql(u8, alg.string, "ed25519")) return error.UnsupportedSignatureAlg;
+
+    const key = sig_obj.object.get("key") orelse return error.MissingSignature;
+    if (key != .string) return error.UnexpectedToken;
+    const sig = sig_obj.object.get("sig") orelse return error.MissingSignature;
+    if (sig != .string) return error.UnexpectedToken;
+
+    const doc = try parseDoc(alloc, json);
+    errdefer deinitDoc(alloc, doc);
+
+    const payload = try encodeDoc(alloc, doc);
+    defer alloc.free(payload);
+
+    const pk = try signing.PublicKey.parseText(key.string);
+    const sig_det = try signing.Signature.parseHex(sig.string);
+    _ = try signing.verifyDetached(payload, sig_det, pk);
+
+    return .{
+        .doc = doc,
+        .pk = pk,
+        .sig = sig_det,
+    };
 }
 
 /// Serialize a policy document to JSON.
@@ -265,6 +315,28 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
     return try buf.toOwnedSlice(alloc);
 }
 
+pub fn encodeSignedDoc(alloc: std.mem.Allocator, doc: Doc, kp: signing.KeyPair) ![]u8 {
+    const payload = try encodeDoc(alloc, doc);
+    defer alloc.free(payload);
+
+    const sig = try kp.sign(payload);
+    const pk = kp.publicKey();
+    const pk_hex = std.fmt.bytesToHex(pk.raw, .lower);
+    const sig_hex = std.fmt.bytesToHex(sig.raw, .lower);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    const w = buf.writer(alloc);
+
+    try w.writeAll(payload[0 .. payload.len - 1]);
+    try w.writeAll(",\"signature\":{\"alg\":\"ed25519\",\"key\":\"");
+    try w.print("{s}", .{&pk_hex});
+    try w.writeAll("\",\"sig\":\"");
+    try w.print("{s}", .{&sig_hex});
+    try w.writeAll("\"}}");
+    return try buf.toOwnedSlice(alloc);
+}
+
 fn writeJsonStr(w: anytype, s: []const u8) !void {
     try w.writeByte('"');
     for (s) |c| {
@@ -287,6 +359,10 @@ pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {
         if (rule.tool) |t| alloc.free(t);
     }
     alloc.free(doc.rules);
+}
+
+pub fn deinitSignedDoc(alloc: std.mem.Allocator, doc: SignedDoc) void {
+    deinitDoc(alloc, doc.doc);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -524,6 +600,57 @@ test "parseDoc with tool filter" {
     try testing.expectEqual(@as(usize, 1), doc.rules.len);
     try testing.expect(std.mem.eql(u8, "rm", doc.rules[0].tool.?));
     try testing.expectEqual(Effect.deny, doc.rules[0].effect);
+}
+
+test "signed policy bundle verifies" {
+    const seed = try signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    const kp = try signing.KeyPair.fromSeed(seed);
+    const rules = [_]Rule{
+        .{ .pattern = "*.zig", .effect = .allow },
+        .{ .pattern = "*.secret", .effect = .deny, .tool = "read" },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const json = try encodeSignedDoc(testing.allocator, doc, kp);
+    defer testing.allocator.free(json);
+
+    const signed = try parseSignedDoc(testing.allocator, json);
+    defer deinitSignedDoc(testing.allocator, signed);
+
+    try testing.expectEqual(@as(u16, ver_current), signed.doc.version);
+    try testing.expectEqual(@as(usize, 2), signed.doc.rules.len);
+    try testing.expectEqual(Effect.allow, signed.doc.rules[0].effect);
+    try testing.expectEqual(Effect.deny, signed.doc.rules[1].effect);
+    try testing.expectEqualSlices(u8, kp.publicKey().raw[0..], signed.pk.raw[0..]);
+}
+
+test "signed policy bundle rejects unsigned doc" {
+    const rules = [_]Rule{
+        .{ .pattern = "*", .effect = .allow },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+
+    try testing.expectError(error.MissingSignature, parseSignedDoc(testing.allocator, json));
+}
+
+test "signed policy bundle rejects tampering" {
+    const seed = try signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    const kp = try signing.KeyPair.fromSeed(seed);
+    const rules = [_]Rule{
+        .{ .pattern = "*.zig", .effect = .allow },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const json = try encodeSignedDoc(testing.allocator, doc, kp);
+    defer testing.allocator.free(json);
+
+    const mut = try testing.allocator.dupe(u8, json);
+    defer testing.allocator.free(mut);
+    const needle = "*.zig";
+    const idx = std.mem.indexOf(u8, mut, needle) orelse return error.TestUnexpectedResult;
+    mut[idx + 3] = 'a';
+
+    try testing.expectError(error.SigMismatch, parseSignedDoc(testing.allocator, mut));
 }
 
 // ── Snapshot tests (ohsnap) ────────────────────────────────────────────
