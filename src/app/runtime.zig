@@ -181,42 +181,23 @@ const MissingProviderStream = struct {
 };
 
 const PrintSink = struct {
-    alloc: std.mem.Allocator,
     fmt: print_fmt.Formatter,
     stop_reason: ?core.providers.StopReason = null,
-    cancel_ids: ToolCancelSet = .{},
 
     fn init(alloc: std.mem.Allocator, out: std.Io.AnyWriter) PrintSink {
         return .{
-            .alloc = alloc,
             .fmt = print_fmt.Formatter.init(alloc, out),
         };
     }
 
     fn deinit(self: *PrintSink) void {
-        self.cancel_ids.deinit(self.alloc);
         self.fmt.deinit();
     }
 
     fn push(self: *PrintSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
-            .tool => |tev| {
-                if (try toolCancelResultAlloc(self.alloc, tev)) |tr| {
-                    defer freeToolResultOwned(self.alloc, tr);
-                    try self.cancel_ids.remember(self.alloc, tr.id);
-                    try self.fmt.push(.{ .tool_result = tr });
-                }
-            },
             .provider => |pev| {
                 switch (pev) {
-                    .tool_result => |tr| {
-                        if (self.cancel_ids.take(self.alloc, tr.id)) return;
-                        if (try remapCancelledToolResultAlloc(self.alloc, tr)) |mapped| {
-                            defer freeToolResultOwned(self.alloc, mapped);
-                            try self.fmt.push(.{ .tool_result = mapped });
-                            return;
-                        }
-                    },
                     .stop => |stop| {
                         // stop:tool is an internal handoff marker when loop continues.
                         if (stop.reason == .tool) return;
@@ -232,177 +213,17 @@ const PrintSink = struct {
 };
 
 const TuiSink = struct {
-    alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
     out: std.Io.AnyWriter,
-    cancel_ids: ToolCancelSet = .{},
-
-    fn deinit(self: *TuiSink) void {
-        self.cancel_ids.deinit(self.alloc);
-    }
 
     fn push(self: *TuiSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
-            .tool => |tev| {
-                if (try toolCancelResultAlloc(self.alloc, tev)) |tr| {
-                    defer freeToolResultOwned(self.alloc, tr);
-                    try self.cancel_ids.remember(self.alloc, tr.id);
-                    try self.ui.onProvider(.{ .tool_result = tr });
-                    self.ui.pn.run_state = .canceled;
-                }
-            },
-            .provider => |pev| switch (pev) {
-                .tool_result => |tr| {
-                    if (self.cancel_ids.take(self.alloc, tr.id)) {} else if (try remapCancelledToolResultAlloc(self.alloc, tr)) |mapped| {
-                        defer freeToolResultOwned(self.alloc, mapped);
-                        try self.ui.onProvider(.{ .tool_result = mapped });
-                        self.ui.pn.run_state = .canceled;
-                    } else {
-                        try self.ui.onProvider(pev);
-                    }
-                },
-                else => try self.ui.onProvider(pev),
-            },
+            .provider => |pev| try self.ui.onProvider(pev),
             else => {},
         }
         try self.ui.draw(self.out);
     }
 };
-
-const ToolCancelSet = struct {
-    ids: std.ArrayListUnmanaged([]u8) = .empty,
-
-    fn deinit(self: *ToolCancelSet, alloc: std.mem.Allocator) void {
-        for (self.ids.items) |id| alloc.free(id);
-        self.ids.deinit(alloc);
-    }
-
-    fn remember(self: *ToolCancelSet, alloc: std.mem.Allocator, id: []const u8) !void {
-        for (self.ids.items) |existing| {
-            if (std.mem.eql(u8, existing, id)) return;
-        }
-        try self.ids.append(alloc, try alloc.dupe(u8, id));
-    }
-
-    fn take(self: *ToolCancelSet, alloc: std.mem.Allocator, id: []const u8) bool {
-        for (self.ids.items, 0..) |existing, i| {
-            if (!std.mem.eql(u8, existing, id)) continue;
-            alloc.free(self.ids.swapRemove(i));
-            return true;
-        }
-        return false;
-    }
-};
-
-fn freeToolResultOwned(alloc: std.mem.Allocator, tr: core.providers.ToolResult) void {
-    alloc.free(tr.id);
-    alloc.free(tr.out);
-}
-
-fn remapCancelledToolResultAlloc(
-    alloc: std.mem.Allocator,
-    tr: core.providers.ToolResult,
-) !?core.providers.ToolResult {
-    if (!std.mem.startsWith(u8, tr.out, "cancelled:")) return null;
-    return .{
-        .id = try alloc.dupe(u8, tr.id),
-        .out = try alloc.dupe(u8, "[canceled]"),
-        .is_err = false,
-    };
-}
-
-fn toolCancelResultAlloc(
-    alloc: std.mem.Allocator,
-    ev: core.tools.Event,
-) !?core.providers.ToolResult {
-    switch (ev) {
-        .finish => |res| switch (res.final) {
-            .cancelled => {
-                const out = try cancelledToolOutAlloc(alloc, res);
-                errdefer alloc.free(out);
-                return .{
-                    .id = try alloc.dupe(u8, res.call_id),
-                    .out = out,
-                    .is_err = false,
-                };
-            },
-            else => return null,
-        },
-        else => return null,
-    }
-}
-
-fn cancelledToolOutAlloc(alloc: std.mem.Allocator, res: core.tools.Result) ![]u8 {
-    const raw = try joinToolChunksAlloc(alloc, res.out);
-    errdefer alloc.free(raw);
-
-    if (try formatCancelledAskOutAlloc(alloc, raw)) |pretty| {
-        alloc.free(raw);
-        return pretty;
-    }
-    if (raw.len == 0) {
-        alloc.free(raw);
-        return alloc.dupe(u8, "[canceled]");
-    }
-    const out = if (raw[raw.len - 1] == '\n')
-        try std.fmt.allocPrint(alloc, "{s}[canceled]", .{raw})
-    else
-        try std.fmt.allocPrint(alloc, "{s}\n[canceled]", .{raw});
-    alloc.free(raw);
-    return out;
-}
-
-fn joinToolChunksAlloc(alloc: std.mem.Allocator, out: []const core.tools.Output) ![]u8 {
-    var total: usize = 0;
-    for (out) |chunk| {
-        if (chunk.stream == .meta) continue;
-        total += chunk.chunk.len;
-    }
-
-    const buf = try alloc.alloc(u8, total);
-    var at: usize = 0;
-    for (out) |chunk| {
-        if (chunk.stream == .meta) continue;
-        std.mem.copyForwards(u8, buf[at .. at + chunk.chunk.len], chunk.chunk);
-        at += chunk.chunk.len;
-    }
-    return buf;
-}
-
-fn formatCancelledAskOutAlloc(alloc: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!?[]u8 {
-    const AskResult = struct {
-        cancelled: bool,
-        answers: []const struct {
-            id: []const u8,
-            answer: []const u8,
-            index: usize,
-        },
-    };
-
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len < 2 or trimmed[0] != '{') return null;
-
-    const parsed = std.json.parseFromSlice(AskResult, alloc, trimmed, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
-    defer parsed.deinit();
-
-    if (!parsed.value.cancelled) return null;
-
-    var buf = std.ArrayList(u8).empty;
-    errdefer buf.deinit(alloc);
-
-    try buf.appendSlice(alloc, "ask: canceled");
-    for (parsed.value.answers) |ans| {
-        _ = ans.index;
-        try std.fmt.format(buf.writer(alloc), "\n  - {s}: {s}", .{ ans.id, ans.answer });
-    }
-    return try buf.toOwnedSlice(alloc);
-}
 
 const AskUiCtx = struct {
     alloc: std.mem.Allocator,
@@ -1128,33 +949,10 @@ const LiveTurn = struct {
 
 const LiveTurnSink = struct {
     live: *LiveTurn,
-    cancel_ids: ToolCancelSet = .{},
-
-    fn deinit(self: *LiveTurnSink) void {
-        self.cancel_ids.deinit(self.live.alloc);
-    }
 
     fn push(self: *LiveTurnSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
-            .tool => |tev| {
-                if (try toolCancelResultAlloc(self.live.alloc, tev)) |tr| {
-                    defer freeToolResultOwned(self.live.alloc, tr);
-                    try self.cancel_ids.remember(self.live.alloc, tr.id);
-                    try self.live.enqueueProvider(.{ .tool_result = tr });
-                }
-            },
-            .provider => |pev| switch (pev) {
-                .tool_result => |tr| {
-                    if (self.cancel_ids.take(self.live.alloc, tr.id)) return;
-                    if (try remapCancelledToolResultAlloc(self.live.alloc, tr)) |mapped| {
-                        defer freeToolResultOwned(self.live.alloc, mapped);
-                        try self.live.enqueueProvider(.{ .tool_result = mapped });
-                        return;
-                    }
-                    try self.live.enqueueProvider(pev);
-                },
-                else => try self.live.enqueueProvider(pev),
-            },
+            .provider => |pev| try self.live.enqueueProvider(pev),
             else => {},
         }
     }
@@ -1600,11 +1398,9 @@ fn runTui(
     }
 
     var sink_impl = TuiSink{
-        .alloc = alloc,
         .ui = &ui,
         .out = out,
     };
-    defer sink_impl.deinit();
     const mode = core.loop.ModeSink.from(TuiSink, &sink_impl, TuiSink.push);
 
     const stdin_fd = std.posix.STDIN_FILENO;
@@ -1783,7 +1579,6 @@ fn runTui(
         var live_sink_impl = LiveTurnSink{
             .live = &live_turn,
         };
-        defer live_sink_impl.deinit();
         const live_mode = core.loop.ModeSink.from(LiveTurnSink, &live_sink_impl, LiveTurnSink.push);
         const live_cancel = core.loop.CancelSrc.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled);
         const live_tctx = TurnCtx{
@@ -3892,23 +3687,11 @@ fn restoreSessionIntoUi(
                 .name = tc.name,
                 .args = tc.args,
             } }),
-            .tool_result => |tr| {
-                if (try remapCancelledToolResultAlloc(alloc, .{
-                    .id = tr.id,
-                    .out = tr.out,
-                    .is_err = tr.is_err,
-                })) |mapped| {
-                    defer freeToolResultOwned(alloc, mapped);
-                    try ui.onProvider(.{ .tool_result = mapped });
-                    ui.pn.run_state = .canceled;
-                } else {
-                    try ui.onProvider(.{ .tool_result = .{
-                        .id = tr.id,
-                        .out = tr.out,
-                        .is_err = tr.is_err,
-                    } });
-                }
-            },
+            .tool_result => |tr| try ui.onProvider(.{ .tool_result = .{
+                .id = tr.id,
+                .out = tr.out,
+                .is_err = tr.is_err,
+            } }),
             .usage => |u| try ui.onProvider(.{ .usage = .{
                 .in_tok = u.in_tok,
                 .out_tok = u.out_tok,
@@ -3993,6 +3776,51 @@ fn listSessionsAlloc(alloc: std.mem.Allocator, session_dir: []const u8) ![]u8 {
     return try out.toOwnedSlice(alloc);
 }
 
+fn listSessionRows(alloc: std.mem.Allocator, session_dir: []const u8) ![]tui_overlay.Overlay.SessionRow {
+    var dir = try std.fs.cwd().openDir(session_dir, .{ .iterate = true });
+    defer dir.close();
+
+    var names = std.ArrayList([]u8).empty;
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+
+    var it = dir.iterate();
+    while (try it.next()) |ent| {
+        if (ent.kind != .file) continue;
+        const sid = fileSidFromName(ent.name) orelse continue;
+        const dup = try alloc.dupe(u8, sid);
+        errdefer alloc.free(dup);
+        try names.append(alloc, dup);
+    }
+
+    std.sort.pdq([]u8, names.items, {}, lessSid);
+
+    const rows = try alloc.alloc(tui_overlay.Overlay.SessionRow, names.items.len);
+    errdefer {
+        for (rows) |row| {
+            if (row.sid.len > 0) alloc.free(row.sid);
+            if (row.title.len > 0) alloc.free(row.title);
+            if (row.time.len > 0) alloc.free(row.time);
+            if (row.tokens.len > 0) alloc.free(row.tokens);
+        }
+        alloc.free(rows);
+    }
+    @memset(rows, .{
+        .sid = &.{},
+        .title = &.{},
+        .time = &.{},
+        .tokens = &.{},
+    });
+
+    const now_ms = std.time.milliTimestamp();
+    for (names.items, 0..) |sid, idx| {
+        rows[idx] = try buildSessionRow(alloc, dir, sid, now_ms);
+    }
+    return rows;
+}
+
 fn listSessionSids(alloc: std.mem.Allocator, session_dir: []const u8) ![][]u8 {
     var dir = try std.fs.cwd().openDir(session_dir, .{ .iterate = true });
     defer dir.close();
@@ -4018,6 +3846,89 @@ fn listSessionSids(alloc: std.mem.Allocator, session_dir: []const u8) ![][]u8 {
 
 fn lessSid(_: void, a: []u8, b: []u8) bool {
     return std.mem.order(u8, a, b) == .lt;
+}
+
+fn buildSessionRow(
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    sid: []const u8,
+    now_ms: i64,
+) !tui_overlay.Overlay.SessionRow {
+    var title: ?[]u8 = null;
+    errdefer if (title) |t| alloc.free(t);
+    var last_ms: i64 = 0;
+    var tot_tok: u64 = 0;
+
+    const path = try core.session.path.sidJsonlAlloc(alloc, sid);
+    defer alloc.free(path);
+    const st = try dir.statFile(path);
+    if (st.size > 0) {
+        var rdr = try core.session.ReplayReader.init(alloc, dir, sid, .{});
+        defer rdr.deinit();
+
+        while (try rdr.next()) |ev| {
+            if (ev.at_ms > last_ms) last_ms = ev.at_ms;
+            switch (ev.data) {
+                .prompt => |p| {
+                    if (title == null) title = try sessionTitleAlloc(alloc, p.text);
+                },
+                .usage => |u| tot_tok +|= u.tot_tok,
+                else => {},
+            }
+        }
+    }
+
+    const sid_dup = try alloc.dupe(u8, sid);
+    errdefer alloc.free(sid_dup);
+    const row_title = if (title) |t| t else try alloc.dupe(u8, sid);
+    errdefer if (title == null) alloc.free(row_title);
+    const time = try formatSessionAgeAlloc(alloc, now_ms, last_ms);
+    errdefer alloc.free(time);
+    const tokens = try formatSessionTokensAlloc(alloc, tot_tok);
+    errdefer alloc.free(tokens);
+
+    return .{
+        .sid = sid_dup,
+        .title = row_title,
+        .time = time,
+        .tokens = tokens,
+    };
+}
+
+fn sessionTitleAlloc(alloc: std.mem.Allocator, text: []const u8) !?[]u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const line = if (std.mem.indexOfScalar(u8, trimmed, '\n')) |nl| trimmed[0..nl] else trimmed;
+    const one = std.mem.trim(u8, line, " \t\r");
+    if (one.len == 0) return null;
+    return try alloc.dupe(u8, one);
+}
+
+fn formatSessionAgeAlloc(alloc: std.mem.Allocator, now_ms: i64, last_ms: i64) ![]u8 {
+    if (last_ms <= 0 or last_ms >= now_ms) return alloc.dupe(u8, "now");
+
+    const diff_ms: u64 = @intCast(now_ms - last_ms);
+    const diff_min = diff_ms / (60 * std.time.ms_per_s);
+    const diff_hour = diff_ms / (60 * 60 * std.time.ms_per_s);
+    const diff_day = diff_ms / (24 * 60 * 60 * std.time.ms_per_s);
+
+    if (diff_min < 1) return alloc.dupe(u8, "now");
+    if (diff_min < 60) return std.fmt.allocPrint(alloc, "{d}m", .{diff_min});
+    if (diff_hour < 24) return std.fmt.allocPrint(alloc, "{d}h", .{diff_hour});
+    if (diff_day < 7) return std.fmt.allocPrint(alloc, "{d}d", .{diff_day});
+    if (diff_day < 30) return std.fmt.allocPrint(alloc, "{d}w", .{diff_day / 7});
+    if (diff_day < 365) return std.fmt.allocPrint(alloc, "{d}mo", .{diff_day / 30});
+    return std.fmt.allocPrint(alloc, "{d}y", .{diff_day / 365});
+}
+
+fn formatSessionTokensAlloc(alloc: std.mem.Allocator, tot_tok: u64) ![]u8 {
+    if (tot_tok >= 1_000_000) {
+        return std.fmt.allocPrint(alloc, "{d}.{d}M tok", .{ tot_tok / 1_000_000, (tot_tok % 1_000_000) / 100_000 });
+    }
+    if (tot_tok >= 1000) {
+        return std.fmt.allocPrint(alloc, "{d}.{d}k tok", .{ tot_tok / 1000, (tot_tok % 1000) / 100 });
+    }
+    return std.fmt.allocPrint(alloc, "{d} tok", .{tot_tok});
 }
 
 fn fileSidFromName(name: []const u8) ?[]const u8 {
@@ -4822,12 +4733,12 @@ fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: [
 
 fn showResumeOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, session_dir_path: ?[]const u8) !bool {
     const sdp = session_dir_path orelse return false;
-    const sids = listSessionSids(alloc, sdp) catch return false;
-    if (sids.len == 0) {
-        alloc.free(sids);
+    const rows = listSessionRows(alloc, sdp) catch return false;
+    if (rows.len == 0) {
+        alloc.free(rows);
         return false;
     }
-    ui.ov = tui_overlay.Overlay.initDyn(alloc, sids, "Resume Session", .session);
+    ui.ov = tui_overlay.Overlay.initSession(rows, "Resume Session");
     return true;
 }
 
@@ -5442,6 +5353,37 @@ test "showQueueOverlay and dequeueQueuedIntoEditor edit selected message" {
     ui.ov = null;
 }
 
+fn writeSessionEventsFile(tmp: std.testing.TmpDir, sub_path: []const u8, events: []const core.session.Event) !void {
+    const file = try tmp.dir.createFile(sub_path, .{});
+    defer file.close();
+    for (events) |ev| {
+        const raw = try core.session.encodeEventAlloc(std.testing.allocator, ev);
+        defer std.testing.allocator.free(raw);
+        try file.writeAll(raw);
+        try file.writeAll("\n");
+    }
+}
+
+fn frameRowBoxAlloc(alloc: std.mem.Allocator, frm: *const tui_frame.Frame, y: usize) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+
+    try out.append(alloc, '|');
+    for (0..frm.w) |x| {
+        const cell = try frm.cell(x, y);
+        if (cell.cp == tui_frame.Frame.wide_pad) continue;
+        if (cell.cp <= 0x7f) {
+            try out.append(alloc, @intCast(cell.cp));
+            continue;
+        }
+        var buf: [4]u8 = undefined;
+        const n = try std.unicode.utf8Encode(cell.cp, &buf);
+        try out.appendSlice(alloc, buf[0..n]);
+    }
+    try out.append(alloc, '|');
+    return out.toOwnedSlice(alloc);
+}
+
 test "showResumeOverlay lists sessions and supports arrow navigation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5465,11 +5407,15 @@ test "showResumeOverlay lists sessions and supports arrow navigation" {
     try std.testing.expect(ui.ov != null);
     try std.testing.expect(ui.ov.?.kind == .session);
     try std.testing.expectEqualStrings("Resume Session", ui.ov.?.title);
-    try std.testing.expect(ui.ov.?.dyn_items != null);
-    const items = ui.ov.?.dyn_items.?;
-    try std.testing.expectEqual(@as(usize, 2), items.len);
-    try std.testing.expectEqualStrings("100", items[0]);
-    try std.testing.expectEqualStrings("200", items[1]);
+    try std.testing.expect(ui.ov.?.session_rows != null);
+    const rows = ui.ov.?.session_rows.?;
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqualStrings("100", rows[0].sid);
+    try std.testing.expectEqualStrings("100", rows[0].title);
+    try std.testing.expectEqualStrings("now", rows[0].time);
+    try std.testing.expectEqualStrings("0 tok", rows[0].tokens);
+    try std.testing.expectEqualStrings("200", rows[1].sid);
+    try std.testing.expectEqualStrings("200", rows[1].title);
 
     try std.testing.expectEqualStrings("100", ui.ov.?.selected().?);
     ui.ov.?.down();
@@ -5481,6 +5427,71 @@ test "showResumeOverlay lists sessions and supports arrow navigation" {
 
     ui.ov.?.deinit(std.testing.allocator);
     ui.ov = null;
+}
+
+test "showResumeOverlay fixed-width snapshot aligns age and token columns" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+
+    const now = std.time.milliTimestamp();
+    const long_events = [_]core.session.Event{
+        .{ .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s), .data = .{ .prompt = .{ .text = "A very long session title that should ellipsize before the right-aligned columns" } } },
+        .{ .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s), .data = .{ .usage = .{ .tot_tok = 1345 } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/100.jsonl", &long_events);
+
+    const short_events = [_]core.session.Event{
+        .{ .at_ms = now - (45 * 60 * std.time.ms_per_s), .data = .{ .prompt = .{ .text = "Short title" } } },
+        .{ .at_ms = now - (45 * 60 * std.time.ms_per_s), .data = .{ .usage = .{ .tot_tok = 46 } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/200.jsonl", &short_events);
+
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 48, 8, "m", "p");
+    defer ui.deinit();
+    try std.testing.expect(try showResumeOverlay(std.testing.allocator, &ui, sess_abs));
+
+    var frm = try tui_frame.Frame.init(std.testing.allocator, 48, 8);
+    defer frm.deinit(std.testing.allocator);
+    try ui.ov.?.render(&frm);
+
+    const row2 = try frameRowBoxAlloc(std.testing.allocator, &frm, 2);
+    defer std.testing.allocator.free(row2);
+    const row3 = try frameRowBoxAlloc(std.testing.allocator, &frm, 3);
+    defer std.testing.allocator.free(row3);
+    const row4 = try frameRowBoxAlloc(std.testing.allocator, &frm, 4);
+    defer std.testing.allocator.free(row4);
+    const row5 = try frameRowBoxAlloc(std.testing.allocator, &frm, 5);
+    defer std.testing.allocator.free(row5);
+
+    const Snap = struct {
+        row2: []const u8,
+        row3: []const u8,
+        row4: []const u8,
+        row5: []const u8,
+    };
+    try oh.snap(@src(),
+        \\app.runtime.test.showResumeOverlay fixed-width snapshot aligns age and token columns.Snap
+        \\  .row2: []const u8
+        \\    "|┌────────────────Resume Session────────────────┐|"
+        \\  .row3: []const u8
+        \\    "|│ > A very long session titl...   2h  1.3k tok │|"
+        \\  .row4: []const u8
+        \\    "|│   Short title                  45m    46 tok │|"
+        \\  .row5: []const u8
+        \\    "|└──────────────────────────────────────────────┘|"
+    ).expectEqual(Snap{
+        .row2 = row2,
+        .row3 = row3,
+        .row4 = row4,
+        .row5 = row5,
+    });
 }
 
 test "showResumeOverlay returns false when no sessions exist" {
@@ -5779,118 +5790,6 @@ test "runtime executes tool calls through loop registry in print mode" {
     try std.testing.expect(std.mem.indexOf(u8, written, "done") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=false out=\"hi\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
-}
-
-test "print sink shows canceled tool result with partial output" {
-    const StreamImpl = struct {
-        evs: []const core.providers.Ev = &.{},
-        idx: usize = 0,
-
-        fn next(self: *@This()) !?core.providers.Ev {
-            if (self.idx >= self.evs.len) return null;
-            const ev = self.evs[self.idx];
-            self.idx += 1;
-            return ev;
-        }
-
-        fn deinit(_: *@This()) void {}
-    };
-
-    const ProviderImpl = struct {
-        start_ct: usize = 0,
-        stream: StreamImpl = .{},
-
-        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
-            self.start_ct += 1;
-            self.stream.idx = 0;
-            self.stream.evs = switch (self.start_ct) {
-                1 => &.{
-                    .{ .tool_call = .{ .id = "call-1", .name = "bash", .args = "{\"cmd\":\"sleep 999\"}" } },
-                    .{ .stop = .{ .reason = .tool } },
-                },
-                2 => &.{
-                    .{ .text = "done" },
-                    .{ .stop = .{ .reason = .done } },
-                },
-                else => return error.TestUnexpectedResult,
-            };
-            return core.providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
-        }
-    };
-
-    const ToolImpl = struct {
-        out: [1]core.tools.Output = undefined,
-
-        fn run(self: *@This(), call: core.tools.Call, _: core.tools.Sink) !core.tools.Result {
-            self.out[0] = .{
-                .call_id = call.id,
-                .seq = 0,
-                .at_ms = call.at_ms,
-                .stream = .stdout,
-                .chunk = "start",
-                .truncated = false,
-            };
-            return .{
-                .call_id = call.id,
-                .started_at_ms = call.at_ms,
-                .ended_at_ms = call.at_ms + 1,
-                .out = self.out[0..],
-                .final = .{ .cancelled = .{ .reason = .user } },
-            };
-        }
-    };
-
-    var provider_impl = ProviderImpl{};
-    var tool_impl = ToolImpl{};
-    var null_store_impl = core.session.NullStore.init();
-    const reg = core.tools.Registry.init(&.{
-        .{
-            .name = "bash",
-            .kind = .bash,
-            .spec = .{
-                .kind = .bash,
-                .desc = "Run bash command",
-                .params = &.{},
-                .out = .{
-                    .max_bytes = 1024,
-                    .stream = true,
-                },
-                .timeout_ms = 1000,
-                .destructive = true,
-            },
-            .dispatch = core.tools.Dispatch.from(ToolImpl, &tool_impl, ToolImpl.run),
-        },
-    });
-
-    var out_buf: [2048]u8 = undefined;
-    var out_fbs = std.io.fixedBufferStream(&out_buf);
-    var sink_impl = PrintSink.init(std.testing.allocator, out_fbs.writer().any());
-    defer sink_impl.deinit();
-    sink_impl.fmt.verbose = true;
-
-    const mode = core.loop.ModeSink.from(PrintSink, &sink_impl, PrintSink.push);
-    _ = try core.loop.run(.{
-        .alloc = std.testing.allocator,
-        .sid = "sid-1",
-        .prompt = "ship",
-        .model = "m",
-        .provider_label = "p",
-        .provider = core.providers.Provider.from(ProviderImpl, &provider_impl, ProviderImpl.start),
-        .store = null_store_impl.asSessionStore(),
-        .reg = reg,
-        .mode = mode,
-    });
-    try sink_impl.fmt.finish();
-
-    const written = out_fbs.getWritten();
-    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=false out=\"start\\n[canceled]\"") != null);
-    try std.testing.expect(std.mem.count(u8, written, "tool_result id=\"call-1\"") == 1);
-    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true") == null);
 }
 
 test "runtime forwards provider label to provider request" {

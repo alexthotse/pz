@@ -10,8 +10,16 @@ const Color = frame_mod.Color;
 pub const Kind = enum { model, session, settings, fork, login, logout, queue };
 
 pub const Overlay = struct {
+    pub const SessionRow = struct {
+        sid: []u8,
+        title: []u8,
+        time: []u8,
+        tokens: []u8,
+    };
+
     items: []const []const u8,
     dyn_items: ?[][]u8 = null, // owned items (freed on deinit)
+    session_rows: ?[]SessionRow = null, // owned session rows
     toggles: ?[]bool = null, // toggle state per item (settings kind)
     sel: usize = 0,
     scroll: usize = 0,
@@ -38,11 +46,30 @@ pub const Overlay = struct {
         };
     }
 
+    pub fn initSession(rows: []SessionRow, title: []const u8) Overlay {
+        return .{
+            .items = &.{},
+            .session_rows = rows,
+            .title = title,
+            .kind = .session,
+        };
+    }
+
     pub fn deinit(self: *Overlay, alloc: std.mem.Allocator) void {
         if (self.dyn_items) |items| {
             for (items) |item| alloc.free(item);
             alloc.free(items);
             self.dyn_items = null;
+        }
+        if (self.session_rows) |rows| {
+            for (rows) |row| {
+                alloc.free(row.sid);
+                alloc.free(row.title);
+                alloc.free(row.time);
+                alloc.free(row.tokens);
+            }
+            alloc.free(rows);
+            self.session_rows = null;
         }
         if (self.toggles) |t| {
             alloc.free(t);
@@ -73,6 +100,7 @@ pub const Overlay = struct {
     }
 
     fn itemCount(self: *const Overlay) usize {
+        if (self.session_rows) |rows| return rows.len;
         if (self.dyn_items) |d| return d.len;
         return self.items.len;
     }
@@ -97,6 +125,10 @@ pub const Overlay = struct {
     }
 
     pub fn selected(self: *const Overlay) ?[]const u8 {
+        if (self.session_rows) |rows| {
+            if (rows.len == 0) return null;
+            return rows[self.sel].sid;
+        }
         const items = self.itemSlice();
         if (items.len == 0) return null;
         return items[self.sel];
@@ -105,6 +137,7 @@ pub const Overlay = struct {
     pub fn render(self: *const Overlay, frm: *Frame) !void {
         const t = theme_mod.get();
         const items = self.itemSlice();
+        const sess_rows = self.session_rows;
         const hint_text = self.hint;
         const has_hint = hint_text != null and hint_text.?.len > 0;
         const has_input = self.input_label != null and self.input_text != null;
@@ -112,10 +145,25 @@ pub const Overlay = struct {
         // Compute box dimensions
         var max_w: usize = wc.strwidth(self.title);
         var vis_n = @min(items.len, max_vis);
-        for (items) |item| {
-            const label = if (self.kind == .model) shortLabel(item) else item;
-            const lw = wc.strwidth(label);
-            if (lw + 4 > max_w) max_w = lw + 4;
+        var sess_time_w: usize = 0;
+        var sess_tok_w: usize = 0;
+        if (sess_rows) |rows| {
+            vis_n = @min(rows.len, max_vis);
+            for (rows) |row| {
+                const title_w = wc.strwidth(row.title);
+                const time_w = wc.strwidth(row.time);
+                const tok_w = wc.strwidth(row.tokens);
+                const row_w = title_w + 2 + time_w + 2 + tok_w;
+                if (row_w + 4 > max_w) max_w = row_w + 4;
+                if (time_w > sess_time_w) sess_time_w = time_w;
+                if (tok_w > sess_tok_w) sess_tok_w = tok_w;
+            }
+        } else {
+            for (items) |item| {
+                const label = if (self.kind == .model) shortLabel(item) else item;
+                const lw = wc.strwidth(label);
+                if (lw + 4 > max_w) max_w = lw + 4;
+            }
         }
         if (has_hint) {
             const hw = wc.strwidth(hint_text.?) + 4;
@@ -186,10 +234,10 @@ pub const Overlay = struct {
 
         // Items (scrolled window)
         var row: usize = 0;
+        const row_count = self.itemCount();
         while (row < vis_n) : (row += 1) {
             const idx = self.scroll + row;
-            if (idx >= items.len) break;
-            const item = items[idx];
+            if (idx >= row_count) break;
             const y = y0 + 1 + row;
             const is_sel = idx == self.sel;
             const row_bg = if (is_sel) sel_bg else bg;
@@ -218,23 +266,55 @@ pub const Overlay = struct {
                 x += 1;
             }
 
-            // Write label
-            const label = if (self.kind == .model) shortLabel(item) else item;
-            var li: usize = 0;
-            while (li < label.len) {
-                if (x >= x0 + box_w - 2) break;
-                const n = std.unicode.utf8ByteSequenceLength(label[li]) catch break;
-                if (li + n > label.len) break;
-                const cp = std.unicode.utf8Decode(label[li .. li + n]) catch break;
-                const cw = wc.wcwidth(cp);
-                if (x + cw > x0 + box_w - 1) break;
-                try frm.set(x, y, cp, Style{
-                    .fg = row_st.fg,
-                    .bg = row_bg,
-                    .bold = row_st.bold,
-                });
-                x += cw;
-                li += n;
+            if (sess_rows) |rows| {
+                const row_data = rows[idx];
+                const content_end = x0 + box_w - 2;
+                const tok_x = content_end - sess_tok_w;
+                const time_x = tok_x - 2 - sess_time_w;
+                const title_end = if (time_x > x) time_x - 2 else x;
+                try writeEllipsis(
+                    frm,
+                    x,
+                    title_end,
+                    y,
+                    row_data.title,
+                    Style{ .fg = row_st.fg, .bg = row_bg, .bold = row_st.bold },
+                );
+                try writeRight(
+                    frm,
+                    time_x,
+                    sess_time_w,
+                    y,
+                    row_data.time,
+                    Style{ .fg = item_st.fg, .bg = row_bg },
+                );
+                try writeRight(
+                    frm,
+                    tok_x,
+                    sess_tok_w,
+                    y,
+                    row_data.tokens,
+                    Style{ .fg = item_st.fg, .bg = row_bg },
+                );
+            } else {
+                const item = items[idx];
+                const label = if (self.kind == .model) shortLabel(item) else item;
+                var li: usize = 0;
+                while (li < label.len) {
+                    if (x >= x0 + box_w - 2) break;
+                    const n = std.unicode.utf8ByteSequenceLength(label[li]) catch break;
+                    if (li + n > label.len) break;
+                    const cp = std.unicode.utf8Decode(label[li .. li + n]) catch break;
+                    const cw = wc.wcwidth(cp);
+                    if (x + cw > x0 + box_w - 1) break;
+                    try frm.set(x, y, cp, Style{
+                        .fg = row_st.fg,
+                        .bg = row_bg,
+                        .bold = row_st.bold,
+                    });
+                    x += cw;
+                    li += n;
+                }
             }
 
             // Toggle indicator for settings
@@ -367,6 +447,53 @@ fn shortLabel(model: []const u8) []const u8 {
     return model;
 }
 
+fn clipCols(text: []const u8, cols: usize) []const u8 {
+    if (cols == 0 or text.len == 0) return text[0..0];
+    var i: usize = 0;
+    var used: usize = 0;
+    while (i < text.len) {
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch break;
+        if (i + n > text.len) break;
+        const cp = std.unicode.utf8Decode(text[i .. i + n]) catch break;
+        const cw = wc.wcwidth(cp);
+        if (used + cw > cols) break;
+        used += cw;
+        i += n;
+    }
+    return text[0..i];
+}
+
+fn writeRight(frm: *Frame, x: usize, cols: usize, y: usize, text: []const u8, st: Style) !void {
+    if (cols == 0) return;
+    const fit = clipCols(text, cols);
+    const pad = cols - @min(cols, wc.strwidth(fit));
+    _ = try frm.write(x + pad, y, fit, st);
+}
+
+fn writeEllipsis(frm: *Frame, x: usize, x_end: usize, y: usize, text: []const u8, st: Style) !void {
+    if (x >= x_end) return;
+    const cols = x_end - x;
+    const fit = clipCols(text, cols);
+    if (fit.len == text.len or cols <= 3) {
+        if (cols <= 3 and fit.len < text.len) {
+            var i: usize = 0;
+            while (i < cols) : (i += 1) try frm.set(x + i, y, '.', st);
+            return;
+        }
+        _ = try frm.write(x, y, fit, st);
+        return;
+    }
+
+    const base = clipCols(text, cols - 3);
+    var xpos = x;
+    xpos += try frm.write(xpos, y, base, st);
+    var i: usize = 0;
+    while (i < 3 and xpos < x_end) : (i += 1) {
+        try frm.set(xpos, y, '.', st);
+        xpos += 1;
+    }
+}
+
 test "overlay renders centered box" {
     const items = [_][]const u8{ "model-a", "model-b", "model-c" };
     const ov = Overlay.init(&items, 1);
@@ -412,30 +539,43 @@ test "overlay scrolls with many items" {
 }
 
 test "overlay session kind renders without shortLabel" {
-    var items = [_][]u8{
-        try std.testing.allocator.dupe(u8, "sess-abc-123"),
-        try std.testing.allocator.dupe(u8, "sess-def-456"),
+    const rows = try std.testing.allocator.alloc(Overlay.SessionRow, 2);
+    defer {
+        for (rows) |row| {
+            std.testing.allocator.free(row.sid);
+            std.testing.allocator.free(row.title);
+            std.testing.allocator.free(row.time);
+            std.testing.allocator.free(row.tokens);
+        }
+        std.testing.allocator.free(rows);
+    }
+    rows[0] = .{
+        .sid = try std.testing.allocator.dupe(u8, "sess-abc-123"),
+        .title = try std.testing.allocator.dupe(u8, "sess-abc-123"),
+        .time = try std.testing.allocator.dupe(u8, "2h"),
+        .tokens = try std.testing.allocator.dupe(u8, "10 tok"),
     };
-    var ov = Overlay{
-        .items = &.{},
-        .dyn_items = &items,
-        .title = "Resume Session",
-        .kind = .session,
+    rows[1] = .{
+        .sid = try std.testing.allocator.dupe(u8, "sess-def-456"),
+        .title = try std.testing.allocator.dupe(u8, "sess-def-456"),
+        .time = try std.testing.allocator.dupe(u8, "5m"),
+        .tokens = try std.testing.allocator.dupe(u8, "2 tok"),
     };
+    var ov = Overlay.initSession(rows, "Resume Session");
 
     var frm = try Frame.init(std.testing.allocator, 40, 10);
     defer frm.deinit(std.testing.allocator);
     try ov.render(&frm);
 
-    // Verify first item "sess-abc-123" is rendered (not shortLabel'd)
-    // Find '>' for selected row
-    const x0 = (40 - (@as(usize, 16) + 4)) / 2;
-    const y0 = (10 - 4) / 2;
-    const c = try frm.cell(x0 + 2, y0 + 1);
-    try std.testing.expectEqual(@as(u21, '>'), c.cp);
-
-    // Don't free — items are stack-allocated slices
-    for (&items) |*item| std.testing.allocator.free(item.*);
+    var saw_sel = false;
+    for (0..40) |x| {
+        if ((try frm.cell(x, 4)).cp == '>') {
+            saw_sel = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_sel);
+    try std.testing.expectEqualStrings("sess-abc-123", ov.selected().?);
 }
 
 test "settings overlay toggle and render" {
