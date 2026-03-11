@@ -762,6 +762,33 @@ fn testParse(stream: *SseStream, data: []const u8) !?providers.Ev {
     return stream.parseSseData(copy);
 }
 
+fn randSafeToken(rnd: std.Random, buf: []u8) []const u8 {
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_-";
+    const n = rnd.intRangeAtMost(usize, 1, buf.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const idx = rnd.intRangeLessThan(usize, 0, alphabet.len);
+        buf[i] = alphabet[idx];
+    }
+    return buf[0..n];
+}
+
+fn resetParserState(stream: *SseStream) void {
+    _ = stream.arena.reset(.retain_capacity);
+    stream.in_tok = 0;
+    stream.out_tok = 0;
+    stream.cache_read = 0;
+    stream.cache_write = 0;
+    stream.in_tool = false;
+    stream.done = false;
+    stream.err_mode = false;
+    stream.err_text = null;
+    stream.pending = null;
+    stream.tool_id.clearRetainingCapacity();
+    stream.tool_name.clearRetainingCapacity();
+    stream.tool_args.clearRetainingCapacity();
+}
+
 test "mapStopReason known values" {
     try testing.expectEqual(providers.StopReason.done, mapStopReason("end_turn"));
     try testing.expectEqual(providers.StopReason.max_out, mapStopReason("max_tokens"));
@@ -898,6 +925,82 @@ test "parseSseData message_delta stop reason and usage" {
     try testing.expect(stream.done);
 }
 
+test "parseSseData property randomized tool_use lifecycle preserves args and tool stop" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    defer stream.tool_id.deinit(testing.allocator);
+    defer stream.tool_name.deinit(testing.allocator);
+    defer stream.tool_args.deinit(testing.allocator);
+
+    var prng = std.Random.DefaultPrng.init(0xa17a_c0de);
+    const rnd = prng.random();
+
+    var iter: usize = 0;
+    while (iter < 128) : (iter += 1) {
+        resetParserState(&stream);
+
+        var id_buf: [24]u8 = undefined;
+        const call_id = std.fmt.bufPrint(&id_buf, "tool-{d}", .{iter}) catch unreachable;
+
+        var head_buf: [16]u8 = undefined;
+        const args_head = randSafeToken(rnd, &head_buf);
+        var tail_buf: [16]u8 = undefined;
+        const args_tail = randSafeToken(rnd, &tail_buf);
+
+        var full_buf: [64]u8 = undefined;
+        const args_full = std.fmt.bufPrint(&full_buf, "{s}{s}", .{ args_head, args_tail }) catch unreachable;
+
+        var ev_start_buf: [256]u8 = undefined;
+        const ev_start = std.fmt.bufPrint(
+            &ev_start_buf,
+            "{{\"type\":\"content_block_start\",\"content_block\":{{\"type\":\"tool_use\",\"id\":\"{s}\",\"name\":\"bash\"}}}}",
+            .{call_id},
+        ) catch unreachable;
+        try testing.expect((try testParse(&stream, ev_start)) == null);
+
+        var ev_head_buf: [256]u8 = undefined;
+        const ev_head = std.fmt.bufPrint(
+            &ev_head_buf,
+            "{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{s}\"}}}}",
+            .{args_head},
+        ) catch unreachable;
+        try testing.expect((try testParse(&stream, ev_head)) == null);
+
+        var ev_tail_buf: [256]u8 = undefined;
+        const ev_tail = std.fmt.bufPrint(
+            &ev_tail_buf,
+            "{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{s}\"}}}}",
+            .{args_tail},
+        ) catch unreachable;
+        try testing.expect((try testParse(&stream, ev_tail)) == null);
+
+        const tool_ev = (try testParse(&stream, "{\"type\":\"content_block_stop\"}")) orelse return error.TestUnexpectedResult;
+        switch (tool_ev) {
+            .tool_call => |tc| {
+                try testing.expectEqualStrings(call_id, tc.id);
+                try testing.expectEqualStrings("bash", tc.name);
+                try testing.expectEqualStrings(args_full, tc.args);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+
+        const usage_ev = (try testParse(
+            &stream,
+            "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}",
+        )) orelse return error.TestUnexpectedResult;
+        switch (usage_ev) {
+            .usage => |usage| {
+                try testing.expectEqual(@as(u64, 0), usage.in_tok);
+                try testing.expectEqual(@as(u64, 7), usage.out_tok);
+                try testing.expectEqual(@as(u64, 7), usage.tot_tok);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try testing.expect(stream.pending != null);
+        try testing.expectEqual(providers.StopReason.tool, stream.pending.?.stop.reason);
+    }
+}
+
 test "parseSseData unknown type returns null" {
     var stream = testStream();
     defer stream.arena.deinit();
@@ -914,6 +1017,43 @@ test "parseSseData invalid json returns null" {
 
     const ev = try testParse(&stream, "not json at all");
     try testing.expect(ev == null);
+}
+
+test "parseSseData fuzz random payloads do not crash parser state" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    defer stream.tool_id.deinit(testing.allocator);
+    defer stream.tool_name.deinit(testing.allocator);
+    defer stream.tool_args.deinit(testing.allocator);
+
+    var prng = std.Random.DefaultPrng.init(0xa17a_f022);
+    const rnd = prng.random();
+
+    var seed: usize = 0;
+    while (seed < 256) : (seed += 1) {
+        resetParserState(&stream);
+
+        const len = rnd.intRangeAtMost(usize, 0, 192);
+        var buf: [192]u8 = undefined;
+        rnd.bytes(buf[0..len]);
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try out.appendSlice(testing.allocator, "{\"type\":\"");
+        try out.appendSlice(testing.allocator, buf[0..@min(len, 24)]);
+        try out.appendSlice(testing.allocator, "\",\"delta\":{\"type\":\"");
+        if (len > 24) try out.appendSlice(testing.allocator, buf[24..@min(len, 48)]);
+        try out.appendSlice(testing.allocator, "\",\"partial_json\":\"");
+        if (len > 48) try out.appendSlice(testing.allocator, buf[48..len]);
+        try out.appendSlice(testing.allocator, "\"}}");
+
+        const ar = stream.arena.allocator();
+        const copy = try ar.dupe(u8, out.items);
+        _ = stream.parseSseData(copy) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return error.TestUnexpectedResult;
+        };
+    }
 }
 
 test "buildBody minimal request" {
