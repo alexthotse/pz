@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const oauth_callback = @import("oauth_callback.zig");
+const audit = @import("../audit.zig");
 const fs_secure = @import("../fs_secure.zig");
 
 pub const Auth = union(enum) {
@@ -37,6 +38,16 @@ const provider_names = [_][]const u8{ "anthropic", "openai", "google" };
 pub fn providerName(p: Provider) []const u8 {
     return provider_names[@intFromEnum(p)];
 }
+
+const Hooks = struct {
+    home_override: ?[]const u8 = null,
+    get_home: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = std.process.getEnvVarOwned,
+    exchange_code: *const fn (std.mem.Allocator, *const OAuthSpec, []const u8, []const u8, []const u8, []const u8) anyerror!OAuth = exchangeAuthorizationCode,
+    refresh_fetch: *const fn (std.mem.Allocator, Provider, OAuth) anyerror!OAuth = fetchRefreshedOAuthForProvider,
+    emit_audit_ctx: ?*anyopaque = null,
+    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,
+    now_ms: *const fn () i64 = std.time.milliTimestamp,
+};
 
 const OAuthTokenBody = enum {
     json_with_state,
@@ -399,7 +410,12 @@ pub fn completeOpenAICodexOAuthFromLocalCallback(
 }
 
 pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []const u8) !void {
+    return completeOAuthWithHooks(alloc, provider, input, .{});
+}
+
+fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, input: []const u8, hooks: Hooks) !void {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
+    try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
     var parsed = try parseOAuthInput(alloc, input);
     defer parsed.deinit(alloc);
@@ -409,12 +425,19 @@ pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []cons
     const oauth_redirect_uri = parsed.redirect_uri orelse spec.default_redirect_uri;
 
     // Manual completion path uses state as verifier (legacy code#state support).
-    const oauth = try exchangeAuthorizationCode(alloc, spec, parsed.code, state, oauth_redirect_uri, state);
+    const oauth = hooks.exchange_code(alloc, spec, parsed.code, state, oauth_redirect_uri, state) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
     defer {
         alloc.free(oauth.access);
         alloc.free(oauth.refresh);
     }
-    try saveOAuthForProvider(alloc, provider, oauth);
+    saveOAuthForProviderWithHooks(alloc, provider, oauth, hooks) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
+    try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .ok, .notice, .{ .text = "oauth login complete", .vis = .@"pub" });
 }
 
 pub fn completeOAuthFromLocalCallback(
@@ -424,22 +447,41 @@ pub fn completeOAuthFromLocalCallback(
     oauth_redirect_uri: []const u8,
     verifier: []const u8,
 ) !void {
+    return completeOAuthFromLocalCallbackWithHooks(alloc, provider, callback, oauth_redirect_uri, verifier, .{});
+}
+
+fn completeOAuthFromLocalCallbackWithHooks(
+    alloc: std.mem.Allocator,
+    provider: Provider,
+    callback: oauth_callback.CodeState,
+    oauth_redirect_uri: []const u8,
+    verifier: []const u8,
+    hooks: Hooks,
+) !void {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
     if (!std.mem.eql(u8, callback.state, verifier)) return error.OAuthStateMismatch;
+    try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
-    const oauth = try exchangeAuthorizationCode(
+    const oauth = hooks.exchange_code(
         alloc,
         spec,
         callback.code,
         callback.state,
         oauth_redirect_uri,
         verifier,
-    );
+    ) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
     defer {
         alloc.free(oauth.access);
         alloc.free(oauth.refresh);
     }
-    try saveOAuthForProvider(alloc, provider, oauth);
+    saveOAuthForProviderWithHooks(alloc, provider, oauth, hooks) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
+    try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .ok, .notice, .{ .text = "oauth login complete", .vis = .@"pub" });
 }
 
 pub fn parseAnthropicOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeInput {
@@ -808,6 +850,28 @@ pub fn refreshOAuth(alloc: std.mem.Allocator, old: OAuth) !OAuth {
 
 /// Refresh an expired OAuth token for a specific provider.
 pub fn refreshOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old: OAuth) !OAuth {
+    return refreshOAuthForProviderWithHooks(alloc, provider, old, .{});
+}
+
+fn refreshOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, old: OAuth, hooks: Hooks) !OAuth {
+    try emitAuthAudit(alloc, hooks, 1, provider, "refresh", "oauth", .ok, .info, .{ .text = "oauth refresh start", .vis = .@"pub" });
+    const new_oauth = hooks.refresh_fetch(alloc, provider, old) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "refresh", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
+    errdefer {
+        alloc.free(new_oauth.access);
+        alloc.free(new_oauth.refresh);
+    }
+    saveOAuthForProviderWithHooks(alloc, provider, new_oauth, hooks) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "refresh", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
+    try emitAuthAudit(alloc, hooks, 2, provider, "refresh", "oauth", .ok, .notice, .{ .text = "oauth refresh complete", .vis = .@"pub" });
+    return new_oauth;
+}
+
+fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old: OAuth) !OAuth {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -852,19 +916,25 @@ pub fn refreshOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old
     const resp_body = try rdr.allocRemaining(ar, .limited(65536));
 
     const new_oauth = try parseOAuthTokenResponse(alloc, ar, resp_body, error.RefreshFailed);
-
-    saveOAuthForProvider(ar, provider, new_oauth) catch |err| {
-        std.debug.print("warning: failed to persist refreshed token: {s}\n", .{@errorName(err)});
-    };
-
     return new_oauth;
 }
 
-fn saveOAuthForProvider(ar: std.mem.Allocator, provider: Provider, oauth: OAuth) !void {
-    const home = try std.process.getEnvVarOwned(ar, "HOME");
-    const dir_path = try primaryAuthDir(ar, home);
+fn saveOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, oauth: OAuth, hooks: Hooks) !void {
+    if (hooks.home_override) |home| return saveOAuthForProviderHome(alloc, home, provider, oauth);
+    const home = try hooks.get_home(alloc, "HOME");
+    defer alloc.free(home);
+    return saveOAuthForProviderHome(alloc, home, provider, oauth);
+}
+
+fn saveOAuthForProviderHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider, oauth: OAuth) !void {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const home_dup = try ar.dupe(u8, home);
+    const dir_path = try primaryAuthDir(ar, home_dup);
     try fs_secure.ensureDirPath(dir_path);
-    const path = try authFilePath(ar, home);
+    const path = try authFilePath(ar, home_dup);
 
     var auth_file: AuthFile = .{};
     // Load existing
@@ -928,18 +998,34 @@ fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {
 
 /// Remove credentials for a provider from all auth files.
 pub fn logout(alloc: std.mem.Allocator, provider: Provider) !void {
+    const home = try std.process.getEnvVarOwned(alloc, "HOME");
+    defer alloc.free(home);
+    return logoutHomeWithHooks(alloc, home, provider, .{});
+}
+
+fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Provider, hooks: Hooks) !void {
+    try emitAuthAudit(alloc, hooks, 1, provider, "logout", "stored", .ok, .info, .{ .text = "logout start", .vis = .@"pub" });
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
 
-    const home = try std.process.getEnvVarOwned(ar, "HOME");
-
-    const path = try authFilePath(ar, home);
-    const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return;
+    const home_dup = try ar.dupe(u8, home);
+    const path = try authFilePath(ar, home_dup);
+    const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) {
+            try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .ok, .notice, .{ .text = "logout noop", .vis = .@"pub" });
+            return;
+        }
+        try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
     var parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
-    }) catch return;
+    }) catch {
+        try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .ok, .notice, .{ .text = "logout noop", .vis = .@"pub" });
+        return;
+    };
 
     switch (provider) {
         .anthropic => parsed.value.anthropic = null,
@@ -951,14 +1037,30 @@ pub fn logout(alloc: std.mem.Allocator, provider: Provider) !void {
     const file = try fs_secure.createFilePath(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(out);
+    try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .ok, .notice, .{ .text = "logout complete", .vis = .@"pub" });
 }
 
 /// Save API key for a provider. Writes to primary auth dir (~/.pz/).
 pub fn saveApiKey(alloc: std.mem.Allocator, provider: Provider, key: []const u8) !void {
-    return saveApiKeyHome(alloc, try std.process.getEnvVarOwned(alloc, "HOME"), provider, key);
+    const home = try std.process.getEnvVarOwned(alloc, "HOME");
+    defer alloc.free(home);
+    return saveApiKeyHomeWithHooks(alloc, home, provider, key, .{});
 }
 
 fn saveApiKeyHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider, key: []const u8) !void {
+    return saveApiKeyHomeWithHooks(alloc, home, provider, key, .{});
+}
+
+fn saveApiKeyHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Provider, key: []const u8, hooks: Hooks) !void {
+    try emitAuthAudit(alloc, hooks, 1, provider, "save_api_key", "api_key", .ok, .info, .{ .text = "api key save start", .vis = .@"pub" });
+    saveApiKeyHomeRaw(alloc, home, provider, key) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "save_api_key", "api_key", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
+    try emitAuthAudit(alloc, hooks, 2, provider, "save_api_key", "api_key", .ok, .notice, .{ .text = "api key save complete", .vis = .@"pub" });
+}
+
+fn saveApiKeyHomeRaw(alloc: std.mem.Allocator, home: []const u8, provider: Provider, key: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -992,6 +1094,39 @@ fn saveApiKeyHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider
     try file.writeAll(out);
 }
 
+fn emitAuthAudit(
+    alloc: std.mem.Allocator,
+    hooks: Hooks,
+    seq: u64,
+    provider: Provider,
+    op: []const u8,
+    mech: []const u8,
+    out: audit.Out,
+    sev: audit.Sev,
+    msg: audit.Str,
+) !void {
+    if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, .{
+        .ts_ms = hooks.now_ms(),
+        .sid = "auth",
+        .seq = seq,
+        .out = out,
+        .sev = sev,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .auth,
+            .name = .{ .text = providerName(provider), .vis = .@"pub" },
+            .op = op,
+        },
+        .msg = msg,
+        .data = .{
+            .auth = .{
+                .mech = mech,
+                .sub = .{ .text = providerName(provider), .vis = .@"pub" },
+            },
+        },
+    });
+}
+
 test "saveApiKeyHome writes provider auth without process HOME" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1013,6 +1148,182 @@ test "saveApiKeyHome writes provider auth without process HOME" {
         const st = try tmp.dir.statFile(".pz/auth.json");
         try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
     }
+}
+
+const AuditRows = struct {
+    rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        for (self.rows.items) |row| alloc.free(row);
+        self.rows.deinit(alloc);
+    }
+
+    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const raw = try audit.encodeAlloc(alloc, ent);
+        try self.rows.append(alloc, raw);
+    }
+};
+
+test "auth audit covers api key save" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+    try saveApiKeyHomeWithHooks(std.testing.allocator, home, .openai, "sk-openai", .{
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 11;
+            }
+        }.f,
+    });
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":11,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"openai","vis":"pub"},"op":"save_api_key"},"msg":{"text":"api key save start","vis":"pub"},"data":{"mech":"api_key","sub":{"text":"openai","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":11,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"openai","vis":"pub"},"op":"save_api_key"},"msg":{"text":"api key save complete","vis":"pub"},"data":{"mech":"api_key","sub":{"text":"openai","vis":"pub"}},"attrs":[]}"
+    ).expectEqual(joined);
+}
+
+test "auth audit covers oauth login and persistence" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", .{
+        .home_override = home,
+        .exchange_code = struct {
+            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !OAuth {
+                return .{
+                    .access = try alloc.dupe(u8, "oa-access"),
+                    .refresh = try alloc.dupe(u8, "oa-refresh"),
+                    .expires = 123,
+                };
+            }
+        }.f,
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 22;
+            }
+        }.f,
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const auth = try loadFileAuthForProvider(arena.allocator(), home, .anthropic);
+    switch (auth) {
+        .oauth => |oauth_tok| {
+            try std.testing.expectEqualStrings("oa-access", oauth_tok.access);
+            try std.testing.expectEqualStrings("oa-refresh", oauth_tok.refresh);
+            try std.testing.expectEqual(@as(i64, 123), oauth_tok.expires);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":22,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"login"},"msg":{"text":"oauth login start","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":22,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"login"},"msg":{"text":"oauth login complete","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}"
+    ).expectEqual(joined);
+}
+
+test "auth audit covers oauth refresh and persistence" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+    const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .openai, .{
+        .access = "old-a",
+        .refresh = "old-r",
+        .expires = 1,
+    }, .{
+        .home_override = home,
+        .refresh_fetch = struct {
+            fn f(alloc: std.mem.Allocator, _: Provider, _: OAuth) !OAuth {
+                return .{
+                    .access = try alloc.dupe(u8, "new-a"),
+                    .refresh = try alloc.dupe(u8, "new-r"),
+                    .expires = 999,
+                };
+            }
+        }.f,
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 33;
+            }
+        }.f,
+    });
+    defer {
+        std.testing.allocator.free(got.access);
+        std.testing.allocator.free(got.refresh);
+    }
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":33,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"openai","vis":"pub"},"op":"refresh"},"msg":{"text":"oauth refresh start","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"openai","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":33,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"openai","vis":"pub"},"op":"refresh"},"msg":{"text":"oauth refresh complete","vis":"pub"},"data":{"mech":"oauth","sub":{"text":"openai","vis":"pub"}},"attrs":[]}"
+    ).expectEqual(joined);
+}
+
+test "auth audit covers logout" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    try saveApiKeyHome(std.testing.allocator, home, .anthropic, "sk-ant");
+
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+    try logoutHomeWithHooks(std.testing.allocator, home, .anthropic, .{
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 44;
+            }
+        }.f,
+    });
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"v":1,"ts_ms":44,"sid":"auth","seq":1,"kind":"auth","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"logout"},"msg":{"text":"logout start","vis":"pub"},"data":{"mech":"stored","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":44,"sid":"auth","seq":2,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"auth","name":{"text":"anthropic","vis":"pub"},"op":"logout"},"msg":{"text":"logout complete","vis":"pub"},"data":{"mech":"stored","sub":{"text":"anthropic","vis":"pub"}},"attrs":[]}"
+    ).expectEqual(joined);
 }
 
 test "listLoggedInHome returns stored providers without leaks" {
