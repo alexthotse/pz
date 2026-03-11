@@ -1,6 +1,7 @@
 const std = @import("std");
 const providers = @import("contract.zig");
 const auth_mod = @import("auth.zig");
+const audit = @import("../audit.zig");
 
 const api_host = "api.openai.com";
 const api_path = "/v1/responses";
@@ -173,7 +174,8 @@ pub const Client = struct {
                 try ar.dupe(u8, "unknown error");
             const status_int: u16 = @intFromEnum(stream.response.head.status);
             const safe_body = sanitizeUtf8(ar, err_body) catch "unknown error";
-            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, safe_body });
+            const redacted = audit.redactTextAlloc(ar, safe_body, .@"pub") catch "unknown error";
+            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, redacted });
         } else {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
         }
@@ -842,6 +844,17 @@ test "sanitizeUtf8 invalid bytes replaced" {
     const out = try sanitizeUtf8(testing.allocator, input);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("ab??cd", out);
+}
+
+test "provider error text redacts secret-bearing body" {
+    const safe = try sanitizeUtf8(testing.allocator, "authorization: bearer sk-live");
+    const redacted = try audit.redactTextAlloc(testing.allocator, safe, .@"pub");
+    defer testing.allocator.free(redacted);
+    const err = try std.fmt.allocPrint(testing.allocator, "401 {s}", .{redacted});
+    defer testing.allocator.free(err);
+
+    try testing.expect(std.mem.indexOf(u8, err, "sk-live") == null);
+    try testing.expect(std.mem.indexOf(u8, err, "[secret:") != null);
 }
 
 test "parseSseData output_text.delta emits text event" {

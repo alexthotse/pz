@@ -1,6 +1,7 @@
 const std = @import("std");
 const providers = @import("contract.zig");
 const auth_mod = @import("auth.zig");
+const audit = @import("../audit.zig");
 
 const api_version = "2023-06-01";
 const api_host = "api.anthropic.com";
@@ -201,7 +202,8 @@ pub const Client = struct {
             const safe_body = sanitizeUtf8(ar, err_body) catch "unknown error";
             // Extract human-readable message from API JSON error body
             const msg = extractApiErrMsg(safe_body) orelse safe_body;
-            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, msg });
+            const redacted = audit.redactTextAlloc(ar, msg, .@"pub") catch "unknown error";
+            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, redacted });
         } else {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
         }
@@ -838,6 +840,20 @@ test "sanitizeUtf8 invalid bytes replaced" {
     const result = try sanitizeUtf8(testing.allocator, input);
     defer testing.allocator.free(result);
     try testing.expectEqualStrings("ab??cd", result);
+}
+
+test "provider api message redacts secret-bearing body" {
+    const safe = try sanitizeUtf8(testing.allocator,
+        \\{"error":{"message":"authorization: bearer sk-live"}}
+    );
+    const msg = extractApiErrMsg(safe) orelse return error.TestUnexpectedResult;
+    const redacted = try audit.redactTextAlloc(testing.allocator, msg, .@"pub");
+    defer testing.allocator.free(redacted);
+    const err = try std.fmt.allocPrint(testing.allocator, "401 {s}", .{redacted});
+    defer testing.allocator.free(err);
+
+    try testing.expect(std.mem.indexOf(u8, err, "sk-live") == null);
+    try testing.expect(std.mem.indexOf(u8, err, "[secret:") != null);
 }
 
 test "parseSseData text delta" {
