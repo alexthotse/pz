@@ -8,6 +8,7 @@ const update_mod = @import("update.zig");
 const version_check = @import("version.zig");
 const config = @import("config.zig");
 const core = @import("../core/mod.zig");
+const core_skill = @import("../core/skill.zig");
 const print_fmt = @import("../modes/print/format.zig");
 const print_err = @import("../modes/print/errors.zig");
 const tui_harness = @import("../modes/tui/harness.zig");
@@ -21,6 +22,7 @@ const tui_overlay = @import("../modes/tui/overlay.zig");
 const tui_panels = @import("../modes/tui/panels.zig");
 const tui_pathcomp = @import("../modes/tui/pathcomp.zig");
 const args_mod = @import("args.zig");
+const path_guard = @import("../core/tools/path_guard.zig");
 
 pub const Err = error{
     SessionNotFound,
@@ -2870,6 +2872,25 @@ const CmdRes = enum {
     select_logout,
 };
 
+const SlashSkill = enum {
+    missing,
+    blocked,
+    allowed,
+};
+
+fn classifySlashSkill(skills: []const core_skill.SkillInfo, name: []const u8) SlashSkill {
+    const info = core_skill.findByDirName(skills, name) orelse return .missing;
+    if (!info.meta.user_invocable) return .blocked;
+    if (info.meta.disable_model_invocation) return .blocked;
+    return .allowed;
+}
+
+fn loadSlashSkill(alloc: std.mem.Allocator, name: []const u8) !SlashSkill {
+    const skills = try core_skill.discoverAndRead(alloc);
+    defer core_skill.freeSkills(alloc, skills);
+    return classifySlashSkill(skills, name);
+}
+
 fn handleSlashCommand(
     alloc: std.mem.Allocator,
     line: []const u8,
@@ -2925,7 +2946,11 @@ fn handleSlashCommand(
     });
 
     const resolved = cmd_map.get(cmd) orelse {
-        try writeTextLine(alloc, out, "unknown command: /{s}\n", .{cmd});
+        switch (try loadSlashSkill(alloc, cmd)) {
+            .allowed => return .unhandled,
+            .blocked => try writeTextLine(alloc, out, "skill blocked: /{s}\n", .{cmd}),
+            .missing => try writeTextLine(alloc, out, "unknown command: /{s}\n", .{cmd}),
+        }
         return .handled;
     };
 
@@ -6710,6 +6735,120 @@ test "runtime tui slash commands execute without prompt turns" {
     try std.testing.expect(std.mem.indexOf(u8, written, "ID:") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "Messages") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "new session") != null);
+}
+
+test "handleSlashCommand falls through for user-invocable skills" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pi/skills/review-plan");
+    var skill = try tmp.dir.createFile(".pi/skills/review-plan/SKILL.md", .{});
+    defer skill.close();
+    try skill.writeAll(
+        \\---
+        \\name: review-plan
+        \\description: review
+        \\user_invocable: true
+        \\---
+        \\Body
+        \\
+    );
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var sid = try std.testing.allocator.dupe(u8, "sid");
+    defer std.testing.allocator.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |buf| std.testing.allocator.free(buf);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |buf| std.testing.allocator.free(buf);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    defer bg_mgr.deinit();
+    var out_buf: [256]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try handleSlashCommand(
+        std.testing.allocator,
+        "/review-plan",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &tools_rt,
+        &bg_mgr,
+        null,
+        true,
+        null,
+        out_fbs.writer().any(),
+    );
+
+    try std.testing.expectEqual(CmdRes.unhandled, got);
+    try std.testing.expectEqual(@as(usize, 0), out_fbs.getWritten().len);
+}
+
+test "handleSlashCommand blocks non-user-invocable skills" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pi/skills/review-plan");
+    var skill = try tmp.dir.createFile(".pi/skills/review-plan/SKILL.md", .{});
+    defer skill.close();
+    try skill.writeAll(
+        \\---
+        \\name: review-plan
+        \\description: review
+        \\user_invocable: false
+        \\---
+        \\Body
+        \\
+    );
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var sid = try std.testing.allocator.dupe(u8, "sid");
+    defer std.testing.allocator.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |buf| std.testing.allocator.free(buf);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |buf| std.testing.allocator.free(buf);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    defer bg_mgr.deinit();
+    var out_buf: [256]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try handleSlashCommand(
+        std.testing.allocator,
+        "/review-plan",
+        &sid,
+        &model,
+        &model_owned,
+        &provider,
+        &provider_owned,
+        &tools_rt,
+        &bg_mgr,
+        null,
+        true,
+        null,
+        out_fbs.writer().any(),
+    );
+
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "skill blocked: /review-plan") != null);
 }
 
 test "runtime tui bg command starts and lists background jobs" {
