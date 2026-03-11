@@ -200,6 +200,14 @@ pub fn load(alloc: std.mem.Allocator) !Result {
 }
 
 pub fn loadForProvider(alloc: std.mem.Allocator, provider: Provider) !Result {
+    return loadForProviderHome(alloc, std.process.getEnvVarOwned, provider);
+}
+
+fn loadForProviderHome(
+    alloc: std.mem.Allocator,
+    comptime get_home: fn (std.mem.Allocator, []const u8) anyerror![]u8,
+    provider: Provider,
+) !Result {
     var arena = std.heap.ArenaAllocator.init(alloc);
     errdefer arena.deinit();
     const ar = arena.allocator();
@@ -208,7 +216,7 @@ pub fn loadForProvider(alloc: std.mem.Allocator, provider: Provider) !Result {
         return .{ .arena = arena, .auth = auth };
     }
 
-    const home = std.process.getEnvVarOwned(ar, "HOME") catch return error.AuthNotFound;
+    const home = get_home(ar, "HOME") catch return error.AuthNotFound;
     return .{
         .arena = arena,
         .auth = try loadFileAuthForProvider(ar, home, provider),
@@ -960,12 +968,16 @@ pub fn logout(alloc: std.mem.Allocator, provider: Provider) !void {
 
 /// Save API key for a provider. Writes to primary auth dir (~/.pi/agent/).
 pub fn saveApiKey(alloc: std.mem.Allocator, provider: Provider, key: []const u8) !void {
+    return saveApiKeyHome(alloc, try std.process.getEnvVarOwned(alloc, "HOME"), provider, key);
+}
+
+fn saveApiKeyHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider, key: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
 
-    const home = try std.process.getEnvVarOwned(ar, "HOME");
-    const dir_path = try primaryAuthDir(ar, home);
+    const home_dup = try ar.dupe(u8, home);
+    const dir_path = try primaryAuthDir(ar, home_dup);
     try std.fs.cwd().makePath(dir_path);
     const path = try std.fs.path.join(ar, &.{ dir_path, "auth.json" });
 
@@ -991,6 +1003,24 @@ pub fn saveApiKey(alloc: std.mem.Allocator, provider: Provider, key: []const u8)
     const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(out);
+}
+
+test "saveApiKeyHome writes provider auth without process HOME" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-openai");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const auth = try loadFileAuthForProvider(arena.allocator(), home, .openai);
+    switch (auth) {
+        .api_key => |key| try std.testing.expectEqualStrings("sk-openai", key),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "authFromEnv prefers oauth token over api key" {

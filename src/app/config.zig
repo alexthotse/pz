@@ -70,8 +70,11 @@ pub const PzState = struct {
     last_hash: ?[]const u8 = null,
 
     pub fn load(alloc: std.mem.Allocator) ?PzState {
-        const home = std.posix.getenv("HOME") orelse return null;
-        const path = std.fs.path.join(alloc, &.{ home, pz_state_dir, pz_state_file }) catch return null;
+        return loadForHome(alloc, std.posix.getenv("HOME"));
+    }
+
+    pub fn loadForHome(alloc: std.mem.Allocator, home_override: ?[]const u8) ?PzState {
+        const path = statePathAlloc(alloc, home_override) orelse return null;
         defer alloc.free(path);
         const raw = std.fs.cwd().readFileAlloc(alloc, path, 64 * 1024) catch return null;
         defer alloc.free(raw);
@@ -87,7 +90,11 @@ pub const PzState = struct {
     }
 
     pub fn save(self: PzState, alloc: std.mem.Allocator) void {
-        const home = std.posix.getenv("HOME") orelse return;
+        self.saveForHome(alloc, std.posix.getenv("HOME"));
+    }
+
+    pub fn saveForHome(self: PzState, alloc: std.mem.Allocator, home_override: ?[]const u8) void {
+        const home = home_override orelse return;
         const dir_path = std.fs.path.join(alloc, &.{ home, pz_state_dir }) catch return;
         defer alloc.free(dir_path);
         std.fs.cwd().makePath(dir_path) catch return;
@@ -106,7 +113,33 @@ pub const PzState = struct {
     }
 };
 
+fn statePathAlloc(alloc: std.mem.Allocator, home_override: ?[]const u8) ?[]u8 {
+    const home = home_override orelse return null;
+    return std.fs.path.join(alloc, &.{ home, pz_state_dir, pz_state_file }) catch return null;
+}
+
 pub const Err = anyerror;
+
+test "pz state save and load are home-overrideable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home");
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home);
+
+    var state = PzState{ .last_hash = try std.testing.allocator.dupe(u8, "abc123") };
+    defer state.deinit(std.testing.allocator);
+    state.saveForHome(std.testing.allocator, home);
+
+    var loaded = PzState.loadForHome(std.testing.allocator, home) orelse return error.TestUnexpectedResult;
+    defer loaded.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("abc123", loaded.last_hash orelse return error.TestUnexpectedResult);
+}
+
+test "pz state load returns null without overrideable home" {
+    try std.testing.expect(PzState.loadForHome(std.testing.allocator, null) == null);
+}
 
 pub fn discover(
     alloc: std.mem.Allocator,

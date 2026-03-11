@@ -223,22 +223,58 @@ fn removeActive(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(Active), 
     }
 }
 
+const StateEnv = struct {
+    pz_state_dir: ?[]const u8 = null,
+    xdg_state_home: ?[]const u8 = null,
+    home: ?[]const u8 = null,
+};
+
 fn resolveStateDir(alloc: std.mem.Allocator) ![]u8 {
-    if (std.posix.getenv("PZ_STATE_DIR")) |state_dir| {
+    return resolveStateDirEnv(alloc, .{
+        .pz_state_dir = std.posix.getenv("PZ_STATE_DIR"),
+        .xdg_state_home = std.posix.getenv("XDG_STATE_HOME"),
+        .home = std.posix.getenv("HOME"),
+    });
+}
+
+fn resolveStateDirEnv(alloc: std.mem.Allocator, env: StateEnv) ![]u8 {
+    if (env.pz_state_dir) |state_dir| {
         return alloc.dupe(u8, state_dir);
     }
 
     if (builtin.os.tag == .macos) {
-        const home = std.posix.getenv("HOME") orelse return error.EnvironmentVariableNotFound;
+        const home = env.home orelse return error.EnvironmentVariableNotFound;
         return std.fs.path.join(alloc, &.{ home, "Library", "Application Support" });
     }
 
-    if (std.posix.getenv("XDG_STATE_HOME")) |xdg_state| {
+    if (env.xdg_state_home) |xdg_state| {
         return alloc.dupe(u8, xdg_state);
     }
 
-    const home = std.posix.getenv("HOME") orelse return error.EnvironmentVariableNotFound;
+    const home = env.home orelse return error.EnvironmentVariableNotFound;
     return std.fs.path.join(alloc, &.{ home, ".local", "state" });
+}
+
+test "resolveStateDirEnv honors explicit override" {
+    const got = try resolveStateDirEnv(std.testing.allocator, .{
+        .pz_state_dir = "/tmp/pz-state",
+        .xdg_state_home = "/tmp/xdg",
+        .home = "/tmp/home",
+    });
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("/tmp/pz-state", got);
+}
+
+test "resolveStateDirEnv is home-overrideable" {
+    const got = try resolveStateDirEnv(std.testing.allocator, .{
+        .home = "/tmp/home",
+    });
+    defer std.testing.allocator.free(got);
+    if (builtin.os.tag == .macos) {
+        try std.testing.expectEqualStrings("/tmp/home/Library/Application Support", got);
+    } else {
+        try std.testing.expectEqualStrings("/tmp/home/.local/state", got);
+    }
 }
 
 test "journal replay tracks active launches only" {
