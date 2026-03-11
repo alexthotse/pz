@@ -80,7 +80,11 @@ pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
     return runOutcomeWith(alloc, .{});
 }
 
-const Hooks = struct {
+pub fn runOutcomeAudited(alloc: std.mem.Allocator, hooks: AuditHooks) !Outcome {
+    return runOutcomeWith(alloc, hooks);
+}
+
+pub const AuditHooks = struct {
     http_get: *const fn (std.mem.Allocator, []const u8, []const u8, usize) anyerror!HttpResult = httpGetResult,
     self_exe_path: *const fn (std.mem.Allocator) anyerror![]u8 = std.fs.selfExePathAlloc,
     install_binary: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void = installBinary,
@@ -89,6 +93,8 @@ const Hooks = struct {
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
 };
+
+const Hooks = AuditHooks;
 
 fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     var arena = std.heap.ArenaAllocator.init(alloc);
