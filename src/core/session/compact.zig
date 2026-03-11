@@ -427,12 +427,20 @@ test "compaction rewrites stream and preserves semantic events" {
         try std.testing.expectEqualStrings(lhs, rhs);
     }
 
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const loaded = (try loadCheckpoint(std.testing.allocator, tmp.dir, "s1")) orelse {
         return error.TestUnexpectedResult;
     };
-    try std.testing.expectEqual(@as(u16, checkpoint_version), loaded.version);
-    try std.testing.expectEqual(@as(u64, 5), loaded.in_lines);
-    try std.testing.expectEqual(@as(u64, 3), loaded.out_lines);
+    try oh.snap(@src(),
+        \\core.session.compact.Checkpoint
+        \\  .version: u16 = 1
+        \\  .in_lines: u64 = 5
+        \\  .out_lines: u64 = 3
+        \\  .in_bytes: u64 = 252
+        \\  .out_bytes: u64 = 166
+        \\  .compacted_at_ms: i64 = 777
+    ).expectEqual(loaded);
 }
 
 test "compaction checkpoint returns null when absent" {
@@ -837,6 +845,12 @@ test "generateSummary with tool_call events produces file_ops" {
 }
 
 test "generateSummary with text-only events has null file_ops" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const SummarySnap = struct {
+        file_ops: ?[]const u8,
+        event_jsons: []const []const u8,
+    };
     const alloc = std.testing.allocator;
     const events = [_]schema.Event{
         .{ .at_ms = 1, .data = .{ .text = .{ .text = "just text" } } },
@@ -846,9 +860,23 @@ test "generateSummary with text-only events has null file_ops" {
     const summary = (try generateSummary(alloc, &events)) orelse return error.TestUnexpectedResult;
     defer freeGeneratedSummary(alloc, summary);
 
-    try std.testing.expect(summary.file_ops == null);
-    try std.testing.expectEqual(@as(usize, 2), summary.event_jsons.len);
-    try std.testing.expect(std.mem.startsWith(u8, summary.event_jsons[1], "<untrusted-input kind=\"session-event\" name=\"prompt\">\n"));
+    try oh.snap(@src(),
+        \\core.session.compact.test.generateSummary with text-only events has null file_ops.SummarySnap
+        \\  .file_ops: ?[]const u8
+        \\    null
+        \\  .event_jsons: []const []const u8
+        \\    [0]: []const u8
+        \\      "<untrusted-input kind="session-event" name="text">
+        \\{"version":1,"at_ms":1,"data":{"text":{"text":"just text"}}}
+        \\</untrusted-input>"
+        \\    [1]: []const u8
+        \\      "<untrusted-input kind="session-event" name="prompt">
+        \\{"version":1,"at_ms":2,"data":{"prompt":{"text":"a prompt"}}}
+        \\</untrusted-input>"
+    ).expectEqual(SummarySnap{
+        .file_ops = summary.file_ops,
+        .event_jsons = summary.event_jsons,
+    });
 }
 
 test "generateSummary with empty events returns null" {
