@@ -870,6 +870,9 @@ fn parseCallArgs(
         .ask => .{
             .ask = try parseArgs(tools.Call.AskArgs, alloc, raw),
         },
+        .skill => .{
+            .skill = try parseArgs(tools.Call.SkillArgs, alloc, raw),
+        },
     };
 }
 
@@ -2414,4 +2417,32 @@ test "CmdCache respects max_commands limit" {
     try std.testing.expect(cache.contains("overflow"));
     try std.testing.expect(!cache.contains("cmd-0")); // evicted
     try std.testing.expect(cache.contains("cmd-1")); // still present
+}
+
+test "parseCallArgs parses skill args" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const got = try parseCallArgs(
+        std.testing.allocator,
+        .skill,
+        "{\"name\":\"review-plan\",\"args\":\"focus policy\"}",
+    );
+
+    const skill_args = switch (got) {
+        .skill => |skill_args| skill_args,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "name={s}\nargs={s}\n", .{
+        skill_args.name,
+        skill_args.args,
+    });
+    defer std.testing.allocator.free(snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "name=review-plan
+        \\args=focus policy
+        \\"
+    ).expectEqual(snap);
 }

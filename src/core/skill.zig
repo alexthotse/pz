@@ -16,6 +16,13 @@ pub const SkillInfo = struct {
     source: Source,
 };
 
+pub fn findByDirName(skills: []const SkillInfo, dir_name: []const u8) ?*const SkillInfo {
+    for (skills) |*skill| {
+        if (std.mem.eql(u8, skill.dir_name, dir_name)) return skill;
+    }
+    return null;
+}
+
 const max_frontmatter: usize = 4096;
 const max_file: usize = 64 * 1024;
 
@@ -168,8 +175,8 @@ pub fn discoverAndRead(alloc: std.mem.Allocator) ![]SkillInfo {
     }
 
     // Track names for dedup (project wins)
-    var seen = std.StringHashMap(usize).empty;
-    defer seen.deinit(alloc);
+    var seen = std.StringHashMap(usize).init(alloc);
+    defer seen.deinit();
 
     // Global: ~/.pi/agent/skills/*/SKILL.md
     if (std.posix.getenv("HOME")) |home| {
@@ -240,7 +247,7 @@ fn scanDir(
             freeSkill(alloc, skills.items[idx]);
             skills.items[idx] = info;
         } else {
-            try seen.put(alloc, dir_name, skills.items.len);
+            try seen.put(dir_name, skills.items.len);
             try skills.append(alloc, info);
         }
     }

@@ -9,6 +9,7 @@ pub const edit = @import("edit.zig");
 pub const grep = @import("grep.zig");
 pub const find = @import("find.zig");
 pub const ls = @import("ls.zig");
+pub const skill = @import("skill.zig");
 pub const web = @import("web.zig");
 pub const contract_test = @import("contract_test.zig");
 
@@ -22,6 +23,7 @@ pub const Kind = enum {
     ls,
     web,
     ask,
+    skill,
 };
 
 pub const Tool = struct {
@@ -109,6 +111,7 @@ pub const Call = struct {
         ls: LsArgs,
         web: WebArgs,
         ask: AskArgs,
+        skill: SkillArgs,
     };
 
     pub const ReadArgs = struct {
@@ -171,6 +174,11 @@ pub const Call = struct {
             label: []const u8,
             description: []const u8 = "",
         };
+    };
+
+    pub const SkillArgs = struct {
+        name: []const u8,
+        args: []const u8 = "",
     };
 
     pub const Env = struct {

@@ -8,6 +8,7 @@ const grep = @import("grep.zig");
 const find = @import("find.zig");
 const ls = @import("ls.zig");
 const path_guard = @import("path_guard.zig");
+const skill = @import("skill.zig");
 
 const default_max_bytes: usize = 64 * 1024;
 pub const mask_read: u16 = 1 << 0;
@@ -18,6 +19,7 @@ pub const mask_grep: u16 = 1 << 4;
 pub const mask_find: u16 = 1 << 5;
 pub const mask_ls: u16 = 1 << 6;
 pub const mask_ask: u16 = 1 << 7;
+pub const mask_skill: u16 = 1 << 8;
 pub const mask_all: u16 =
     mask_read |
     mask_write |
@@ -26,7 +28,8 @@ pub const mask_all: u16 =
     mask_grep |
     mask_find |
     mask_ls |
-    mask_ask;
+    mask_ask |
+    mask_skill;
 
 const read_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = true, .desc = "File path" },
@@ -69,6 +72,11 @@ const find_params = [_]tools.Tool.Param{
 const ls_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = false, .desc = "Directory to list" },
     .{ .name = "all", .ty = .bool, .required = false, .desc = "Include hidden entries" },
+};
+
+const skill_params = [_]tools.Tool.Param{
+    .{ .name = "name", .ty = .string, .required = true, .desc = "Skill directory name" },
+    .{ .name = "args", .ty = .string, .required = false, .desc = "Optional user arguments appended to the skill body" },
 };
 
 const ask_schema =
@@ -142,8 +150,9 @@ pub const Runtime = struct {
     max_bytes: usize,
     tool_mask: u16,
     ask_hook: ?AskHook,
-    entries: [8]tools.Entry = undefined,
-    selected: [8]tools.Entry = undefined,
+    skill_cache: skill.Cache = .{},
+    entries: [9]tools.Entry = undefined,
+    selected: [9]tools.Entry = undefined,
 
     pub fn init(opts: Opts) Runtime {
         return .{
@@ -157,6 +166,10 @@ pub const Runtime = struct {
     pub fn registry(self: *Runtime) tools.Registry {
         self.rebuildEntries();
         return tools.Registry.init(self.activeEntries());
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        self.skill_cache.deinit(self.alloc);
     }
 
     pub fn deinitResult(self: Runtime, res: tools.Result) void {
@@ -298,6 +311,22 @@ pub const Runtime = struct {
                 },
                 .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runAsk),
             },
+            .{
+                .name = "skill",
+                .kind = .skill,
+                .spec = .{
+                    .kind = .skill,
+                    .desc = "Load a named skill into the model context",
+                    .params = skill_params[0..],
+                    .out = .{
+                        .max_bytes = @intCast(self.max_bytes),
+                        .stream = false,
+                    },
+                    .timeout_ms = 2000,
+                    .destructive = false,
+                },
+                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runSkill),
+            },
         };
     }
 
@@ -335,6 +364,10 @@ pub const Runtime = struct {
         }
         if ((self.tool_mask & mask_ask) != 0) {
             self.selected[len] = self.entries[7];
+            len += 1;
+        }
+        if ((self.tool_mask & mask_skill) != 0) {
+            self.selected[len] = self.entries[8];
             len += 1;
         }
         return self.selected[0..len];
@@ -465,6 +498,16 @@ pub const Runtime = struct {
                 .{ .ok = .{ .code = 0 } },
         };
     }
+
+    fn runSkill(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+        const h = skill.Handler.init(.{
+            .alloc = self.alloc,
+            .max_bytes = self.max_bytes,
+            .now_ms = call.at_ms,
+            .cache = &self.skill_cache,
+        });
+        return h.run(call, sink);
+    }
 };
 
 fn askResultCancelled(raw: []const u8) bool {
@@ -490,6 +533,7 @@ pub fn maskForName(name: []const u8) ?u16 {
         .{ "find", mask_find },
         .{ "ls", mask_ls },
         .{ "ask", mask_ask },
+        .{ "skill", mask_skill },
     });
     return map.get(name);
 }

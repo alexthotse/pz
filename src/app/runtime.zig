@@ -3760,6 +3760,7 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
         "find",
         "ls",
         "ask",
+        "skill",
     };
     const bits = [_]u16{
         core.tools.builtin.mask_read,
@@ -3770,6 +3771,7 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
         core.tools.builtin.mask_find,
         core.tools.builtin.mask_ls,
         core.tools.builtin.mask_ask,
+        core.tools.builtin.mask_skill,
     };
 
     var need_sep = false;
@@ -4340,7 +4342,7 @@ const model_cycle = [_][]const u8{
 };
 
 const provider_args = [_][]const u8{ "anthropic", "openai", "google" };
-const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "ask" };
+const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "ask", "skill" };
 const bg_args = [_][]const u8{ "run", "list", "show", "stop" };
 const bg_usage = "usage: /bg run <cmd>|list|show <id>|stop <id>\n";
 const BgSub = enum {

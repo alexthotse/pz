@@ -103,7 +103,7 @@ pub const help_text =
     \\      --provider <PROVIDER>   Override provider id
     \\      --session-dir <PATH>    Override session directory
     \\      --provider-cmd <CMD>    Override provider transport command
-    \\      --tools <LIST>          Enable tool subset (read,write,bash,edit,grep,find,ls,ask)
+    \\      --tools <LIST>          Enable tool subset (read,write,bash,edit,grep,find,ls,ask,skill)
     \\      --no-tools              Disable all built-in tools
     \\      --thinking <LEVEL>      Thinking mode (off,minimal,low,medium,high,xhigh,adaptive)
     \\      --max-turns <N>          Limit agent loop turns (0=unlimited)
