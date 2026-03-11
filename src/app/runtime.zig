@@ -5706,6 +5706,77 @@ test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
     try std.testing.expect(ui.ov == null);
 }
 
+test "ask ui cancel frees temporary state and overlay" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var live = try LiveTurn.init(std.testing.allocator);
+    defer live.deinit();
+
+    const opts = [_]core.tools.Call.AskArgs.Option{
+        .{ .label = "A" },
+        .{ .label = "B" },
+    };
+    const qs = [_]core.tools.Call.AskArgs.Question{
+        .{
+            .id = "scope",
+            .question = "Pick scope",
+            .options = opts[0..],
+            .allow_other = true,
+        },
+    };
+
+    const Ctx = struct {
+        live: *LiveTurn,
+        out: ?[]u8 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.out = self.live.ask(.{ .questions = qs[0..] }) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
+    defer ui.deinit();
+    try ui.ed.setText("draft");
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+    defer std.posix.close(pipe[0]);
+    defer std.posix.close(pipe[1]);
+    var watcher = try InputWatcher.init(pipe[0]);
+    defer watcher.deinit();
+    var ask_ui_ctx = AskUiCtx{
+        .alloc = std.testing.allocator,
+        .ui = &ui,
+        .out = out_fbs.writer().any(),
+        .watcher = &watcher,
+    };
+    _ = try std.posix.write(pipe[1], "\x03");
+    var reader = tui_input.Reader.init(watcher.fd);
+
+    var ctx = Ctx{ .live = &live };
+    const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+    const tx = try waitForAskTxn(&live);
+
+    live.finishAsk(tx, ask_ui_ctx.runOnMain(&reader, tx.args.view()));
+    thr.join();
+
+    if (ctx.err) |err| return err;
+    defer std.testing.allocator.free(ctx.out.?);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{"cancelled":true,"answers":[]}"
+    ).expectEqual(ctx.out.?);
+    try std.testing.expectEqualStrings("draft", ui.ed.text());
+    try std.testing.expect(!watcher.isPaused());
+    try std.testing.expect(ui.ov == null);
+}
+
 test "input watcher join wakes promptly while paused" {
     const in_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
     defer std.posix.close(in_pipe[0]);
