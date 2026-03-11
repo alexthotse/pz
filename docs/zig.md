@@ -149,6 +149,17 @@ try std.testing.expectError(error.X, err_union);
 // NEVER /// doc comments on test decls — use //
 ```
 
+## Build + Snapshot Notes
+
+- In `jj` repos, build metadata must not shell out to `git`. Use `jj log` or repository metadata already available to the build, or sibling workspaces will fail tests.
+- `ohsnap` raw-value snapshots must include the rendered type header, not just the value body.
+```zig
+try oh.snap(@src(),
+    \\[]u8
+    \\  "value"
+).expectEqual(got);
+```
+
 ## Anti-Patterns (BLOCKING)
 
 **1. Error masking:** No `catch unreachable` (unless provable). No `catch {}`. Use `try` or `catch |err| { log; return err; }`.

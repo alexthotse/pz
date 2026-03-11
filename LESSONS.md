@@ -4,6 +4,16 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 
 ---
 
+## Session Notes (2026-03-11)
+
+### Worked Well
+- Landing worker results with `jj restore --from <commit> <file>` kept dot merges exact and avoided stale workspace side-data.
+- Replacing `git` shell-outs in `build.zig` with `jj log` made test runs work inside `jj workspace` siblings without fake `.git` hacks.
+
+### Did Not Work
+- Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.
+- For raw string snapshots, writing only the body text is wrong. `ohsnap` expects the full typed shape like `[]u8` plus the value line.
+
 ## Session Notes (2026-03-10)
 
 ### Worked Well
