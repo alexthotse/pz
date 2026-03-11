@@ -319,12 +319,18 @@ fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?File
     const r = try alloc.dupe([]const u8, read_set.keys());
     errdefer alloc.free(r);
     read_set.clearRetainingCapacity();
+    std.sort.pdq([]const u8, r, {}, lessPath);
 
     const m = try alloc.dupe([]const u8, mod_set.keys());
     errdefer alloc.free(m);
     mod_set.clearRetainingCapacity();
+    std.sort.pdq([]const u8, m, {}, lessPath);
 
     return FileOps{ .read = r, .modified = m };
+}
+
+fn lessPath(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }
 
 fn freeFileOps(alloc: std.mem.Allocator, ops: FileOps) void {
@@ -602,6 +608,33 @@ test "formatFileOps deduplicates read+write to modified only" {
         \\</read-files>
         \\<modified-files>
         \\/src/f.zig
+        \\</modified-files>
+        \\"
+    ).expectEqual(got);
+}
+
+test "formatFileOps sorts read and modified paths" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const evs = [_]schema.Event{
+        mkEv("read", "{\"path\":\"/src/z.zig\"}"),
+        mkEv("read", "{\"path\":\"/src/a.zig\"}"),
+        mkEv("edit", "{\"path\":\"/src/m.zig\"}"),
+        mkEv("write", "{\"path\":\"/src/b.zig\"}"),
+    };
+    const got = try formatFileOps(std.testing.allocator, &evs) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "<read-files>
+        \\/src/a.zig
+        \\/src/z.zig
+        \\</read-files>
+        \\<modified-files>
+        \\/src/b.zig
+        \\/src/m.zig
         \\</modified-files>
         \\"
     ).expectEqual(got);
