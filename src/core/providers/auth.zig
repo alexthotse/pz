@@ -39,7 +39,7 @@ pub fn providerName(p: Provider) []const u8 {
     return provider_names[@intFromEnum(p)];
 }
 
-const Hooks = struct {
+pub const Hooks = struct {
     home_override: ?[]const u8 = null,
     get_home: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = std.process.getEnvVarOwned,
     exchange_code: *const fn (std.mem.Allocator, *const OAuthSpec, []const u8, []const u8, []const u8, []const u8) anyerror!OAuth = exchangeAuthorizationCode,
@@ -413,7 +413,7 @@ pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []cons
     return completeOAuthWithHooks(alloc, provider, input, .{});
 }
 
-fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, input: []const u8, hooks: Hooks) !void {
+pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, input: []const u8, hooks: Hooks) !void {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
     try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
@@ -450,7 +450,7 @@ pub fn completeOAuthFromLocalCallback(
     return completeOAuthFromLocalCallbackWithHooks(alloc, provider, callback, oauth_redirect_uri, verifier, .{});
 }
 
-fn completeOAuthFromLocalCallbackWithHooks(
+pub fn completeOAuthFromLocalCallbackWithHooks(
     alloc: std.mem.Allocator,
     provider: Provider,
     callback: oauth_callback.CodeState,
@@ -998,9 +998,16 @@ fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {
 
 /// Remove credentials for a provider from all auth files.
 pub fn logout(alloc: std.mem.Allocator, provider: Provider) !void {
-    const home = try std.process.getEnvVarOwned(alloc, "HOME");
+    return logoutWithHooks(alloc, provider, .{});
+}
+
+pub fn logoutWithHooks(alloc: std.mem.Allocator, provider: Provider, hooks: Hooks) !void {
+    const home = if (hooks.home_override) |path|
+        try alloc.dupe(u8, path)
+    else
+        try hooks.get_home(alloc, "HOME");
     defer alloc.free(home);
-    return logoutHomeWithHooks(alloc, home, provider, .{});
+    return logoutHomeWithHooks(alloc, home, provider, hooks);
 }
 
 fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Provider, hooks: Hooks) !void {
@@ -1042,9 +1049,16 @@ fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Pro
 
 /// Save API key for a provider. Writes to primary auth dir (~/.pz/).
 pub fn saveApiKey(alloc: std.mem.Allocator, provider: Provider, key: []const u8) !void {
-    const home = try std.process.getEnvVarOwned(alloc, "HOME");
+    return saveApiKeyWithHooks(alloc, provider, key, .{});
+}
+
+pub fn saveApiKeyWithHooks(alloc: std.mem.Allocator, provider: Provider, key: []const u8, hooks: Hooks) !void {
+    const home = if (hooks.home_override) |path|
+        try alloc.dupe(u8, path)
+    else
+        try hooks.get_home(alloc, "HOME");
     defer alloc.free(home);
-    return saveApiKeyHomeWithHooks(alloc, home, provider, key, .{});
+    return saveApiKeyHomeWithHooks(alloc, home, provider, key, hooks);
 }
 
 fn saveApiKeyHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider, key: []const u8) !void {

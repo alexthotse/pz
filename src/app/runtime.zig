@@ -1347,6 +1347,22 @@ const RpcReq = struct {
     sid: ?[]const u8 = null,
 };
 
+const AuditHooks = struct {
+    emit_audit_ctx: ?*anyopaque = null,
+    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    now_ms: *const fn () i64 = std.time.milliTimestamp,
+    auth_home: ?[]const u8 = null,
+
+    fn auth(self: AuditHooks) core.providers.auth.Hooks {
+        return .{
+            .home_override = self.auth_home,
+            .emit_audit_ctx = self.emit_audit_ctx,
+            .emit_audit = self.emit_audit,
+            .now_ms = self.now_ms,
+        };
+    }
+};
+
 pub fn exec(alloc: std.mem.Allocator, run_cmd: cli.Run) (Err || anyerror)![]u8 {
     return execWithIo(alloc, run_cmd, null, null);
 }
@@ -1364,6 +1380,16 @@ pub fn execWithIo(
     run_cmd: cli.Run,
     in: ?std.Io.AnyReader,
     out: ?std.Io.AnyWriter,
+) (Err || anyerror)![]u8 {
+    return execWithIoHooks(alloc, run_cmd, in, out, .{});
+}
+
+fn execWithIoHooks(
+    alloc: std.mem.Allocator,
+    run_cmd: cli.Run,
+    in: ?std.Io.AnyReader,
+    out: ?std.Io.AnyWriter,
+    audit_hooks: AuditHooks,
 ) (Err || anyerror)![]u8 {
     var provider_rt: ProviderRuntime = undefined;
     var native_rt: NativeProviderRuntime = undefined;
@@ -1491,6 +1517,7 @@ pub fn execWithIo(
                     run_cmd.no_session,
                     sys_prompt,
                     has_native_rt and native_rt.isSub(),
+                    audit_hooks,
                 ),
                 .rpc => try runRpc(
                     alloc,
@@ -1504,6 +1531,7 @@ pub fn execWithIo(
                     session_dir_path,
                     run_cmd.no_session,
                     sys_prompt,
+                    audit_hooks,
                 ),
             }
             st = .done;
@@ -1627,6 +1655,7 @@ fn runTui(
     no_session: bool,
     sys_prompt_arg: ?[]const u8,
     is_sub: bool,
+    audit_hooks: AuditHooks,
 ) !void {
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
     var model_owned: ?[]u8 = null;
@@ -1697,7 +1726,11 @@ fn runTui(
         .max_turns = run_cmd.max_turns,
         .cancel = cancel,
     };
-    var bg_mgr = try bg.Mgr.init(alloc);
+    var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
+        .emit_audit_ctx = audit_hooks.emit_audit_ctx,
+        .emit_audit = audit_hooks.emit_audit,
+        .now_ms = audit_hooks.now_ms,
+    });
     defer bg_mgr.deinit();
     try syncBgFooter(alloc, &ui, &bg_mgr);
 
@@ -1760,6 +1793,7 @@ fn runTui(
             no_session,
             sys_prompt,
             init_cmd_fbs.writer().any(),
+            audit_hooks,
         );
         if (cmd == .quit) return;
         if (cmd == .clear) {
@@ -2072,6 +2106,7 @@ fn runTui(
                                 no_session,
                                 sys_prompt,
                                 cmd_fbs.writer().any(),
+                                audit_hooks,
                             );
                             if (cmd == .quit) return;
                             if (cmd == .clear) {
@@ -2527,6 +2562,7 @@ fn runTui(
                 no_session,
                 sys_prompt,
                 out,
+                audit_hooks,
             );
             if (cmd == .quit) return;
             if (cmd == .clear) {
@@ -2609,6 +2645,7 @@ fn runRpc(
     session_dir_path: ?[]const u8,
     no_session: bool,
     sys_prompt: ?[]const u8,
+    audit_hooks: AuditHooks,
 ) !void {
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
     var model_owned: ?[]u8 = null;
@@ -2631,7 +2668,11 @@ fn runRpc(
         .mode = mode,
         .max_turns = run_cmd.max_turns,
     };
-    var bg_mgr = try bg.Mgr.init(alloc);
+    var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
+        .emit_audit_ctx = audit_hooks.emit_audit_ctx,
+        .emit_audit = audit_hooks.emit_audit,
+        .now_ms = audit_hooks.now_ms,
+    });
     defer bg_mgr.deinit();
 
     while (try in.readUntilDelimiterOrEofAlloc(alloc, '\n', 128 * 1024)) |raw_line| {
@@ -2676,13 +2717,15 @@ fn runRpc(
         }
         const cmd = normalizeRpcCmd(raw_cmd);
 
-        const RpcCmd = enum { prompt, model, provider, tools, bg, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
+        const RpcCmd = enum { prompt, model, provider, tools, bg, login, logout, upgrade, new, @"resume", session, tree, fork, compact, help, commands, quit, exit };
         const rpc_map = std.StaticStringMap(RpcCmd).initComptime(.{
             .{ "prompt", .prompt },
             .{ "model", .model },
             .{ "provider", .provider },
             .{ "tools", .tools },
             .{ "bg", .bg },
+            .{ "login", .login },
+            .{ "logout", .logout },
             .{ "upgrade", .upgrade },
             .{ "new", .new },
             .{ "resume", .@"resume" },
@@ -2817,6 +2860,46 @@ fn runRpc(
                 defer alloc.free(msg);
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_bg",
+                    .id = req.id,
+                    .cmd = raw_cmd,
+                    .msg = msg,
+                });
+            },
+            .login => {
+                const msg = runRpcLogin(alloc, req, audit_hooks.auth()) catch |err| {
+                    const err_msg = try report.rpc(alloc, "login", err);
+                    defer alloc.free(err_msg);
+                    try writeJsonLine(alloc, out, .{
+                        .type = "rpc_error",
+                        .id = req.id,
+                        .cmd = raw_cmd,
+                        .msg = err_msg,
+                    });
+                    continue;
+                };
+                defer alloc.free(msg);
+                try writeJsonLine(alloc, out, .{
+                    .type = "rpc_auth",
+                    .id = req.id,
+                    .cmd = raw_cmd,
+                    .msg = msg,
+                });
+            },
+            .logout => {
+                const msg = runRpcLogout(alloc, req, provider_label, audit_hooks.auth()) catch |err| {
+                    const err_msg = try report.rpc(alloc, "logout", err);
+                    defer alloc.free(err_msg);
+                    try writeJsonLine(alloc, out, .{
+                        .type = "rpc_error",
+                        .id = req.id,
+                        .cmd = raw_cmd,
+                        .msg = err_msg,
+                    });
+                    continue;
+                };
+                defer alloc.free(msg);
+                try writeJsonLine(alloc, out, .{
+                    .type = "rpc_auth",
                     .id = req.id,
                     .cmd = raw_cmd,
                     .msg = msg,
@@ -2969,12 +3052,12 @@ fn runRpc(
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_help",
                     .id = req.id,
-                    .commands = "prompt,model,provider,tools,bg,upgrade,new,resume,session,tree,fork,compact,quit",
+                    .commands = "prompt,model,provider,tools,bg,login,logout,upgrade,new,resume,session,tree,fork,compact,quit",
                 });
             },
             .commands => {
                 const commands = [_][]const u8{
-                    "prompt", "model", "provider", "tools", "bg", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
+                    "prompt", "model", "provider", "tools", "bg", "login", "logout", "upgrade", "new", "resume", "session", "tree", "fork", "compact", "help", "quit",
                 };
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_commands",
@@ -2992,6 +3075,194 @@ fn runRpc(
             },
         }
     }
+}
+
+const AuthReq = struct {
+    prov: core.providers.auth.Provider,
+    prov_name: []const u8,
+    key: []const u8,
+};
+
+fn parseAuthReq(arg: []const u8, provider_hint: ?[]const u8) !AuthReq {
+    const trimmed = std.mem.trim(u8, arg, " \t");
+    if (provider_hint) |name| {
+        const prov_name = std.mem.trim(u8, name, " \t");
+        if (prov_name.len == 0) return error.InvalidArgs;
+        return .{
+            .prov = parseAuthProvider(prov_name) orelse return error.UnknownProvider,
+            .prov_name = prov_name,
+            .key = trimmed,
+        };
+    }
+
+    if (trimmed.len == 0) return error.InvalidArgs;
+    const sp = std.mem.indexOfAny(u8, trimmed, " \t");
+    const prov_name = if (sp) |i| trimmed[0..i] else trimmed;
+    return .{
+        .prov = parseAuthProvider(prov_name) orelse return error.UnknownProvider,
+        .prov_name = prov_name,
+        .key = if (sp) |i| std.mem.trim(u8, trimmed[i + 1 ..], " \t") else "",
+    };
+}
+
+fn runLoginFlow(
+    alloc: std.mem.Allocator,
+    out: std.Io.AnyWriter,
+    req: AuthReq,
+    hooks: core.providers.auth.Hooks,
+) !void {
+    const kind = classifyLoginInput(req.prov, req.key);
+    const oauth_info = core.providers.auth.oauthLoginInfo(req.prov);
+    if (kind == .oauth_start) {
+        const info = oauth_info orelse unreachable;
+        var listener = core.providers.oauth_callback.Listener.init(alloc, .{
+            .path = info.callback_path,
+        }) catch |err| {
+            const em = try report.cli(alloc, "start local oauth callback server", err);
+            defer alloc.free(em);
+            try out.writeAll(em);
+            return;
+        };
+        defer listener.deinit();
+
+        const oauth_name = core.providers.auth.providerName(req.prov);
+        var flow = core.providers.auth.beginOAuthWithRedirect(alloc, req.prov, listener.redirect_uri) catch |err| {
+            const em = try report.cli(alloc, info.start_action, err);
+            defer alloc.free(em);
+            try out.writeAll(em);
+            return;
+        };
+        defer flow.deinit(alloc);
+
+        if (core.providers.auth.openBrowser(alloc, flow.url)) {
+            try writeTextLine(alloc, out, "opened browser for {s} oauth\n", .{oauth_name});
+        } else |_| {
+            try out.writeAll("could not open browser automatically\n");
+            try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
+        }
+        try out.writeAll("waiting for oauth callback...\n");
+
+        var callback = listener.waitForCodeState(alloc, 5 * 60 * 1000) catch |err| {
+            const em = try report.cli(alloc, "wait for oauth callback", err);
+            defer alloc.free(em);
+            try out.writeAll(em);
+            try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
+            try out.writeAll("if your browser showed localhost callback URL, run:\n");
+            try writeTextLine(alloc, out, "  /login {s} <callback-url>\n", .{oauth_name});
+            return;
+        };
+        defer callback.deinit(alloc);
+
+        core.providers.auth.completeOAuthFromLocalCallbackWithHooks(
+            alloc,
+            req.prov,
+            callback,
+            listener.redirect_uri,
+            flow.verifier,
+            hooks,
+        ) catch |err| {
+            const em = try report.cli(alloc, info.complete_action, err);
+            defer alloc.free(em);
+            try out.writeAll(em);
+            return;
+        };
+        try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
+        return;
+    }
+    if (kind == .oauth_complete) {
+        const info = oauth_info orelse unreachable;
+        const oauth_name = core.providers.auth.providerName(req.prov);
+        core.providers.auth.completeOAuthWithHooks(alloc, req.prov, req.key, hooks) catch |err| {
+            const em = try report.cli(alloc, info.complete_action, err);
+            defer alloc.free(em);
+            try out.writeAll(em);
+            return;
+        };
+        try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
+        return;
+    }
+    if (req.key.len == 0) {
+        const env_var = provider_env_map.get(req.prov_name) orelse "API_KEY";
+        try writeTextLine(alloc, out, "Paste API key: /login {s} <key> (or set {s})\n", .{ req.prov_name, env_var });
+        return;
+    }
+    try core.providers.auth.saveApiKeyWithHooks(alloc, req.prov, req.key, hooks);
+    try writeTextLine(alloc, out, "API key saved for {s}\n", .{req.prov_name});
+}
+
+fn runRpcLogin(alloc: std.mem.Allocator, req: RpcReq, hooks: core.providers.auth.Hooks) ![]u8 {
+    const auth_req = try parseAuthReq(req.arg orelse req.text orelse "", req.provider);
+    const kind = classifyLoginInput(auth_req.prov, auth_req.key);
+    const oauth_info = core.providers.auth.oauthLoginInfo(auth_req.prov);
+    if (kind == .oauth_start) {
+        const info = oauth_info orelse unreachable;
+        var listener = try core.providers.oauth_callback.Listener.init(alloc, .{
+            .path = info.callback_path,
+        });
+        defer listener.deinit();
+
+        const oauth_name = core.providers.auth.providerName(auth_req.prov);
+        var flow = try core.providers.auth.beginOAuthWithRedirect(alloc, auth_req.prov, listener.redirect_uri);
+        defer flow.deinit(alloc);
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(alloc);
+        if (core.providers.auth.openBrowser(alloc, flow.url)) {
+            try writeTextLine(alloc, out.writer(alloc).any(), "opened browser for {s} oauth\n", .{oauth_name});
+        } else |_| {
+            try out.appendSlice(alloc, "could not open browser automatically\n");
+            try writeTextLine(alloc, out.writer(alloc).any(), "auth url: {s}\n", .{flow.url});
+        }
+        try out.appendSlice(alloc, "waiting for oauth callback...\n");
+
+        var callback = try listener.waitForCodeState(alloc, 5 * 60 * 1000);
+        defer callback.deinit(alloc);
+        try core.providers.auth.completeOAuthFromLocalCallbackWithHooks(
+            alloc,
+            auth_req.prov,
+            callback,
+            listener.redirect_uri,
+            flow.verifier,
+            hooks,
+        );
+        try writeTextLine(alloc, out.writer(alloc).any(), "{s} oauth login complete\n", .{oauth_name});
+        return out.toOwnedSlice(alloc);
+    }
+    if (kind == .oauth_complete) {
+        try core.providers.auth.completeOAuthWithHooks(alloc, auth_req.prov, auth_req.key, hooks);
+        return std.fmt.allocPrint(alloc, "{s} oauth login complete\n", .{core.providers.auth.providerName(auth_req.prov)});
+    }
+    if (auth_req.key.len == 0) {
+        const env_var = provider_env_map.get(auth_req.prov_name) orelse "API_KEY";
+        return std.fmt.allocPrint(alloc, "Paste API key: /login {s} <key> (or set {s})\n", .{ auth_req.prov_name, env_var });
+    }
+    try core.providers.auth.saveApiKeyWithHooks(alloc, auth_req.prov, auth_req.key, hooks);
+    return std.fmt.allocPrint(alloc, "API key saved for {s}\n", .{auth_req.prov_name});
+}
+
+fn runRpcLogout(
+    alloc: std.mem.Allocator,
+    req: RpcReq,
+    active_name: []const u8,
+    hooks: core.providers.auth.Hooks,
+) ![]u8 {
+    const provider_name = if (req.provider) |name|
+        std.mem.trim(u8, name, " \t")
+    else
+        std.mem.trim(u8, req.arg orelse req.text orelse "", " \t");
+
+    if (provider_name.len != 0) {
+        const prov = parseAuthProvider(provider_name) orelse return error.UnknownProvider;
+        try core.providers.auth.logoutWithHooks(alloc, prov, hooks);
+        return std.fmt.allocPrint(alloc, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
+    }
+
+    const logged_in = core.providers.auth.listLoggedIn(alloc) catch try alloc.alloc(core.providers.auth.Provider, 0);
+    defer alloc.free(logged_in);
+    if (logged_in.len == 0) return alloc.dupe(u8, "no providers logged in\n");
+    const prov = chooseLogoutProvider(active_name, logged_in) orelse return error.InvalidArgs;
+    try core.providers.auth.logoutWithHooks(alloc, prov, hooks);
+    return std.fmt.allocPrint(alloc, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
 }
 
 const CmdRes = enum {
@@ -3045,6 +3316,7 @@ fn handleSlashCommand(
     no_session: bool,
     _: ?[]const u8, // sys_prompt (unused after settings became interactive)
     out: std.Io.AnyWriter,
+    audit_hooks: AuditHooks,
 ) !CmdRes {
     if (line.len == 0 or line[0] != '/') return .unhandled;
 
@@ -3329,90 +3601,13 @@ fn handleSlashCommand(
         },
         .login => {
             if (arg.len == 0) return .select_login;
-            // /login <provider> [api-key | code#state | callback-url]
-            const sp2 = std.mem.indexOfAny(u8, arg, " \t");
-            const prov_name = if (sp2) |i| arg[0..i] else arg;
-            const key = if (sp2) |i| std.mem.trim(u8, arg[i + 1 ..], " \t") else "";
-            const prov = parseAuthProvider(prov_name) orelse {
+            const req = parseAuthReq(arg, null) catch {
+                const prov_name = if (std.mem.indexOfAny(u8, arg, " \t")) |i| arg[0..i] else arg;
                 try writeTextLine(alloc, out, "unknown provider: {s}\n", .{prov_name});
                 return .handled;
             };
-            const kind = classifyLoginInput(prov, key);
-            const oauth_info = core.providers.auth.oauthLoginInfo(prov);
-            if (kind == .oauth_start) {
-                const info = oauth_info orelse unreachable;
-                var listener = core.providers.oauth_callback.Listener.init(alloc, .{
-                    .path = info.callback_path,
-                }) catch |err| {
-                    const em = try report.cli(alloc, "start local oauth callback server", err);
-                    defer alloc.free(em);
-                    try out.writeAll(em);
-                    return .handled;
-                };
-                defer listener.deinit();
-
-                const oauth_name = core.providers.auth.providerName(prov);
-                var flow = core.providers.auth.beginOAuthWithRedirect(alloc, prov, listener.redirect_uri) catch |err| {
-                    const em = try report.cli(alloc, info.start_action, err);
-                    defer alloc.free(em);
-                    try out.writeAll(em);
-                    return .handled;
-                };
-                defer flow.deinit(alloc);
-
-                if (core.providers.auth.openBrowser(alloc, flow.url)) {
-                    try writeTextLine(alloc, out, "opened browser for {s} oauth\n", .{oauth_name});
-                } else |_| {
-                    try out.writeAll("could not open browser automatically\n");
-                    try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
-                }
-                try out.writeAll("waiting for oauth callback...\n");
-
-                var callback = listener.waitForCodeState(alloc, 5 * 60 * 1000) catch |err| {
-                    const em = try report.cli(alloc, "wait for oauth callback", err);
-                    defer alloc.free(em);
-                    try out.writeAll(em);
-                    try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
-                    try out.writeAll("if your browser showed localhost callback URL, run:\n");
-                    try writeTextLine(alloc, out, "  /login {s} <callback-url>\n", .{oauth_name});
-                    return .handled;
-                };
-                defer callback.deinit(alloc);
-
-                core.providers.auth.completeOAuthFromLocalCallback(
-                    alloc,
-                    prov,
-                    callback,
-                    listener.redirect_uri,
-                    flow.verifier,
-                ) catch |err| {
-                    const em = try report.cli(alloc, info.complete_action, err);
-                    defer alloc.free(em);
-                    try out.writeAll(em);
-                    return .handled;
-                };
-                try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
-                return .handled;
-            }
-            if (kind == .oauth_complete) {
-                const info = oauth_info orelse unreachable;
-                const oauth_name = core.providers.auth.providerName(prov);
-                core.providers.auth.completeOAuth(alloc, prov, key) catch |err| {
-                    const em = try report.cli(alloc, info.complete_action, err);
-                    defer alloc.free(em);
-                    try out.writeAll(em);
-                    return .handled;
-                };
-                try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
-                return .handled;
-            }
-            if (key.len == 0) {
-                const env_var = provider_env_map.get(prov_name) orelse "API_KEY";
-                try writeTextLine(alloc, out, "Paste API key: /login {s} <key> (or set {s})\n", .{ prov_name, env_var });
-                return .handled;
-            }
-            try core.providers.auth.saveApiKey(alloc, prov, key);
-            try writeTextLine(alloc, out, "API key saved for {s}\n", .{prov_name});
+            try runLoginFlow(alloc, out, req, audit_hooks.auth());
+            return .handled;
         },
         .logout => {
             if (arg.len != 0) {
@@ -3420,7 +3615,7 @@ fn handleSlashCommand(
                     try writeTextLine(alloc, out, "unknown provider: {s}\n", .{arg});
                     return .handled;
                 };
-                try core.providers.auth.logout(alloc, prov);
+                try core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth());
                 try writeTextLine(alloc, out, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
                 return .handled;
             }
@@ -3434,7 +3629,7 @@ fn handleSlashCommand(
 
             const active_name = resolveDefaultProvider(provider.*);
             if (chooseLogoutProvider(active_name, logged_in)) |prov| {
-                try core.providers.auth.logout(alloc, prov);
+                try core.providers.auth.logoutWithHooks(alloc, prov, audit_hooks.auth());
                 try writeTextLine(alloc, out, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
                 return .handled;
             }
@@ -6394,6 +6589,22 @@ fn eofReader() std.Io.AnyReader {
     return .{ .context = undefined, .readFn = &S.read };
 }
 
+const AuditRows = struct {
+    rows: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *AuditRows, alloc: std.mem.Allocator) void {
+        for (self.rows.items) |row| alloc.free(row);
+        self.rows.deinit(alloc);
+    }
+
+    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+        const self: *AuditRows = @ptrCast(@alignCast(ctx));
+        const raw = try core.audit.encodeAlloc(alloc, ent);
+        errdefer alloc.free(raw);
+        try self.rows.append(alloc, raw);
+    }
+};
+
 test "runtime executes print mode and persists session events" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7190,6 +7401,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
         true,
         null,
         out_fbs.writer().any(),
+        .{},
     );
 
     try std.testing.expectEqual(CmdRes.unhandled, got);
@@ -7247,6 +7459,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
         true,
         null,
         out_fbs.writer().any(),
+        .{},
     );
 
     try std.testing.expectEqual(CmdRes.handled, got);
@@ -7448,6 +7661,191 @@ test "runtime rpc bg command starts lists and stops jobs" {
         std.mem.indexOf(u8, written, "bg stop sent id=1") != null or
             std.mem.indexOf(u8, written, "bg already done id=1") != null,
     );
+}
+
+test "runtime rpc auth commands emit audited success and failure records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    try tmp.dir.makePath("home");
+    {
+        var bad = try tmp.dir.createFile("home-bad", .{});
+        bad.close();
+    }
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+    const bad_home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home-bad");
+    defer std.testing.allocator.free(bad_home_abs);
+
+    var cfg = cli.Run{
+        .mode = .rpc,
+        .prompt = null,
+        .cfg = .{
+            .mode = .rpc,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "openai"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream(
+        "{\"id\":\"1\",\"cmd\":\"login\",\"provider\":\"openai\",\"arg\":\"sk-openai-secret\"}\n" ++
+            "{\"id\":\"2\",\"cmd\":\"logout\",\"provider\":\"openai\"}\n" ++
+            "{\"id\":\"3\",\"cmd\":\"quit\"}\n",
+    );
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 321;
+                }
+            }.f,
+            .auth_home = home_abs,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"type\":\"rpc_auth\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "API key saved for openai") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "logged out of openai") != null);
+
+    var fail_cfg = cli.Run{
+        .mode = .rpc,
+        .prompt = null,
+        .cfg = .{
+            .mode = .rpc,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "openai"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer fail_cfg.cfg.deinit(std.testing.allocator);
+
+    var fail_in_fbs = std.io.fixedBufferStream(
+        "{\"id\":\"4\",\"cmd\":\"login\",\"provider\":\"openai\",\"arg\":\"sk-openai-secret\"}\n" ++
+            "{\"id\":\"5\",\"cmd\":\"quit\"}\n",
+    );
+    var fail_out_buf: [32768]u8 = undefined;
+    var fail_out_fbs = std.io.fixedBufferStream(&fail_out_buf);
+
+    const fail_sid = try execWithIoHooks(
+        std.testing.allocator,
+        fail_cfg,
+        fail_in_fbs.reader().any(),
+        fail_out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 321;
+                }
+            }.f,
+            .auth_home = bad_home_abs,
+        },
+    );
+    defer std.testing.allocator.free(fail_sid);
+
+    const fail_written = fail_out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, fail_written, "\"type\":\"rpc_error\"") != null);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"sid\":\"auth\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"save_api_key\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "api key save start") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "api key save complete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"out\":\"fail\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"text\":\"[mask:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"logout\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "sk-openai-secret") == null);
+}
+
+test "runtime rpc bg commands emit audited redacted control records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var cfg = cli.Run{
+        .mode = .rpc,
+        .prompt = null,
+        .cfg = .{
+            .mode = .rpc,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream(
+        "{\"id\":\"1\",\"cmd\":\"bg\",\"arg\":\"run printf done\"}\n" ++
+            "{\"id\":\"2\",\"cmd\":\"bg\",\"arg\":\"list\"}\n" ++
+            "{\"id\":\"3\",\"cmd\":\"bg\",\"arg\":\"stop 42\"}\n" ++
+            "{\"id\":\"4\",\"cmd\":\"quit\"}\n",
+    );
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 654;
+                }
+            }.f,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"type\":\"rpc_bg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "bg started id=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "bg not found id=42") != null);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
+    defer std.testing.allocator.free(joined);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"sid\":\"bg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"start\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"msg\":{\"text\":\"bg control start\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"msg\":{\"text\":\"bg control success\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"key\":\"cwd\",\"vis\":\"mask\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"key\":\"log_path\",\"vis\":\"mask\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"argv\":{\"text\":\"[mask:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"op\":\"stop\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "\"out\":\"fail\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "printf done") == null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "/tmp/pz-bg-") == null);
 }
 
 test "runtime bg command validates usage and missing ids" {
