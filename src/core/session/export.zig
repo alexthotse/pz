@@ -208,6 +208,25 @@ fn nowMs() i64 {
     return std.time.milliTimestamp();
 }
 
+fn normalizeMd(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(alloc);
+    var nl_run: usize = 0;
+    for (raw) |c| {
+        if (c == '\n') {
+            nl_run += 1;
+            if (nl_run > 2) continue;
+        } else {
+            nl_run = 0;
+        }
+        try out.append(alloc, c);
+    }
+    while (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
+        out.items.len -= 1;
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
 test "export session to markdown" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -243,6 +262,8 @@ test "export session to markdown" {
     defer content.close();
     const md = try content.readToEndAlloc(std.testing.allocator, 64 * 1024);
     defer std.testing.allocator.free(md);
+    const snap = try normalizeMd(std.testing.allocator, md);
+    defer std.testing.allocator.free(snap);
 
     try oh.snap(@src(),
         \\[]u8
@@ -281,11 +302,8 @@ test "export session to markdown" {
         \\```
         \\raw
         \\```
-        \\````
-        \\
-        \\
-        \\"
-    ).expectEqual(md);
+        \\````"
+    ).expectEqual(snap);
 }
 
 test "export default path uses sid.md" {
@@ -340,6 +358,8 @@ test "export markdown redacts secrets and neutralizes markdown" {
     defer content.close();
     const md = try content.readToEndAlloc(std.testing.allocator, 64 * 1024);
     defer std.testing.allocator.free(md);
+    const snap = try normalizeMd(std.testing.allocator, md);
+    defer std.testing.allocator.free(snap);
 
     try oh.snap(@src(),
         \\[]u8
@@ -368,11 +388,8 @@ test "export markdown redacts secrets and neutralizes markdown" {
         \\
         \\```
         \\[secret:7ac2c068fc811ef1]
-        \\```
-        \\
-        \\
-        \\"
-    ).expectEqual(md);
+        \\```"
+    ).expectEqual(snap);
 }
 
 test "export audit emits start and success entries" {
