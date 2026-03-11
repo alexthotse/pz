@@ -86,6 +86,10 @@ fn mapWriteErr(err: anyerror) Err {
 test "write handler overwrites file with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
+    const Snap = struct {
+        res: tools.Result,
+        file: []const u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -119,26 +123,25 @@ test "write handler overwrites file with deterministic timestamps" {
 
     const got = try tmp.dir.readFileAlloc(std.testing.allocator, "out.txt", 64);
     defer std.testing.allocator.free(got);
-    const code = switch (res.final) {
-        .ok => |ok| ok.code,
-        else => return error.TestUnexpectedResult,
+    const snap = Snap{
+        .res = res,
+        .file = got,
     };
-    const snap = try std.fmt.allocPrint(std.testing.allocator, "start={d}\nend={d}\nout={d}\ncode={d}\nfile={s}\n", .{
-        res.started_at_ms,
-        res.ended_at_ms,
-        res.out.len,
-        code,
-        got,
-    });
-    defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
-        \\[]u8
-        \\  "start=77
-        \\end=77
-        \\out=0
-        \\code=0
-        \\file=new
-        \\"
+        \\core.tools.write.test.write handler overwrites file with deterministic timestamps.Snap
+        \\  .res: core.tools.mod.Result
+        \\    .call_id: []const u8
+        \\      "w1"
+        \\    .started_at_ms: i64 = 77
+        \\    .ended_at_ms: i64 = 77
+        \\    .out: []const core.tools.mod.Output
+        \\      (empty)
+        \\    .out_owned: bool = false
+        \\    .final: core.tools.mod.Result.Final
+        \\      .ok: core.tools.mod.Result.Ok
+        \\        .code: i32 = 0
+        \\  .file: []const u8
+        \\    "new"
     ).expectEqual(snap);
 }
 
