@@ -897,11 +897,15 @@ fn saveOAuthForProvider(ar: std.mem.Allocator, provider: Provider, oauth: OAuth)
 
 /// List providers that have credentials stored (merges all auth files).
 pub fn listLoggedIn(alloc: std.mem.Allocator) ![]Provider {
+    const home = std.process.getEnvVarOwned(alloc, "HOME") catch return try alloc.alloc(Provider, 0);
+    defer alloc.free(home);
+    return listLoggedInHome(alloc, home);
+}
+
+fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
-
-    const home = std.process.getEnvVarOwned(ar, "HOME") catch return try alloc.alloc(Provider, 0);
 
     var merged: AuthFile = .{};
     const path = authFilePath(ar, home) catch return try alloc.alloc(Provider, 0);
@@ -1009,6 +1013,36 @@ test "saveApiKeyHome writes provider auth without process HOME" {
         const st = try tmp.dir.statFile(".pz/auth.json");
         try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
     }
+}
+
+test "listLoggedInHome returns stored providers without leaks" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    try saveApiKeyHome(std.testing.allocator, home, .anthropic, "sk-ant");
+    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-openai");
+
+    const providers = try listLoggedInHome(std.testing.allocator, home);
+    defer std.testing.allocator.free(providers);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    const w = out.writer(std.testing.allocator);
+    for (providers) |provider| {
+        try w.print("{s}\n", .{providerName(provider)});
+    }
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "anthropic
+        \\openai
+        \\"
+    ).expectEqual(out.items);
 }
 
 test "authFromEnv prefers oauth token over api key" {
