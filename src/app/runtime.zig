@@ -4648,22 +4648,24 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
 
     // Skills section
     const skills = try discoverSkills(alloc);
-    defer {
-        for (skills) |s| alloc.free(s);
-        alloc.free(skills);
-    }
+    defer core_skill.freeSkills(alloc, skills);
     if (skills.len > 0) {
         try ui.tr.styledText("", .{}); // blank line
         try ui.tr.styledText("[Skills]", .{ .fg = t.md_heading });
-        try ui.tr.infoText("  user");
-        const home2 = std.posix.getenv("HOME") orelse "";
-        for (skills) |p| {
-            const display2 = if (home2.len > 0 and std.mem.startsWith(u8, p, home2))
-                try std.fmt.allocPrint(alloc, "    ~{s}", .{p[home2.len..]})
+        for (skills) |skill| {
+            const display = if (skill.meta.description.len > 0)
+                try std.fmt.allocPrint(alloc, "  {s} [{s}] - {s}", .{
+                    skill.dir_name,
+                    skillSourceName(skill.source),
+                    skill.meta.description,
+                })
             else
-                try std.fmt.allocPrint(alloc, "    {s}", .{p});
-            defer alloc.free(display2);
-            try ui.tr.infoText(display2);
+                try std.fmt.allocPrint(alloc, "  {s} [{s}]", .{
+                    skill.dir_name,
+                    skillSourceName(skill.source),
+                });
+            defer alloc.free(display);
+            try ui.tr.infoText(display);
         }
     }
 
@@ -4697,40 +4699,21 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
     try ui.tr.styledText("", .{});
 }
 
-fn discoverSkills(alloc: std.mem.Allocator) ![][]u8 {
-    const home = std.posix.getenv("HOME") orelse return &.{};
-    const base = std.fs.path.join(alloc, &.{ home, ".claude", "skills" }) catch return &.{};
-    defer alloc.free(base);
-
-    var dir = std.fs.cwd().openDir(base, .{ .iterate = true }) catch return &.{};
-    defer dir.close();
-
-    var paths: std.ArrayListUnmanaged([]u8) = .empty;
-    errdefer {
-        for (paths.items) |p| alloc.free(p);
-        paths.deinit(alloc);
-    }
-
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
-        if (entry.kind != .directory) continue;
-        const skill_path = std.fs.path.join(alloc, &.{ base, entry.name, "SKILL.md" }) catch continue;
-        // Check file exists
-        if (std.fs.cwd().access(skill_path, .{})) |_| {
-            try paths.append(alloc, skill_path);
-        } else |_| {
-            alloc.free(skill_path);
-        }
-    }
-
-    // Sort for stable display
-    std.mem.sort([]u8, paths.items, {}, struct {
-        fn lt(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
+fn discoverSkills(alloc: std.mem.Allocator) ![]core_skill.SkillInfo {
+    const skills = try core_skill.discoverAndRead(alloc);
+    std.mem.sort(core_skill.SkillInfo, skills, {}, struct {
+        fn lt(_: void, a: core_skill.SkillInfo, b: core_skill.SkillInfo) bool {
+            return std.mem.lessThan(u8, a.dir_name, b.dir_name);
         }
     }.lt);
+    return skills;
+}
 
-    return try paths.toOwnedSlice(alloc);
+fn skillSourceName(source: core_skill.Source) []const u8 {
+    return switch (source) {
+        .global => "global",
+        .project => "project",
+    };
 }
 
 fn infoTextSafe(alloc: std.mem.Allocator, ui: *tui_harness.Ui, text: []const u8) !void {
@@ -6842,6 +6825,36 @@ test "runtime tui slash commands execute without prompt turns" {
     try std.testing.expect(std.mem.indexOf(u8, written, "ID:") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "Messages") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "new session") != null);
+}
+
+test "discoverSkills returns skill metadata with source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pi/skills/review-plan");
+    var skill = try tmp.dir.createFile(".pi/skills/review-plan/SKILL.md", .{});
+    defer skill.close();
+    try skill.writeAll(
+        \\---
+        \\name: review-plan
+        \\description: review
+        \\user_invocable: true
+        \\---
+        \\Body
+        \\
+    );
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    const skills = try discoverSkills(std.testing.allocator);
+    defer core_skill.freeSkills(std.testing.allocator, skills);
+
+    const info = core_skill.findByDirName(skills, "review-plan") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("review", info.meta.description);
+    try std.testing.expectEqual(core_skill.Source.project, info.source);
 }
 
 test "handleSlashCommand falls through for user-invocable skills" {
