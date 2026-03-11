@@ -1,4 +1,5 @@
 const std = @import("std");
+const policy_mod = @import("../policy.zig");
 
 pub const Method = enum {
     GET,
@@ -57,6 +58,7 @@ pub const RedirectPolicy = struct {
     allow_cross_host: bool = false,
     allow_cross_port: bool = false,
     allow_https_downgrade: bool = false,
+    allow_private_addrs: bool = false,
 };
 
 pub const ParseErr = std.Uri.ParseError || error{
@@ -75,7 +77,19 @@ pub const RedirectErr = std.Uri.ResolveInPlaceError || error{
     CrossHostRedirect,
     CrossPortRedirect,
     HttpsDowngrade,
+    BlockedAddr,
     OutOfMemory,
+};
+
+pub const ResolveErr = ParseErr || error{
+    BlockedAddr,
+    ResolveFailed,
+    OutOfMemory,
+};
+
+const ResolveFns = struct {
+    resolve: *const fn (alloc: std.mem.Allocator, host: []const u8, port: u16) anyerror![]std.net.Address = resolveAddrsAlloc,
+    free: *const fn (alloc: std.mem.Allocator, addrs: []std.net.Address) void = freeAddrsAlloc,
 };
 
 pub const ParsedUrl = struct {
@@ -142,6 +156,35 @@ pub fn nextRedirectTargetAlloc(
     const location = res.location() orelse return null;
     const base = try parseUrl(req.url);
     return try resolveRedirectAlloc(alloc, base, location, policy);
+}
+
+pub fn resolveConnectAddrAlloc(
+    alloc: std.mem.Allocator,
+    raw_url: []const u8,
+    policy: RedirectPolicy,
+) ResolveErr!std.net.Address {
+    return resolveConnectAddrWith(alloc, try parseUrl(raw_url), policy, .{});
+}
+
+fn resolveConnectAddrWith(
+    alloc: std.mem.Allocator,
+    parsed: ParsedUrl,
+    policy: RedirectPolicy,
+    fns: ResolveFns,
+) ResolveErr!std.net.Address {
+    const addrs = fns.resolve(alloc, parsed.host, parsed.port) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.ResolveFailed,
+    };
+    defer fns.free(alloc, addrs);
+    if (addrs.len == 0) return error.MissingHost;
+
+    if (!policy.allow_private_addrs) {
+        for (addrs) |addr| {
+            if (policy_mod.isBlockedNetAddr(addr)) return error.BlockedAddr;
+        }
+    }
+    return addrs[0];
 }
 
 fn parseAbsoluteUrl(text: []const u8, uri: std.Uri) ParseErr!ParsedUrl {
@@ -221,6 +264,16 @@ fn renderUrlAlloc(alloc: std.mem.Allocator, uri: std.Uri) error{OutOfMemory}![]u
         .query = true,
         .fragment = false,
     })});
+}
+
+fn resolveAddrsAlloc(alloc: std.mem.Allocator, host: []const u8, port: u16) ![]std.net.Address {
+    const list = try std.net.getAddressList(alloc, host, port);
+    defer list.deinit();
+    return try alloc.dupe(std.net.Address, list.addrs);
+}
+
+fn freeAddrsAlloc(alloc: std.mem.Allocator, addrs: []std.net.Address) void {
+    alloc.free(addrs);
 }
 
 test "parseUrl returns normalized fields for request targets" {
@@ -315,4 +368,84 @@ test "resolveRedirectAlloc blocks unsafe redirects by default" {
         error.HttpsDowngrade,
         resolveRedirectAlloc(std.testing.allocator, base, "http://svc.local/api", .{}),
     );
+}
+
+test "resolveConnectAddrAlloc blocks resolved private targets by default" {
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, _: []const u8, port: u16) ![]std.net.Address {
+            const out = try alloc.alloc(std.net.Address, 2);
+            out[0] = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+            out[1] = std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port);
+            return out;
+        }
+
+        fn free(alloc: std.mem.Allocator, addrs: []std.net.Address) void {
+            alloc.free(addrs);
+        }
+    };
+
+    const url = try parseUrl("https://svc.local/api");
+    try std.testing.expectError(error.BlockedAddr, resolveConnectAddrWith(
+        std.testing.allocator,
+        url,
+        .{},
+        .{ .resolve = Mock.resolve, .free = Mock.free },
+    ));
+}
+
+test "resolveConnectAddrAlloc allows private targets when opted in" {
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, _: []const u8, port: u16) ![]std.net.Address {
+            const out = try alloc.alloc(std.net.Address, 1);
+            out[0] = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+            return out;
+        }
+
+        fn free(alloc: std.mem.Allocator, addrs: []std.net.Address) void {
+            alloc.free(addrs);
+        }
+    };
+
+    const url = try parseUrl("https://svc.local/api");
+    const addr = try resolveConnectAddrWith(
+        std.testing.allocator,
+        url,
+        .{ .allow_private_addrs = true },
+        .{ .resolve = Mock.resolve, .free = Mock.free },
+    );
+    try std.testing.expect(std.net.Address.eql(std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 443), addr));
+}
+
+test "redirect hops revalidate resolved target addresses" {
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, host: []const u8, port: u16) ![]std.net.Address {
+            const out = try alloc.alloc(std.net.Address, 1);
+            out[0] = if (std.mem.eql(u8, host, "svc.local"))
+                std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port)
+            else
+                std.net.Address.initIp4(.{ 10, 0, 0, 7 }, port);
+            return out;
+        }
+
+        fn free(alloc: std.mem.Allocator, addrs: []std.net.Address) void {
+            alloc.free(addrs);
+        }
+    };
+
+    const req: Request = .{ .url = "https://svc.local/api" };
+    const res: Response = .{
+        .status = 302,
+        .headers = &.{.{ .name = "location", .value = "https://cdn.local/final" }},
+    };
+    const next = (try nextRedirectTargetAlloc(std.testing.allocator, req, res, .{
+        .allow_cross_host = true,
+    })).?;
+    defer next.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.BlockedAddr, resolveConnectAddrWith(
+        std.testing.allocator,
+        next.parsed,
+        .{},
+        .{ .resolve = Mock.resolve, .free = Mock.free },
+    ));
 }

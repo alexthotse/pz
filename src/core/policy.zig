@@ -131,6 +131,40 @@ pub fn isProtectedPath(path: []const u8) bool {
     return false;
 }
 
+pub fn isBlockedNetAddr(addr: std.net.Address) bool {
+    return switch (addr.any.family) {
+        std.posix.AF.INET => isBlockedIp4(@as(*const [4]u8, @ptrCast(&addr.in.sa.addr)).*),
+        std.posix.AF.INET6 => isBlockedIp6(addr.in6.sa.addr),
+        else => true,
+    };
+}
+
+pub fn isBlockedIp4(ip: [4]u8) bool {
+    if (ip[0] == 0) return true;
+    if (ip[0] == 10) return true;
+    if (ip[0] == 127) return true;
+    if (ip[0] == 169 and ip[1] == 254) return true;
+    if (ip[0] == 172 and ip[1] >= 16 and ip[1] <= 31) return true;
+    if (ip[0] == 192 and ip[1] == 168) return true;
+    if (ip[0] == 100 and ip[1] >= 64 and ip[1] <= 127) return true;
+    if (ip[0] == 198 and (ip[1] == 18 or ip[1] == 19)) return true;
+    if (ip[0] >= 224) return true;
+    return false;
+}
+
+pub fn isBlockedIp6(ip: [16]u8) bool {
+    const zero = [_]u8{0} ** 16;
+    if (std.mem.eql(u8, ip[0..], zero[0..])) return true;
+    if (std.mem.eql(u8, ip[0..15], zero[0..15]) and ip[15] == 1) return true;
+    if ((ip[0] & 0xfe) == 0xfc) return true;
+    if (ip[0] == 0xfe and (ip[1] & 0xc0) == 0x80) return true;
+    if (ip[0] == 0xff) return true;
+    if (std.mem.eql(u8, ip[0..10], zero[0..10]) and ip[10] == 0xff and ip[11] == 0xff) {
+        return isBlockedIp4(ip[12..16].*);
+    }
+    return false;
+}
+
 /// Evaluate env key+val against rules using last-match-wins semantics.
 /// Allows specific allow rules to override broad deny rules (and vice versa).
 /// Default (no match): deny.
@@ -741,4 +775,23 @@ test "property: evalEnv last-match-wins consistency" {
             return r1 == .allow and r2 == .deny;
         }
     }.prop, .{ .iterations = 2000 });
+}
+
+test "network policy blocks local and private ranges" {
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 443)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp4(.{ 10, 1, 2, 3 }, 443)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp4(.{ 172, 16, 1, 9 }, 443)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp4(.{ 192, 168, 4, 5 }, 443)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp4(.{ 169, 254, 2, 9 }, 443)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp6(.{0} ** 15 ++ .{1}, 443, 0, 0)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp6(.{ 0xfe, 0x80 } ++ .{0} ** 14, 443, 0, 0)));
+    try testing.expect(isBlockedNetAddr(std.net.Address.initIp6(.{ 0xfc, 0 } ++ .{0} ** 14, 443, 0, 0)));
+}
+
+test "network policy allows public addresses" {
+    try testing.expect(!isBlockedNetAddr(std.net.Address.initIp4(.{ 34, 117, 59, 81 }, 443)));
+    try testing.expect(!isBlockedNetAddr(std.net.Address.initIp6(.{
+        0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
+        0, 0, 0, 0, 0, 0, 0x88, 0x88,
+    }, 443, 0, 0)));
 }
