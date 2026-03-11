@@ -202,6 +202,14 @@ pub const FrameOpts = struct {
     sd_id: []const u8 = "pz@32473",
 };
 
+pub const FrameHdr = struct {
+    ts_ms: i64,
+    sid: []const u8,
+    seq: u64,
+    sev: Sev = .info,
+    site: Site = .{},
+};
+
 pub const ConnVTable = struct {
     sendRaw: *const fn (ctx: *anyopaque, raw: []const u8) anyerror!void,
     deinit: *const fn (ctx: *anyopaque) void,
@@ -584,31 +592,41 @@ pub fn encodeFrameAlloc(alloc: Allocator, opts: FrameOpts, ent: Entry) ![]u8 {
     const body = try encodeAlloc(alloc, ent);
     defer alloc.free(body);
 
+    return try encodeFrameBodyAlloc(alloc, opts, .{
+        .ts_ms = ent.ts_ms,
+        .sid = ent.sid,
+        .seq = ent.seq,
+        .sev = ent.sev,
+        .site = ent.site,
+    }, body);
+}
+
+pub fn encodeFrameBodyAlloc(alloc: Allocator, opts: FrameOpts, hdr: FrameHdr, body: []const u8) ![]u8 {
     var pid_buf: [32]u8 = undefined;
     const procid = blk: {
-        if (ent.site.pid) |pid| break :blk try std.fmt.bufPrint(&pid_buf, "{d}", .{pid});
+        if (hdr.site.pid) |pid| break :blk try std.fmt.bufPrint(&pid_buf, "{d}", .{pid});
         if (opts.procid) |procid| break :blk procid;
         break :blk syslog.nil;
     };
 
     var seq_buf: [32]u8 = undefined;
-    const seq = try std.fmt.bufPrint(&seq_buf, "{d}", .{ent.seq});
+    const seq = try std.fmt.bufPrint(&seq_buf, "{d}", .{hdr.seq});
 
     return try syslog.encodeAlloc(alloc, .{
         .pri = .{
             .facility = opts.facility,
-            .severity = sevSyslog(ent.sev),
+            .severity = sevSyslog(hdr.sev),
         },
-        .timestamp_ms = ent.ts_ms,
-        .hostname = ent.site.host orelse opts.hostname orelse syslog.nil,
-        .app_name = ent.site.app orelse opts.app_name orelse syslog.nil,
+        .timestamp_ms = hdr.ts_ms,
+        .hostname = hdr.site.host orelse opts.hostname orelse syslog.nil,
+        .app_name = hdr.site.app orelse opts.app_name orelse syslog.nil,
         .procid = procid,
         .msgid = opts.msgid,
         .structured_data = &.{
             .{
                 .id = opts.sd_id,
                 .params = &.{
-                    .{ .name = "sid", .value = ent.sid },
+                    .{ .name = "sid", .value = hdr.sid },
                     .{ .name = "seq", .value = seq },
                 },
             },

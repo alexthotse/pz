@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("../core/mod.zig");
 const journal_mod = @import("job_journal.zig");
+const syslog_mock = @import("../test/syslog_mock.zig");
 
 pub const State = enum {
     running,
@@ -858,6 +859,104 @@ fn scrubBgAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     return out;
 }
 
+const AuditHdrDoc = struct {
+    ts_ms: i64,
+    sid: []const u8,
+    seq: u64,
+    sev: core.audit.Sev,
+};
+
+const AuditSealDoc = struct {
+    mac: []const u8,
+    body: []const u8,
+};
+
+fn e2eAuditKey() core.audit_integrity.Key {
+    return .{
+        .id = 7,
+        .bytes = [_]u8{0x37} ** core.audit_integrity.mac_len,
+    };
+}
+
+fn e2eFrameOpts() core.audit.FrameOpts {
+    return .{
+        .hostname = "pz-host",
+        .app_name = "pz",
+        .procid = "17",
+        .msgid = "audit",
+    };
+}
+
+fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []const []const u8) !void {
+    const key = e2eAuditKey();
+    var prev: ?core.audit_integrity.Tag = null;
+
+    for (rows) |row| {
+        const hdr = try std.json.parseFromSlice(AuditHdrDoc, alloc, row, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+        defer hdr.deinit();
+
+        const sealed = try core.audit_integrity.sealAlloc(alloc, key, prev, row);
+        defer alloc.free(sealed);
+
+        const doc = try std.json.parseFromSlice(AuditSealDoc, alloc, sealed, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+        defer doc.deinit();
+
+        var next: core.audit_integrity.Tag = undefined;
+        _ = try std.fmt.hexToBytes(next[0..], doc.value.mac);
+
+        const frame = try core.audit.encodeFrameBodyAlloc(alloc, e2eFrameOpts(), .{
+            .ts_ms = hdr.value.ts_ms,
+            .sid = hdr.value.sid,
+            .seq = hdr.value.seq,
+            .sev = hdr.value.sev,
+        }, sealed);
+        defer alloc.free(frame);
+
+        try sender.sendRaw(frame);
+        prev = next;
+    }
+}
+
+fn extractSyslogMsg(raw: []const u8) ![]const u8 {
+    const idx = std.mem.indexOf(u8, raw, "] {") orelse return error.InvalidFrame;
+    return raw[idx + 2 ..];
+}
+
+fn joinShippedLinesAlloc(alloc: std.mem.Allocator, collector: anytype) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+
+    for (0..collector.msgCount()) |i| {
+        try out.appendSlice(alloc, try extractSyslogMsg(collector.messageAt(i)));
+        try out.append(alloc, '\n');
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn joinShippedBodiesAlloc(alloc: std.mem.Allocator, collector: anytype) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+
+    for (0..collector.msgCount()) |i| {
+        const raw = try extractSyslogMsg(collector.messageAt(i));
+        const doc = try std.json.parseFromSlice(AuditSealDoc, alloc, raw, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        });
+        defer doc.deinit();
+
+        if (i > 0) try out.append(alloc, '\n');
+        try out.appendSlice(alloc, doc.value.body);
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
 test "bg manager rejects empty command" {
     var mgr = try Mgr.init(std.testing.allocator);
     defer mgr.deinit();
@@ -1145,4 +1244,147 @@ test "bg manager audit emits failure entries for invalid start and missing stop"
         \\{"v":1,"ts_ms":456,"sid":"bg","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg control start","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":42}]}
         \\{"v":1,"ts_ms":456,"sid":"bg","seq":4,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"bg","vis":"pub"},"op":"stop"},"msg":{"text":"bg not found","vis":"pub"},"data":{"name":{"text":"bg","vis":"pub"},"call_id":"stop"},"attrs":[{"key":"job_id","vis":"pub","ty":"uint","val":42},{"key":"status","vis":"pub","ty":"str","val":"not_found"}]}"
     ).expectEqual(joined);
+}
+
+test "bg manager syslog e2e ships redacted chained success audit over udp" {
+    var cap = AuditCap{};
+    defer cap.deinit(std.testing.allocator);
+
+    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+        .emit_audit_ctx = &cap,
+        .emit_audit = captureAudit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 123;
+            }
+        }.f,
+    });
+    defer mgr.deinit();
+
+    const id = try mgr.start("printf done", "/tmp/secret");
+    const listed = try mgr.list(std.testing.allocator);
+    defer deinitViews(std.testing.allocator, listed);
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+
+    const stop = try mgr.stop(id);
+    try std.testing.expect(stop == .sent or stop == .already_done);
+
+    const woke = try waitWake(mgr.wakeFd(), 5000);
+    try std.testing.expect(woke);
+
+    const done = try mgr.drainDone(std.testing.allocator);
+    defer deinitViews(std.testing.allocator, done);
+    try std.testing.expectEqual(@as(usize, 1), done.len);
+
+    var collector = try syslog_mock.UdpCollector.init();
+    defer collector.deinit();
+    const t = try collector.spawnCount(cap.rows.items.len);
+
+    var sender = try core.syslog.Sender.init(std.testing.allocator, .{
+        .transport = .udp,
+        .host = "127.0.0.1",
+        .port = collector.port(),
+    });
+    defer sender.deinit();
+
+    try shipAuditRows(std.testing.allocator, &sender, cap.rows.items);
+    t.join();
+
+    try std.testing.expectEqual(cap.rows.items.len, collector.msgCount());
+
+    const shipped_lines = try joinShippedLinesAlloc(std.testing.allocator, &collector);
+    defer std.testing.allocator.free(shipped_lines);
+    const got_chain = try core.audit_integrity.verifyLogAlloc(std.testing.allocator, shipped_lines, &.{e2eAuditKey()});
+    switch (got_chain) {
+        .ok => |ok| {
+            try std.testing.expectEqual(@as(u64, @intCast(cap.rows.items.len)), ok.lines);
+            try std.testing.expectEqual(@as(?u32, e2eAuditKey().id), ok.last_key_id);
+            try std.testing.expect(ok.last_mac != null);
+        },
+        .fail => return error.InvalidAuditChain,
+    }
+
+    for (0..collector.msgCount()) |i| {
+        const raw = collector.messageAt(i);
+        try std.testing.expect(std.mem.indexOf(u8, raw, "printf done") == null);
+        try std.testing.expect(std.mem.indexOf(u8, raw, "/tmp/secret") == null);
+        try std.testing.expect(std.mem.indexOf(u8, raw, "[pz@32473 sid=\"bg\" seq=\"") != null);
+    }
+
+    const shipped_bodies = try joinShippedBodiesAlloc(std.testing.allocator, &collector);
+    defer std.testing.allocator.free(shipped_bodies);
+    const scrubbed = try scrubBgAudit(std.testing.allocator, shipped_bodies);
+    defer std.testing.allocator.free(scrubbed);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    const expected = try scrubBgAudit(std.testing.allocator, joined);
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, scrubbed);
+}
+
+test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
+    var cap = AuditCap{};
+    defer cap.deinit(std.testing.allocator);
+
+    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+        .emit_audit_ctx = &cap,
+        .emit_audit = captureAudit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 456;
+            }
+        }.f,
+    });
+    defer mgr.deinit();
+
+    try std.testing.expectError(error.InvalidArgs, mgr.start("   ", null));
+    try std.testing.expectEqual(StopRes.not_found, try mgr.stop(42));
+
+    var collector = try syslog_mock.TcpCollector.init();
+    defer collector.deinit();
+    const t = try collector.spawnCount(cap.rows.items.len);
+
+    var sender = try core.syslog.Sender.init(std.testing.allocator, .{
+        .transport = .tcp,
+        .host = "127.0.0.1",
+        .port = collector.port(),
+    });
+    defer sender.deinit();
+
+    try shipAuditRows(std.testing.allocator, &sender, cap.rows.items);
+    t.join();
+
+    try std.testing.expectEqual(cap.rows.items.len, collector.msgCount());
+
+    const shipped_lines = try joinShippedLinesAlloc(std.testing.allocator, &collector);
+    defer std.testing.allocator.free(shipped_lines);
+    const got_chain = try core.audit_integrity.verifyLogAlloc(std.testing.allocator, shipped_lines, &.{e2eAuditKey()});
+    switch (got_chain) {
+        .ok => |ok| {
+            try std.testing.expectEqual(@as(u64, @intCast(cap.rows.items.len)), ok.lines);
+            try std.testing.expectEqual(@as(?u32, e2eAuditKey().id), ok.last_key_id);
+            try std.testing.expect(ok.last_mac != null);
+        },
+        .fail => return error.InvalidAuditChain,
+    }
+
+    for (0..collector.msgCount()) |i| {
+        const raw = collector.messageAt(i);
+        try std.testing.expect(std.mem.indexOf(u8, raw, "InvalidArgs") == null);
+        try std.testing.expect(std.mem.indexOf(u8, raw, "[pz@32473 sid=\"bg\" seq=\"") != null);
+    }
+
+    const shipped_bodies = try joinShippedBodiesAlloc(std.testing.allocator, &collector);
+    defer std.testing.allocator.free(shipped_bodies);
+    const scrubbed = try scrubBgAudit(std.testing.allocator, shipped_bodies);
+    defer std.testing.allocator.free(scrubbed);
+
+    const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
+    defer std.testing.allocator.free(joined);
+    const expected = try scrubBgAudit(std.testing.allocator, joined);
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, scrubbed);
 }
