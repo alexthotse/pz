@@ -809,6 +809,9 @@ fn parseCallArgs(
         .ls => .{
             .ls = try parseArgs(tools.Call.LsArgs, alloc, raw),
         },
+        .web => .{
+            .web = try parseArgs(tools.Call.WebArgs, alloc, raw),
+        },
         .ask => .{
             .ask = try parseArgs(tools.Call.AskArgs, alloc, raw),
         },

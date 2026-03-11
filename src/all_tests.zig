@@ -21,6 +21,8 @@ const core_audit = @import("core/audit.zig");
 const core_syslog = @import("core/syslog.zig");
 const core_signing = @import("core/signing.zig");
 const core_agent = @import("core/agent.zig");
+const core_watcher = @import("core/watcher.zig");
+const tool_web = @import("core/tools/web.zig");
 const session_file = @import("core/session/session_file.zig");
 
 test "all module tests" {
@@ -47,5 +49,7 @@ test "all module tests" {
     _ = core_syslog;
     _ = core_signing;
     _ = core_agent;
+    _ = core_watcher;
+    _ = tool_web;
     _ = session_file;
 }

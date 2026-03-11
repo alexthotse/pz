@@ -1,0 +1,318 @@
+const std = @import("std");
+
+pub const Method = enum {
+    GET,
+    POST,
+    PUT,
+    PATCH,
+    DELETE,
+    HEAD,
+    OPTIONS,
+};
+
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const Request = struct {
+    method: Method = .GET,
+    url: []const u8,
+    headers: []const Header = &.{},
+    body: ?[]const u8 = null,
+    follow_redirects: bool = true,
+    max_redirects: u8 = 5,
+};
+
+pub const Response = struct {
+    status: u16,
+    headers: []const Header = &.{},
+    body: []const u8 = "",
+
+    pub fn header(self: Response, name: []const u8) ?[]const u8 {
+        for (self.headers) |hdr| {
+            if (std.ascii.eqlIgnoreCase(hdr.name, name)) return hdr.value;
+        }
+        return null;
+    }
+
+    pub fn location(self: Response) ?[]const u8 {
+        return self.header("location");
+    }
+
+    pub fn isRedirect(self: Response) bool {
+        return switch (self.status) {
+            301, 302, 303, 307, 308 => self.location() != null,
+            else => false,
+        };
+    }
+};
+
+pub const Scheme = enum {
+    http,
+    https,
+};
+
+pub const RedirectPolicy = struct {
+    allow_cross_host: bool = false,
+    allow_cross_port: bool = false,
+    allow_https_downgrade: bool = false,
+};
+
+pub const ParseErr = std.Uri.ParseError || error{
+    UnsupportedScheme,
+    MissingHost,
+    UserInfoNotAllowed,
+    FragmentNotAllowed,
+};
+
+pub const RedirectErr = std.Uri.ResolveInPlaceError || error{
+    UnsupportedScheme,
+    MissingHost,
+    UserInfoNotAllowed,
+    FragmentNotAllowed,
+    EmptyLocation,
+    CrossHostRedirect,
+    CrossPortRedirect,
+    HttpsDowngrade,
+    OutOfMemory,
+};
+
+pub const ParsedUrl = struct {
+    text: []const u8,
+    uri: std.Uri,
+    scheme: Scheme,
+    host: []const u8,
+    port: u16,
+    path: []const u8,
+    query: ?[]const u8 = null,
+};
+
+pub const OwnedUrl = struct {
+    text: []u8,
+    parsed: ParsedUrl,
+
+    pub fn deinit(self: OwnedUrl, alloc: std.mem.Allocator) void {
+        alloc.free(self.text);
+    }
+};
+
+pub fn parseUrl(raw: []const u8) ParseErr!ParsedUrl {
+    const text = std.mem.trim(u8, raw, " \t\r\n");
+    const uri = try std.Uri.parse(text);
+    return parseAbsoluteUrl(text, uri);
+}
+
+pub fn resolveRedirectAlloc(
+    alloc: std.mem.Allocator,
+    base: ParsedUrl,
+    location_raw: []const u8,
+    policy: RedirectPolicy,
+) RedirectErr!OwnedUrl {
+    const location = std.mem.trim(u8, location_raw, " \t\r\n");
+    if (location.len == 0) return error.EmptyLocation;
+
+    const scratch_len = location.len + compText(base.uri.path).len + location.len + 1;
+    const scratch = try alloc.alloc(u8, scratch_len);
+    defer alloc.free(scratch);
+
+    @memcpy(scratch[0..location.len], location);
+    var aux = scratch[0..];
+    var resolved = try std.Uri.resolveInPlace(base.uri, location.len, &aux);
+    resolved.fragment = null;
+
+    try validateRedirect(base, resolved, policy);
+
+    const text = try renderUrlAlloc(alloc, resolved);
+    errdefer alloc.free(text);
+
+    return .{
+        .text = text,
+        .parsed = try parseUrl(text),
+    };
+}
+
+pub fn nextRedirectTargetAlloc(
+    alloc: std.mem.Allocator,
+    req: Request,
+    res: Response,
+    policy: RedirectPolicy,
+) RedirectErr!?OwnedUrl {
+    if (!req.follow_redirects or !res.isRedirect()) return null;
+    const location = res.location() orelse return null;
+    const base = try parseUrl(req.url);
+    return try resolveRedirectAlloc(alloc, base, location, policy);
+}
+
+fn parseAbsoluteUrl(text: []const u8, uri: std.Uri) ParseErr!ParsedUrl {
+    if (uri.user != null or uri.password != null) return error.UserInfoNotAllowed;
+    if (uri.fragment != null) return error.FragmentNotAllowed;
+
+    const scheme = try parseScheme(uri.scheme);
+    const host = try parseHost(uri);
+
+    return .{
+        .text = text,
+        .uri = uri,
+        .scheme = scheme,
+        .host = host,
+        .port = uri.port orelse defaultPort(scheme),
+        .path = pathText(uri),
+        .query = if (uri.query) |query| compText(query) else null,
+    };
+}
+
+fn validateRedirect(base: ParsedUrl, uri: std.Uri, policy: RedirectPolicy) RedirectErr!void {
+    if (uri.user != null or uri.password != null) return error.UserInfoNotAllowed;
+
+    const scheme = try parseScheme(uri.scheme);
+    const host = try parseHost(uri);
+    const port = uri.port orelse defaultPort(scheme);
+
+    if (base.scheme == .https and scheme == .http and !policy.allow_https_downgrade) {
+        return error.HttpsDowngrade;
+    }
+    if (!policy.allow_cross_host and !std.ascii.eqlIgnoreCase(base.host, host)) {
+        return error.CrossHostRedirect;
+    }
+    if (!policy.allow_cross_port and base.port != port) {
+        return error.CrossPortRedirect;
+    }
+}
+
+fn parseScheme(text: []const u8) error{UnsupportedScheme}!Scheme {
+    if (std.ascii.eqlIgnoreCase(text, "http")) return .http;
+    if (std.ascii.eqlIgnoreCase(text, "https")) return .https;
+    return error.UnsupportedScheme;
+}
+
+fn parseHost(uri: std.Uri) error{MissingHost}![]const u8 {
+    const host = uri.host orelse return error.MissingHost;
+    const text = compText(host);
+    if (text.len == 0) return error.MissingHost;
+    return text;
+}
+
+fn defaultPort(scheme: Scheme) u16 {
+    return switch (scheme) {
+        .http => 80,
+        .https => 443,
+    };
+}
+
+fn compText(comp: std.Uri.Component) []const u8 {
+    return switch (comp) {
+        .raw => |text| text,
+        .percent_encoded => |text| text,
+    };
+}
+
+fn pathText(uri: std.Uri) []const u8 {
+    const text = compText(uri.path);
+    if (text.len == 0) return "/";
+    return text;
+}
+
+fn renderUrlAlloc(alloc: std.mem.Allocator, uri: std.Uri) error{OutOfMemory}![]u8 {
+    return try std.fmt.allocPrint(alloc, "{f}", .{std.Uri.fmt(&uri, .{
+        .scheme = true,
+        .authority = true,
+        .path = true,
+        .query = true,
+        .fragment = false,
+    })});
+}
+
+test "parseUrl returns normalized fields for request targets" {
+    const url = try parseUrl(" https://EXAMPLE.test:8443/api/v1?q=ok ");
+
+    try std.testing.expect(url.scheme == .https);
+    try std.testing.expectEqualStrings("EXAMPLE.test", url.host);
+    try std.testing.expectEqual(@as(u16, 8443), url.port);
+    try std.testing.expectEqualStrings("/api/v1", url.path);
+    try std.testing.expect(url.query != null);
+    try std.testing.expectEqualStrings("q=ok", url.query.?);
+}
+
+test "nextRedirectTargetAlloc follows safe local redirect chain" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const req0: Request = .{
+        .url = "https://svc.local/api/v1/start?x=1",
+    };
+    const res0: Response = .{
+        .status = 302,
+        .headers = &.{
+            .{ .name = "Location", .value = "../next?step=1" },
+        },
+    };
+
+    const hop1 = (try nextRedirectTargetAlloc(std.testing.allocator, req0, res0, .{})).?;
+    defer hop1.deinit(std.testing.allocator);
+
+    const req1: Request = .{
+        .url = hop1.text,
+    };
+    const res1: Response = .{
+        .status = 307,
+        .headers = &.{
+            .{ .name = "location", .value = "/done#ignored" },
+        },
+    };
+
+    const hop2 = (try nextRedirectTargetAlloc(std.testing.allocator, req1, res1, .{})).?;
+    defer hop2.deinit(std.testing.allocator);
+
+    const Snap = struct {
+        hop0_in: []const u8,
+        hop0_status: u16,
+        hop0_location: []const u8,
+        hop0_out: []const u8,
+        hop1_in: []const u8,
+        hop1_status: u16,
+        hop1_location: []const u8,
+        hop1_out: []const u8,
+    };
+    const snap = Snap{
+        .hop0_in = req0.url,
+        .hop0_status = res0.status,
+        .hop0_location = res0.location().?,
+        .hop0_out = hop1.text,
+        .hop1_in = req1.url,
+        .hop1_status = res1.status,
+        .hop1_location = res1.location().?,
+        .hop1_out = hop2.text,
+    };
+
+    try oh.snap(@src(),
+        \\core.tools.web.test.nextRedirectTargetAlloc follows safe local redirect chain.Snap
+        \\  .hop0_in: []const u8
+        \\    "https://svc.local/api/v1/start?x=1"
+        \\  .hop0_status: u16 = 302
+        \\  .hop0_location: []const u8
+        \\    "../next?step=1"
+        \\  .hop0_out: []const u8
+        \\    "https://svc.local/api/next?step=1"
+        \\  .hop1_in: []const u8
+        \\    "https://svc.local/api/next?step=1"
+        \\  .hop1_status: u16 = 307
+        \\  .hop1_location: []const u8
+        \\    "/done#ignored"
+        \\  .hop1_out: []const u8
+        \\    "https://svc.local/done"
+    ).expectEqual(snap);
+}
+
+test "resolveRedirectAlloc blocks unsafe redirects by default" {
+    const base = try parseUrl("https://svc.local/api");
+
+    try std.testing.expectError(
+        error.CrossHostRedirect,
+        resolveRedirectAlloc(std.testing.allocator, base, "https://evil.local/api", .{}),
+    );
+    try std.testing.expectError(
+        error.HttpsDowngrade,
+        resolveRedirectAlloc(std.testing.allocator, base, "http://svc.local/api", .{}),
+    );
+}

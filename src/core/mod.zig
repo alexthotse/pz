@@ -10,3 +10,4 @@ pub const audit = @import("audit.zig");
 pub const syslog = @import("syslog.zig");
 pub const signing = @import("signing.zig");
 pub const agent = @import("agent.zig");
+pub const watcher = @import("watcher.zig");

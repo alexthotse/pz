@@ -9,6 +9,7 @@ pub const edit = @import("edit.zig");
 pub const grep = @import("grep.zig");
 pub const find = @import("find.zig");
 pub const ls = @import("ls.zig");
+pub const web = @import("web.zig");
 pub const contract_test = @import("contract_test.zig");
 
 pub const Kind = enum {
@@ -19,6 +20,7 @@ pub const Kind = enum {
     grep,
     find,
     ls,
+    web,
     ask,
 };
 
@@ -105,6 +107,7 @@ pub const Call = struct {
         grep: GrepArgs,
         find: FindArgs,
         ls: LsArgs,
+        web: WebArgs,
         ask: AskArgs,
     };
 
@@ -150,6 +153,8 @@ pub const Call = struct {
         path: []const u8 = ".",
         all: bool = false,
     };
+
+    pub const WebArgs = web.Request;
 
     pub const AskArgs = struct {
         questions: []const Question,
