@@ -260,6 +260,36 @@ fn fixtureSignature() !Signature {
     return Signature.parseHex(sig_hex);
 }
 
+fn seedFromParts(a: u64, b: u64, c: u64, d: u64) Seed {
+    var raw: [seed_len]u8 = undefined;
+    std.mem.writeInt(u64, raw[0..8], a, .little);
+    std.mem.writeInt(u64, raw[8..16], b, .little);
+    std.mem.writeInt(u64, raw[16..24], c, .little);
+    std.mem.writeInt(u64, raw[24..32], d, .little);
+    return .{ .raw = raw };
+}
+
+fn mutateMsg(alloc: std.mem.Allocator, msg: []const u8, flip: u8) ![]u8 {
+    const n = if (msg.len == 0) @as(usize, 1) else msg.len;
+    const buf = try alloc.alloc(u8, n);
+    if (msg.len == 0) {
+        buf[0] = flip | 1;
+        return buf;
+    }
+
+    @memcpy(buf, msg);
+    const idx = @as(usize, flip) % msg.len;
+    buf[idx] ^= flip | 1;
+    return buf;
+}
+
+fn mutateSig(sig: Signature, flip: u8) Signature {
+    var raw = sig.raw;
+    const idx = @as(usize, flip) % sig_len;
+    raw[idx] ^= flip | 1;
+    return .{ .raw = raw };
+}
+
 test "seed derives expected public key" {
     const kp = try fixtureKeyPair();
     const exp = try fixturePublicKey();
@@ -316,28 +346,20 @@ test "verify rejects malformed signature bytes" {
     try testing.expectError(error.BadSig, verifyDetached("test", sig, pk));
 }
 
-test "parseText accepts fixture key in hex pem and ssh forms" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-
+test "parsed fixture keys preserve behavior across hex pem and ssh forms" {
+    const exp = try fixturePublicKey();
+    const sig = try fixtureSignature();
     const hex = try PublicKey.parseText(pk_hex);
     const pem = try PublicKey.parseText(pk_pem);
     const ssh = try PublicKey.parseText(pk_ssh);
+    const pks = [_]PublicKey{ hex, pem, ssh };
 
-    const snap = try std.fmt.allocPrint(testing.allocator, "{x}{x}{x}\n{x}{x}{x}\n{x}{x}{x}\n", .{
-        hex.raw[0], hex.raw[1], hex.raw[2],
-        pem.raw[0], pem.raw[1], pem.raw[2],
-        ssh.raw[0], ssh.raw[1], ssh.raw[2],
-    });
-    defer testing.allocator.free(snap);
-
-    try oh.snap(@src(),
-        \\[]u8
-        \\  "2d6f74
-        \\2d6f74
-        \\2d6f74
-        \\"
-    ).expectEqual(snap);
+    for (pks) |pk| {
+        try testing.expectEqualSlices(u8, exp.raw[0..], pk.raw[0..]);
+        const checked = try verifyDetached("test", sig, pk);
+        try testing.expectEqualSlices(u8, pk.raw[0..], checked.pk.raw[0..]);
+        try testing.expectEqualSlices(u8, sig.raw[0..], checked.sig.raw[0..]);
+    }
 }
 
 test "parseText rejects wrong pem type and malformed ssh payload" {
@@ -349,4 +371,63 @@ test "parseText rejects wrong pem type and malformed ssh payload" {
 
     try testing.expectError(error.BadPemType, PublicKey.parseText(bad_pem));
     try testing.expectError(error.BadSsh, PublicKey.parseText("ssh-ed25519 AAAA"));
+}
+
+test "signing property: valid signatures verify" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: u64, b: u64, c: u64, d: u64, msg: zc.String }) bool {
+            const msg = args.msg.slice();
+            const seed = seedFromParts(args.a, args.b, args.c, args.d);
+            const kp = KeyPair.fromSeed(seed) catch return false;
+            const pk = kp.publicKey();
+            const sig = kp.sign(msg) catch return false;
+            const checked = verifyDetached(msg, sig, pk) catch return false;
+
+            return std.mem.eql(u8, pk.raw[0..], checked.pk.raw[0..]) and
+                std.mem.eql(u8, sig.raw[0..], checked.sig.raw[0..]);
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0x5eed_ed25,
+    });
+}
+
+test "signing property: message mutation fails verification" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: u64, b: u64, c: u64, d: u64, msg: zc.String, flip: u8 }) bool {
+            const msg = args.msg.slice();
+            const seed = seedFromParts(args.a, args.b, args.c, args.d);
+            const kp = KeyPair.fromSeed(seed) catch return false;
+            const sig = kp.sign(msg) catch return false;
+            const bad = mutateMsg(testing.allocator, msg, args.flip) catch return false;
+            defer testing.allocator.free(bad);
+
+            _ = verifyDetached(bad, sig, kp.publicKey()) catch |err| return err == error.SigMismatch;
+            return false;
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0x5eed_bad1,
+    });
+}
+
+test "signing property: signature mutation fails verification" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: u64, b: u64, c: u64, d: u64, msg: zc.String, flip: u8 }) bool {
+            const msg = args.msg.slice();
+            const seed = seedFromParts(args.a, args.b, args.c, args.d);
+            const kp = KeyPair.fromSeed(seed) catch return false;
+            const sig = kp.sign(msg) catch return false;
+            const bad = mutateSig(sig, args.flip);
+
+            _ = verifyDetached(msg, bad, kp.publicKey()) catch return true;
+            return false;
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0x5eed_51a9,
+    });
 }
