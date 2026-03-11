@@ -711,7 +711,7 @@ fn fmtToolCall(alloc: std.mem.Allocator, name: []const u8, args: []const u8) ![]
 
     // bash tool: show command
     if (std.mem.eql(u8, name, "bash")) {
-        if (obj.get("command")) |cmd| {
+        if (obj.get("cmd") orelse obj.get("command")) |cmd| {
             const cmd_str = switch (cmd) {
                 .string => |s| s,
                 else => return std.fmt.allocPrint(alloc, " $ bash", .{}),
@@ -2244,7 +2244,7 @@ test "transcript appendSeq keeps deny blocks in causal order" {
     var y: usize = 0;
     while (y < frm.h) : (y += 1) {
         const row = try rowAscii(&frm, y, raw[0..]);
-        if (call_y == null and std.mem.indexOf(u8, row, "$ bash") != null) call_y = y;
+        if (call_y == null and std.mem.indexOf(u8, row, "$ cat ~/.ssh/id_rsa") != null) call_y = y;
         if (deny_y == null and std.mem.indexOf(u8, row, "permission denied") != null) deny_y = y;
         if (later_y == null and std.mem.indexOf(u8, row, "later provider text") != null) later_y = y;
     }
@@ -2445,9 +2445,12 @@ test "tool call recolors to error with failed result" {
     const t = theme.get();
     const call_row = try frm.cell(1, 0);
     const result_row = try frm.cell(1, 1);
+    var raw: [30]u8 = undefined;
+    const row = try rowAscii(&frm, 0, raw[0..]);
     try std.testing.expect(frame.Color.eql(call_row.style.bg, t.tool_error_bg));
     try std.testing.expect(frame.Color.eql(result_row.style.bg, t.tool_error_bg));
     try std.testing.expect(frame.Color.eql(result_row.style.fg, t.err));
+    try std.testing.expect(std.mem.indexOf(u8, row, "$ false") != null);
 }
 
 test "usage and stop produce no transcript blocks" {
