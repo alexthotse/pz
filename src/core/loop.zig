@@ -2,6 +2,7 @@ const std = @import("std");
 const providers = @import("providers/mod.zig");
 const session = @import("session/mod.zig");
 const tools = @import("tools/mod.zig");
+const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 
 pub const Err = error{
@@ -2440,21 +2441,13 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
         }
     };
 
-    const CancelImpl = struct {
-        canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-        fn isCanceled(self: *@This()) bool {
-            return self.canceled.load(.acquire);
-        }
-    };
-
     const CancelCtx = struct {
-        cancel: *CancelImpl,
+        cancel: *cancel_mock.Flag,
         slot: *providers.AbortSlot,
 
         fn run(self: *@This()) void {
             std.Thread.sleep(20 * std.time.ns_per_ms);
-            self.cancel.canceled.store(true, .release);
+            self.cancel.request();
             self.slot.abort();
         }
     };
@@ -2479,8 +2472,8 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
     var mode_impl = ModeImpl{};
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
 
-    var cancel_impl = CancelImpl{};
-    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+    var cancel_impl = cancel_mock.Flag{};
+    const cancel = CancelSrc.from(cancel_mock.Flag, &cancel_impl, cancel_mock.Flag.isCanceled);
     var abort_slot = providers.AbortSlot{};
     var cancel_ctx = CancelCtx{
         .cancel = &cancel_impl,
