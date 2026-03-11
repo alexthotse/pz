@@ -4,27 +4,40 @@ const pkg = @import("build.zig.zon");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const dep_opt = .{
+        .target = target,
+        .optimize = optimize,
+    };
+    const zcheck_mod = depMod(b, "zcheck", "src/zcheck.zig", target, optimize);
 
-    // Build options: version, git hash, changelog
+    // Build options: version, VCS hash, changelog
     const options = b.addOptions();
     options.addOption([]const u8, "version", pkg.version);
 
     var code: u8 = 0;
-    const git_hash_raw = b.runAllowFail(
-        &.{ "git", "rev-parse", "--short", "HEAD" },
+    const vcs_hash_raw = b.runAllowFail(
+        &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short()" },
         &code,
         .Ignore,
     ) catch "unknown";
-    const git_hash = std.mem.trimRight(u8, git_hash_raw, "\n\r ");
-    options.addOption([]const u8, "git_hash", git_hash);
+    const vcs_hash = std.mem.trimRight(u8, vcs_hash_raw, "\n\r ");
+    options.addOption([]const u8, "git_hash", vcs_hash);
 
-    const git_log_raw = b.runAllowFail(
-        &.{ "git", "log", "--oneline", "--no-decorate", "-n", "50" },
+    const vcs_log_raw = b.runAllowFail(
+        &.{
+            "jj",
+            "log",
+            "--no-graph",
+            "-r",
+            "ancestors(@, 50)",
+            "-T",
+            "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
+        },
         &code,
         .Ignore,
     ) catch "No commit history available";
-    const git_log = std.mem.trimRight(u8, git_log_raw, "\n\r ");
-    options.addOption([]const u8, "changelog", git_log);
+    const vcs_log = std.mem.trimRight(u8, vcs_log_raw, "\n\r ");
+    options.addOption([]const u8, "changelog", vcs_log);
 
     const exe = b.addExecutable(.{
         .name = "pz",
@@ -52,18 +65,10 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    if (b.lazyDependency("ohsnap", .{
-        .target = target,
-        .optimize = optimize,
-    })) |ohsnap_dep| {
+    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
         exe_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
     }
-    if (b.lazyDependency("zcheck", .{
-        .target = target,
-        .optimize = optimize,
-    })) |zcheck_dep| {
-        exe_tests.root_module.addImport("zcheck", zcheck_dep.module("zcheck"));
-    }
+    exe_tests.root_module.addImport("zcheck", zcheck_mod);
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const suite_tests = b.addTest(.{
@@ -74,18 +79,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     suite_tests.root_module.addOptions("build_options", options);
-    if (b.lazyDependency("ohsnap", .{
-        .target = target,
-        .optimize = optimize,
-    })) |ohsnap_dep| {
+    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
         suite_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
     }
-    if (b.lazyDependency("zcheck", .{
-        .target = target,
-        .optimize = optimize,
-    })) |zcheck_dep| {
-        suite_tests.root_module.addImport("zcheck", zcheck_dep.module("zcheck"));
-    }
+    suite_tests.root_module.addImport("zcheck", zcheck_mod);
     const run_suite_tests = b.addRunArtifact(suite_tests);
 
     const test_step = b.step("test", "Run unit tests");
@@ -99,6 +96,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    perf_tests.root_module.addImport("zcheck", zcheck_mod);
     const run_perf_tests = b.addRunArtifact(perf_tests);
     const perf_step = b.step("perf", "Run performance budget tests");
     perf_step.dependOn(&run_perf_tests.step);
@@ -108,4 +106,36 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&exe_tests.step);
     check_step.dependOn(&suite_tests.step);
     check_step.dependOn(&perf_tests.step);
+}
+
+fn depMod(
+    b: *std.Build,
+    name: []const u8,
+    sub_path: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/{s}", .{ depRoot(b, name), sub_path }) },
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn depRoot(b: *std.Build, name: []const u8) []const u8 {
+    const pkgs = @import("root").dependencies.packages;
+
+    for (b.available_deps) |dep| {
+        const dep_name, const dep_hash = dep;
+        if (!std.mem.eql(u8, dep_name, name)) continue;
+
+        inline for (@typeInfo(pkgs).@"struct".decls) |decl| {
+            if (std.mem.eql(u8, dep_hash, decl.name)) {
+                return @field(pkgs, decl.name).build_root;
+            }
+        }
+        unreachable;
+    }
+
+    std.debug.panic("missing dependency '{s}'", .{name});
 }

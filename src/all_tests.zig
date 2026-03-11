@@ -17,6 +17,7 @@ const core_skill = @import("core/skill.zig");
 const core_policy = @import("core/policy.zig");
 const core_shell = @import("core/shell.zig");
 const core_lru = @import("core/lru.zig");
+const core_pbt = @import("core/pbt.zig");
 const core_audit = @import("core/audit.zig");
 const core_syslog = @import("core/syslog.zig");
 const core_signing = @import("core/signing.zig");
@@ -45,6 +46,7 @@ test "all module tests" {
     _ = core_policy;
     _ = core_shell;
     _ = core_lru;
+    _ = core_pbt;
     _ = core_audit;
     _ = core_syslog;
     _ = core_signing;
