@@ -17,6 +17,8 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - For RFC 5424 UDP truncation, parse through the structured-data boundary and append truncation metadata there; trimming raw bytes blindly risks invalid frames and would miss the `sendRaw` audit path.
 - Pulling the ad hoc blocked-stream provider out of the loop test and into `src/test/provider_mock.zig` made the cancel regression cheaper to reuse and gave `T7b` a real local provider harness instead of copy-pasted test scaffolding.
 - A tiny one-shot local HTTP server under `src/test/http_mock.zig` is enough to unblock update/share/redirect testing; land the harness before trying to write higher-level E2E around it.
+- Contract helpers added under `src/core/providers/contract.zig` are not automatically visible through `src/core/providers/mod.zig`; owned callers should import the contract directly unless the module surface is intentionally widened.
+- When a test frees a companion `parts` buffer by deriving its size from `msgs.len`, any change that allows multi-part system messages must update that free path too or the debug allocator will catch a mismatched free/leak.
 
 ### Did Not Work
 - Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.

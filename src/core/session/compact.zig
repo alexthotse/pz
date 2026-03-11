@@ -4,6 +4,7 @@ const schema = @import("schema.zig");
 const reader = @import("reader.zig");
 const sid_path = @import("path.zig");
 const providers = @import("../providers/mod.zig");
+const prov_contract = @import("../providers/contract.zig");
 const fs_secure = @import("../fs_secure.zig");
 
 pub const checkpoint_version: u16 = 1;
@@ -165,7 +166,9 @@ pub fn generateSummary(alloc: Allocator, events: []const schema.Event) !?Generat
     for (events) |ev| {
         if (ev.data == .noop) continue;
         const raw = try schema.encodeAlloc(alloc, ev);
-        try jsons.append(alloc, raw);
+        defer alloc.free(raw);
+        const wrapped = try prov_contract.wrapUntrustedNamed(alloc, "session-event", @tagName(ev.data), raw);
+        try jsons.append(alloc, wrapped);
     }
 
     if (jsons.items.len == 0) {
@@ -179,7 +182,14 @@ pub fn generateSummary(alloc: Allocator, events: []const schema.Event) !?Generat
         alloc.free(owned);
     }
 
-    const fops = try formatFileOps(alloc, events);
+    const fops = blk: {
+        const raw = try formatFileOps(alloc, events);
+        if (raw) |text| {
+            defer alloc.free(text);
+            break :blk try prov_contract.wrapUntrusted(alloc, "file-ops", text);
+        }
+        break :blk null;
+    };
 
     const const_jsons: []const []const u8 = @as([*]const []const u8, @ptrCast(owned.ptr))[0..owned.len];
 
@@ -821,6 +831,9 @@ test "generateSummary with tool_call events produces file_ops" {
     try std.testing.expect(summary.file_ops != null);
     try std.testing.expectEqual(@as(usize, 3), summary.event_jsons.len);
     try std.testing.expectEqual(@as(usize, 3), summary.req.events_json.len);
+    try std.testing.expect(std.mem.startsWith(u8, summary.event_jsons[0], "<untrusted-input kind=\"session-event\" name=\"text\">\n"));
+    try std.testing.expect(summary.file_ops != null);
+    try std.testing.expect(std.mem.startsWith(u8, summary.file_ops.?, "<untrusted-input kind=\"file-ops\">\n"));
 }
 
 test "generateSummary with text-only events has null file_ops" {
@@ -835,6 +848,7 @@ test "generateSummary with text-only events has null file_ops" {
 
     try std.testing.expect(summary.file_ops == null);
     try std.testing.expectEqual(@as(usize, 2), summary.event_jsons.len);
+    try std.testing.expect(std.mem.startsWith(u8, summary.event_jsons[1], "<untrusted-input kind=\"session-event\" name=\"prompt\">\n"));
 }
 
 test "generateSummary with empty events returns null" {

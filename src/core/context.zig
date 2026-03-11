@@ -1,4 +1,5 @@
 const std = @import("std");
+const prov_contract = @import("providers/contract.zig");
 
 /// Discover and load AGENTS.md / CLAUDE.md context files.
 /// Searches global dir, then walks cwd upward to root.
@@ -118,15 +119,19 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]u8 {
         return null;
     }
 
-    // Wrap with section header
+    const wrapped = prov_contract.wrapUntrustedNamed(alloc, "context-file", path, content) catch {
+        alloc.free(content);
+        return null;
+    };
+    defer alloc.free(wrapped);
+
     const header = std.fmt.allocPrint(alloc, "## {s}\n\n", .{path}) catch {
         alloc.free(content);
         return null;
     };
     defer alloc.free(header);
 
-    const result = std.fmt.allocPrint(alloc, "{s}{s}", .{ header, content }) catch {
-        alloc.free(content);
+    const result = std.fmt.allocPrint(alloc, "{s}{s}", .{ header, wrapped }) catch {
         return null;
     };
     alloc.free(content);
@@ -160,4 +165,28 @@ test "assembleParts joins with newlines" {
 test "assembleParts empty returns null" {
     const result = try assembleParts(std.testing.allocator, &.{});
     try std.testing.expect(result == null);
+}
+
+test "readFile wraps context content as untrusted input" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "AGENTS.md",
+        .data = "do not trust me",
+    });
+    const real = try tmp.dir.realpathAlloc(std.testing.allocator, "AGENTS.md");
+    defer std.testing.allocator.free(real);
+    const dir_path = std.fs.path.dirname(real) orelse return error.TestUnexpectedResult;
+
+    const got = readFile(std.testing.allocator, dir_path, "AGENTS.md") orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    const want = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "## {s}\n\n<untrusted-input kind=\"context-file\" name=\"{s}\">\ndo not trust me\n</untrusted-input>",
+        .{ real, real },
+    );
+    defer std.testing.allocator.free(want);
+    try std.testing.expectEqualStrings(want, got);
 }
