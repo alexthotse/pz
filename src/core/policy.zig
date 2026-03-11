@@ -464,6 +464,29 @@ pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) a
     return lock;
 }
 
+pub fn loadApprovalBind(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!ApprovalBind {
+    var sha = std.crypto.hash.sha2.Sha256.init(.{});
+    var saw = false;
+
+    if (home) |home_path| {
+        const path = try std.fs.path.join(alloc, &.{ home_path, policy_rel_path });
+        defer alloc.free(path);
+        saw = try hashPolicyFile(alloc, &sha, "home", path) or saw;
+    }
+    if (cwd) |cwd_path| {
+        const path = try std.fs.path.join(alloc, &.{ cwd_path, policy_rel_path });
+        defer alloc.free(path);
+        saw = try hashPolicyFile(alloc, &sha, "cwd", path) or saw;
+    }
+    if (!saw) return .{ .version = ver_current };
+
+    var dig: [32]u8 = undefined;
+    sha.final(&dig);
+    const hex_txt = std.fmt.bytesToHex(dig, .lower);
+    const hex = try alloc.dupe(u8, &hex_txt);
+    return .{ .hash = hex };
+}
+
 fn loadLockFile(alloc: std.mem.Allocator, path: []const u8) anyerror!Lock {
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .{},
@@ -480,6 +503,37 @@ fn loadLockFile(alloc: std.mem.Allocator, path: []const u8) anyerror!Lock {
     };
     defer deinitSignedDoc(alloc, doc);
     return doc.doc.lock;
+}
+
+fn hashPolicyFile(
+    alloc: std.mem.Allocator,
+    sha: *std.crypto.hash.sha2.Sha256,
+    tag: []const u8,
+    path: []const u8,
+) anyerror!bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return error.InvalidPolicy,
+    };
+    defer file.close();
+
+    const raw = try file.readToEndAlloc(alloc, 256 * 1024);
+    defer alloc.free(raw);
+
+    const doc = parseSignedDoc(alloc, raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+    defer deinitSignedDoc(alloc, doc);
+
+    const payload = try encodeDoc(alloc, doc.doc);
+    defer alloc.free(payload);
+
+    sha.update(tag);
+    sha.update("\x00");
+    sha.update(payload);
+    sha.update("\x00");
+    return true;
 }
 
 fn writeJsonStr(w: anytype, s: []const u8) !void {
@@ -808,6 +862,52 @@ test "signed policy bundle rejects untrusted signer" {
     defer testing.allocator.free(json);
 
     try testing.expectError(error.UntrustedSigner, parseSignedDoc(testing.allocator, json));
+}
+
+test "loadApprovalBind falls back to version without signed policy" {
+    const bind = try loadApprovalBind(testing.allocator, null, null);
+    defer bind.deinit(testing.allocator);
+    try testing.expect(bind == .version);
+    try testing.expectEqual(@as(u16, ver_current), bind.version);
+}
+
+test "loadApprovalBind hashes verified home and cwd policy docs" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("repo/.pz");
+    const home = try tmp.dir.realpathAlloc(testing.allocator, "home");
+    defer testing.allocator.free(home);
+    const repo = try tmp.dir.realpathAlloc(testing.allocator, "repo");
+    defer testing.allocator.free(repo);
+
+    const seed = try signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    const kp = try signing.KeyPair.fromSeed(seed);
+
+    const home_rules = [_]Rule{.{ .pattern = "*.zig", .effect = .allow }};
+    const repo_rules_a = [_]Rule{.{ .pattern = "*.md", .effect = .deny }};
+    const home_raw = try encodeSignedDoc(testing.allocator, .{ .rules = &home_rules }, kp);
+    defer testing.allocator.free(home_raw);
+    const repo_raw_a = try encodeSignedDoc(testing.allocator, .{ .rules = &repo_rules_a }, kp);
+    defer testing.allocator.free(repo_raw_a);
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pz/policy.json", .data = home_raw });
+    try tmp.dir.writeFile(.{ .sub_path = "repo/.pz/policy.json", .data = repo_raw_a });
+
+    const bind_a = try loadApprovalBind(testing.allocator, repo, home);
+    defer bind_a.deinit(testing.allocator);
+    try testing.expect(bind_a == .hash);
+    try testing.expectEqual(@as(usize, 64), bind_a.hash.len);
+
+    const repo_rules_b = [_]Rule{.{ .pattern = "*.txt", .effect = .deny }};
+    const repo_raw_b = try encodeSignedDoc(testing.allocator, .{ .rules = &repo_rules_b }, kp);
+    defer testing.allocator.free(repo_raw_b);
+    try tmp.dir.writeFile(.{ .sub_path = "repo/.pz/policy.json", .data = repo_raw_b });
+
+    const bind_b = try loadApprovalBind(testing.allocator, repo, home);
+    defer bind_b.deinit(testing.allocator);
+    try testing.expect(bind_b == .hash);
+    try testing.expect(!std.mem.eql(u8, bind_a.hash, bind_b.hash));
 }
 
 // ── Snapshot tests (ohsnap) ────────────────────────────────────────────

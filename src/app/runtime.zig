@@ -23,6 +23,7 @@ const tui_panels = @import("../modes/tui/panels.zig");
 const tui_pathcomp = @import("../modes/tui/pathcomp.zig");
 const args_mod = @import("args.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
+const provider_mock = @import("../test/provider_mock.zig");
 
 pub const Err = error{
     SessionNotFound,
@@ -1599,6 +1600,12 @@ fn runJson(
     };
     const mode = core.loop.ModeSink.from(JsonSink, &sink_impl, JsonSink.push);
     const popts = run_cmd.thinking.toProviderOpts();
+    var cmd_cache = core.loop.CmdCache.init(alloc);
+    defer cmd_cache.deinit();
+    const approval_bind = try loadApprovalBindAlloc(alloc);
+    defer approval_bind.deinit(alloc);
+    const approval_loc = try getApprovalLocAlloc(alloc);
+    defer freeApprovalLoc(alloc, approval_loc);
     const tctx = TurnCtx{
         .alloc = alloc,
         .provider = provider,
@@ -1606,6 +1613,9 @@ fn runJson(
         .tools_rt = tools_rt,
         .mode = mode,
         .max_turns = run_cmd.max_turns,
+        .cmd_cache = &cmd_cache,
+        .approval_bind = approval_bind,
+        .approval_loc = approval_loc,
     };
 
     if (run_cmd.prompt) |prompt| {
@@ -1717,6 +1727,12 @@ fn runTui(
     var watcher = try InputWatcher.init(stdin_fd);
     defer watcher.deinit();
     const cancel = core.loop.CancelSrc.from(InputWatcher, &watcher, InputWatcher.isCanceled);
+    var cmd_cache = core.loop.CmdCache.init(alloc);
+    defer cmd_cache.deinit();
+    const approval_bind = try loadApprovalBindAlloc(alloc);
+    defer approval_bind.deinit(alloc);
+    const approval_loc = try getApprovalLocAlloc(alloc);
+    defer freeApprovalLoc(alloc, approval_loc);
     const tctx = TurnCtx{
         .alloc = alloc,
         .provider = provider,
@@ -1725,6 +1741,9 @@ fn runTui(
         .mode = mode,
         .max_turns = run_cmd.max_turns,
         .cancel = cancel,
+        .cmd_cache = &cmd_cache,
+        .approval_bind = approval_bind,
+        .approval_loc = approval_loc,
     };
     var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
@@ -1886,6 +1905,12 @@ fn runTui(
         };
         const live_mode = core.loop.ModeSink.from(LiveTurnSink, &live_sink_impl, LiveTurnSink.push);
         const live_cancel = core.loop.CancelSrc.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled);
+        var live_cmd_cache = core.loop.CmdCache.init(alloc);
+        defer live_cmd_cache.deinit();
+        const live_approval_bind = try loadApprovalBindAlloc(alloc);
+        defer live_approval_bind.deinit(alloc);
+        const live_approval_loc = try getApprovalLocAlloc(alloc);
+        defer freeApprovalLoc(alloc, live_approval_loc);
         const live_tctx = TurnCtx{
             .alloc = alloc,
             .provider = provider,
@@ -1895,6 +1920,9 @@ fn runTui(
             .max_turns = run_cmd.max_turns,
             .cancel = live_cancel,
             .abort_slot = &live_turn.abort_slot,
+            .cmd_cache = &live_cmd_cache,
+            .approval_bind = live_approval_bind,
+            .approval_loc = live_approval_loc,
         };
         var reader = tui_input.Reader.initWithNotify2(stdin_fd, bg_mgr.wakeFd(), live_turn.wakeFd());
         var live_ask_ctx = LiveAskCtx{
@@ -2660,6 +2688,12 @@ fn runRpc(
     };
     const mode = core.loop.ModeSink.from(JsonSink, &sink_impl, JsonSink.push);
     const popts = run_cmd.thinking.toProviderOpts();
+    var cmd_cache = core.loop.CmdCache.init(alloc);
+    defer cmd_cache.deinit();
+    const approval_bind = try loadApprovalBindAlloc(alloc);
+    defer approval_bind.deinit(alloc);
+    const approval_loc = try getApprovalLocAlloc(alloc);
+    defer freeApprovalLoc(alloc, approval_loc);
     const tctx = TurnCtx{
         .alloc = alloc,
         .provider = provider,
@@ -2667,6 +2701,9 @@ fn runRpc(
         .tools_rt = tools_rt,
         .mode = mode,
         .max_turns = run_cmd.max_turns,
+        .cmd_cache = &cmd_cache,
+        .approval_bind = approval_bind,
+        .approval_loc = approval_loc,
     };
     var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
@@ -4525,26 +4562,44 @@ fn resolveSessionPlan(alloc: std.mem.Allocator, run_cmd: cli.Run) !core.session.
     };
 }
 
-fn getProjectPath(alloc: std.mem.Allocator) ![]u8 {
+fn getApprovalLocAlloc(alloc: std.mem.Allocator) !core.loop.CmdCache.Loc {
     if (runCmdTrimAlloc(alloc, &.{ "jj", "root" }, 4096)) |root| {
-        return shortenHomePath(alloc, root);
+        return .{ .repo_root = root };
     }
     if (runCmdTrimAlloc(alloc, &.{ "git", "rev-parse", "--show-toplevel" }, 4096)) |root| {
-        return shortenHomePath(alloc, root);
+        return .{ .repo_root = root };
     }
-
-    const full = try std.fs.cwd().realpathAlloc(alloc, ".");
-    return shortenHomePath(alloc, full);
+    return .{ .cwd = try std.fs.cwd().realpathAlloc(alloc, ".") };
 }
 
-fn shortenHomePath(alloc: std.mem.Allocator, full: []u8) ![]u8 {
+fn freeApprovalLoc(alloc: std.mem.Allocator, loc: core.loop.CmdCache.Loc) void {
+    switch (loc) {
+        .cwd => |cwd| alloc.free(cwd),
+        .repo_root => |root| alloc.free(root),
+    }
+}
+
+fn loadApprovalBindAlloc(alloc: std.mem.Allocator) !core.policy.ApprovalBind {
+    const cwd = try std.fs.cwd().realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    return core.policy.loadApprovalBind(alloc, cwd, std.posix.getenv("HOME"));
+}
+
+fn getProjectPath(alloc: std.mem.Allocator) ![]u8 {
+    const loc = try getApprovalLocAlloc(alloc);
+    defer freeApprovalLoc(alloc, loc);
+    switch (loc) {
+        .cwd => |cwd| return shortenHomePath(alloc, cwd),
+        .repo_root => |root| return shortenHomePath(alloc, root),
+    }
+}
+
+fn shortenHomePath(alloc: std.mem.Allocator, full: []const u8) ![]u8 {
     const home = std.posix.getenv("HOME") orelse "";
     if (home.len > 0 and std.mem.startsWith(u8, full, home)) {
-        const short = try std.fmt.allocPrint(alloc, "~{s}", .{full[home.len..]});
-        alloc.free(full);
-        return short;
+        return std.fmt.allocPrint(alloc, "~{s}", .{full[home.len..]});
     }
-    return full;
+    return alloc.dupe(u8, full);
 }
 
 fn getGitBranch(alloc: std.mem.Allocator) ![]u8 {
@@ -5650,6 +5705,10 @@ const TurnCtx = struct {
     max_turns: u16 = 0,
     cancel: ?core.loop.CancelSrc = null,
     abort_slot: ?*core.providers.AbortSlot = null,
+    cmd_cache: ?*core.loop.CmdCache = null,
+    approval_bind: core.policy.ApprovalBind = .{ .version = core.policy.ver_current },
+    approval_loc: ?core.loop.CmdCache.Loc = null,
+    approver: ?core.loop.Approver = null,
 
     const TurnOpts = struct {
         sid: []const u8,
@@ -5686,6 +5745,12 @@ const TurnCtx = struct {
             .max_turns = self.max_turns,
             .cancel = self.cancel,
             .abort_slot = self.abort_slot,
+            .cmd_cache = self.cmd_cache,
+            .approval = if (self.approval_loc) |loc| .{
+                .loc = loc,
+                .policy = self.approval_bind,
+            } else null,
+            .approver = self.approver,
         });
     }
 };
@@ -7464,6 +7529,119 @@ test "handleSlashCommand blocks non-user-invocable skills" {
 
     try std.testing.expectEqual(CmdRes.handled, got);
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "skill blocked: /review-plan") != null);
+}
+
+test "TurnCtx.run binds approval context for destructive tools" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd);
+
+    const steps = [_]provider_mock.Step{
+        .{ .ev = .{ .tool_call = .{
+            .id = "call-write",
+            .name = "write",
+            .args = "{\"path\":\"out.txt\",\"text\":\"hello\"}",
+        } } },
+        .{ .ev = .{ .stop = .{ .reason = .done } } },
+    };
+    var scripted = try provider_mock.ScriptedProvider.init(steps[0..]);
+    defer scripted.deinit();
+
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?core.session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+
+        fn append(_: *@This(), _: []const u8, _: core.session.Event) !void {}
+
+        fn replay(self: *@This(), _: []const u8) !core.session.Reader {
+            return core.session.Reader.from(ReaderImpl, &self.rdr, ReaderImpl.next, ReaderImpl.deinit);
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ModeImpl = struct {
+        fn push(_: *@This(), _: core.loop.ModeEv) !void {}
+    };
+
+    const ApproverImpl = struct {
+        cached: bool = true,
+        sid: []const u8 = "",
+        cwd: []const u8 = "",
+        policy_hash: []const u8 = "",
+
+        fn check(self: *@This(), key: core.loop.CmdCache.Key, cached: bool) !void {
+            self.cached = cached;
+            self.sid = switch (key.life) {
+                .session => |sid| sid,
+                .expires_at_ms => return error.TestUnexpectedResult,
+            };
+            self.cwd = switch (key.loc) {
+                .cwd => |loc| loc,
+                .repo_root => return error.TestUnexpectedResult,
+            };
+            self.policy_hash = switch (key.policy) {
+                .hash => |hash| hash,
+                .version => return error.TestUnexpectedResult,
+            };
+        }
+    };
+
+    var store_impl = StoreImpl{};
+    const store = core.session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+    var mode_impl = ModeImpl{};
+    const mode = core.loop.ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
+    defer tools_rt.deinit();
+    var cmd_cache = core.loop.CmdCache.init(std.testing.allocator);
+    defer cmd_cache.deinit();
+    try cmd_cache.add(.{
+        .tool = .write,
+        .cmd = "{\"path\":\"out.txt\",\"text\":\"hello\"}",
+        .loc = .{ .cwd = cwd },
+        .policy = .{ .hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        .life = .{ .session = "sid-rt" },
+    });
+    var approver_impl = ApproverImpl{};
+    const approver = core.loop.Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+
+    const tctx = TurnCtx{
+        .alloc = std.testing.allocator,
+        .provider = scripted.asProvider(),
+        .store = store,
+        .tools_rt = &tools_rt,
+        .mode = mode,
+        .max_turns = 1,
+        .cmd_cache = &cmd_cache,
+        .approval_bind = .{ .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+        .approval_loc = .{ .cwd = cwd },
+        .approver = approver,
+    };
+
+    try tctx.run(.{
+        .sid = "sid-rt",
+        .prompt = "test",
+        .model = "m",
+    });
+
+    try std.testing.expect(!approver_impl.cached);
+    try std.testing.expectEqualStrings("sid-rt", approver_impl.sid);
+    try std.testing.expectEqualStrings(cwd, approver_impl.cwd);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", approver_impl.policy_hash);
 }
 
 test "runtime tui bg command starts and lists background jobs" {

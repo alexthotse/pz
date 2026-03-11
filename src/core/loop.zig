@@ -376,6 +376,40 @@ pub const Opts = struct {
     compactor: ?Compactor = null,
     compact_every: u32 = 0,
     cmd_cache: ?*CmdCache = null,
+    approval: ?ApprovalCtx = null,
+    approver: ?Approver = null,
+};
+
+pub const ApprovalCtx = struct {
+    loc: CmdCache.Loc,
+    policy: policy.ApprovalBind,
+};
+
+pub const Approver = struct {
+    ctx: *anyopaque,
+    check_fn: *const fn (ctx: *anyopaque, key: CmdCache.Key, cached: bool) anyerror!void,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime check_fn: fn (ctx: *T, key: CmdCache.Key, cached: bool) anyerror!void,
+    ) Approver {
+        const Wrap = struct {
+            fn check(raw: *anyopaque, key: CmdCache.Key, cached: bool) anyerror!void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return check_fn(typed, key, cached);
+            }
+        };
+
+        return .{
+            .ctx = ctx,
+            .check_fn = Wrap.check,
+        };
+    }
+
+    pub fn check(self: Approver, key: CmdCache.Key, cached: bool) !void {
+        return self.check_fn(self.ctx, key, cached);
+    }
 };
 
 pub const RunOut = struct {
@@ -957,6 +991,8 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
         };
     };
 
+    try noteApproval(opts, entry.kind, entry.spec.destructive, tc);
+
     const at_ms = nowMs(opts);
     var parse_arena = std.heap.ArenaAllocator.init(opts.alloc);
     defer parse_arena.deinit();
@@ -1023,6 +1059,20 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
             else => true,
         },
     };
+}
+
+fn noteApproval(opts: Opts, kind: tools.Kind, destructive: bool, tc: providers.ToolCall) !void {
+    if (!destructive) return;
+    const ctx = opts.approval orelse return;
+    const key: CmdCache.Key = .{
+        .tool = kind,
+        .cmd = tc.args,
+        .loc = ctx.loc,
+        .policy = ctx.policy,
+        .life = .{ .session = opts.sid },
+    };
+    const cached = if (opts.cmd_cache) |cache| cache.contains(key) else false;
+    if (opts.approver) |approver| try approver.check(key, cached);
 }
 
 const ToolModeSink = struct {
@@ -1944,6 +1994,137 @@ test "runTool forwards cancel source to dispatch" {
     try std.testing.expectEqualStrings("call-1", tr.id);
     try std.testing.expectEqualStrings("tool-ok", tr.out);
     try std.testing.expect(!tr.is_err);
+}
+
+test "runTool approval hook binds repo policy session and cache state" {
+    const DispatchImpl = struct {
+        fn run(_: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+            return .{
+                .call_id = call.id,
+                .started_at_ms = 1,
+                .ended_at_ms = 2,
+                .out = &.{},
+                .final = .{ .ok = .{ .code = 0 } },
+            };
+        }
+    };
+
+    const ModeImpl = struct {
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+
+    const ProviderImpl = struct {
+        fn start(_: *@This(), _: providers.Req) !providers.Stream {
+            return error.Unused;
+        }
+    };
+
+    const StoreImpl = struct {
+        fn append(_: *@This(), _: []const u8, _: session.Event) !void {
+            return error.Unused;
+        }
+
+        fn replay(_: *@This(), _: []const u8) !session.Reader {
+            return error.Unused;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ApproverImpl = struct {
+        cached: bool = true,
+        tool: tools.Kind = .read,
+        cmd: []const u8 = "",
+        repo_root: []const u8 = "",
+        sid: []const u8 = "",
+        policy_hash: []const u8 = "",
+
+        fn check(self: *@This(), key: CmdCache.Key, cached: bool) !void {
+            self.cached = cached;
+            self.tool = key.tool;
+            self.cmd = key.cmd;
+            self.sid = switch (key.life) {
+                .session => |sid| sid,
+                .expires_at_ms => return error.TestUnexpectedResult,
+            };
+            self.repo_root = switch (key.loc) {
+                .repo_root => |root| root,
+                .cwd => return error.TestUnexpectedResult,
+            };
+            self.policy_hash = switch (key.policy) {
+                .hash => |hash| hash,
+                .version => return error.TestUnexpectedResult,
+            };
+        }
+    };
+
+    var dispatch_impl = DispatchImpl{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "write",
+            .kind = .write,
+            .spec = .{
+                .kind = .write,
+                .desc = "write",
+                .params = &.{
+                    .{ .name = "path", .ty = .string, .required = true, .desc = "path" },
+                    .{ .name = "text", .ty = .string, .required = true, .desc = "text" },
+                },
+                .out = .{ .max_bytes = 4096, .stream = false },
+                .timeout_ms = 1000,
+                .destructive = true,
+            },
+            .dispatch = tools.Dispatch.from(DispatchImpl, &dispatch_impl, DispatchImpl.run),
+        },
+    };
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    var provider_impl = ProviderImpl{};
+    const provider = providers.Provider.from(ProviderImpl, &provider_impl, ProviderImpl.start);
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.add(.{
+        .tool = .write,
+        .cmd = "{\"path\":\"a.txt\",\"text\":\"hello\"}",
+        .loc = .{ .repo_root = "/work/pz" },
+        .policy = .{ .hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        .life = .{ .session = "sid-approve" },
+    });
+    var approver_impl = ApproverImpl{};
+    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+
+    const tr = try runTool(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-approve",
+        .prompt = "prompt",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .cmd_cache = &cache,
+        .approval = .{
+            .loc = .{ .repo_root = "/work/pz" },
+            .policy = .{ .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+        },
+        .approver = approver,
+    }, .{
+        .id = "call-write",
+        .name = "write",
+        .args = "{\"path\":\"a.txt\",\"text\":\"hello\"}",
+    });
+    defer std.testing.allocator.free(tr.id);
+    defer std.testing.allocator.free(tr.out);
+
+    try std.testing.expect(!approver_impl.cached);
+    try std.testing.expectEqual(tools.Kind.write, approver_impl.tool);
+    try std.testing.expectEqualStrings("{\"path\":\"a.txt\",\"text\":\"hello\"}", approver_impl.cmd);
+    try std.testing.expectEqualStrings("/work/pz", approver_impl.repo_root);
+    try std.testing.expectEqualStrings("sid-approve", approver_impl.sid);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", approver_impl.policy_hash);
 }
 
 test "loop compaction trigger runs at configured append cadence" {
