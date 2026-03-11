@@ -36,7 +36,8 @@ pub fn openDir(path: []const u8, opts: std.fs.Dir.OpenOptions) !std.fs.Dir {
     errdefer parent.dir.close();
 
     const leaf = parent.leaf orelse return error.FileNotFound;
-    const dir = try parent.dir.openDir(leaf, noFollowDirOpts(opts));
+    const dir = parent.dir.openDir(leaf, noFollowDirOpts(opts)) catch |err|
+        return mapParentDirErr(parent.dir, leaf, err);
     parent.dir.close();
     return dir;
 }
@@ -85,10 +86,10 @@ fn openParentDir(rel_path: []const u8) !ParentDir {
         if (isDotDot(part.name)) return error.AccessDenied;
 
         if (leaf) |name| {
-            const next = try dir.openDir(name, .{
+            const next = dir.openDir(name, .{
                 .access_sub_paths = true,
                 .no_follow = true,
-            });
+            }) catch |err| return mapParentDirErr(dir, name, err);
             dir.close();
             dir = next;
         }
@@ -99,6 +100,19 @@ fn openParentDir(rel_path: []const u8) !ParentDir {
         .dir = dir,
         .leaf = leaf,
     };
+}
+
+fn mapParentDirErr(dir: std.fs.Dir, name: []const u8, err: anyerror) anyerror {
+    if (err != error.NotDir) return err;
+    if (native_os == .windows) return err;
+
+    const st = posix.fstatat(dir.fd, name, posix.AT.SYMLINK_NOFOLLOW) catch |stat_err| switch (stat_err) {
+        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => return error.AccessDenied,
+        error.FileNotFound => return error.FileNotFound,
+        else => return err,
+    };
+    if ((st.mode & posix.S.IFMT) == posix.S.IFLNK) return error.AccessDenied;
+    return error.FileNotFound;
 }
 
 fn relPath(path: []const u8) ![]const u8 {

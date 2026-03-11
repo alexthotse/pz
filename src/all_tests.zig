@@ -5,6 +5,7 @@ const app_runtime = @import("app/runtime.zig");
 const core_loop = @import("core/loop.zig");
 const sess = @import("core/session/mod.zig");
 const tools = @import("core/tools/mod.zig");
+const tool_contract = @import("core/tools/contract_test.zig");
 const prov = @import("core/providers/first_provider.zig");
 const openai_prov = @import("core/providers/openai.zig");
 const mode_contract = @import("modes/contract.zig");
@@ -39,6 +40,7 @@ test "all module tests" {
     _ = core_loop;
     _ = sess;
     _ = tools;
+    _ = tool_contract;
     _ = prov;
     _ = openai_prov;
     _ = mode_contract;

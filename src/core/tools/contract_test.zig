@@ -1,4 +1,5 @@
 const std = @import("std");
+const OhSnap = @import("ohsnap");
 const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
 
@@ -10,19 +11,44 @@ fn noopSink() tools.Sink {
     return tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
 }
 
-fn expectResultEnvelope(call: tools.Call, res: tools.Result) !void {
-    try std.testing.expectEqualStrings(call.id, res.call_id);
-    try std.testing.expect(res.ended_at_ms >= res.started_at_ms);
+const OutSnap = struct {
+    call_id: []const u8,
+    seq: u32,
+    at_ms: i64,
+    stream: tools.Output.Stream,
+    truncated: bool,
+};
 
-    var expected_seq: u32 = 0;
-    for (res.out) |out| {
-        try std.testing.expectEqualStrings(call.id, out.call_id);
-        try std.testing.expectEqual(expected_seq, out.seq);
-        expected_seq += 1;
+const ResultSnap = struct {
+    call_id: []const u8,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+    final: tools.Result.Tag,
+    out: []OutSnap,
+};
+
+fn snapshotResult(alloc: std.mem.Allocator, res: tools.Result) !ResultSnap {
+    var out = try alloc.alloc(OutSnap, res.out.len);
+    for (res.out, 0..) |row, i| {
+        out[i] = .{
+            .call_id = row.call_id,
+            .seq = row.seq,
+            .at_ms = row.at_ms,
+            .stream = row.stream,
+            .truncated = row.truncated,
+        };
     }
+    return .{
+        .call_id = res.call_id,
+        .started_at_ms = res.started_at_ms,
+        .ended_at_ms = res.ended_at_ms,
+        .final = std.meta.activeTag(res.final),
+        .out = out,
+    };
 }
 
 test "tool contract handlers emit deterministic envelopes" {
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -75,7 +101,6 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     const rd_res = try rd.run(rd_call, sink);
     defer rd.deinitResult(rd_res);
-    try expectResultEnvelope(rd_call, rd_res);
 
     const wr = @import("write.zig").Handler.init(.{
         .now_ms = 22,
@@ -92,7 +117,6 @@ test "tool contract handlers emit deterministic envelopes" {
         .at_ms = 0,
     };
     const wr_res = try wr.run(wr_call, sink);
-    try expectResultEnvelope(wr_call, wr_res);
 
     const ed = @import("edit.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -112,7 +136,6 @@ test "tool contract handlers emit deterministic envelopes" {
         .at_ms = 0,
     };
     const ed_res = try ed.run(ed_call, sink);
-    try expectResultEnvelope(ed_call, ed_res);
 
     const sh = @import("bash.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -130,7 +153,6 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     const sh_res = try sh.run(sh_call, sink);
     defer sh.deinitResult(sh_res);
-    try expectResultEnvelope(sh_call, sh_res);
 
     const ls_h = @import("ls.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -148,7 +170,6 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     const ls_res = try ls_h.run(ls_call, sink);
     defer ls_h.deinitResult(ls_res);
-    try expectResultEnvelope(ls_call, ls_res);
 
     const find_h = @import("find.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -167,7 +188,6 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     const find_res = try find_h.run(find_call, sink);
     defer find_h.deinitResult(find_res);
-    try expectResultEnvelope(find_call, find_res);
 
     const grep_h = @import("grep.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -186,7 +206,125 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     const grep_res = try grep_h.run(grep_call, sink);
     defer grep_h.deinitResult(grep_res);
-    try expectResultEnvelope(grep_call, grep_res);
+
+    const snaps = [_]ResultSnap{
+        try snapshotResult(std.testing.allocator, rd_res),
+        try snapshotResult(std.testing.allocator, wr_res),
+        try snapshotResult(std.testing.allocator, ed_res),
+        try snapshotResult(std.testing.allocator, sh_res),
+        try snapshotResult(std.testing.allocator, ls_res),
+        try snapshotResult(std.testing.allocator, find_res),
+        try snapshotResult(std.testing.allocator, grep_res),
+    };
+    defer for (snaps) |snap| std.testing.allocator.free(snap.out);
+    try std.testing.expectEqualStrings(rd_call.id, snaps[0].call_id);
+    try std.testing.expectEqualStrings(wr_call.id, snaps[1].call_id);
+    try std.testing.expectEqualStrings(ed_call.id, snaps[2].call_id);
+    try std.testing.expectEqualStrings(sh_call.id, snaps[3].call_id);
+    try std.testing.expectEqualStrings(ls_call.id, snaps[4].call_id);
+    try std.testing.expectEqualStrings(find_call.id, snaps[5].call_id);
+    try std.testing.expectEqualStrings(grep_call.id, snaps[6].call_id);
+    try oh.snap(@src(),
+        \\[7]core.tools.contract_test.ResultSnap
+        \\  [0]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "r1"
+        \\    .started_at_ms: i64 = 11
+        \\    .ended_at_ms: i64 = 11
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      [0]: core.tools.contract_test.OutSnap
+        \\        .call_id: []const u8
+        \\          "r1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 11
+        \\        .stream: core.tools.mod.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
+        \\  [1]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "w1"
+        \\    .started_at_ms: i64 = 22
+        \\    .ended_at_ms: i64 = 22
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      (empty)
+        \\  [2]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "e1"
+        \\    .started_at_ms: i64 = 33
+        \\    .ended_at_ms: i64 = 33
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      (empty)
+        \\  [3]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "b1"
+        \\    .started_at_ms: i64 = 44
+        \\    .ended_at_ms: i64 = 44
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      [0]: core.tools.contract_test.OutSnap
+        \\        .call_id: []const u8
+        \\          "b1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 44
+        \\        .stream: core.tools.mod.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
+        \\  [4]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "l1"
+        \\    .started_at_ms: i64 = 66
+        \\    .ended_at_ms: i64 = 66
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      [0]: core.tools.contract_test.OutSnap
+        \\        .call_id: []const u8
+        \\          "l1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 66
+        \\        .stream: core.tools.mod.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
+        \\  [5]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "f1"
+        \\    .started_at_ms: i64 = 77
+        \\    .ended_at_ms: i64 = 77
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      [0]: core.tools.contract_test.OutSnap
+        \\        .call_id: []const u8
+        \\          "f1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 77
+        \\        .stream: core.tools.mod.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
+        \\  [6]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
+        \\      "g1"
+        \\    .started_at_ms: i64 = 88
+        \\    .ended_at_ms: i64 = 88
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      [0]: core.tools.contract_test.OutSnap
+        \\        .call_id: []const u8
+        \\          "g1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 88
+        \\        .stream: core.tools.mod.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
+    ).expectEqual(snaps);
 }
 
 test "tool contract handlers deny nested symlink escapes" {
@@ -298,6 +436,7 @@ test "tool contract handlers deny nested symlink escapes" {
 }
 
 test "tool contract registry emits start output finish ordering" {
+    const oh = OhSnap{};
     const SinkImpl = struct {
         tags: [8]std.meta.Tag(tools.Event) = undefined,
         ct: usize = 0,
@@ -358,7 +497,13 @@ test "tool contract registry emits start output finish ordering" {
     const res = try reg.run("bash", call, sink);
     defer wrap.h.deinitResult(res);
 
-    try std.testing.expect(sink_impl.ct >= 2);
-    try std.testing.expect(sink_impl.tags[0] == .start);
-    try std.testing.expect(sink_impl.tags[sink_impl.ct - 1] == .finish);
+    try oh.snap(@src(),
+        \\[]@typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\  [0]: @typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\    .start
+        \\  [1]: @typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\    .output
+        \\  [2]: @typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\    .finish
+    ).expectEqual(sink_impl.tags[0..sink_impl.ct]);
 }
