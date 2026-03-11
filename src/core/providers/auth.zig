@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const oauth_callback = @import("oauth_callback.zig");
+const fs_secure = @import("../fs_secure.zig");
 
 pub const Auth = union(enum) {
     oauth: OAuth,
@@ -173,26 +174,18 @@ const AuthFile = struct {
     google: ?AuthEntry = null,
 };
 
-/// Auth file search paths (tried in order).
-const auth_dirs = [_][2][]const u8{
-    .{ ".pi", "agent" },
-    .{ ".agents", "" },
-};
-
 fn findAuthFile(ar: std.mem.Allocator, home: []const u8) ![]const u8 {
-    for (auth_dirs) |d| {
-        const path = if (d[1].len > 0)
-            try std.fs.path.join(ar, &.{ home, d[0], d[1], "auth.json" })
-        else
-            try std.fs.path.join(ar, &.{ home, d[0], "auth.json" });
-        if (std.fs.cwd().access(path, .{})) |_| return path else |_| {}
-    }
-    return error.AuthNotFound;
+    const path = try authFilePath(ar, home);
+    if (std.fs.cwd().access(path, .{})) |_| return path else |_| return error.AuthNotFound;
 }
 
-/// Primary auth dir (for writes). Uses ~/.pi/agent/ by default.
+fn authFilePath(ar: std.mem.Allocator, home: []const u8) ![]const u8 {
+    return std.fs.path.join(ar, &.{ home, ".pz", "auth.json" });
+}
+
+/// Primary auth dir (for writes). Uses ~/.pz/ by default.
 fn primaryAuthDir(ar: std.mem.Allocator, home: []const u8) ![]const u8 {
-    return try std.fs.path.join(ar, &.{ home, ".pi", "agent" });
+    return try std.fs.path.join(ar, &.{ home, ".pz" });
 }
 
 pub fn load(alloc: std.mem.Allocator) !Result {
@@ -870,8 +863,8 @@ pub fn refreshOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old
 fn saveOAuthForProvider(ar: std.mem.Allocator, provider: Provider, oauth: OAuth) !void {
     const home = try std.process.getEnvVarOwned(ar, "HOME");
     const dir_path = try primaryAuthDir(ar, home);
-    try std.fs.cwd().makePath(dir_path);
-    const path = try std.fs.path.join(ar, &.{ dir_path, "auth.json" });
+    try fs_secure.ensureDirPath(dir_path);
+    const path = try authFilePath(ar, home);
 
     var auth_file: AuthFile = .{};
     // Load existing
@@ -897,7 +890,7 @@ fn saveOAuthForProvider(ar: std.mem.Allocator, provider: Provider, oauth: OAuth)
     }
 
     const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    const file = try fs_secure.createFilePath(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(out);
 }
@@ -911,20 +904,15 @@ pub fn listLoggedIn(alloc: std.mem.Allocator) ![]Provider {
     const home = std.process.getEnvVarOwned(ar, "HOME") catch return try alloc.alloc(Provider, 0);
 
     var merged: AuthFile = .{};
-    for (auth_dirs) |d| {
-        const path = if (d[1].len > 0)
-            try std.fs.path.join(ar, &.{ home, d[0], d[1], "auth.json" })
-        else
-            try std.fs.path.join(ar, &.{ home, d[0], "auth.json" });
-        const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch continue;
-        const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        }) catch continue;
-        if (merged.anthropic == null) merged.anthropic = parsed.value.anthropic;
-        if (merged.openai == null) merged.openai = parsed.value.openai;
-        if (merged.google == null) merged.google = parsed.value.google;
-    }
+    const path = authFilePath(ar, home) catch return try alloc.alloc(Provider, 0);
+    const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return try alloc.alloc(Provider, 0);
+    const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return try alloc.alloc(Provider, 0);
+    merged.anthropic = parsed.value.anthropic;
+    merged.openai = parsed.value.openai;
+    merged.google = parsed.value.google;
 
     var result = std.ArrayList(Provider).empty;
     errdefer result.deinit(alloc);
@@ -942,31 +930,26 @@ pub fn logout(alloc: std.mem.Allocator, provider: Provider) !void {
 
     const home = try std.process.getEnvVarOwned(ar, "HOME");
 
-    for (auth_dirs) |d| {
-        const path = if (d[1].len > 0)
-            try std.fs.path.join(ar, &.{ home, d[0], d[1], "auth.json" })
-        else
-            try std.fs.path.join(ar, &.{ home, d[0], "auth.json" });
-        const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch continue;
-        var parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        }) catch continue;
+    const path = try authFilePath(ar, home);
+    const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return;
+    var parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return;
 
-        switch (provider) {
-            .anthropic => parsed.value.anthropic = null,
-            .openai => parsed.value.openai = null,
-            .google => parsed.value.google = null,
-        }
-
-        const out = try std.json.Stringify.valueAlloc(ar, parsed.value, .{ .whitespace = .indent_2 });
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(out);
+    switch (provider) {
+        .anthropic => parsed.value.anthropic = null,
+        .openai => parsed.value.openai = null,
+        .google => parsed.value.google = null,
     }
+
+    const out = try std.json.Stringify.valueAlloc(ar, parsed.value, .{ .whitespace = .indent_2 });
+    const file = try fs_secure.createFilePath(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(out);
 }
 
-/// Save API key for a provider. Writes to primary auth dir (~/.pi/agent/).
+/// Save API key for a provider. Writes to primary auth dir (~/.pz/).
 pub fn saveApiKey(alloc: std.mem.Allocator, provider: Provider, key: []const u8) !void {
     return saveApiKeyHome(alloc, try std.process.getEnvVarOwned(alloc, "HOME"), provider, key);
 }
@@ -978,8 +961,8 @@ fn saveApiKeyHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider
 
     const home_dup = try ar.dupe(u8, home);
     const dir_path = try primaryAuthDir(ar, home_dup);
-    try std.fs.cwd().makePath(dir_path);
-    const path = try std.fs.path.join(ar, &.{ dir_path, "auth.json" });
+    try fs_secure.ensureDirPath(dir_path);
+    const path = try authFilePath(ar, home_dup);
 
     var auth_file: AuthFile = .{};
     // Try loading existing
@@ -1000,7 +983,7 @@ fn saveApiKeyHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider
     }
 
     const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    const file = try fs_secure.createFilePath(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(out);
 }
@@ -1020,6 +1003,11 @@ test "saveApiKeyHome writes provider auth without process HOME" {
     switch (auth) {
         .api_key => |key| try std.testing.expectEqualStrings("sk-openai", key),
         else => return error.TestUnexpectedResult,
+    }
+
+    if (builtin.os.tag != .windows) {
+        const st = try tmp.dir.statFile(".pz/auth.json");
+        try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);
     }
 }
 
@@ -1053,9 +1041,9 @@ test "loadFileAuth parses anthropic api_key entry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".pi/agent");
+    try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{
-        .sub_path = ".pi/agent/auth.json",
+        .sub_path = ".pz/auth.json",
         .data =
         \\{
         \\  "anthropic": {
@@ -1095,9 +1083,9 @@ test "loadFileAuthForProvider parses openai oauth entry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".pi/agent");
+    try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{
-        .sub_path = ".pi/agent/auth.json",
+        .sub_path = ".pz/auth.json",
         .data =
         \\{
         \\  "openai": {
@@ -1130,9 +1118,9 @@ test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".pi/agent");
+    try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{
-        .sub_path = ".pi/agent/auth.json",
+        .sub_path = ".pz/auth.json",
         .data =
         \\{
         \\  "anthropic": {
