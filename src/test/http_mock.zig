@@ -58,6 +58,16 @@ fn readRequest(fd: std.posix.socket_t, buf: []u8) !usize {
     return off;
 }
 
+fn readResponse(fd: std.posix.socket_t, buf: []u8) !usize {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const got = try std.posix.read(fd, buf[off..]);
+        if (got == 0) break;
+        off += got;
+    }
+    return off;
+}
+
 fn writeResponse(fd: std.posix.socket_t, resp: Response) !void {
     const prefix = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\n", .{resp.status});
     defer std.heap.page_allocator.free(prefix);
@@ -98,7 +108,7 @@ test "http mock captures request and returns canned response" {
     );
 
     var buf: [128]u8 = undefined;
-    const got = try std.posix.read(fd, buf[0..]);
+    const got = try readResponse(fd, buf[0..]);
     thr.join();
 
     try std.testing.expect(std.mem.indexOf(u8, server.request(), "GET /health HTTP/1.1") != null);
