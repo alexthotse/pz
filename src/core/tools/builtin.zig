@@ -458,10 +458,26 @@ pub const Runtime = struct {
             .ended_at_ms = call.at_ms,
             .out = out,
             .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = if (askResultCancelled(out_text))
+                .{ .cancelled = .{ .reason = .user } }
+            else
+                .{ .ok = .{ .code = 0 } },
         };
     }
 };
+
+fn askResultCancelled(raw: []const u8) bool {
+    const Out = struct {
+        cancelled: bool = false,
+    };
+
+    const parsed = std.json.parseFromSlice(Out, std.heap.smp_allocator, raw, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+    return parsed.value.cancelled;
+}
 
 pub fn maskForName(name: []const u8) ?u16 {
     const map = std.StaticStringMap(u16).initComptime(.{
@@ -725,6 +741,61 @@ test "ask tool reports hook failure" {
     defer rt.deinitResult(res);
     switch (res.final) {
         .failed => |f| try std.testing.expectEqualStrings("BadInput", f.msg),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "ask tool maps cancelled hook output to cancelled final" {
+    const AskImpl = struct {
+        alloc: std.mem.Allocator,
+
+        fn run(self: *@This(), _: tools.Call.AskArgs) ![]u8 {
+            return self.alloc.dupe(u8, "{\"cancelled\":true,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}");
+        }
+    };
+
+    var impl = AskImpl{ .alloc = std.testing.allocator };
+    var rt = Runtime.init(.{
+        .alloc = std.testing.allocator,
+        .tool_mask = mask_ask,
+        .ask_hook = AskHook.from(AskImpl, &impl, AskImpl.run),
+    });
+    const reg = rt.registry();
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const opts = [_]tools.Call.AskArgs.Option{
+        .{ .label = "A" },
+        .{ .label = "B" },
+    };
+    const qs = [_]tools.Call.AskArgs.Question{
+        .{
+            .id = "scope",
+            .question = "Pick one",
+            .options = opts[0..],
+        },
+    };
+    const call: tools.Call = .{
+        .id = "ask-cancel",
+        .kind = .ask,
+        .args = .{ .ask = .{ .questions = qs[0..] } },
+        .src = .model,
+        .at_ms = 9,
+    };
+
+    const res = try reg.run("ask", call, sink);
+    defer rt.deinitResult(res);
+    try std.testing.expectEqual(@as(usize, 1), res.out.len);
+    try std.testing.expectEqualStrings(
+        "{\"cancelled\":true,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}",
+        res.out[0].chunk,
+    );
+    switch (res.final) {
+        .cancelled => |cancelled| try std.testing.expect(cancelled.reason == .user),
         else => return error.TestUnexpectedResult,
     }
 }

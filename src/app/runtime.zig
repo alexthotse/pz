@@ -181,23 +181,42 @@ const MissingProviderStream = struct {
 };
 
 const PrintSink = struct {
+    alloc: std.mem.Allocator,
     fmt: print_fmt.Formatter,
     stop_reason: ?core.providers.StopReason = null,
+    cancel_ids: ToolCancelSet = .{},
 
     fn init(alloc: std.mem.Allocator, out: std.Io.AnyWriter) PrintSink {
         return .{
+            .alloc = alloc,
             .fmt = print_fmt.Formatter.init(alloc, out),
         };
     }
 
     fn deinit(self: *PrintSink) void {
+        self.cancel_ids.deinit(self.alloc);
         self.fmt.deinit();
     }
 
     fn push(self: *PrintSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
+            .tool => |tev| {
+                if (try toolCancelResultAlloc(self.alloc, tev)) |tr| {
+                    defer freeToolResultOwned(self.alloc, tr);
+                    try self.cancel_ids.remember(self.alloc, tr.id);
+                    try self.fmt.push(.{ .tool_result = tr });
+                }
+            },
             .provider => |pev| {
                 switch (pev) {
+                    .tool_result => |tr| {
+                        if (self.cancel_ids.take(self.alloc, tr.id)) return;
+                        if (try remapCancelledToolResultAlloc(self.alloc, tr)) |mapped| {
+                            defer freeToolResultOwned(self.alloc, mapped);
+                            try self.fmt.push(.{ .tool_result = mapped });
+                            return;
+                        }
+                    },
                     .stop => |stop| {
                         // stop:tool is an internal handoff marker when loop continues.
                         if (stop.reason == .tool) return;
@@ -213,17 +232,177 @@ const PrintSink = struct {
 };
 
 const TuiSink = struct {
+    alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
     out: std.Io.AnyWriter,
+    cancel_ids: ToolCancelSet = .{},
+
+    fn deinit(self: *TuiSink) void {
+        self.cancel_ids.deinit(self.alloc);
+    }
 
     fn push(self: *TuiSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
-            .provider => |pev| try self.ui.onProvider(pev),
+            .tool => |tev| {
+                if (try toolCancelResultAlloc(self.alloc, tev)) |tr| {
+                    defer freeToolResultOwned(self.alloc, tr);
+                    try self.cancel_ids.remember(self.alloc, tr.id);
+                    try self.ui.onProvider(.{ .tool_result = tr });
+                    self.ui.pn.run_state = .canceled;
+                }
+            },
+            .provider => |pev| switch (pev) {
+                .tool_result => |tr| {
+                    if (self.cancel_ids.take(self.alloc, tr.id)) {} else if (try remapCancelledToolResultAlloc(self.alloc, tr)) |mapped| {
+                        defer freeToolResultOwned(self.alloc, mapped);
+                        try self.ui.onProvider(.{ .tool_result = mapped });
+                        self.ui.pn.run_state = .canceled;
+                    } else {
+                        try self.ui.onProvider(pev);
+                    }
+                },
+                else => try self.ui.onProvider(pev),
+            },
             else => {},
         }
         try self.ui.draw(self.out);
     }
 };
+
+const ToolCancelSet = struct {
+    ids: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *ToolCancelSet, alloc: std.mem.Allocator) void {
+        for (self.ids.items) |id| alloc.free(id);
+        self.ids.deinit(alloc);
+    }
+
+    fn remember(self: *ToolCancelSet, alloc: std.mem.Allocator, id: []const u8) !void {
+        for (self.ids.items) |existing| {
+            if (std.mem.eql(u8, existing, id)) return;
+        }
+        try self.ids.append(alloc, try alloc.dupe(u8, id));
+    }
+
+    fn take(self: *ToolCancelSet, alloc: std.mem.Allocator, id: []const u8) bool {
+        for (self.ids.items, 0..) |existing, i| {
+            if (!std.mem.eql(u8, existing, id)) continue;
+            alloc.free(self.ids.swapRemove(i));
+            return true;
+        }
+        return false;
+    }
+};
+
+fn freeToolResultOwned(alloc: std.mem.Allocator, tr: core.providers.ToolResult) void {
+    alloc.free(tr.id);
+    alloc.free(tr.out);
+}
+
+fn remapCancelledToolResultAlloc(
+    alloc: std.mem.Allocator,
+    tr: core.providers.ToolResult,
+) !?core.providers.ToolResult {
+    if (!std.mem.startsWith(u8, tr.out, "cancelled:")) return null;
+    return .{
+        .id = try alloc.dupe(u8, tr.id),
+        .out = try alloc.dupe(u8, "[canceled]"),
+        .is_err = false,
+    };
+}
+
+fn toolCancelResultAlloc(
+    alloc: std.mem.Allocator,
+    ev: core.tools.Event,
+) !?core.providers.ToolResult {
+    switch (ev) {
+        .finish => |res| switch (res.final) {
+            .cancelled => {
+                const out = try cancelledToolOutAlloc(alloc, res);
+                errdefer alloc.free(out);
+                return .{
+                    .id = try alloc.dupe(u8, res.call_id),
+                    .out = out,
+                    .is_err = false,
+                };
+            },
+            else => return null,
+        },
+        else => return null,
+    }
+}
+
+fn cancelledToolOutAlloc(alloc: std.mem.Allocator, res: core.tools.Result) ![]u8 {
+    const raw = try joinToolChunksAlloc(alloc, res.out);
+    errdefer alloc.free(raw);
+
+    if (try formatCancelledAskOutAlloc(alloc, raw)) |pretty| {
+        alloc.free(raw);
+        return pretty;
+    }
+    if (raw.len == 0) {
+        alloc.free(raw);
+        return alloc.dupe(u8, "[canceled]");
+    }
+    const out = if (raw[raw.len - 1] == '\n')
+        try std.fmt.allocPrint(alloc, "{s}[canceled]", .{raw})
+    else
+        try std.fmt.allocPrint(alloc, "{s}\n[canceled]", .{raw});
+    alloc.free(raw);
+    return out;
+}
+
+fn joinToolChunksAlloc(alloc: std.mem.Allocator, out: []const core.tools.Output) ![]u8 {
+    var total: usize = 0;
+    for (out) |chunk| {
+        if (chunk.stream == .meta) continue;
+        total += chunk.chunk.len;
+    }
+
+    const buf = try alloc.alloc(u8, total);
+    var at: usize = 0;
+    for (out) |chunk| {
+        if (chunk.stream == .meta) continue;
+        std.mem.copyForwards(u8, buf[at .. at + chunk.chunk.len], chunk.chunk);
+        at += chunk.chunk.len;
+    }
+    return buf;
+}
+
+fn formatCancelledAskOutAlloc(alloc: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!?[]u8 {
+    const AskResult = struct {
+        cancelled: bool,
+        answers: []const struct {
+            id: []const u8,
+            answer: []const u8,
+            index: usize,
+        },
+    };
+
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len < 2 or trimmed[0] != '{') return null;
+
+    const parsed = std.json.parseFromSlice(AskResult, alloc, trimmed, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer parsed.deinit();
+
+    if (!parsed.value.cancelled) return null;
+
+    var buf = std.ArrayList(u8).empty;
+    errdefer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "ask: canceled");
+    for (parsed.value.answers) |ans| {
+        _ = ans.index;
+        try std.fmt.format(buf.writer(alloc), "\n  - {s}: {s}", .{ ans.id, ans.answer });
+    }
+    return try buf.toOwnedSlice(alloc);
+}
 
 const AskUiCtx = struct {
     alloc: std.mem.Allocator,
@@ -949,10 +1128,33 @@ const LiveTurn = struct {
 
 const LiveTurnSink = struct {
     live: *LiveTurn,
+    cancel_ids: ToolCancelSet = .{},
+
+    fn deinit(self: *LiveTurnSink) void {
+        self.cancel_ids.deinit(self.live.alloc);
+    }
 
     fn push(self: *LiveTurnSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
-            .provider => |pev| try self.live.enqueueProvider(pev),
+            .tool => |tev| {
+                if (try toolCancelResultAlloc(self.live.alloc, tev)) |tr| {
+                    defer freeToolResultOwned(self.live.alloc, tr);
+                    try self.cancel_ids.remember(self.live.alloc, tr.id);
+                    try self.live.enqueueProvider(.{ .tool_result = tr });
+                }
+            },
+            .provider => |pev| switch (pev) {
+                .tool_result => |tr| {
+                    if (self.cancel_ids.take(self.live.alloc, tr.id)) return;
+                    if (try remapCancelledToolResultAlloc(self.live.alloc, tr)) |mapped| {
+                        defer freeToolResultOwned(self.live.alloc, mapped);
+                        try self.live.enqueueProvider(.{ .tool_result = mapped });
+                        return;
+                    }
+                    try self.live.enqueueProvider(pev);
+                },
+                else => try self.live.enqueueProvider(pev),
+            },
             else => {},
         }
     }
@@ -1398,9 +1600,11 @@ fn runTui(
     }
 
     var sink_impl = TuiSink{
+        .alloc = alloc,
         .ui = &ui,
         .out = out,
     };
+    defer sink_impl.deinit();
     const mode = core.loop.ModeSink.from(TuiSink, &sink_impl, TuiSink.push);
 
     const stdin_fd = std.posix.STDIN_FILENO;
@@ -1579,6 +1783,7 @@ fn runTui(
         var live_sink_impl = LiveTurnSink{
             .live = &live_turn,
         };
+        defer live_sink_impl.deinit();
         const live_mode = core.loop.ModeSink.from(LiveTurnSink, &live_sink_impl, LiveTurnSink.push);
         const live_cancel = core.loop.CancelSrc.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled);
         const live_tctx = TurnCtx{
@@ -3687,11 +3892,23 @@ fn restoreSessionIntoUi(
                 .name = tc.name,
                 .args = tc.args,
             } }),
-            .tool_result => |tr| try ui.onProvider(.{ .tool_result = .{
-                .id = tr.id,
-                .out = tr.out,
-                .is_err = tr.is_err,
-            } }),
+            .tool_result => |tr| {
+                if (try remapCancelledToolResultAlloc(alloc, .{
+                    .id = tr.id,
+                    .out = tr.out,
+                    .is_err = tr.is_err,
+                })) |mapped| {
+                    defer freeToolResultOwned(alloc, mapped);
+                    try ui.onProvider(.{ .tool_result = mapped });
+                    ui.pn.run_state = .canceled;
+                } else {
+                    try ui.onProvider(.{ .tool_result = .{
+                        .id = tr.id,
+                        .out = tr.out,
+                        .is_err = tr.is_err,
+                    } });
+                }
+            },
             .usage => |u| try ui.onProvider(.{ .usage = .{
                 .in_tok = u.in_tok,
                 .out_tok = u.out_tok,
@@ -5562,6 +5779,118 @@ test "runtime executes tool calls through loop registry in print mode" {
     try std.testing.expect(std.mem.indexOf(u8, written, "done") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=false out=\"hi\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
+}
+
+test "print sink shows canceled tool result with partial output" {
+    const StreamImpl = struct {
+        evs: []const core.providers.Ev = &.{},
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?core.providers.Ev {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        start_ct: usize = 0,
+        stream: StreamImpl = .{},
+
+        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
+            self.start_ct += 1;
+            self.stream.idx = 0;
+            self.stream.evs = switch (self.start_ct) {
+                1 => &.{
+                    .{ .tool_call = .{ .id = "call-1", .name = "bash", .args = "{\"cmd\":\"sleep 999\"}" } },
+                    .{ .stop = .{ .reason = .tool } },
+                },
+                2 => &.{
+                    .{ .text = "done" },
+                    .{ .stop = .{ .reason = .done } },
+                },
+                else => return error.TestUnexpectedResult,
+            };
+            return core.providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ToolImpl = struct {
+        out: [1]core.tools.Output = undefined,
+
+        fn run(self: *@This(), call: core.tools.Call, _: core.tools.Sink) !core.tools.Result {
+            self.out[0] = .{
+                .call_id = call.id,
+                .seq = 0,
+                .at_ms = call.at_ms,
+                .stream = .stdout,
+                .chunk = "start",
+                .truncated = false,
+            };
+            return .{
+                .call_id = call.id,
+                .started_at_ms = call.at_ms,
+                .ended_at_ms = call.at_ms + 1,
+                .out = self.out[0..],
+                .final = .{ .cancelled = .{ .reason = .user } },
+            };
+        }
+    };
+
+    var provider_impl = ProviderImpl{};
+    var tool_impl = ToolImpl{};
+    var null_store_impl = core.session.NullStore.init();
+    const reg = core.tools.Registry.init(&.{
+        .{
+            .name = "bash",
+            .kind = .bash,
+            .spec = .{
+                .kind = .bash,
+                .desc = "Run bash command",
+                .params = &.{},
+                .out = .{
+                    .max_bytes = 1024,
+                    .stream = true,
+                },
+                .timeout_ms = 1000,
+                .destructive = true,
+            },
+            .dispatch = core.tools.Dispatch.from(ToolImpl, &tool_impl, ToolImpl.run),
+        },
+    });
+
+    var out_buf: [2048]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var sink_impl = PrintSink.init(std.testing.allocator, out_fbs.writer().any());
+    defer sink_impl.deinit();
+    sink_impl.fmt.verbose = true;
+
+    const mode = core.loop.ModeSink.from(PrintSink, &sink_impl, PrintSink.push);
+    _ = try core.loop.run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-1",
+        .prompt = "ship",
+        .model = "m",
+        .provider_label = "p",
+        .provider = core.providers.Provider.from(ProviderImpl, &provider_impl, ProviderImpl.start),
+        .store = null_store_impl.asSessionStore(),
+        .reg = reg,
+        .mode = mode,
+    });
+    try sink_impl.fmt.finish();
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=false out=\"start\\n[canceled]\"") != null);
+    try std.testing.expect(std.mem.count(u8, written, "tool_result id=\"call-1\"") == 1);
+    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true") == null);
 }
 
 test "runtime forwards provider label to provider request" {
