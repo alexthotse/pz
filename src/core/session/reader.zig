@@ -127,6 +127,19 @@ fn encodeLine(file: std.fs.File, ev: Event) !void {
     try file.writeAll("\n");
 }
 
+fn textEvent(at_ms: i64, text: []const u8) Event {
+    return .{
+        .at_ms = at_ms,
+        .data = .{ .text = .{ .text = text } },
+    };
+}
+
+fn allocFill(alloc: std.mem.Allocator, len: usize, byte: u8) ![]u8 {
+    const buf = try alloc.alloc(u8, len);
+    @memset(buf, byte);
+    return buf;
+}
+
 test "jsonl replay preserves event stream exactly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -300,4 +313,93 @@ test "jsonl replay enforces max line bytes in streaming mode" {
     defer rdr.deinit();
 
     try std.testing.expectError(error.ReplayLineTooLong, rdr.next());
+}
+
+test "jsonl replay property preserves text stream across io buffer splits" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: u16, b: u16, c: u16 }) bool {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+
+            const alloc = std.testing.allocator;
+            const lens = [_]usize{
+                8200 + @as(usize, args.a % 1024),
+                32 + @as(usize, args.b % 512),
+                4096 + @as(usize, args.c % 1024),
+            };
+            const fills = [_]u8{ 'a', 'b', 'c' };
+            var texts: [3][]u8 = undefined;
+            for (&texts, lens, fills) |*text, len, fill| {
+                text.* = allocFill(alloc, len, fill) catch return false;
+            }
+            defer for (texts) |text| alloc.free(text);
+
+            const events = [_]Event{
+                textEvent(1, texts[0]),
+                textEvent(2, texts[1]),
+                textEvent(3, texts[2]),
+            };
+
+            {
+                const file = tmp.dir.createFile("prop.jsonl", .{}) catch return false;
+                defer file.close();
+                for (events) |ev| encodeLine(file, ev) catch return false;
+            }
+
+            var rdr = ReplayReader.init(alloc, tmp.dir, "prop", .{}) catch return false;
+            defer rdr.deinit();
+
+            var idx: usize = 0;
+            while (rdr.next() catch return false) |ev| : (idx += 1) {
+                if (idx >= events.len) return false;
+                const want = schema.encodeAlloc(alloc, events[idx]) catch return false;
+                defer alloc.free(want);
+                const got = schema.encodeAlloc(alloc, ev) catch return false;
+                defer alloc.free(got);
+                if (!std.mem.eql(u8, want, got)) return false;
+            }
+            return idx == events.len;
+        }
+    }.prop, .{
+        .iterations = 64,
+        .seed = 0x5eed_1234,
+    });
+}
+
+test "jsonl replay property rejects encoded lines above max bytes" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { len: u16, slack: u8 }) bool {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+
+            const alloc = std.testing.allocator;
+            const text = allocFill(alloc, 128 + @as(usize, args.len % 2048), 'x') catch return false;
+            defer alloc.free(text);
+
+            const raw = schema.encodeAlloc(alloc, textEvent(1, text)) catch return false;
+            defer alloc.free(raw);
+
+            {
+                const file = tmp.dir.createFile("over.jsonl", .{}) catch return false;
+                defer file.close();
+                file.writeAll(raw) catch return false;
+                file.writeAll("\n") catch return false;
+            }
+
+            const delta = 1 + @as(usize, args.slack % 8);
+            const max_line_bytes = if (raw.len > delta) raw.len - delta else raw.len - 1;
+            var rdr = ReplayReader.init(alloc, tmp.dir, "over", .{
+                .max_line_bytes = max_line_bytes,
+            }) catch return false;
+            defer rdr.deinit();
+
+            std.testing.expectError(error.ReplayLineTooLong, rdr.next()) catch return false;
+            return true;
+        }
+    }.prop, .{
+        .iterations = 128,
+        .seed = 0x0be7_f10a,
+    });
 }
