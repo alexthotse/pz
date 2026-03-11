@@ -13,10 +13,14 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - For TUI `ask`, keep the tool thread on a waitable handoff and let the main loop answer through its existing `tui_input.Reader`; pausing the ESC watcher only while the main loop owns stdin preserves single-reader semantics and avoids editor/ask interleaving.
 - Gate every bash entrypoint through one shared protected-command scanner; otherwise direct `!cmd` and tool `bash` drift and one becomes the bypass.
 - For RFC 5424 UDP truncation, parse through the structured-data boundary and append truncation metadata there; trimming raw bytes blindly risks invalid frames and would miss the `sendRaw` audit path.
+- Pulling the ad hoc blocked-stream provider out of the loop test and into `src/test/provider_mock.zig` made the cancel regression cheaper to reuse and gave `T7b` a real local provider harness instead of copy-pasted test scaffolding.
+- A tiny one-shot local HTTP server under `src/test/http_mock.zig` is enough to unblock update/share/redirect testing; land the harness before trying to write higher-level E2E around it.
 
 ### Did Not Work
 - Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.
 - For raw string snapshots, writing only the body text is wrong. `ohsnap` expects the full typed shape like `[]u8` plus the value line.
+- Escaping JSON quotes inside raw multiline `ohsnap` snapshots is wrong. After `\\`, the quotes are literal snapshot content.
+- Treating `std.net.Stream.writer` like the old zero-arg API caused wasted compile/debug churn. In Zig 0.15 it requires a caller-supplied buffer; direct `std.posix.write` is often simpler in tiny test servers.
 
 ## Session Notes (2026-03-10)
 
