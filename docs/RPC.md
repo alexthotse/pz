@@ -1,4 +1,4 @@
-# Agent RPC
+# RPC
 
 JSON-lines parent/child protocol.
 
