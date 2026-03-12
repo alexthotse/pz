@@ -110,6 +110,15 @@ defer f.close();
 const data = try f.readToEndAlloc(alloc, max_size);
 ```
 
+## HTTP TLS
+
+- `std.http.Client` owns `ca_bundle`; HTTPS requests pass `client.ca_bundle` into `std.crypto.tls.Client.init`.
+- Custom CA bundle flow:
+  - initialize `std.http.Client{ .allocator = alloc }`
+  - clear/reset `client.ca_bundle`
+  - `try client.ca_bundle.addCertsFromFilePathAbsolute(alloc, abs_pem_path)`
+  - `@atomicStore(bool, &client.next_https_rescan_certs, false, .release)` to stop later system-root rescans from replacing the custom bundle
+
 ## Alignment
 
 ```zig

@@ -1,4 +1,5 @@
 const std = @import("std");
+const app_tls = @import("tls.zig");
 const cli = @import("cli.zig");
 
 /// Semver triple for comparison.
@@ -68,7 +69,7 @@ fn checkLatest(alloc: std.mem.Allocator) !?[]u8 {
     defer arena.deinit();
     const ar = arena.allocator();
 
-    var http = std.http.Client{ .allocator = ar };
+    var http = try app_tls.initRuntimeClient(ar);
     defer http.deinit();
     try http.initDefaultProxies(ar);
 

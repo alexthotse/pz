@@ -1,5 +1,6 @@
 const app_cli = @import("app/cli.zig");
 const app_changelog = @import("app/changelog.zig");
+const app_tls = @import("app/tls.zig");
 const app_version = @import("app/version.zig");
 const app_runtime = @import("app/runtime.zig");
 const core_loop = @import("core/loop.zig");
@@ -35,6 +36,7 @@ const test_provider_mock = @import("test/provider_mock.zig");
 test "all module tests" {
     _ = app_cli;
     _ = app_changelog;
+    _ = app_tls;
     _ = app_version;
     _ = app_runtime;
     _ = core_loop;

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cli = @import("cli.zig");
 const core = @import("../core/mod.zig");
+const app_tls = @import("tls.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
 const version = @import("version.zig");
 
@@ -566,7 +567,7 @@ fn httpGetResultOnce(
     limit: usize,
     mode: HeaderMode,
 ) !HttpResult {
-    var http = std.http.Client{ .allocator = alloc };
+    var http = try app_tls.initRuntimeClient(alloc);
     defer http.deinit();
     var proxy_arena = std.heap.ArenaAllocator.init(alloc);
     defer proxy_arena.deinit();
