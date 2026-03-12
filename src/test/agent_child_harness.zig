@@ -6,6 +6,8 @@ const Mode = enum {
     hello,
     echo,
     mismatch,
+    empty_hash,
+    invalid_hash,
     fd_report,
     pgid_report,
 };
@@ -27,9 +29,11 @@ pub fn main() !void {
     var stdout = stdout_file.writerStreaming(&stdout_buf);
     try writeHello(alloc, &stdout.interface, 1, agent_id, switch (mode) {
         .mismatch => try mutateHashAlloc(alloc, pol_hash),
+        .empty_hash => "",
+        .invalid_hash => try invalidHashAlloc(alloc, pol_hash),
         else => pol_hash,
     });
-    if (mode == .hello or mode == .mismatch) return;
+    if (mode == .hello or mode == .mismatch or mode == .empty_hash or mode == .invalid_hash) return;
 
     var seq: u32 = 2;
     const stdin_file = std.fs.File.stdin();
@@ -112,6 +116,12 @@ fn readFrameAlloc(alloc: std.mem.Allocator, stdin: anytype) !?agent.Frame {
 fn mutateHashAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
     var out = try alloc.dupe(u8, raw);
     out[0] = if (out[0] == '0') '1' else '0';
+    return out;
+}
+
+fn invalidHashAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    var out = try alloc.dupe(u8, raw);
+    out[0] = 'x';
     return out;
 }
 

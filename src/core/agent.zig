@@ -269,6 +269,8 @@ pub const Stub = struct {
 pub const ChildMode = enum {
     echo,
     mismatch,
+    empty_hash,
+    invalid_hash,
     fd_report,
     pgid_report,
 };
@@ -912,6 +914,46 @@ test "spawned child rejects mismatched policy hash" {
     defer child.deinit();
 
     try testing.expectError(error.PolicyMismatch, child.connect());
+}
+
+test "spawned child rejects empty policy hash" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .empty_hash, "agent-child", hash);
+    defer child.deinit();
+
+    try testing.expectError(error.InvalidPolicyHash, child.connect());
+}
+
+test "spawned child rejects invalid policy hash" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .invalid_hash, "agent-child", hash);
+    defer child.deinit();
+
+    try testing.expectError(error.InvalidPolicyHash, child.connect());
+}
+
+test "spawned child accepts inherited policy hash" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .echo, "agent-child", hash);
+    defer child.deinit();
+
+    const hello = try child.connect();
+    try testing.expectEqualStrings("agent-child", hello.agent_id);
+    try testing.expectEqualStrings(hash, hello.policy_hash);
+
+    const res = try child.runReq(.{
+        .id = "job-echo",
+        .prompt = "inherit",
+    });
+    const out = res.out orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("echo:inherit", out.text);
+    try testing.expect(res.done != null);
 }
 
 test "spawned child inherits only stdio fds" {
