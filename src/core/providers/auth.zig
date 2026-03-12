@@ -1142,6 +1142,8 @@ fn emitAuthAudit(
 }
 
 test "saveApiKeyHome writes provider auth without process HOME" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1153,10 +1155,11 @@ test "saveApiKeyHome writes provider auth without process HOME" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const auth = try loadFileAuthForProvider(arena.allocator(), home, .openai);
-    switch (auth) {
-        .api_key => |key| try std.testing.expectEqualStrings("sk-openai", key),
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .api_key: []const u8
+        \\    "sk-openai"
+    ).expectEqual(auth);
 
     if (builtin.os.tag != .windows) {
         const st = try tmp.dir.statFile(".pz/auth.json");
@@ -1372,32 +1375,40 @@ test "listLoggedInHome returns stored providers without leaks" {
 }
 
 test "authFromEnv prefers oauth token over api key" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const auth = authFromEnv(.{
         .oauth = "sk-ant-oat-123",
         .api_key = "sk-ant-123",
     }) orelse return error.TestUnexpectedResult;
-    switch (auth) {
-        .oauth => |oauth| {
-            try std.testing.expectEqualStrings("sk-ant-oat-123", oauth.access);
-            try std.testing.expectEqualStrings("", oauth.refresh);
-            try std.testing.expectEqual(@as(i64, oauth_no_expiry), oauth.expires);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .oauth: core.providers.auth.OAuth
+        \\    .access: []const u8
+        \\      "sk-ant-oat-123"
+        \\    .refresh: []const u8
+        \\      ""
+        \\    .expires: i64 = 9223372036854775807
+    ).expectEqual(auth);
 }
 
 test "authFromEnv uses api key when oauth token is missing" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const auth = authFromEnv(.{
         .oauth = null,
         .api_key = "sk-ant-123",
     }) orelse return error.TestUnexpectedResult;
-    switch (auth) {
-        .api_key => |key| try std.testing.expectEqualStrings("sk-ant-123", key),
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .api_key: []const u8
+        \\    "sk-ant-123"
+    ).expectEqual(auth);
 }
 
 test "loadFileAuth parses anthropic api_key entry" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1420,10 +1431,11 @@ test "loadFileAuth parses anthropic api_key entry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const auth = try loadFileAuth(arena.allocator(), home);
-    switch (auth) {
-        .api_key => |key| try std.testing.expectEqualStrings("sk-ant-file", key),
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .api_key: []const u8
+        \\    "sk-ant-file"
+    ).expectEqual(auth);
 }
 
 test "loadFileAuth returns AuthNotFound when file is missing" {
