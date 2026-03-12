@@ -834,6 +834,49 @@ test "harness submit resets scroll" {
     try std.testing.expectEqual(@as(usize, 0), ui.tr.scroll_off);
 }
 
+test "harness draw clamps streamed transcript viewport to visible rows" {
+    var ui = try Ui.init(std.testing.allocator, 30, 8, "m", "p");
+    defer ui.deinit();
+
+    const table = try struct {
+        fn make(alloc: std.mem.Allocator, n: usize) ![]u8 {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "| H1 | H2 |\n");
+            try buf.appendSlice(alloc, "| --- | --- |\n");
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                try std.fmt.format(buf.writer(alloc), "| r{d} | v{d} |\n", .{ i + 1, i + 1 });
+            }
+            return buf.toOwnedSlice(alloc);
+        }
+    }.make(std.testing.allocator, 70);
+    defer std.testing.allocator.free(table);
+
+    try ui.onProvider(.{ .text = table[0 .. table.len / 2] });
+    try ui.onProvider(.{ .text = table[table.len / 2 ..] });
+
+    var raw: [4096]u8 = undefined;
+    var out = TestBuf.init(raw[0..]);
+    try ui.draw(&out);
+
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "streaming") != null);
+    try std.testing.expect(findAsciiSeqInFrame(&ui.frm, "r62") != null);
+    var y: usize = 0;
+    while (y < 3) : (y += 1) {
+        var has_ink = false;
+        var x: usize = 0;
+        while (x < ui.frm.w) : (x += 1) {
+            const c = try ui.frm.cell(x, y);
+            if (c.cp != ' ') {
+                has_ink = true;
+                break;
+            }
+        }
+        try std.testing.expect(has_ink);
+    }
+}
+
 test "harness resize to same size is noop" {
     var ui = try Ui.init(std.testing.allocator, 10, 5, "m", "p");
     defer ui.deinit();
