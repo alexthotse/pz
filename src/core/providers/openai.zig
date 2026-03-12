@@ -11,20 +11,25 @@ pub const Client = struct {
     alloc: std.mem.Allocator,
     auth: auth_mod.Result,
     http: std.http.Client,
+    ca_file: ?[]u8,
 
-    pub fn init(alloc: std.mem.Allocator) !Client {
+    pub fn init(alloc: std.mem.Allocator, ca_file: ?[]const u8) !Client {
         var auth_res = try auth_mod.loadForProvider(alloc, .openai);
         errdefer auth_res.deinit();
+        const ca_dup = if (ca_file) |path| try alloc.dupe(u8, path) else null;
+        errdefer if (ca_dup) |path| alloc.free(path);
         return .{
             .alloc = alloc,
             .auth = auth_res,
             .http = .{ .allocator = alloc },
+            .ca_file = ca_dup,
         };
     }
 
     pub fn deinit(self: *Client) void {
         self.http.deinit();
         self.auth.deinit();
+        if (self.ca_file) |path| self.alloc.free(path);
     }
 
     pub fn isSub(self: *const Client) bool {
@@ -51,7 +56,7 @@ pub const Client = struct {
     fn refreshAuth(self: *Client, ar: std.mem.Allocator) !void {
         const old = self.auth.auth.oauth;
 
-        if (auth_mod.refreshOAuthForProvider(ar, .openai, old)) |new_oauth| {
+        if (auth_mod.refreshOAuthForProviderWithHooks(ar, .openai, old, .{ .ca_file = self.ca_file })) |new_oauth| {
             const auth_ar = self.auth.arena.allocator();
             const new_access = try auth_ar.dupe(u8, new_oauth.access);
             const new_refresh = try auth_ar.dupe(u8, new_oauth.refresh);

@@ -94,10 +94,10 @@ const NativeProviderRuntime = union(enum) {
     anthropic: core.providers.anthropic.Client,
     openai: core.providers.openai.Client,
 
-    fn init(alloc: std.mem.Allocator, kind: NativeProviderKind) !NativeProviderRuntime {
+    fn init(alloc: std.mem.Allocator, kind: NativeProviderKind, ca_file: ?[]const u8) !NativeProviderRuntime {
         return switch (kind) {
-            .anthropic => .{ .anthropic = try core.providers.anthropic.Client.init(alloc) },
-            .openai => .{ .openai = try core.providers.openai.Client.init(alloc) },
+            .anthropic => .{ .anthropic = try core.providers.anthropic.Client.init(alloc, ca_file) },
+            .openai => .{ .openai = try core.providers.openai.Client.init(alloc, ca_file) },
         };
     }
 
@@ -1563,12 +1563,14 @@ const AuditHooks = struct {
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
     auth_home: ?[]const u8 = null,
+    ca_file: ?[]const u8 = null,
     share_gist: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = shareGist,
     run_upgrade: *const fn (std.mem.Allocator, update_mod.AuditHooks) anyerror!update_mod.Outcome = update_mod.runOutcomeAudited,
 
     fn auth(self: AuditHooks) core.providers.auth.Hooks {
         return .{
             .home_override = self.auth_home,
+            .ca_file = self.ca_file,
             .emit_audit_ctx = self.emit_audit_ctx,
             .emit_audit = self.emit_audit,
             .now_ms = self.now_ms,
@@ -1862,6 +1864,8 @@ fn execWithIoHooks(
 ) (Err || anyerror)![]u8 {
     var provider_rt: ProviderRuntime = undefined;
     var native_rt: NativeProviderRuntime = undefined;
+    var hooks = audit_hooks;
+    if (hooks.ca_file == null) hooks.ca_file = run_cmd.cfg.ca_file;
     var missing_provider = MissingProvider{
         .alloc = alloc,
         .msg = missing_provider_msg,
@@ -1910,7 +1914,7 @@ fn execWithIoHooks(
             } else {
                 const provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
                 if (parseNativeProviderKind(provider_name)) |native_kind| {
-                    if (NativeProviderRuntime.init(alloc, native_kind)) |nr| {
+                    if (NativeProviderRuntime.init(alloc, native_kind, run_cmd.cfg.ca_file)) |nr| {
                         native_rt = nr;
                         has_native_rt = true;
                         provider = native_rt.asProvider();
@@ -1978,7 +1982,7 @@ fn execWithIoHooks(
                     reader,
                     writer,
                     sys_prompt,
-                    audit_hooks,
+                    hooks,
                 ),
                 .tui => try runTui(
                     alloc,
@@ -1994,7 +1998,7 @@ fn execWithIoHooks(
                     run_cmd.no_session,
                     sys_prompt,
                     has_native_rt and native_rt.isSub(),
-                    audit_hooks,
+                    hooks,
                 ),
                 .rpc => try runRpc(
                     alloc,
@@ -2009,7 +2013,7 @@ fn execWithIoHooks(
                     session_dir_path,
                     run_cmd.no_session,
                     sys_prompt,
-                    audit_hooks,
+                    hooks,
                 ),
             }
             st = .done;

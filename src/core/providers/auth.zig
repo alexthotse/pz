@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const oauth_callback = @import("oauth_callback.zig");
 const audit = @import("../audit.zig");
 const fs_secure = @import("../fs_secure.zig");
+const core_tls = @import("../tls.zig");
 
 pub const Auth = union(enum) {
     oauth: OAuth,
@@ -40,10 +41,13 @@ pub fn providerName(p: Provider) []const u8 {
 }
 
 pub const Hooks = struct {
+    const Self = @This();
+
     home_override: ?[]const u8 = null,
+    ca_file: ?[]const u8 = null,
     get_home: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = std.process.getEnvVarOwned,
-    exchange_code: *const fn (std.mem.Allocator, *const OAuthSpec, []const u8, []const u8, []const u8, []const u8) anyerror!OAuth = exchangeAuthorizationCode,
-    refresh_fetch: *const fn (std.mem.Allocator, Provider, OAuth) anyerror!OAuth = fetchRefreshedOAuthForProvider,
+    exchange_code: *const fn (std.mem.Allocator, *const OAuthSpec, []const u8, []const u8, []const u8, []const u8, Self) anyerror!OAuth = exchangeAuthorizationCode,
+    refresh_fetch: *const fn (std.mem.Allocator, Provider, OAuth, Self) anyerror!OAuth = fetchRefreshedOAuthForProvider,
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
@@ -425,7 +429,7 @@ pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, inpu
     const oauth_redirect_uri = parsed.redirect_uri orelse spec.default_redirect_uri;
 
     // Manual completion path uses state as verifier (legacy code#state support).
-    const oauth = hooks.exchange_code(alloc, spec, parsed.code, state, oauth_redirect_uri, state) catch |err| {
+    const oauth = hooks.exchange_code(alloc, spec, parsed.code, state, oauth_redirect_uri, state, hooks) catch |err| {
         try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
         return err;
     };
@@ -469,6 +473,7 @@ pub fn completeOAuthFromLocalCallbackWithHooks(
         callback.state,
         oauth_redirect_uri,
         verifier,
+        hooks,
     ) catch |err| {
         try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
         return err;
@@ -767,6 +772,7 @@ fn exchangeAuthorizationCode(
     state: []const u8,
     oauth_redirect_uri: []const u8,
     verifier: []const u8,
+    hooks: Hooks,
 ) !OAuth {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -774,7 +780,7 @@ fn exchangeAuthorizationCode(
 
     const token_req = try buildTokenReqBody(ar, spec, code, state, oauth_redirect_uri, verifier);
 
-    var http = std.http.Client{ .allocator = ar };
+    var http = try initHttpClient(ar, hooks.ca_file);
     defer http.deinit();
 
     const uri = std.Uri{
@@ -810,6 +816,13 @@ fn exchangeAuthorizationCode(
     const resp_body = try rdr.allocRemaining(ar, .limited(65536));
 
     return parseOAuthTokenResponse(alloc, ar, resp_body, error.TokenExchangeFailed);
+}
+
+fn initHttpClient(alloc: std.mem.Allocator, ca_file: ?[]const u8) !std.http.Client {
+    var http = std.http.Client{ .allocator = alloc };
+    errdefer http.deinit();
+    try core_tls.applyCaFile(&http, alloc, ca_file);
+    return http;
 }
 
 fn decodeQueryValue(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
@@ -853,9 +866,9 @@ pub fn refreshOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old
     return refreshOAuthForProviderWithHooks(alloc, provider, old, .{});
 }
 
-fn refreshOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, old: OAuth, hooks: Hooks) !OAuth {
+pub fn refreshOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, old: OAuth, hooks: Hooks) !OAuth {
     try emitAuthAudit(alloc, hooks, 1, provider, "refresh", "oauth", .ok, .info, .{ .text = "oauth refresh start", .vis = .@"pub" });
-    const new_oauth = hooks.refresh_fetch(alloc, provider, old) catch |err| {
+    const new_oauth = hooks.refresh_fetch(alloc, provider, old, hooks) catch |err| {
         try emitAuthAudit(alloc, hooks, 2, provider, "refresh", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
         return err;
     };
@@ -871,7 +884,7 @@ fn refreshOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider
     return new_oauth;
 }
 
-fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old: OAuth) !OAuth {
+fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, old: OAuth, hooks: Hooks) !OAuth {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -880,7 +893,7 @@ fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, 
 
     const req_body = try buildRefreshReqBody(ar, spec, old.refresh);
 
-    var http = std.http.Client{ .allocator = ar };
+    var http = try initHttpClient(ar, hooks.ca_file);
     defer http.deinit();
 
     const uri = std.Uri{
@@ -1226,7 +1239,7 @@ test "auth audit covers oauth login and persistence" {
     try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", .{
         .home_override = home,
         .exchange_code = struct {
-            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8) !OAuth {
+            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Hooks) !OAuth {
                 return .{
                     .access = try alloc.dupe(u8, "oa-access"),
                     .refresh = try alloc.dupe(u8, "oa-refresh"),
@@ -1283,7 +1296,7 @@ test "auth audit covers oauth refresh and persistence" {
     }, .{
         .home_override = home,
         .refresh_fetch = struct {
-            fn f(alloc: std.mem.Allocator, _: Provider, _: OAuth) !OAuth {
+            fn f(alloc: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
                 return .{
                     .access = try alloc.dupe(u8, "new-a"),
                     .refresh = try alloc.dupe(u8, "new-r"),
@@ -1797,4 +1810,75 @@ test "refreshOAuthForProvider rejects unsupported provider" {
         error.UnsupportedOAuthProvider,
         refreshOAuthForProvider(std.testing.allocator, .google, old),
     );
+}
+
+test "completeOAuthWithHooks passes ca_file to exchange_code" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", .{
+        .home_override = home,
+        .ca_file = "/etc/pz/auth.pem",
+        .exchange_code = struct {
+            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, hooks: Hooks) !OAuth {
+                try std.testing.expectEqualStrings("/etc/pz/auth.pem", hooks.ca_file orelse return error.TestUnexpectedResult);
+                return .{
+                    .access = try alloc.dupe(u8, "ca-a"),
+                    .refresh = try alloc.dupe(u8, "ca-r"),
+                    .expires = 77,
+                };
+            }
+        }.f,
+    });
+}
+
+test "refreshOAuthForProviderWithHooks passes ca_file to refresh_fetch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .openai, .{
+        .access = "old-a",
+        .refresh = "old-r",
+        .expires = 1,
+    }, .{
+        .home_override = home,
+        .ca_file = "/etc/pz/auth.pem",
+        .refresh_fetch = struct {
+            fn f(alloc: std.mem.Allocator, _: Provider, _: OAuth, hooks: Hooks) !OAuth {
+                try std.testing.expectEqualStrings("/etc/pz/auth.pem", hooks.ca_file orelse return error.TestUnexpectedResult);
+                return .{
+                    .access = try alloc.dupe(u8, "new-a"),
+                    .refresh = try alloc.dupe(u8, "new-r"),
+                    .expires = 999,
+                };
+            }
+        }.f,
+    });
+    defer {
+        std.testing.allocator.free(got.access);
+        std.testing.allocator.free(got.refresh);
+    }
+}
+
+test "initHttpClient fails closed on invalid ca bundle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
+    const bad = try tmp.dir.realpathAlloc(std.testing.allocator, "bad.pem");
+    defer std.testing.allocator.free(bad);
+
+    if (initHttpClient(std.testing.allocator, bad)) |h| {
+        var http = h;
+        defer http.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expectEqual(error.MissingEndCertificateMarker, err);
+    }
 }
