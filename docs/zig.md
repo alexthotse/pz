@@ -119,6 +119,12 @@ const data = try f.readToEndAlloc(alloc, max_size);
   - `try client.ca_bundle.addCertsFromFilePathAbsolute(alloc, abs_pem_path)`
   - `@atomicStore(bool, &client.next_https_rescan_certs, false, .release)` to stop later system-root rescans from replacing the custom bundle
 
+## Child Sandbox Hook
+
+- `std.process.Child.spawnPosix` exposes no caller hook between `fork` and `exec`.
+- If a subprocess needs pre-`exec` sandbox setup, `std.process.Child` is insufficient on its own.
+- Real pre-`exec` sandboxing means manual `fork`/child setup/`exec` plumbing or an external sandbox launcher.
+
 ## Alignment
 
 ```zig
