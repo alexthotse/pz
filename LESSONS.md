@@ -29,6 +29,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - For approval-cache properties, generate alternate session/hash strings inside the property so the invariant never collapses onto an accidental equal input.
 
 ### Did Not Work
+- Assuming `execWithIo` exercises the live TUI loop was wrong. `runTui` gates overflow-retry and other live-turn behavior behind `isatty(STDIN_FILENO)`, so fixed-buffer tests only cover the non-TTY prompt path unless stdin/tty are injectable.
 - Using synthetic policy paths under `.pz/runtime/...` for runtime actions was wrong because policy self-protection denies any `.pz` path before rule evaluation.
 - Letting a worker validate in a workspace whose build still shells out to `git` created false failures. Fix the build once instead of faking `.git` per workspace.
 - For raw string snapshots, writing only the body text is wrong. `ohsnap` expects the full typed shape like `[]u8` plus the value line.
