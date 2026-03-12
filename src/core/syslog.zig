@@ -1,4 +1,5 @@
 const std = @import("std");
+const policy = @import("policy.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");
 
 pub const version: u8 = 1;
@@ -99,6 +100,8 @@ pub const SenderOpts = struct {
     transport: Transport = .udp,
     host: []const u8,
     port: u16 = 514,
+    egress: ?policy.Policy = null,
+    tool: ?[]const u8 = "syslog",
     hooks: Hooks = .{},
 };
 
@@ -113,6 +116,7 @@ pub const Sender = struct {
 
     pub fn init(alloc: std.mem.Allocator, opts: SenderOpts) !Sender {
         if (opts.host.len == 0) return error.InvalidHost;
+        if (opts.egress) |egress| try checkHostAllowed(opts.host, egress, opts.tool);
 
         const host = try alloc.dupe(u8, opts.host);
         errdefer alloc.free(host);
@@ -187,6 +191,15 @@ pub const Sender = struct {
         try self.hooks.send_tcp(self.fd, raw);
     }
 };
+
+fn checkHostAllowed(host: []const u8, egress: policy.Policy, tool: ?[]const u8) error{HostDenied}!void {
+    const prefix = "runtime/syslog/";
+    var path_buf: [320]u8 = undefined;
+    if (prefix.len + host.len > path_buf.len) return error.HostDenied;
+    @memcpy(path_buf[0..prefix.len], prefix);
+    for (host, 0..) |c, i| path_buf[prefix.len + i] = std.ascii.toLower(c);
+    if (egress.eval(path_buf[0 .. prefix.len + host.len], tool) != .allow) return error.HostDenied;
+}
 
 const Hooks = struct {
     resolve: *const fn (alloc: std.mem.Allocator, host: []const u8, port: u16) anyerror!std.net.Address = resolve,
@@ -767,4 +780,62 @@ test "udp sender re-resolves hostname after send failure" {
 
     try std.testing.expectEqual(@as(usize, 2), Wrap.h.resolve_ct);
     try std.testing.expectEqual(@as(u16, 4012), Wrap.h.sent_port);
+}
+
+test "sender init rejects host absent from policy" {
+    const rules = [_]policy.Rule{
+        .{ .pattern = "runtime/syslog/audit.example.com", .effect = .allow, .tool = "syslog" },
+    };
+
+    try std.testing.expectError(error.HostDenied, Sender.init(std.testing.allocator, .{
+        .host = "blocked.example.com",
+        .egress = .{ .rules = &rules },
+        .hooks = .{
+            .resolve = struct {
+                fn f(_: std.mem.Allocator, _: []const u8, _: u16) !std.net.Address {
+                    return error.TestUnexpectedResult;
+                }
+            }.f,
+        },
+    }));
+}
+
+test "sender init accepts host allowed by policy" {
+    const Wrap = struct {
+        var resolved = false;
+
+        fn resolve(_: std.mem.Allocator, host: []const u8, port: u16) !std.net.Address {
+            resolved = true;
+            try std.testing.expectEqualStrings("Audit.EXAMPLE.com", host);
+            return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+        }
+
+        fn openSocket(_: std.net.Address, _: Transport) !std.posix.socket_t {
+            return 0;
+        }
+
+        fn connect(_: std.posix.socket_t, _: std.net.Address) !void {}
+        fn sendUdp(_: std.posix.socket_t, _: []const u8, _: std.net.Address) !void {}
+        fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
+        fn closeSocket(_: std.posix.socket_t) void {}
+    };
+    const rules = [_]policy.Rule{
+        .{ .pattern = "runtime/syslog/audit.example.com", .effect = .allow, .tool = "syslog" },
+    };
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .host = "Audit.EXAMPLE.com",
+        .egress = .{ .rules = &rules },
+        .hooks = .{
+            .resolve = Wrap.resolve,
+            .open_socket = Wrap.openSocket,
+            .connect = Wrap.connect,
+            .send_udp = Wrap.sendUdp,
+            .send_tcp = Wrap.sendTcp,
+            .close_socket = Wrap.closeSocket,
+        },
+    });
+    defer sender.deinit();
+
+    try std.testing.expect(Wrap.resolved);
 }
