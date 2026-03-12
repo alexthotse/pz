@@ -262,6 +262,31 @@ fn addManualRows(rows: *Rows) !void {
             },
         },
     });
+
+    try rows.appendEntry(testing.allocator, .{
+        .ts_ms = 141,
+        .sid = "sess-bash",
+        .seq = 1,
+        .out = .deny,
+        .sev = .warn,
+        .actor = .{
+            .kind = .tool,
+            .id = .{ .text = "bash", .vis = .@"pub" },
+        },
+        .res = .{
+            .kind = .cmd,
+            .name = .{ .text = "rm -rf /tmp/bash-secret/.env", .vis = .mask },
+            .op = "exec",
+        },
+        .msg = .{ .text = "policy denied", .vis = .@"pub" },
+        .data = .{
+            .tool = .{
+                .name = .{ .text = "bash", .vis = .@"pub" },
+                .call_id = "call-bash",
+                .argv = .{ .text = "rm -rf /tmp/bash-secret/.env", .vis = .mask },
+            },
+        },
+    });
 }
 
 fn addAuthRows(rows: *Rows) !void {
@@ -326,6 +351,8 @@ fn assertCleartextMissing(collector: anytype) !void {
         "/tmp/share-secret/report.md",
         "https://gist.github.com/joel/abc123",
         ".pz/policy.json",
+        "rm -rf /tmp/bash-secret/.env",
+        "/tmp/bash-secret/.env",
         "sk-openai-secret",
         "printf done",
         "/tmp/bg-secret",
