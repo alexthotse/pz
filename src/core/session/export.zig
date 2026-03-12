@@ -541,3 +541,83 @@ fn scrubExportAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     }
     return cur;
 }
+
+test "scrubExportAudit property: targeted paths normalize to mask" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            sid: zc.Id,
+            call_id: zc.Id,
+            file: zc.Id,
+            argv: zc.Id,
+        }) bool {
+            const alloc = std.testing.allocator;
+            const file_path = std.fmt.allocPrint(alloc, "/tmp/{s}", .{args.file.slice()}) catch return false;
+            defer alloc.free(file_path);
+            const argv_path = std.fmt.allocPrint(alloc, "/bin/{s}", .{args.argv.slice()}) catch return false;
+            defer alloc.free(argv_path);
+            const raw = std.fmt.allocPrint(
+                alloc,
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"{s}\",\"vis\":\"sec\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"call_id\":\"{s}\",\"argv\":{{\"text\":\"{s}\",\"vis\":\"sec\"}}}},\"attrs\":[]}}",
+                .{ args.sid.slice(), file_path, args.call_id.slice(), argv_path },
+            ) catch return false;
+            defer alloc.free(raw);
+            const want = std.fmt.allocPrint(
+                alloc,
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"[mask:PATH]\",\"vis\":\"sec\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"call_id\":\"{s}\",\"argv\":{{\"text\":\"[mask:PATH]\",\"vis\":\"sec\"}}}},\"attrs\":[]}}",
+                .{ args.sid.slice(), args.call_id.slice() },
+            ) catch return false;
+            defer alloc.free(want);
+            const got = scrubExportAudit(alloc, raw) catch return false;
+            defer alloc.free(got);
+            return std.mem.eql(u8, got, want) and
+                std.mem.count(u8, got, "[mask:PATH]") == 2 and
+                std.mem.indexOf(u8, got, file_path) == null and
+                std.mem.indexOf(u8, got, argv_path) == null;
+        }
+    }.prop, .{ .iterations = 200 });
+}
+
+test "scrubExportAudit property: masked targeted rows stay stable" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { sid: zc.Id, call_id: zc.Id }) bool {
+            const alloc = std.testing.allocator;
+            const raw = std.fmt.allocPrint(
+                alloc,
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"[mask:PATH]\",\"vis\":\"mask\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"call_id\":\"{s}\",\"argv\":{{\"text\":\"[mask:PATH]\",\"vis\":\"mask\"}}}},\"attrs\":[]}}",
+                .{ args.sid.slice(), args.call_id.slice() },
+            ) catch return false;
+            defer alloc.free(raw);
+            const got = scrubExportAudit(alloc, raw) catch return false;
+            defer alloc.free(got);
+            return std.mem.eql(u8, got, raw);
+        }
+    }.prop, .{ .iterations = 200 });
+}
+
+test "scrubExportAudit property: safe rows stay stable" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            sid: zc.Id,
+            file: zc.Id,
+            argv: zc.Id,
+        }) bool {
+            const alloc = std.testing.allocator;
+            const file_path = std.fmt.allocPrint(alloc, "/tmp/{s}", .{args.file.slice()}) catch return false;
+            defer alloc.free(file_path);
+            const argv_path = std.fmt.allocPrint(alloc, "/bin/{s}", .{args.argv.slice()}) catch return false;
+            defer alloc.free(argv_path);
+            const raw = std.fmt.allocPrint(
+                alloc,
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"cmd\",\"name\":{{\"text\":\"{s}\",\"vis\":\"sec\"}},\"op\":\"run\"}},\"msg\":{{\"text\":\"run {s}\",\"vis\":\"sec\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"argv\":\"{s}\"}},\"attrs\":[]}}",
+                .{ args.sid.slice(), file_path, argv_path, argv_path },
+            ) catch return false;
+            defer alloc.free(raw);
+            const got = scrubExportAudit(alloc, raw) catch return false;
+            defer alloc.free(got);
+            return std.mem.eql(u8, got, raw);
+        }
+    }.prop, .{ .iterations = 200 });
+}
