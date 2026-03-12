@@ -9,6 +9,7 @@ pub const edit = @import("edit.zig");
 pub const grep = @import("grep.zig");
 pub const find = @import("find.zig");
 pub const ls = @import("ls.zig");
+pub const agent = @import("agent.zig");
 pub const skill = @import("skill.zig");
 pub const web = @import("web.zig");
 pub const contract_test = @import("contract_test.zig");
@@ -21,6 +22,7 @@ pub const Kind = enum {
     grep,
     find,
     ls,
+    agent,
     web,
     ask,
     skill,
@@ -109,6 +111,7 @@ pub const Call = struct {
         grep: GrepArgs,
         find: FindArgs,
         ls: LsArgs,
+        agent: AgentArgs,
         web: WebArgs,
         ask: AskArgs,
         skill: SkillArgs,
@@ -155,6 +158,11 @@ pub const Call = struct {
     pub const LsArgs = struct {
         path: []const u8 = ".",
         all: bool = false,
+    };
+
+    pub const AgentArgs = struct {
+        agent_id: []const u8,
+        prompt: []const u8,
     };
 
     pub const WebArgs = web.Request;

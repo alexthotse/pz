@@ -1158,6 +1158,7 @@ fn approvalSummaryAlloc(
         .write => std.fmt.allocPrint(alloc, "write {s}", .{parsed_args.write.path}),
         .bash => std.fmt.allocPrint(alloc, "bash `{s}`", .{parsed_args.bash.cmd}),
         .edit => std.fmt.allocPrint(alloc, "edit {s}", .{parsed_args.edit.path}),
+        .agent => std.fmt.allocPrint(alloc, "agent {s}", .{parsed_args.agent.agent_id}),
         .web => tools.web.approvalSummaryAlloc(alloc, parsed_args.web),
         else => unreachable,
     };
@@ -1233,6 +1234,9 @@ fn parseCallArgs(
         },
         .ls => .{
             .ls = try parseArgs(tools.Call.LsArgs, alloc, raw),
+        },
+        .agent => .{
+            .agent = try parseArgs(tools.Call.AgentArgs, alloc, raw),
         },
         .web => .{
             .web = try parseArgs(tools.Call.WebArgs, alloc, raw),

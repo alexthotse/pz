@@ -171,6 +171,42 @@ test "tool contract handlers emit deterministic envelopes" {
     const ls_res = try ls_h.run(ls_call, sink);
     defer ls_h.deinitResult(ls_res);
 
+    const AgentImpl = struct {
+        fn run(_: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunRes {
+            return .{
+                .out = .{
+                    .id = "req-1",
+                    .kind = .text,
+                    .text = args.prompt,
+                },
+                .done = .{
+                    .id = "req-1",
+                    .stop = .done,
+                    .truncated = false,
+                },
+            };
+        }
+    };
+    var agent_impl = AgentImpl{};
+    const agent_h = @import("agent.zig").Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 4096,
+        .now_ms = 70,
+        .hook = @import("agent.zig").Hook.from(AgentImpl, &agent_impl, AgentImpl.run),
+    });
+    const agent_call: tools.Call = .{
+        .id = "a1",
+        .kind = .agent,
+        .args = .{ .agent = .{
+            .agent_id = "critic",
+            .prompt = "delegated to child agent",
+        } },
+        .src = .system,
+        .at_ms = 0,
+    };
+    const agent_res = try agent_h.run(agent_call, sink);
+    defer agent_h.deinitResult(agent_res);
+
     const find_h = @import("find.zig").Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 4096,
@@ -213,6 +249,7 @@ test "tool contract handlers emit deterministic envelopes" {
         try snapshotResult(std.testing.allocator, ed_res),
         try snapshotResult(std.testing.allocator, sh_res),
         try snapshotResult(std.testing.allocator, ls_res),
+        try snapshotResult(std.testing.allocator, agent_res),
         try snapshotResult(std.testing.allocator, find_res),
         try snapshotResult(std.testing.allocator, grep_res),
     };
@@ -222,10 +259,11 @@ test "tool contract handlers emit deterministic envelopes" {
     try std.testing.expectEqualStrings(ed_call.id, snaps[2].call_id);
     try std.testing.expectEqualStrings(sh_call.id, snaps[3].call_id);
     try std.testing.expectEqualStrings(ls_call.id, snaps[4].call_id);
-    try std.testing.expectEqualStrings(find_call.id, snaps[5].call_id);
-    try std.testing.expectEqualStrings(grep_call.id, snaps[6].call_id);
+    try std.testing.expectEqualStrings(agent_call.id, snaps[5].call_id);
+    try std.testing.expectEqualStrings(find_call.id, snaps[6].call_id);
+    try std.testing.expectEqualStrings(grep_call.id, snaps[7].call_id);
     try oh.snap(@src(),
-        \\[7]core.tools.contract_test.ResultSnap
+        \\[8]core.tools.contract_test.ResultSnap
         \\  [0]: core.tools.contract_test.ResultSnap
         \\    .call_id: []const u8
         \\      "r1"
@@ -294,6 +332,22 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .truncated: bool = false
         \\  [5]: core.tools.contract_test.ResultSnap
         \\    .call_id: []const u8
+        \\      "a1"
+        \\    .started_at_ms: i64 = 70
+        \\    .ended_at_ms: i64 = 70
+        \\    .final: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .out: []core.tools.contract_test.OutSnap
+        \\      [0]: core.tools.contract_test.OutSnap
+        \\        .call_id: []const u8
+        \\          "a1"
+        \\        .seq: u32 = 0
+        \\        .at_ms: i64 = 70
+        \\        .stream: core.tools.mod.Output.Stream
+        \\          .stdout
+        \\        .truncated: bool = false
+        \\  [6]: core.tools.contract_test.ResultSnap
+        \\    .call_id: []const u8
         \\      "f1"
         \\    .started_at_ms: i64 = 77
         \\    .ended_at_ms: i64 = 77
@@ -308,7 +362,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .stream: core.tools.mod.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
-        \\  [6]: core.tools.contract_test.ResultSnap
+        \\  [7]: core.tools.contract_test.ResultSnap
         \\    .call_id: []const u8
         \\      "g1"
         \\    .started_at_ms: i64 = 88

@@ -205,6 +205,7 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
         .grep => |args| args.path,
         .find => |args| args.path,
         .ls => |args| args.path,
+        .agent => |args| try std.fmt.bufPrint(buf, "runtime/subagent/{s}", .{args.agent_id}),
         .web => try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
         .ask => try std.fmt.bufPrint(buf, "runtime/tool/{s}", .{name}),
         .skill => |args| try std.fmt.bufPrint(buf, "runtime/skill/{s}", .{args.name}),
@@ -234,8 +235,8 @@ const PolicyToolDispatch = struct {
 };
 
 const PolicyToolRegistry = struct {
-    ctxs: [9]PolicyToolDispatch = undefined,
-    entries: [9]core.tools.Entry = undefined,
+    ctxs: [10]PolicyToolDispatch = undefined,
+    entries: [10]core.tools.Entry = undefined,
     reg: core.tools.Registry = undefined,
 
     fn init(self: *PolicyToolRegistry, pol: *const RuntimePolicy, base: core.tools.Registry) void {
@@ -5005,6 +5006,7 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
         "grep",
         "find",
         "ls",
+        "agent",
         "ask",
         "skill",
     };
@@ -5016,6 +5018,7 @@ fn toolMaskCsvAlloc(alloc: std.mem.Allocator, mask: u16) ![]u8 {
         core.tools.builtin.mask_grep,
         core.tools.builtin.mask_find,
         core.tools.builtin.mask_ls,
+        core.tools.builtin.mask_agent,
         core.tools.builtin.mask_ask,
         core.tools.builtin.mask_skill,
     };
@@ -5619,7 +5622,7 @@ const model_cycle = [_][]const u8{
 };
 
 const provider_args = [_][]const u8{ "anthropic", "openai", "google" };
-const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "ask", "skill" };
+const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill" };
 const bg_args = [_][]const u8{ "run", "list", "show", "stop" };
 const bg_usage = "usage: /bg run <cmd>|list|show <id>|stop <id>\n";
 const BgSub = enum {
@@ -7837,7 +7840,7 @@ test "subagent stub inherits effective policy hash" {
     switch (hello.msg) {
         .hello => |msg| {
             try std.testing.expectEqualStrings("agent-child", msg.agent_id);
-    try std.testing.expectEqualStrings(pol.hash(), msg.policy_hash);
+            try std.testing.expectEqualStrings(pol.hash(), msg.policy_hash);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -9136,7 +9139,7 @@ test "runtime snapshot for slash + bg flow" {
         \\  .has_bg_footer: bool = true
     ).expectEqual(Snap{
         .has_help = std.mem.indexOf(u8, written, "/help") != null,
-        .has_tools_set = std.mem.indexOf(u8, written, "tools set to read,write,bash,edit,grep,find,ls,ask,skill") != null,
+        .has_tools_set = std.mem.indexOf(u8, written, "tools set to read,write,bash,edit,grep,find,ls,agent,ask,skill") != null,
         .has_bg_started = std.mem.indexOf(u8, written, "bg started id=1") != null,
         .has_bg_list_header = std.mem.indexOf(u8, written, "id pid state code log cmd") != null,
         .has_bg_footer = std.mem.indexOf(u8, written, "bg L1 R1 D0") != null,

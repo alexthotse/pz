@@ -7,6 +7,7 @@ const edit = @import("edit.zig");
 const grep = @import("grep.zig");
 const find = @import("find.zig");
 const ls = @import("ls.zig");
+const agent_tool = @import("agent.zig");
 const path_guard = @import("path_guard.zig");
 const skill = @import("skill.zig");
 
@@ -18,8 +19,9 @@ pub const mask_edit: u16 = 1 << 3;
 pub const mask_grep: u16 = 1 << 4;
 pub const mask_find: u16 = 1 << 5;
 pub const mask_ls: u16 = 1 << 6;
-pub const mask_ask: u16 = 1 << 7;
-pub const mask_skill: u16 = 1 << 8;
+pub const mask_agent: u16 = 1 << 7;
+pub const mask_ask: u16 = 1 << 8;
+pub const mask_skill: u16 = 1 << 9;
 pub const mask_all: u16 =
     mask_read |
     mask_write |
@@ -28,6 +30,7 @@ pub const mask_all: u16 =
     mask_grep |
     mask_find |
     mask_ls |
+    mask_agent |
     mask_ask |
     mask_skill;
 
@@ -72,6 +75,11 @@ const find_params = [_]tools.Tool.Param{
 const ls_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = false, .desc = "Directory to list" },
     .{ .name = "all", .ty = .bool, .required = false, .desc = "Include hidden entries" },
+};
+
+const agent_params = [_]tools.Tool.Param{
+    .{ .name = "agent_id", .ty = .string, .required = true, .desc = "Target child agent id" },
+    .{ .name = "prompt", .ty = .string, .required = true, .desc = "Prompt forwarded to the child agent" },
 };
 
 const skill_params = [_]tools.Tool.Param{
@@ -142,6 +150,7 @@ pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize = default_max_bytes,
     tool_mask: u16 = mask_all,
+    agent_hook: ?agent_tool.Hook = null,
     ask_hook: ?AskHook = null,
 };
 
@@ -149,16 +158,18 @@ pub const Runtime = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     tool_mask: u16,
+    agent_hook: ?agent_tool.Hook,
     ask_hook: ?AskHook,
     skill_cache: skill.Cache = .{},
-    entries: [9]tools.Entry = undefined,
-    selected: [9]tools.Entry = undefined,
+    entries: [10]tools.Entry = undefined,
+    selected: [10]tools.Entry = undefined,
 
     pub fn init(opts: Opts) Runtime {
         return .{
             .alloc = opts.alloc,
             .max_bytes = opts.max_bytes,
             .tool_mask = opts.tool_mask & mask_all,
+            .agent_hook = opts.agent_hook,
             .ask_hook = opts.ask_hook,
         };
     }
@@ -295,6 +306,22 @@ pub const Runtime = struct {
                 .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runLs),
             },
             .{
+                .name = "agent",
+                .kind = .agent,
+                .spec = .{
+                    .kind = .agent,
+                    .desc = "Run a child agent and return its bounded output",
+                    .params = agent_params[0..],
+                    .out = .{
+                        .max_bytes = @intCast(self.max_bytes),
+                        .stream = false,
+                    },
+                    .timeout_ms = 120000,
+                    .destructive = false,
+                },
+                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runAgent),
+            },
+            .{
                 .name = "ask",
                 .kind = .ask,
                 .spec = .{
@@ -362,12 +389,16 @@ pub const Runtime = struct {
             self.selected[len] = self.entries[6];
             len += 1;
         }
-        if ((self.tool_mask & mask_ask) != 0) {
+        if ((self.tool_mask & mask_agent) != 0) {
             self.selected[len] = self.entries[7];
             len += 1;
         }
-        if ((self.tool_mask & mask_skill) != 0) {
+        if ((self.tool_mask & mask_ask) != 0) {
             self.selected[len] = self.entries[8];
+            len += 1;
+        }
+        if ((self.tool_mask & mask_skill) != 0) {
+            self.selected[len] = self.entries[9];
             len += 1;
         }
         return self.selected[0..len];
@@ -430,6 +461,16 @@ pub const Runtime = struct {
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
             .now_ms = call.at_ms,
+        });
+        return h.run(call, sink);
+    }
+
+    fn runAgent(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+        const h = agent_tool.Handler.init(.{
+            .alloc = self.alloc,
+            .max_bytes = self.max_bytes,
+            .now_ms = call.at_ms,
+            .hook = self.agent_hook,
         });
         return h.run(call, sink);
     }
@@ -532,6 +573,7 @@ pub fn maskForName(name: []const u8) ?u16 {
         .{ "grep", mask_grep },
         .{ "find", mask_find },
         .{ "ls", mask_ls },
+        .{ "agent", mask_agent },
         .{ "ask", mask_ask },
         .{ "skill", mask_skill },
     });
@@ -624,6 +666,7 @@ test "builtin runtime registry exposes all core tools" {
     try std.testing.expect(reg.byName("grep") != null);
     try std.testing.expect(reg.byName("find") != null);
     try std.testing.expect(reg.byName("ls") != null);
+    try std.testing.expect(reg.byName("agent") != null);
     try std.testing.expect(reg.byName("ask") != null);
 
     try std.testing.expect(reg.byKind(.read) != null);
@@ -633,6 +676,7 @@ test "builtin runtime registry exposes all core tools" {
     try std.testing.expect(reg.byKind(.grep) != null);
     try std.testing.expect(reg.byKind(.find) != null);
     try std.testing.expect(reg.byKind(.ls) != null);
+    try std.testing.expect(reg.byKind(.agent) != null);
     try std.testing.expect(reg.byKind(.ask) != null);
 }
 
@@ -682,14 +726,105 @@ test "builtin runtime uses call timestamp in result envelope" {
 test "builtin runtime supports deterministic tool mask filtering" {
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
-        .tool_mask = mask_read | mask_bash,
+        .tool_mask = mask_read | mask_agent,
     });
     const reg = rt.registry();
 
     try std.testing.expectEqual(@as(usize, 2), reg.entries.len);
     try std.testing.expectEqualStrings("read", reg.entries[0].name);
-    try std.testing.expectEqualStrings("bash", reg.entries[1].name);
+    try std.testing.expectEqualStrings("agent", reg.entries[1].name);
     try std.testing.expect(reg.byName("write") == null);
+}
+
+test "agent tool uses runtime hook output" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const AgentImpl = struct {
+        seen: usize = 0,
+
+        fn run(self: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunRes {
+            self.seen += 1;
+            return .{
+                .out = .{
+                    .id = "req-1",
+                    .kind = .text,
+                    .text = args.prompt,
+                },
+                .done = .{
+                    .id = "req-1",
+                    .stop = .done,
+                    .truncated = false,
+                },
+            };
+        }
+    };
+
+    var impl = AgentImpl{};
+    var rt = Runtime.init(.{
+        .alloc = std.testing.allocator,
+        .tool_mask = mask_agent,
+        .agent_hook = agent_tool.Hook.from(AgentImpl, &impl, AgentImpl.run),
+    });
+    const reg = rt.registry();
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const call: tools.Call = .{
+        .id = "agent-hook",
+        .kind = .agent,
+        .args = .{ .agent = .{
+            .agent_id = "critic",
+            .prompt = "delegated to child agent",
+        } },
+        .src = .model,
+        .at_ms = 12,
+    };
+
+    const res = try reg.run("agent", call, sink);
+    defer rt.deinitResult(res);
+    try std.testing.expectEqual(@as(usize, 1), impl.seen);
+    const snap = try snapAskResult(std.testing.allocator, res);
+    defer freeAskResultSnap(std.testing.allocator, snap);
+    try oh.snap(@src(),
+        \\core.tools.builtin.AskResultSnap
+        \\  .call_id: []const u8
+        \\    "agent-hook"
+        \\  .started_at_ms: i64 = 12
+        \\  .ended_at_ms: i64 = 12
+        \\  .final: core.tools.builtin.AskFinalSnap
+        \\    .tag: core.tools.mod.Result.Tag
+        \\      .ok
+        \\    .code: ?i32
+        \\      0
+        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\      null
+        \\    .msg: ?[]const u8
+        \\      null
+        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\      null
+        \\    .limit_ms: ?u32
+        \\      null
+        \\  .out: []core.tools.builtin.AskOutSnap
+        \\    [0]: core.tools.builtin.AskOutSnap
+        \\      .call_id: []const u8
+        \\        "agent-hook"
+        \\      .seq: u32 = 0
+        \\      .at_ms: i64 = 12
+        \\      .stream: core.tools.mod.Output.Stream
+        \\        .stdout
+        \\      .chunk: []const u8
+        \\        "agent: critic
+        \\kind: text
+        \\stop: done
+        \\truncated: false
+        \\
+        \\delegated to child agent"
+        \\      .truncated: bool = false
+    ).expectEqual(snap);
 }
 
 test "ask tool requires interactive hook" {
@@ -1046,6 +1181,7 @@ test "maskForName validates builtin tool names" {
     try std.testing.expect(maskForName("grep") != null);
     try std.testing.expect(maskForName("find") != null);
     try std.testing.expect(maskForName("ls") != null);
+    try std.testing.expect(maskForName("agent") != null);
     try std.testing.expect(maskForName("ask") != null);
     try std.testing.expect(maskForName("skill") != null);
     try std.testing.expect(maskForName("wat") == null);
