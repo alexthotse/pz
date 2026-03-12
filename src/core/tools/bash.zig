@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const policy = @import("../policy.zig");
 const shell = @import("../shell.zig");
@@ -263,6 +264,7 @@ fn runChild(
     child.stderr_behavior = .Pipe;
     child.cwd = cwd;
     child.env_map = env;
+    if (builtin.os.tag != .windows and builtin.os.tag != .wasi) child.pgid = 0;
 
     child.spawn() catch |spawn_err| return mapProcErr(spawn_err);
 
@@ -390,7 +392,7 @@ fn terminateAndReap(child: *std.process.Child) anyerror!u32 {
         .pending => {},
     }
 
-    std.posix.kill(child.id, std.posix.SIG.TERM) catch |kill_err| switch (kill_err) {
+    signalChild(child.id, std.posix.SIG.TERM) catch |kill_err| switch (kill_err) {
         error.ProcessNotFound => return reapChild(child),
         else => return kill_err,
     };
@@ -404,12 +406,20 @@ fn terminateAndReap(child: *std.process.Child) anyerror!u32 {
         }
     }
 
-    std.posix.kill(child.id, std.posix.SIG.KILL) catch |kill_err| switch (kill_err) {
+    signalChild(child.id, std.posix.SIG.KILL) catch |kill_err| switch (kill_err) {
         error.ProcessNotFound => {},
         else => return kill_err,
     };
 
     return reapChild(child);
+}
+
+fn signalChild(pid: std.posix.pid_t, sig: @TypeOf(std.posix.SIG.TERM)) !void {
+    if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+        try std.posix.kill(-pid, sig);
+        return;
+    }
+    try std.posix.kill(pid, sig);
 }
 
 fn pollChild(child: *std.process.Child) WaitPoll {
@@ -918,6 +928,19 @@ test "bash handler returns kind mismatch for wrong call kind" {
 }
 
 test "bash handler cancels running child and reaps TERM-resistant process" {
+    const WaitGone = struct {
+        fn run(pid: std.posix.pid_t) !void {
+            var polls: usize = 0;
+            while (polls < 50) : (polls += 1) {
+                std.posix.kill(pid, 0) catch |kill_err| switch (kill_err) {
+                    error.ProcessNotFound => return,
+                    else => return kill_err,
+                };
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -956,7 +979,7 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
         .id = "b9",
         .kind = .bash,
         .args = .{ .bash = .{
-            .cmd = "trap '' TERM; printf 'start'; while :; do sleep 1; done",
+            .cmd = "trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & bg=$!; printf '%s' \"$bg\"; while :; do sleep 1; done",
         } },
         .src = .model,
         .at_ms = 0,
@@ -980,7 +1003,9 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
 
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
     try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expectEqualStrings("start", res.out[0].chunk);
+    const bg_pid = try std.fmt.parseInt(std.posix.pid_t, res.out[0].chunk, 10);
+    defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {};
+    try WaitGone.run(bg_pid);
 
     switch (res.final) {
         .cancelled => |cancelled| try std.testing.expect(cancelled.reason == .user),
