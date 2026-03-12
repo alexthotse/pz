@@ -82,6 +82,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }));
+    const agent_child_harness = b.addExecutable(.{
+        .name = "agent-child-harness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test/agent_child_harness.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_child_harness.root_module.addImport("core_agent", b.createModule(.{
+        .root_source_file = b.path("src/core/agent.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
@@ -117,6 +130,14 @@ pub fn build(b: *std.Build) void {
     run_agent_exit_other.addArg("other");
     run_agent_exit_other.expectExitCode(0);
     test_step.dependOn(&run_agent_exit_other.step);
+    const run_agent_child_hello = b.addRunArtifact(agent_child_harness);
+    run_agent_child_hello.addArgs(&.{
+        "hello",
+        "agent-child",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    run_agent_child_hello.expectExitCode(0);
+    test_step.dependOn(&run_agent_child_hello.step);
 
     const perf_tests = b.addTest(.{
         .root_module = b.createModule(.{
