@@ -37,6 +37,11 @@ const HeaderMode = enum {
     bare,
 };
 
+const HttpDeps = struct {
+    init_client: *const fn (?*anyopaque, std.mem.Allocator) anyerror!std.http.Client = initHttpClientRuntime,
+    init_client_ctx: ?*anyopaque = null,
+};
+
 pub const Outcome = struct {
     ok: bool,
     msg: []u8,
@@ -75,6 +80,10 @@ const HttpResult = union(enum) {
         }
     }
 };
+
+fn initHttpClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
+    return try app_tls.initRuntimeClient(alloc);
+}
 
 pub fn run(alloc: std.mem.Allocator) ![]u8 {
     const out = try runOutcome(alloc);
@@ -545,11 +554,21 @@ fn httpGetResult(
     accept: []const u8,
     limit: usize,
 ) !HttpResult {
+    return try httpGetResultWith(alloc, url, accept, limit, .{});
+}
+
+fn httpGetResultWith(
+    alloc: std.mem.Allocator,
+    url: []const u8,
+    accept: []const u8,
+    limit: usize,
+    deps: HttpDeps,
+) !HttpResult {
     const modes = [_]HeaderMode{ .full, .wgetish, .bare };
     var i: usize = 0;
     while (i < modes.len) : (i += 1) {
         const mode = modes[i];
-        var res = httpGetResultOnce(alloc, url, accept, limit, mode) catch |err| {
+        var res = httpGetResultOnceWith(alloc, url, accept, limit, mode, deps) catch |err| {
             if (i + 1 < modes.len and isBadHeaderTransport(err)) continue;
             return err;
         };
@@ -569,7 +588,18 @@ fn httpGetResultOnce(
     limit: usize,
     mode: HeaderMode,
 ) !HttpResult {
-    var http = try app_tls.initRuntimeClient(alloc);
+    return try httpGetResultOnceWith(alloc, url, accept, limit, mode, .{});
+}
+
+fn httpGetResultOnceWith(
+    alloc: std.mem.Allocator,
+    url: []const u8,
+    accept: []const u8,
+    limit: usize,
+    mode: HeaderMode,
+    deps: HttpDeps,
+) !HttpResult {
+    var http = try deps.init_client(deps.init_client_ctx, alloc);
     defer http.deinit();
     var proxy_arena = std.heap.ArenaAllocator.init(alloc);
     defer proxy_arena.deinit();
@@ -1249,6 +1279,248 @@ test "checkUpdateHostAllowed accepts explicitly allowed host" {
     });
 
     try checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest");
+}
+
+const UpdateFetchSnap = struct {
+    ok: bool,
+    msg: []const u8,
+    reqs: []const u8,
+    req_ct: usize,
+    fetch_ct: usize,
+    all_have_ca: bool,
+    all_rescan_disabled: bool,
+};
+
+const UpdateClientTap = struct {
+    fetch_ct: usize = 0,
+    no_ca_ct: usize = 0,
+    rescan_ct: usize = 0,
+
+    fn init(ctx: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
+        const tap: *UpdateClientTap = @ptrCast(@alignCast(ctx.?));
+        var http = try app_tls.initRuntimeClient(alloc);
+        tap.fetch_ct += 1;
+        if (http.ca_bundle.bytes.items.len == 0) tap.no_ca_ct += 1;
+        if (@atomicLoad(bool, &http.next_https_rescan_certs, .acquire)) tap.rescan_ct += 1;
+        return http;
+    }
+};
+
+fn writeTestCfg(tmp: std.testing.TmpDir, ca_path: []const u8) !void {
+    try tmp.dir.makePath(".pz");
+    const raw = try std.fmt.allocPrint(std.testing.allocator, "{{\"ca_file\":\"{s}\"}}", .{ca_path});
+    defer std.testing.allocator.free(raw);
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/settings.json", .data = raw });
+}
+
+test "update uses runtime CA bundle for metadata archive and signature fetches" {
+    if (targetAssetName() == null) return;
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cert_path = try app_tls.writeTestCert(tmp.dir, "ca.pem");
+    defer std.testing.allocator.free(cert_path);
+    try writeTestCfg(tmp, cert_path);
+
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    const asset_name = targetAssetName() orelse unreachable;
+    const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
+    defer std.testing.allocator.free(archive);
+    const sig_hex = try updateTestSigHexAlloc(std.testing.allocator, archive, false);
+    defer std.testing.allocator.free(sig_hex);
+
+    var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
+    var server = try http_mock.Server.initSeq(&resps);
+    defer server.deinit();
+
+    const base_url = try server.urlAlloc(std.testing.allocator, "");
+    defer std.testing.allocator.free(base_url);
+    const latest_url = try server.urlAlloc(std.testing.allocator, "/release/latest");
+    defer std.testing.allocator.free(latest_url);
+    const archive_url = try server.urlAlloc(std.testing.allocator, "/asset/archive");
+    defer std.testing.allocator.free(archive_url);
+    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.sig");
+    defer std.testing.allocator.free(sig_url);
+    const release_body = try updateReleaseBodyAlloc(std.testing.allocator, "v9.9.9", asset_name, archive_url, sig_url);
+    defer std.testing.allocator.free(release_body);
+
+    resps[0] = .{ .status = "302 Found", .headers = &.{"Location: /release/meta"} };
+    resps[1] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: application/json"},
+        .body = release_body,
+    };
+    resps[2] = .{ .status = "302 Found", .headers = &.{"Location: /blob/archive"} };
+    resps[3] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: application/octet-stream"},
+        .body = archive,
+    };
+    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.sig"} };
+    resps[5] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: text/plain"},
+        .body = sig_hex,
+    };
+
+    const CaHooks = struct {
+        var base: []const u8 = undefined;
+        var latest: []const u8 = undefined;
+        var tap = UpdateClientTap{};
+
+        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.startsWith(u8, url, base)) return;
+            return error.TestUnexpectedResult;
+        }
+
+        fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
+            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+                latest
+            else if (std.mem.startsWith(u8, url, base))
+                url
+            else
+                return error.TestUnexpectedResult;
+            return httpGetResultWith(alloc, local_url, accept, limit, .{
+                .init_client = UpdateClientTap.init,
+                .init_client_ctx = &tap,
+            });
+        }
+
+        fn selfExePath(_: std.mem.Allocator) ![]u8 {
+            return error.TestUnexpectedResult;
+        }
+
+        fn installBinary(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestUnexpectedResult;
+        }
+    };
+    CaHooks.base = base_url;
+    CaHooks.latest = latest_url;
+    CaHooks.tap = .{};
+
+    const thr = try server.spawn();
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = CaHooks.httpGet,
+        .self_exe_path = CaHooks.selfExePath,
+        .install_binary = CaHooks.installBinary,
+        .check_update_host = CaHooks.checkHost,
+    });
+    try server.join(thr);
+    defer out.deinit(std.testing.allocator);
+
+    const reqs = try joinRequestLinesAlloc(std.testing.allocator, &server);
+    defer std.testing.allocator.free(reqs);
+
+    try oh.snap(@src(),
+        \\app.update.UpdateFetchSnap
+        \\  .ok: bool = false
+        \\  .msg: []const u8
+        \\    "upgrade failed: signature verification failed for pz-aarch64-macos.tar.gz
+        \\next: retry later or install manually from https://github.com/joelreymont/pz/releases/latest
+        \\"
+        \\  .reqs: []const u8
+        \\    "GET /release/latest HTTP/1.1
+        \\GET /release/meta HTTP/1.1
+        \\GET /asset/archive HTTP/1.1
+        \\GET /blob/archive HTTP/1.1
+        \\GET /asset/archive.sig HTTP/1.1
+        \\GET /blob/archive.sig HTTP/1.1"
+        \\  .req_ct: usize = 6
+        \\  .fetch_ct: usize = 3
+        \\  .all_have_ca: bool = true
+        \\  .all_rescan_disabled: bool = true
+    ).expectEqual(UpdateFetchSnap{
+        .ok = out.ok,
+        .msg = out.msg,
+        .reqs = reqs,
+        .req_ct = server.requestCount(),
+        .fetch_ct = CaHooks.tap.fetch_ct,
+        .all_have_ca = CaHooks.tap.no_ca_ct == 0,
+        .all_rescan_disabled = CaHooks.tap.rescan_ct == 0,
+    });
+}
+
+test "update invalid runtime CA bundle fails before transport" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
+    const bad_path = try tmp.dir.realpathAlloc(std.testing.allocator, "bad.pem");
+    defer std.testing.allocator.free(bad_path);
+    try writeTestCfg(tmp, bad_path);
+
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    var server = try http_mock.Server.initSeq(&.{.{ .headers = &.{"Content-Type: application/json"}, .body = "{\"tag_name\":\"v9.9.9\",\"assets\":[]}" }});
+    defer server.deinit();
+
+    const base_url = try server.urlAlloc(std.testing.allocator, "");
+    defer std.testing.allocator.free(base_url);
+    const latest_url = try server.urlAlloc(std.testing.allocator, "/release/latest");
+    defer std.testing.allocator.free(latest_url);
+
+    const BadHooks = struct {
+        var base: []const u8 = undefined;
+        var latest: []const u8 = undefined;
+
+        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.startsWith(u8, url, base)) return;
+            return error.TestUnexpectedResult;
+        }
+
+        fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
+            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+                latest
+            else if (std.mem.startsWith(u8, url, base))
+                url
+            else
+                return error.TestUnexpectedResult;
+            return httpGetResultWith(alloc, local_url, accept, limit, .{});
+        }
+    };
+    BadHooks.base = base_url;
+    BadHooks.latest = latest_url;
+
+    const thr = try server.spawn();
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = BadHooks.httpGet,
+        .check_update_host = BadHooks.checkHost,
+    });
+    try server.join(thr);
+    defer out.deinit(std.testing.allocator);
+
+    const Snap = struct {
+        ok: bool,
+        msg: []const u8,
+        req_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\app.update.test.update invalid runtime CA bundle fails before transport.Snap
+        \\  .ok: bool = false
+        \\  .msg: []const u8
+        \\    "upgrade failed: could not fetch latest release metadata
+        \\reason: MissingEndCertificateMarker
+        \\url: https://api.github.com/repos/joelreymont/pz/releases/latest
+        \\next: check network/DNS/firewall/proxy settings and retry
+        \\"
+        \\  .req_ct: usize = 0
+    ).expectEqual(Snap{
+        .ok = out.ok,
+        .msg = out.msg,
+        .req_ct = server.requestCount(),
+    });
 }
 
 test "update audit emits start and deny entries on policy block" {

@@ -52,7 +52,7 @@ pub fn applyCaFile(client: *std.http.Client, alloc: std.mem.Allocator, ca_file: 
     try core_tls.applyCaFile(client, alloc, ca_file);
 }
 
-fn writeTestCert(dir: std.fs.Dir, name: []const u8) ![]u8 {
+pub fn writeTestCert(dir: std.fs.Dir, name: []const u8) ![]u8 {
     try dir.writeFile(.{ .sub_path = name, .data = test_ca_pem });
     return try dir.realpathAlloc(std.testing.allocator, name);
 }

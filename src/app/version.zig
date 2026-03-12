@@ -280,14 +280,13 @@ test "checkLatest uses runtime CA bundle for version checks" {
     var guard = try CwdGuard.enter(tmp.dir);
     defer guard.deinit();
 
-    var server = try http_mock.Server.init(.{
+    var server = try http_mock.Server.initSeq(&.{.{
         .headers = &.{"Content-Type: application/json"},
         .body = "{\"tag_name\":\"v9.9.9\"}",
-    });
+    }});
     defer server.deinit();
 
     const thr = try server.spawn();
-    defer thr.join();
 
     var tap = ClientTap{};
     const got = try checkLatestWith(std.testing.allocator, .{
@@ -296,11 +295,12 @@ test "checkLatest uses runtime CA bundle for version checks" {
         .uri = releaseUriFor(server.port()),
         .current_version = "0.0.1",
     });
+    try server.join(thr);
     defer if (got) |tag| std.testing.allocator.free(tag);
 
     try testing.expect(got != null);
 
-    const req = server.request();
+    const req = server.requestAt(0);
     const snap = CheckSnap{
         .tag = got.?,
         .has_ca = tap.ca_len != 0,
