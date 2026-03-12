@@ -84,6 +84,22 @@ pub fn openFile(path: []const u8, flags: std.fs.File.OpenFlags) !std.fs.File {
     };
 }
 
+pub fn openFileInDir(dir: std.fs.Dir, name: []const u8, flags: std.fs.File.OpenFlags) !std.fs.File {
+    const leaf = try leafName(name);
+    return switch (native_os) {
+        .windows => error.AccessDenied,
+        else => openFileAt(dir.fd, leaf, flags),
+    };
+}
+
+pub fn createFileInDir(dir: std.fs.Dir, name: []const u8, flags: std.fs.File.CreateFlags) !std.fs.File {
+    const leaf = try leafName(name);
+    return switch (native_os) {
+        .windows => error.AccessDenied,
+        else => createFileAt(dir.fd, leaf, flags),
+    };
+}
+
 pub fn createFile(path: []const u8, flags: std.fs.File.CreateFlags) !std.fs.File {
     const rel = try relPath(path);
     if (rel.len == 0) return error.FileNotFound;
@@ -171,6 +187,15 @@ fn isDot(name: []const u8) bool {
 
 fn isDotDot(name: []const u8) bool {
     return name.len == 2 and name[0] == '.' and name[1] == '.';
+}
+
+fn leafName(name: []const u8) ![]const u8 {
+    if (name.len == 0) return error.AccessDenied;
+    if (isDot(name) or isDotDot(name)) return error.AccessDenied;
+    for (name) |c| {
+        if (std.fs.path.isSep(c)) return error.AccessDenied;
+    }
+    return name;
 }
 
 fn openFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.OpenFlags) !std.fs.File {

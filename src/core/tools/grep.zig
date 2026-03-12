@@ -16,18 +16,26 @@ pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64 = 0,
+    pre_open: ?PreOpen = null,
+};
+
+const PreOpen = struct {
+    ctx: *anyopaque,
+    run: *const fn (*anyopaque, std.fs.Dir, []const u8) anyerror!void,
 };
 
 pub const Handler = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64,
+    pre_open: ?PreOpen,
 
     pub fn init(opts: Opts) Handler {
         return .{
             .alloc = opts.alloc,
             .max_bytes = opts.max_bytes,
             .now_ms = opts.now_ms,
+            .pre_open = opts.pre_open,
         };
     }
 
@@ -45,20 +53,13 @@ pub const Handler = struct {
         };
         defer root.close();
 
-        var walk = root.walk(self.alloc) catch |walk_err| {
-            return mapFsErr(walk_err);
-        };
-        defer walk.deinit();
-
         var acc = Acc.init(self.alloc, self.max_bytes);
         defer acc.deinit();
 
         var hit_ct: u32 = 0;
-        while (walk.next() catch |next_err| return mapFsErr(next_err)) |ent| {
-            if (hit_ct >= args.max_results) break;
-            if (ent.kind != .file) continue;
-            try grepFile(self, ent.path, args, &hit_ct, &acc);
-        }
+        var path = std.ArrayList(u8).empty;
+        defer path.deinit(self.alloc);
+        try grepDir(self, root, &path, args, &hit_ct, &acc);
 
         const data = acc.takeOwned() catch return error.OutOfMemory;
         errdefer self.alloc.free(data);
@@ -116,17 +117,53 @@ pub const Handler = struct {
     }
 };
 
+fn grepDir(
+    self: Handler,
+    dir: std.fs.Dir,
+    path: *std.ArrayList(u8),
+    args: tools.Call.GrepArgs,
+    hit_ct: *u32,
+    acc: *Acc,
+) Err!void {
+    var it = dir.iterate();
+    while (try nextEnt(&it)) |ent| {
+        if (hit_ct.* >= args.max_results) break;
+
+        const base_len = path.items.len;
+        if (base_len != 0) try path.append(self.alloc, '/');
+        defer path.shrinkRetainingCapacity(base_len);
+        try path.appendSlice(self.alloc, ent.name);
+
+        switch (ent.kind) {
+            .directory => {
+                var child = dir.openDir(ent.name, .{
+                    .iterate = true,
+                    .access_sub_paths = true,
+                    .no_follow = true,
+                }) catch |open_err| return mapFsErr(open_err);
+                defer child.close();
+                try grepDir(self, child, path, args, hit_ct, acc);
+            },
+            .file => try grepFile(self, dir, ent.name, path.items, args, hit_ct, acc),
+            else => {},
+        }
+    }
+}
+
 fn grepFile(
     self: Handler,
+    dir: std.fs.Dir,
+    name: []const u8,
     rel_path: []const u8,
     args: tools.Call.GrepArgs,
     hit_ct: *u32,
     acc: *Acc,
 ) Err!void {
-    const full_path = try std.fs.path.join(self.alloc, &.{ args.path, rel_path });
-    defer self.alloc.free(full_path);
+    if (self.pre_open) |hook| {
+        hook.run(hook.ctx, dir, rel_path) catch |hook_err| return mapFsErr(hook_err);
+    }
 
-    var file = path_guard.openFile(full_path, .{ .mode = .read_only }) catch |open_err| {
+    var file = path_guard.openFileInDir(dir, name, .{ .mode = .read_only }) catch |open_err| {
         return mapFsErr(open_err);
     };
     defer file.close();
@@ -154,6 +191,10 @@ fn grepFile(
         try acc.append(row);
         hit_ct.* += 1;
     }
+}
+
+fn nextEnt(it: *std.fs.Dir.Iterator) Err!?std.fs.Dir.Entry {
+    return it.next() catch |next_err| mapFsErr(next_err);
 }
 
 fn trimLine(raw: []const u8) []const u8 {
@@ -349,4 +390,65 @@ test "grep handler denies hardlinked leaf" {
         .src = .model,
         .at_ms = 0,
     }, sink));
+}
+
+test "grep handler keeps trusted dir after ancestor swap" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    const Hook = struct {
+        const Ctx = struct {
+            root: std.fs.Dir,
+            done: bool = false,
+        };
+
+        fn run(raw: *anyopaque, _: std.fs.Dir, rel_path: []const u8) !void {
+            const ctx: *Ctx = @ptrCast(@alignCast(raw));
+            if (ctx.done) return;
+            if (!std.mem.eql(u8, rel_path, "sub/victim.txt")) return;
+            ctx.done = true;
+            try ctx.root.rename("sub", "gone");
+            try ctx.root.rename("swap", "sub");
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.makePath("src/sub");
+    try tmp.dir.makePath("src/swap");
+    try tmp.dir.writeFile(.{ .sub_path = "src/sub/victim.txt", .data = "secret\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "src/swap/victim.txt", .data = "hacked\n" });
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, "src");
+    defer std.testing.allocator.free(root);
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    var ctx = Hook.Ctx{ .root = try tmp.dir.openDir("src", .{ .access_sub_paths = true }) };
+    defer ctx.root.close();
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 256,
+        .pre_open = .{ .ctx = &ctx, .run = Hook.run },
+    });
+    const res = try handler.run(.{
+        .id = "g-race",
+        .kind = .grep,
+        .args = .{ .grep = .{
+            .path = root,
+            .pattern = "secret",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    }, sink);
+    defer handler.deinitResult(res);
+
+    try std.testing.expectEqualStrings("sub/victim.txt:1:secret\n", res.out[0].chunk);
 }

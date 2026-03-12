@@ -44,11 +44,6 @@ pub const Handler = struct {
         };
         defer root.close();
 
-        var walk = root.walk(self.alloc) catch |walk_err| {
-            return mapFsErr(walk_err);
-        };
-        defer walk.deinit();
-
         var matches = std.ArrayList([]u8).empty;
         defer {
             for (matches.items) |m| self.alloc.free(m);
@@ -56,15 +51,9 @@ pub const Handler = struct {
         }
 
         const collect_limit = satMul(@as(usize, args.max_results), 8);
-        while (walk.next() catch |next_err| return mapFsErr(next_err)) |ent| {
-            const base = std.fs.path.basename(ent.path);
-            if (std.mem.indexOf(u8, base, args.name) == null) continue;
-            if (matches.items.len >= collect_limit) break;
-
-            const dup = self.alloc.dupe(u8, ent.path) catch return error.OutOfMemory;
-            errdefer self.alloc.free(dup);
-            matches.append(self.alloc, dup) catch return error.OutOfMemory;
-        }
+        var path = std.ArrayList(u8).empty;
+        defer path.deinit(self.alloc);
+        try collectMatches(self, root, &path, args.name, collect_limit, &matches);
 
         std.sort.pdq([]u8, matches.items, {}, lessPath);
 
@@ -72,8 +61,8 @@ pub const Handler = struct {
         defer acc.deinit();
 
         const emit_len = @min(matches.items.len, @as(usize, args.max_results));
-        for (matches.items[0..emit_len]) |path| {
-            try acc.append(path);
+        for (matches.items[0..emit_len]) |match_path| {
+            try acc.append(match_path);
             try acc.append("\n");
         }
 
@@ -135,6 +124,46 @@ pub const Handler = struct {
 
 fn lessPath(_: void, a: []u8, b: []u8) bool {
     return std.mem.order(u8, a, b) == .lt;
+}
+
+fn collectMatches(
+    self: Handler,
+    dir: std.fs.Dir,
+    path: *std.ArrayList(u8),
+    needle: []const u8,
+    limit: usize,
+    matches: *std.ArrayList([]u8),
+) Err!void {
+    var it = dir.iterate();
+    while (try nextEnt(&it)) |ent| {
+        if (matches.items.len >= limit) break;
+
+        const base_len = path.items.len;
+        if (base_len != 0) try path.append(self.alloc, '/');
+        defer path.shrinkRetainingCapacity(base_len);
+        try path.appendSlice(self.alloc, ent.name);
+
+        if (std.mem.indexOf(u8, ent.name, needle) != null) {
+            const dup = self.alloc.dupe(u8, path.items) catch return error.OutOfMemory;
+            errdefer self.alloc.free(dup);
+            matches.append(self.alloc, dup) catch return error.OutOfMemory;
+            if (matches.items.len >= limit) break;
+        }
+
+        if (ent.kind != .directory) continue;
+
+        var child = dir.openDir(ent.name, .{
+            .iterate = true,
+            .access_sub_paths = true,
+            .no_follow = true,
+        }) catch |open_err| return mapFsErr(open_err);
+        defer child.close();
+        try collectMatches(self, child, path, needle, limit, matches);
+    }
+}
+
+fn nextEnt(it: *std.fs.Dir.Iterator) Err!?std.fs.Dir.Entry {
+    return it.next() catch |next_err| mapFsErr(next_err);
 }
 
 const Acc = struct {
