@@ -1055,6 +1055,43 @@ test "sanitizeSnippetAlloc normalizes binary text and truncates" {
     try std.testing.expect(std.mem.indexOf(u8, snip, "..") != null);
 }
 
+test "property: sanitizeSnippetAlloc stays printable and non-empty" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { raw: zc.String }) bool {
+            const alloc = std.testing.allocator;
+            const raw = args.raw.slice();
+            const snip = sanitizeSnippetAlloc(alloc, raw) catch return false;
+            defer alloc.free(snip);
+            if (snip.len == 0) return false;
+            if (snip.len > body_snip_limit + 3) return false;
+            for (snip) |b| {
+                if (b < 0x20 or b > 0x7e) return false;
+            }
+            return true;
+        }
+    }.prop, .{ .iterations = 300 });
+}
+
+test "property: stripHtmlTagsCollapseAlloc unwraps simple tagged text" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: zc.Id, b: zc.Id }) bool {
+            const alloc = std.testing.allocator;
+            const raw = std.fmt.allocPrint(alloc, "<p>\n<b>{s}</b>\t{s}</p>", .{
+                args.a.slice(),
+                args.b.slice(),
+            }) catch return false;
+            defer alloc.free(raw);
+            const got = stripHtmlTagsCollapseAlloc(alloc, raw) catch return false;
+            defer alloc.free(got);
+            const want = std.fmt.allocPrint(alloc, "{s} {s}", .{ args.a.slice(), args.b.slice() }) catch return false;
+            defer alloc.free(want);
+            return std.mem.eql(u8, want, got);
+        }
+    }.prop, .{ .iterations = 300 });
+}
+
 test "formatHttpFailure includes actionable fields" {
     const msg = try formatHttpFailure(
         std.testing.allocator,
