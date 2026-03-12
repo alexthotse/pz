@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const policy = @import("../policy.zig");
+const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const tools = @import("mod.zig");
 
@@ -18,18 +19,54 @@ pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64 = 0,
+    runner: ?Runner = null,
+};
+
+const Launch = struct {
+    argv: []const []const u8,
+    cwd: ?[]const u8,
+    env: *const std.process.EnvMap,
+    cancel: ?tools.CancelSrc,
+};
+
+pub const Runner = struct {
+    ctx: *anyopaque,
+    run_fn: *const fn (*anyopaque, Handler, Launch) Err!RunOut,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime run_fn: *const fn (*T, Handler, Launch) Err!RunOut,
+    ) Runner {
+        const Wrap = struct {
+            fn call(ptr: *anyopaque, handler: Handler, launch: Launch) Err!RunOut {
+                const self: *T = @ptrCast(@alignCast(ptr));
+                return run_fn(self, handler, launch);
+            }
+        };
+        return .{
+            .ctx = ctx,
+            .run_fn = Wrap.call,
+        };
+    }
+
+    fn exec(self: Runner, handler: Handler, launch: Launch) Err!RunOut {
+        return self.run_fn(self.ctx, handler, launch);
+    }
 };
 
 pub const Handler = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64,
+    runner: ?Runner,
 
     pub fn init(opts: Opts) Handler {
         return .{
             .alloc = opts.alloc,
             .max_bytes = opts.max_bytes,
             .now_ms = opts.now_ms,
+            .runner = opts.runner,
         };
     }
 
@@ -63,8 +100,19 @@ pub const Handler = struct {
             if (policy.isProtectedPath(cwd)) return error.Denied;
         }
 
-        const argv = [_][]const u8{ "/bin/bash", "-lc", args.cmd };
-        const run_res = try runChild(self, argv[0..], args.cwd, &env, call.cancel);
+        var launch_plan = try sandbox.prepareBash(self.alloc, &env, args.cwd, args.cmd);
+        defer launch_plan.deinit(self.alloc);
+
+        const launch: Launch = .{
+            .argv = launch_plan.argv,
+            .cwd = launch_plan.cwd,
+            .env = &env,
+            .cancel = call.cancel,
+        };
+        const run_res = if (self.runner) |runner|
+            try runner.exec(self, launch)
+        else
+            try runChild(self, launch.argv, launch.cwd, launch.env, launch.cancel);
 
         var stdout_chunk = run_res.stdout.chunk;
         errdefer self.alloc.free(stdout_chunk);
@@ -631,6 +679,96 @@ test "bash handler applies explicit env variables" {
     try std.testing.expectEqualStrings("ok", res.out[0].chunk);
 }
 
+test "bash handler installs sandbox before bash exec" {
+    const RunnerCtx = struct {
+        alloc: std.mem.Allocator,
+        argv: ?[][]const u8 = null,
+        cwd: ?[]const u8 = null,
+
+        fn run(self: *@This(), handler: Handler, launch: Launch) Err!RunOut {
+            self.argv = try self.alloc.alloc([]const u8, launch.argv.len);
+            errdefer {
+                if (self.argv) |argv| self.alloc.free(argv);
+                self.argv = null;
+            }
+            var n: usize = 0;
+            errdefer if (self.argv) |argv| {
+                for (argv[0..n]) |arg| self.alloc.free(arg);
+            };
+            for (launch.argv, 0..) |arg, i| {
+                self.argv.?[i] = try self.alloc.dupe(u8, arg);
+                n += 1;
+            }
+            if (launch.cwd) |cwd| self.cwd = try self.alloc.dupe(u8, cwd);
+            return .{
+                .stdout = .{ .chunk = try handler.alloc.dupe(u8, "ok"), .full_bytes = 2 },
+                .stderr = .{ .chunk = try handler.alloc.dupe(u8, ""), .full_bytes = 0 },
+                .final = .{ .ok = .{ .code = 0 } },
+            };
+        }
+
+        fn deinit(self: *@This()) void {
+            if (self.argv) |argv| {
+                for (argv) |arg| self.alloc.free(arg);
+                self.alloc.free(argv);
+            }
+            if (self.cwd) |cwd| self.alloc.free(cwd);
+            self.* = undefined;
+        }
+    };
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sub");
+    const path_guard = @import("path_guard.zig");
+    var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd_guard.deinit();
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    var runner_ctx = RunnerCtx{ .alloc = std.testing.allocator };
+    defer runner_ctx.deinit();
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 128,
+        .runner = Runner.from(RunnerCtx, &runner_ctx, RunnerCtx.run),
+    });
+    const call: tools.Call = .{
+        .id = "b2-sandbox",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = "printf ok",
+            .cwd = "sub",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    const res = try handler.run(call, sink);
+    defer handler.deinitResult(res);
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const sub = try tmp.dir.realpathAlloc(std.testing.allocator, "sub");
+    defer std.testing.allocator.free(sub);
+
+    const argv = runner_ctx.argv orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 8), argv.len);
+    try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", argv[0]);
+    try std.testing.expectEqualStrings("-p", argv[1]);
+    try std.testing.expect(std.mem.indexOf(u8, argv[2], root) != null);
+    try std.testing.expectEqualStrings("/bin/bash", argv[3]);
+    try std.testing.expectEqualStrings("--noprofile", argv[4]);
+    try std.testing.expectEqualStrings("--norc", argv[5]);
+    try std.testing.expectEqualStrings("-lc", argv[6]);
+    try std.testing.expectEqualStrings("printf ok", argv[7]);
+    try std.testing.expectEqualStrings(sub, runner_ctx.cwd.?);
+}
+
 test "bash handler returns failed final on non-zero exit" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -855,6 +993,219 @@ test "bash handler denies wrapped protected state access" {
     };
 
     try std.testing.expectError(error.Denied, handler.run(call, sink));
+}
+
+test "bash handler denies file reads outside workspace inside sandbox" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const secret = try std.fs.cwd().realpathAlloc(std.testing.allocator, "README.md");
+    defer std.testing.allocator.free(secret);
+
+    const path_guard = @import("path_guard.zig");
+    var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd_guard.deinit();
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    const cmd = try std.fmt.allocPrint(std.testing.allocator, "cat '{s}'", .{secret});
+    defer std.testing.allocator.free(cmd);
+    const call: tools.Call = .{
+        .id = "b-file-deny",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = cmd,
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    const res = try handler.run(call, sink);
+    defer handler.deinitResult(res);
+
+    switch (res.final) {
+        .failed => |failed| try std.testing.expectEqual(@as(i32, 1), failed.code.?),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.out.len);
+    try std.testing.expect(res.out[0].stream == .stderr);
+    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "Operation not permitted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "top-secret") == null);
+}
+
+test "bash handler denies process exec outside workspace inside sandbox" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const script_rel = ".zig-cache/p30a-run.sh";
+    defer std.fs.cwd().deleteFile(script_rel) catch {};
+    try std.fs.cwd().writeFile(.{ .sub_path = script_rel, .data = "#!/bin/sh\nprintf nope\n" });
+    var script_file = try std.fs.cwd().openFile(script_rel, .{ .mode = .read_only });
+    defer script_file.close();
+    try script_file.chmod(0o755);
+    const script = try std.fs.cwd().realpathAlloc(std.testing.allocator, script_rel);
+    defer std.testing.allocator.free(script);
+
+    const path_guard = @import("path_guard.zig");
+    var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd_guard.deinit();
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    const cmd = try std.fmt.allocPrint(std.testing.allocator, "'{s}'", .{script});
+    defer std.testing.allocator.free(cmd);
+    const call: tools.Call = .{
+        .id = "b-proc-deny",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = cmd,
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    const res = try handler.run(call, sink);
+    defer handler.deinitResult(res);
+
+    switch (res.final) {
+        .failed => |failed| try std.testing.expectEqual(@as(i32, 126), failed.code.?),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.out.len);
+    try std.testing.expect(res.out[0].stream == .stderr);
+    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "Operation not permitted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "nope") == null);
+}
+
+test "bash handler denies network connects inside sandbox" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    const Server = struct {
+        listener: std.net.Server,
+        stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn run(self: *@This()) void {
+            var conn = self.acceptReady() catch return orelse return;
+            conn.stream.close();
+        }
+
+        fn join(self: *@This(), thr: std.Thread) void {
+            self.stop.store(true, .release);
+            thr.join();
+            self.listener.deinit();
+        }
+
+        fn acceptReady(self: *@This()) !?std.net.Server.Connection {
+            var fds = [_]std.posix.pollfd{.{
+                .fd = self.listener.stream.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            while (true) {
+                if (self.stop.load(.acquire)) return null;
+                const ready = try std.posix.poll(fds[0..], 20);
+                if (ready == 0) continue;
+                return try self.listener.accept();
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path_guard = @import("path_guard.zig");
+    var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd_guard.deinit();
+
+    const addr = try std.net.Address.parseIp4("127.0.0.1", 0);
+    var server = Server{
+        .listener = try addr.listen(.{
+            .reuse_address = true,
+        }),
+    };
+    const port = server.listener.listen_address.in.getPort();
+    const thr = try std.Thread.spawn(.{}, Server.run, .{&server});
+    defer server.join(thr);
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    const cmd = try std.fmt.allocPrint(std.testing.allocator, "nc -z 127.0.0.1 {d}", .{port});
+    defer std.testing.allocator.free(cmd);
+    const call: tools.Call = .{
+        .id = "b-net-deny",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = cmd,
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    const res = try handler.run(call, sink);
+    defer handler.deinitResult(res);
+
+    switch (res.final) {
+        .failed => |failed| try std.testing.expectEqual(@as(i32, 1), failed.code.?),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "bash handler allows workspace file actions inside sandbox" {
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path_guard = @import("path_guard.zig");
+    var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd_guard.deinit();
+
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+    });
+    const call: tools.Call = .{
+        .id = "b-allow-workspace",
+        .kind = .bash,
+        .args = .{ .bash = .{
+            .cmd = "mkdir -p sub; printf ok > sub/out.txt; cat sub/out.txt",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    };
+
+    const res = try handler.run(call, sink);
+    defer handler.deinitResult(res);
+
+    switch (res.final) {
+        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.out.len);
+    try std.testing.expect(res.out[0].stream == .stdout);
+    try std.testing.expectEqualStrings("ok", res.out[0].chunk);
 }
 
 test "bash handler truncates oversized output and emits metadata" {
