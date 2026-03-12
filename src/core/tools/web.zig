@@ -1,5 +1,6 @@
 const std = @import("std");
 const policy_mod = @import("../policy.zig");
+const http_mock = @import("../../test/http_mock.zig");
 
 pub const Method = enum {
     GET,
@@ -303,6 +304,149 @@ fn freeAddrsAlloc(alloc: std.mem.Allocator, addrs: []std.net.Address) void {
     alloc.free(addrs);
 }
 
+const TestAddr = struct {
+    host: []const u8,
+    ip: [4]u8,
+};
+
+const ChainResult = struct {
+    status: u16,
+    body: []u8,
+    final_url: []u8,
+    hops: u8,
+
+    fn deinit(self: ChainResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.body);
+        alloc.free(self.final_url);
+    }
+};
+
+fn resolveTestAddrsAlloc(
+    alloc: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    addrs: []const TestAddr,
+) ![]std.net.Address {
+    for (addrs) |item| {
+        if (std.mem.eql(u8, item.host, host)) {
+            const out = try alloc.alloc(std.net.Address, 1);
+            out[0] = std.net.Address.initIp4(item.ip, port);
+            return out;
+        }
+    }
+    return error.UnknownHost;
+}
+
+fn fetchRedirectChainAlloc(
+    alloc: std.mem.Allocator,
+    req: Request,
+    policy: RedirectPolicy,
+    fns: ResolveFns,
+) !ChainResult {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    var cur = req;
+    var hops: u8 = 0;
+    while (true) {
+        const parsed = try parseUrl(cur.url);
+        _ = try resolveConnectAddrWith(ar, parsed, policy, fns);
+
+        const raw = try sendLocalRequestAlloc(ar, cur.method, parsed);
+        const res = try parseHttpResponseAlloc(ar, raw);
+        if (!cur.follow_redirects or !res.isRedirect()) {
+            return .{
+                .status = res.status,
+                .body = try alloc.dupe(u8, res.body),
+                .final_url = try alloc.dupe(u8, cur.url),
+                .hops = hops,
+            };
+        }
+        if (hops >= cur.max_redirects) return error.TooManyRedirects;
+
+        const next = (try nextRedirectTargetAlloc(ar, cur, res, policy)) orelse {
+            return error.MissingRedirectTarget;
+        };
+        cur.url = next.text;
+        hops += 1;
+    }
+}
+
+fn sendLocalRequestAlloc(
+    alloc: std.mem.Allocator,
+    method: Method,
+    parsed: ParsedUrl,
+) ![]u8 {
+    var addr = try std.net.Address.parseIp("127.0.0.1", parsed.port);
+    const fd = try std.posix.socket(addr.any.family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.TCP);
+    defer (std.net.Stream{ .handle = fd }).close();
+    try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
+
+    const target = if (parsed.query) |query|
+        try std.fmt.allocPrint(alloc, "{s}?{s}", .{ parsed.path, query })
+    else
+        try alloc.dupe(u8, parsed.path);
+    const host = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ parsed.host, parsed.port });
+    const raw_req = try std.fmt.allocPrint(alloc,
+        "{s} {s} HTTP/1.1\r\n" ++
+            "Host: {s}\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n",
+        .{ @tagName(method), target, host },
+    );
+    _ = try std.posix.write(fd, raw_req);
+
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const got = try std.posix.read(fd, buf[0..]);
+        if (got == 0) break;
+        try out.appendSlice(alloc, buf[0..got]);
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn parseHttpResponseAlloc(alloc: std.mem.Allocator, raw: []const u8) !Response {
+    const head_end = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.BadHttpResponse;
+    const head = raw[0..head_end];
+    const body = raw[head_end + 4 ..];
+    const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return error.BadHttpResponse;
+    const status_line = head[0..line_end];
+
+    var parts = std.mem.tokenizeScalar(u8, status_line, ' ');
+    _ = parts.next() orelse return error.BadHttpResponse;
+    const status_txt = parts.next() orelse return error.BadHttpResponse;
+    const status = try std.fmt.parseInt(u16, status_txt, 10);
+
+    var headers = std.ArrayList(Header).empty;
+    errdefer headers.deinit(alloc);
+
+    var pos = line_end + 2;
+    while (pos < head.len) {
+        const end = std.mem.indexOfPos(u8, head, pos, "\r\n") orelse head.len;
+        const line = head[pos..end];
+        if (line.len == 0) break;
+        const sep = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHttpResponse;
+        try headers.append(alloc, .{
+            .name = std.mem.trim(u8, line[0..sep], " \t"),
+            .value = std.mem.trim(u8, line[sep + 1 ..], " \t"),
+        });
+        pos = end + 2;
+    }
+
+    return .{
+        .status = status,
+        .headers = try headers.toOwnedSlice(alloc),
+        .body = body,
+    };
+}
+
+fn hostName(host_port: []const u8) []const u8 {
+    return host_port[0 .. std.mem.lastIndexOfScalar(u8, host_port, ':') orelse host_port.len];
+}
+
 test "parseUrl returns normalized fields for request targets" {
     const url = try parseUrl(" https://EXAMPLE.test:8443/api/v1?q=ok ");
 
@@ -559,4 +703,286 @@ test "resolveRedirectAlloc denies cross-host targets without explicit allow" {
             .allow_cross_host = true,
         }),
     );
+}
+
+test "redirect e2e allows public redirect chains over local mock sockets" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{
+                .status = "302 Found",
+            },
+        },
+        .{
+            .resp = .{
+                .status = "200 OK",
+                .headers = &.{"Content-Type: text/plain"},
+                .body = "final-ok",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const port = server.port();
+    const svc_host = try std.fmt.allocPrint(ar, "svc.test:{d}", .{port});
+    const cdn_host = try std.fmt.allocPrint(ar, "cdn.test:{d}", .{port});
+    const start_url = try std.fmt.allocPrint(ar, "http://{s}/start", .{svc_host});
+    const next_url = try std.fmt.allocPrint(ar, "http://{s}/final", .{cdn_host});
+
+    steps[0].expect = .{
+        .target = "/start",
+        .host = svc_host,
+    };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{next_url})};
+    steps[1].expect = .{
+        .target = "/final",
+        .host = cdn_host,
+    };
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.test", .effect = .allow, .tool = "web" },
+        .{ .pattern = "runtime/web/cdn.test", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "svc.test", .ip = .{ 34, 117, 59, 81 } },
+        .{ .host = "cdn.test", .ip = .{ 151, 101, 1, 69 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, host: []const u8, req_port: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, host, req_port, &addrs);
+        }
+
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    const got = try fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start_url,
+    }, .{
+        .egress = .{ .rules = &rules },
+        .allow_cross_host = true,
+    }, .{ .resolve = Mock.resolve, .free = Mock.free });
+    defer got.deinit(std.testing.allocator);
+    try server.join(thr);
+
+    const final = try parseUrl(got.final_url);
+    const Snap = struct {
+        req0_line: []const u8,
+        req0_host: []const u8,
+        req1_line: []const u8,
+        req1_host: []const u8,
+        final_status: u16,
+        final_body: []const u8,
+        final_host: []const u8,
+        final_path: []const u8,
+        hops: u8,
+    };
+    const snap = Snap{
+        .req0_line = http_mock.requestLine(server.request(0)).?,
+        .req0_host = hostName(http_mock.header(server.request(0), "host").?),
+        .req1_line = http_mock.requestLine(server.request(1)).?,
+        .req1_host = hostName(http_mock.header(server.request(1), "host").?),
+        .final_status = got.status,
+        .final_body = got.body,
+        .final_host = final.host,
+        .final_path = final.path,
+        .hops = got.hops,
+    };
+    try oh.snap(@src(),
+        \\core.tools.web.test.redirect e2e allows public redirect chains over local mock sockets.Snap
+        \\  .req0_line: []const u8
+        \\    "GET /start HTTP/1.1"
+        \\  .req0_host: []const u8
+        \\    "svc.test"
+        \\  .req1_line: []const u8
+        \\    "GET /final HTTP/1.1"
+        \\  .req1_host: []const u8
+        \\    "cdn.test"
+        \\  .final_status: u16 = 200
+        \\  .final_body: []const u8
+        \\    "final-ok"
+        \\  .final_host: []const u8
+        \\    "cdn.test"
+        \\  .final_path: []const u8
+        \\    "/final"
+        \\  .hops: u8 = 1
+    ).expectEqual(snap);
+}
+
+test "redirect e2e denies redirect hosts not in policy" {
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{
+                .status = "302 Found",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const port = server.port();
+    const svc_host = try std.fmt.allocPrint(ar, "svc.test:{d}", .{port});
+    const denied_host = try std.fmt.allocPrint(ar, "deny.test:{d}", .{port});
+    const start_url = try std.fmt.allocPrint(ar, "http://{s}/start", .{svc_host});
+    const denied_url = try std.fmt.allocPrint(ar, "http://{s}/blocked", .{denied_host});
+
+    steps[0].expect = .{
+        .target = "/start",
+        .host = svc_host,
+    };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{denied_url})};
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.test", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "svc.test", .ip = .{ 34, 117, 59, 81 } },
+        .{ .host = "deny.test", .ip = .{ 151, 101, 1, 69 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, host: []const u8, req_port: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, host, req_port, &addrs);
+        }
+
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    try std.testing.expectError(error.HostDenied, fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start_url,
+    }, .{
+        .egress = .{ .rules = &rules },
+        .allow_cross_host = true,
+    }, .{ .resolve = Mock.resolve, .free = Mock.free }));
+    try server.join(thr);
+    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
+    try std.testing.expectEqualStrings("GET /start HTTP/1.1", http_mock.requestLine(server.request(0)).?);
+}
+
+test "redirect e2e blocks literal private redirect targets" {
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{
+                .status = "302 Found",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const port = server.port();
+    const svc_host = try std.fmt.allocPrint(ar, "svc.test:{d}", .{port});
+    const start_url = try std.fmt.allocPrint(ar, "http://{s}/start", .{svc_host});
+    const private_url = try std.fmt.allocPrint(ar, "http://127.0.0.1:{d}/private", .{port});
+
+    steps[0].expect = .{
+        .target = "/start",
+        .host = svc_host,
+    };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{private_url})};
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.test", .effect = .allow, .tool = "web" },
+        .{ .pattern = "runtime/web/127.0.0.1", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "svc.test", .ip = .{ 34, 117, 59, 81 } },
+        .{ .host = "127.0.0.1", .ip = .{ 127, 0, 0, 1 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, host: []const u8, req_port: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, host, req_port, &addrs);
+        }
+
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    try std.testing.expectError(error.BlockedAddr, fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start_url,
+    }, .{
+        .egress = .{ .rules = &rules },
+        .allow_cross_host = true,
+    }, .{ .resolve = Mock.resolve, .free = Mock.free }));
+    try server.join(thr);
+    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
+    try std.testing.expectEqualStrings(svc_host, http_mock.header(server.request(0), "host").?);
+}
+
+test "redirect e2e blocks rebound redirect targets" {
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{
+                .status = "302 Found",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const port = server.port();
+    const svc_host = try std.fmt.allocPrint(ar, "svc.test:{d}", .{port});
+    const rebound_host = try std.fmt.allocPrint(ar, "rebound.test:{d}", .{port});
+    const start_url = try std.fmt.allocPrint(ar, "http://{s}/start", .{svc_host});
+    const rebound_url = try std.fmt.allocPrint(ar, "http://{s}/final", .{rebound_host});
+
+    steps[0].expect = .{
+        .target = "/start",
+        .host = svc_host,
+    };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{rebound_url})};
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.test", .effect = .allow, .tool = "web" },
+        .{ .pattern = "runtime/web/rebound.test", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "svc.test", .ip = .{ 34, 117, 59, 81 } },
+        .{ .host = "rebound.test", .ip = .{ 10, 0, 0, 7 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, host: []const u8, req_port: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, host, req_port, &addrs);
+        }
+
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    try std.testing.expectError(error.BlockedAddr, fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start_url,
+    }, .{
+        .egress = .{ .rules = &rules },
+        .allow_cross_host = true,
+    }, .{ .resolve = Mock.resolve, .free = Mock.free }));
+    try server.join(thr);
+    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
+    try std.testing.expectEqualStrings("GET /start HTTP/1.1", http_mock.requestLine(server.request(0)).?);
 }
