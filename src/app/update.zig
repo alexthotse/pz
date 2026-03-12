@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cli = @import("cli.zig");
 const core = @import("../core/mod.zig");
+const path_guard = @import("../core/tools/path_guard.zig");
 const version = @import("version.zig");
 
 const ReleaseAsset = struct {
@@ -52,6 +53,7 @@ pub const UpdateError = error{
     InvalidExecutablePath,
     MissingSignatureAsset,
     UpgradeDisabledByPolicy,
+    UpdateHostDenied,
     InvalidPolicy,
     SignatureVerifyFailed,
 };
@@ -89,6 +91,7 @@ pub const AuditHooks = struct {
     self_exe_path: *const fn (std.mem.Allocator) anyerror![]u8 = std.fs.selfExePathAlloc,
     install_binary: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void = installBinary,
     check_update_allowed: *const fn (std.mem.Allocator) anyerror!void = checkUpdateAllowed,
+    check_update_host: *const fn (std.mem.Allocator, []const u8) anyerror!void = checkUpdateHostAllowed,
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
@@ -117,6 +120,9 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
         );
     };
 
+    if (try checkUpdateUrlOrAudit(alloc, hooks, release_latest_url, "metadata host denied")) |out| {
+        return out;
+    }
     const release_http = hooks.http_get(alloc, release_latest_url, release_accept, release_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
@@ -228,6 +234,9 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
         );
     };
 
+    if (try checkUpdateUrlOrAudit(alloc, hooks, asset_url, "archive host denied")) |out| {
+        return out;
+    }
     const archive_http = hooks.http_get(alloc, asset_url, asset_accept, asset_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
@@ -282,6 +291,9 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
             ),
         );
     };
+    if (try checkUpdateUrlOrAudit(alloc, hooks, sig_url, "signature host denied")) |out| {
+        return out;
+    }
     const sig_http = hooks.http_get(alloc, sig_url, any_accept, 8 * 1024) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
@@ -378,6 +390,23 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     );
 }
 
+fn checkUpdateUrlOrAudit(alloc: std.mem.Allocator, hooks: Hooks, url: []const u8, msg: []const u8) !?Outcome {
+    hooks.check_update_host(alloc, url) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .deny,
+            .warn,
+            .{ .text = msg, .vis = .@"pub" },
+            .{ .text = url, .vis = .mask },
+            try formatPolicyFailure(alloc, err),
+        );
+    };
+    return null;
+}
+
 fn auditOutcome(
     alloc: std.mem.Allocator,
     hooks: Hooks,
@@ -451,6 +480,45 @@ fn checkPolicyPath(alloc: std.mem.Allocator, path: []const u8) !void {
     if (core.policy.evaluate(doc.rules, update_policy_path, update_policy_tool) == .deny) {
         return error.UpgradeDisabledByPolicy;
     }
+}
+
+fn checkUpdateHostAllowed(alloc: std.mem.Allocator, url: []const u8) !void {
+    try checkHostPolicyPath(alloc, update_policy_file, url);
+
+    const home = std.posix.getenv("HOME") orelse return;
+    const home_path = try std.fs.path.join(alloc, &.{ home, update_policy_file });
+    defer alloc.free(home_path);
+    try checkHostPolicyPath(alloc, home_path, url);
+}
+
+fn checkHostPolicyPath(alloc: std.mem.Allocator, path: []const u8, url: []const u8) !void {
+    const raw = std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+    defer alloc.free(raw);
+
+    const doc = core.policy.parseDoc(alloc, raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
+    defer core.policy.deinitDoc(alloc, doc);
+
+    const parsed = core.tools.web.parseUrl(url) catch return error.UpdateHostDenied;
+    const pol_path = try updateHostPathAlloc(alloc, parsed.host);
+    defer alloc.free(pol_path);
+    if (core.policy.evaluate(doc.rules, pol_path, update_policy_tool) == .deny) {
+        return error.UpdateHostDenied;
+    }
+}
+
+fn updateHostPathAlloc(alloc: std.mem.Allocator, host: []const u8) ![]u8 {
+    const prefix = "runtime/update/";
+    const out = try alloc.alloc(u8, prefix.len + host.len);
+    @memcpy(out[0..prefix.len], prefix);
+    for (host, 0..) |c, i| out[prefix.len + i] = std.ascii.toLower(c);
+    return out;
 }
 
 fn trustedUpdatePk() !core.signing.PublicKey {
@@ -709,6 +777,11 @@ fn formatPolicyFailure(alloc: std.mem.Allocator, err: anyerror) ![]u8 {
             alloc,
             "upgrade blocked by policy\nnext: ask your administrator to allow tool {s} on path {s}\n",
             .{ update_policy_tool, update_policy_path },
+        ),
+        error.UpdateHostDenied => std.fmt.allocPrint(
+            alloc,
+            "upgrade blocked by policy host gate\nnext: ask your administrator to allow tool {s} on runtime/update/<host>\n",
+            .{update_policy_tool},
         ),
         error.InvalidPolicy => std.fmt.allocPrint(
             alloc,
@@ -1136,6 +1209,44 @@ test "formatPolicyFailure reports denied upgrade path" {
     try std.testing.expect(std.mem.indexOf(u8, msg, update_policy_path) != null);
 }
 
+test "checkUpdateHostAllowed rejects host absent from policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{
+        .sub_path = update_policy_file,
+        .data = "{\"version\":1,\"rules\":[{\"pattern\":\".pz/upgrade\",\"effect\":\"allow\",\"tool\":\"upgrade\"}]}",
+    });
+
+    try std.testing.expectError(
+        error.UpdateHostDenied,
+        checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest"),
+    );
+}
+
+test "checkUpdateHostAllowed accepts explicitly allowed host" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{
+        .sub_path = update_policy_file,
+        .data =
+        \\{"version":1,"rules":[
+        \\  {"pattern":".pz/upgrade","effect":"allow","tool":"upgrade"},
+        \\  {"pattern":"runtime/update/api.github.com","effect":"allow","tool":"upgrade"}
+        \\]}
+        ,
+    });
+
+    try checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest");
+}
+
 test "update audit emits start and deny entries on policy block" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -1230,6 +1341,37 @@ test "update audit emits start and success entries when already current" {
         \\  "{"v":1,"ts_ms":456,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":456,"sid":"upgrade","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"already up to date","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
     ).expectEqual(joined);
+}
+
+test "update denies archive host before transport" {
+    if (targetAssetName() == null) return;
+
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .check_update_allowed = struct {
+            fn f(_: std.mem.Allocator) !void {}
+        }.f,
+        .check_update_host = struct {
+            fn f(_: std.mem.Allocator, url: []const u8) !void {
+                if (std.mem.endsWith(u8, url, ".tar.gz")) return error.UpdateHostDenied;
+            }
+        }.f,
+        .http_get = struct {
+            fn f(alloc: std.mem.Allocator, url: []const u8, _: []const u8, _: usize) !HttpResult {
+                if (!std.mem.eql(u8, url, release_latest_url)) return error.TestUnexpectedResult;
+                const asset_name = targetAssetName() orelse return error.TestUnexpectedResult;
+                const body = try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"tag_name\":\"v9.9.9\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"https://dl.invalid/pz.tar.gz\"}},{{\"name\":\"{s}.sig\",\"browser_download_url\":\"https://dl.invalid/pz.tar.gz.sig\"}}]}}",
+                    .{ asset_name, asset_name },
+                );
+                return .{ .ok = body };
+            }
+        }.f,
+    });
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(!out.ok);
+    try std.testing.expect(std.mem.indexOf(u8, out.msg, "policy host gate") != null);
 }
 
 test "formatVerifyFailure reports signature rejection" {
