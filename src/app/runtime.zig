@@ -14,6 +14,7 @@ const print_err = @import("../modes/print/errors.zig");
 const tui_harness = @import("../modes/tui/harness.zig");
 const tui_render = @import("../modes/tui/render.zig");
 const tui_term = @import("../modes/tui/term.zig");
+const tui_transcript = @import("../modes/tui/transcript.zig");
 const tui_input = @import("../modes/tui/input.zig");
 const tui_editor = @import("../modes/tui/editor.zig");
 const tui_frame = @import("../modes/tui/frame.zig");
@@ -8455,6 +8456,8 @@ test "runtime tui overflow retries once with injected live stdin" {
             else => {},
         }
     }
+    const plain_out = try tui_transcript.stripAnsi(std.testing.allocator, out_fbs.getWritten());
+    defer std.testing.allocator.free(plain_out);
 
     const Snap = struct {
         retry_ct: u8,
@@ -8465,8 +8468,8 @@ test "runtime tui overflow retries once with injected live stdin" {
     try oh.snap(@src(),
         \\app.runtime.test.runtime tui overflow retries once with injected live stdin.Snap
         \\  .retry_ct: u8 = 2
-        \\  .saw_notice: bool = false
-        \\  .saw_retry_text: bool = false
+        \\  .saw_notice: bool = true
+        \\  .saw_retry_text: bool = true
         \\  .events: []const u8
         \\    "prompt:ping
         \\prompt:ping
@@ -8474,8 +8477,9 @@ test "runtime tui overflow retries once with injected live stdin" {
         \\"
     ).expectEqual(Snap{
         .retry_ct = provider_impl.starts,
-        .saw_notice = std.mem.indexOf(u8, out_fbs.getWritten(), "[overflow detected: compacting and retrying]") != null,
-        .saw_retry_text = std.mem.indexOf(u8, out_fbs.getWritten(), "retry-ok") != null,
+        .saw_notice = std.mem.indexOf(u8, plain_out, "overflow detected:") != null and
+            std.mem.indexOf(u8, plain_out, "retrying") != null,
+        .saw_retry_text = std.mem.indexOf(u8, events.items, "text:retry-ok\n") != null,
         .events = events.items,
     });
 }
