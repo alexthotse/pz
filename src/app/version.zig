@@ -2,6 +2,12 @@ const std = @import("std");
 const app_tls = @import("tls.zig");
 const cli = @import("cli.zig");
 
+const release_uri = std.Uri{
+    .scheme = "https",
+    .host = .{ .raw = "api.github.com" },
+    .path = .{ .raw = "/repos/joelreymont/pz/releases/latest" },
+};
+
 /// Semver triple for comparison.
 pub const Ver = struct {
     major: u16,
@@ -63,24 +69,33 @@ pub const Check = struct {
     }
 };
 
+const Deps = struct {
+    init_client: *const fn (?*anyopaque, std.mem.Allocator) anyerror!std.http.Client = initClientRuntime,
+    init_client_ctx: ?*anyopaque = null,
+    uri: std.Uri = release_uri,
+    current_version: []const u8 = cli.version,
+};
+
+fn initClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
+    return try app_tls.initRuntimeClient(alloc);
+}
+
 /// Check GitHub releases for a newer version. Returns version string if newer, null otherwise.
 fn checkLatest(alloc: std.mem.Allocator) !?[]u8 {
+    return try checkLatestWith(alloc, .{});
+}
+
+fn checkLatestWith(alloc: std.mem.Allocator, deps: Deps) !?[]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
 
-    var http = try app_tls.initRuntimeClient(ar);
+    var http = try deps.init_client(deps.init_client_ctx, ar);
     defer http.deinit();
     try http.initDefaultProxies(ar);
 
-    const uri = std.Uri{
-        .scheme = "https",
-        .host = .{ .raw = "api.github.com" },
-        .path = .{ .raw = "/repos/joelreymont/pz/releases/latest" },
-    };
-
     const ua = "pz/" ++ cli.version;
-    var req = try http.request(.GET, uri, .{
+    var req = try http.request(.GET, deps.uri, .{
         .extra_headers = &.{
             .{ .name = "User-Agent", .value = ua },
             .{ .name = "Accept", .value = "application/vnd.github+json" },
@@ -105,7 +120,7 @@ fn checkLatest(alloc: std.mem.Allocator) !?[]u8 {
     // Parse just the tag_name field
     const tag = extractTagName(body) orelse return null;
 
-    const current = parseVersion(cli.version) orelse return null;
+    const current = parseVersion(deps.current_version) orelse return null;
     const latest = parseVersion(tag) orelse return null;
 
     if (!latest.isNewer(current)) return null;
@@ -132,6 +147,73 @@ fn extractTagName(json: []const u8) ?[]const u8 {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const http_mock = @import("../test/http_mock.zig");
+const CwdGuard = @import("../core/tools/path_guard.zig").CwdGuard;
+
+const test_ca_pem =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIDCzCCAfOgAwIBAgIURa7/IGeeVRlDa4FwDe++jL0QdxwwDQYJKoZIhvcNAQEL
+    \\BQAwFTETMBEGA1UEAwwKcHotdGVzdC1jYTAeFw0yNjAzMTIxNjE2NDRaFw0yNjAz
+    \\MTMxNjE2NDRaMBUxEzARBgNVBAMMCnB6LXRlc3QtY2EwggEiMA0GCSqGSIb3DQEB
+    \\AQUAA4IBDwAwggEKAoIBAQDPijTFBaC7eSjSfbDdlSperM4GjuUI4kFPjkNZeMfs
+    \\QeQZtLaNRsiDmDrj4gupRt0FjaH+vpW77xinL/XCCC+h3QnbmYBAk1RjrCUDcIMS
+    \\kfqZPhc7qfKsBJCK+pio5IZGSvCNDeny32zxy6mYKBUN2UMyeLOJGKUxQTR3DJ1n
+    \\Z9z0DaNloQK80x/EA59BaHEaKlBOUhiGpZWzykXAWxH9DszXGX9WcneskaS9DKt4
+    \\l8UYEzn/E5Lw5k+91XQJAAtiKCR69lorOJPIhe/iTsdFQ/4L75PRzaLzjPAFjFcX
+    \\KMUndj4y/rpWEfVwG3eyN0HobTIydLEsaCBS3grFwWGDAgMBAAGjUzBRMB0GA1Ud
+    \\DgQWBBSgqshoiKDsFd/cdjw9ISdRZl5r7zAfBgNVHSMEGDAWgBSgqshoiKDsFd/c
+    \\djw9ISdRZl5r7zAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCT
+    \\rRyDf+axvu0uLXpqGcJM3/xdcidqJhrFtkOAu/EufGFYr3W0QSl3lVlDpy2cvsIS
+    \\FBqYEL8n31AVq5+Tfi8ORQCu6SrxuFv2lO6qit4xIRpqIwO6pfiNw6PKKkHpJheV
+    \\+r0w1VpEsKKOrZQsD2m6/PkMTLrpFcjGD9EBWy23Ox+zVNVtdcYnT/FszUdHpQfs
+    \\bAfNtHkWEmpZ3eBj2wXtAYlSZpwT44iLbywR+Os9jOzAEiscig2Q0SYZiO8XEQ0i
+    \\/yGcMd+7viFlE60oib0k2Q4IPDnLhPm0JWXb0aWBnginT+RcjKnaEUmtuXbjG6RZ
+    \\AxzSE0ZI8572sfc7EEB+
+    \\-----END CERTIFICATE-----
+;
+
+const CheckSnap = struct {
+    tag: []const u8,
+    has_ca: bool,
+    rescan_disabled: bool,
+    saw_get: bool,
+    saw_ua: bool,
+    saw_accept: bool,
+};
+
+const ClientTap = struct {
+    ca_len: usize = 0,
+    rescan_disabled: bool = false,
+
+    fn init(ctx: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
+        const tap: *ClientTap = @ptrCast(@alignCast(ctx.?));
+        var http = try app_tls.initRuntimeClient(alloc);
+        tap.ca_len = http.ca_bundle.bytes.items.len;
+        tap.rescan_disabled = !@atomicLoad(bool, &http.next_https_rescan_certs, .acquire);
+        return http;
+    }
+};
+
+fn writeCfg(tmp: std.testing.TmpDir, ca_path: []const u8) !void {
+    try tmp.dir.makePath(".pz");
+    const raw = try std.fmt.allocPrint(std.testing.allocator, "{{\"ca_file\":\"{s}\"}}", .{ca_path});
+    defer std.testing.allocator.free(raw);
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/settings.json", .data = raw });
+}
+
+fn writeCaPem(tmp: std.testing.TmpDir, name: []const u8) ![]u8 {
+    try tmp.dir.writeFile(.{ .sub_path = name, .data = test_ca_pem });
+    return try tmp.dir.realpathAlloc(std.testing.allocator, name);
+}
+
+fn releaseUriFor(port: u16) std.Uri {
+    return .{
+        .scheme = "http",
+        .host = .{ .raw = "127.0.0.1" },
+        .port = port,
+        .path = .{ .raw = "/repos/joelreymont/pz/releases/latest" },
+    };
+}
 
 test "parseVersion basic" {
     const v = parseVersion("0.1.0").?;
@@ -182,4 +264,77 @@ test "extractTagName from json" {
 test "extractTagName missing" {
     try testing.expect(extractTagName("{}") == null);
     try testing.expect(extractTagName("{\"other\":1}") == null);
+}
+
+test "checkLatest uses runtime CA bundle for version checks" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cert_path = try writeCaPem(tmp, "ca.pem");
+    defer std.testing.allocator.free(cert_path);
+    try writeCfg(tmp, cert_path);
+
+    var guard = try CwdGuard.enter(tmp.dir);
+    defer guard.deinit();
+
+    var server = try http_mock.Server.init(.{
+        .headers = &.{"Content-Type: application/json"},
+        .body = "{\"tag_name\":\"v9.9.9\"}",
+    });
+    defer server.deinit();
+
+    const thr = try server.spawn();
+    defer thr.join();
+
+    var tap = ClientTap{};
+    const got = try checkLatestWith(std.testing.allocator, .{
+        .init_client = ClientTap.init,
+        .init_client_ctx = &tap,
+        .uri = releaseUriFor(server.port()),
+        .current_version = "0.0.1",
+    });
+    defer if (got) |tag| std.testing.allocator.free(tag);
+
+    try testing.expect(got != null);
+
+    const req = server.request();
+    const snap = CheckSnap{
+        .tag = got.?,
+        .has_ca = tap.ca_len != 0,
+        .rescan_disabled = tap.rescan_disabled,
+        .saw_get = std.mem.indexOf(u8, req, "GET /repos/joelreymont/pz/releases/latest HTTP/1.1") != null,
+        .saw_ua = std.mem.indexOf(u8, req, "User-Agent: pz/" ++ cli.version) != null,
+        .saw_accept = std.mem.indexOf(u8, req, "Accept: application/vnd.github+json") != null,
+    };
+    try oh.snap(@src(),
+        \\app.version.CheckSnap
+        \\  .tag: []const u8
+        \\    "v9.9.9"
+        \\  .has_ca: bool = true
+        \\  .rescan_disabled: bool = true
+        \\  .saw_get: bool = true
+        \\  .saw_ua: bool = true
+        \\  .saw_accept: bool = true
+    ).expectEqual(snap);
+}
+
+test "checkLatest fails closed on invalid runtime CA bundle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
+    const bad_path = try tmp.dir.realpathAlloc(std.testing.allocator, "bad.pem");
+    defer std.testing.allocator.free(bad_path);
+    try writeCfg(tmp, bad_path);
+
+    var guard = try CwdGuard.enter(tmp.dir);
+    defer guard.deinit();
+
+    try testing.expectError(error.MissingEndCertificateMarker, checkLatestWith(std.testing.allocator, .{
+        .uri = releaseUriFor(1),
+        .current_version = "0.0.1",
+    }));
 }
