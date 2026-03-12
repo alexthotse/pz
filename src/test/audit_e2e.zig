@@ -55,7 +55,7 @@ fn e2eFrameOpts() audit.FrameOpts {
     };
 }
 
-fn shipAuditRows(alloc: std.mem.Allocator, sender: *syslog.Sender, rows: []const []const u8) !void {
+pub fn shipAuditRows(alloc: std.mem.Allocator, sender: *syslog.Sender, rows: []const []const u8) !void {
     const key = e2eAuditKey();
     var prev: ?audit_integrity.Tag = null;
 
@@ -344,7 +344,7 @@ fn buildRows() !Rows {
     return rows;
 }
 
-fn assertCleartextMissing(collector: anytype) !void {
+pub fn assertCleartextMissing(collector: anytype) !void {
     const ban = [_][]const u8{
         "/tmp/runtime-secret/42.jsonl",
         "/tmp/export-secret/report.md",
@@ -368,7 +368,7 @@ fn assertCleartextMissing(collector: anytype) !void {
     }
 }
 
-fn verifyRoundTrip(collector: anytype, rows: []const []const u8) !void {
+pub fn verifyRoundTrip(collector: anytype, rows: []const []const u8) !void {
     try testing.expectEqual(rows.len, collector.msgCount());
 
     const shipped_lines = try joinShippedLinesAlloc(testing.allocator, collector);

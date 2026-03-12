@@ -416,17 +416,17 @@ pub const Approver = struct {
 
 pub const ToolAuth = struct {
     ctx: *anyopaque,
-    check_fn: *const fn (ctx: *anyopaque, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) anyerror!void,
+    check_fn: *const fn (ctx: *anyopaque, call_id: []const u8, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) anyerror!void,
 
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime check_fn: fn (ctx: *T, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) anyerror!void,
+        comptime check_fn: fn (ctx: *T, call_id: []const u8, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) anyerror!void,
     ) ToolAuth {
         const Wrap = struct {
-            fn check(raw: *anyopaque, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) anyerror!void {
+            fn check(raw: *anyopaque, call_id: []const u8, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) anyerror!void {
                 const typed: *T = @ptrCast(@alignCast(raw));
-                return check_fn(typed, name, kind, parsed_args);
+                return check_fn(typed, call_id, name, kind, parsed_args);
             }
         };
 
@@ -436,8 +436,8 @@ pub const ToolAuth = struct {
         };
     }
 
-    pub fn check(self: ToolAuth, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) !void {
-        return self.check_fn(self.ctx, name, kind, parsed_args);
+    pub fn check(self: ToolAuth, call_id: []const u8, name: []const u8, kind: tools.Kind, parsed_args: tools.Call.Args) !void {
+        return self.check_fn(self.ctx, call_id, name, kind, parsed_args);
     }
 };
 
@@ -1038,7 +1038,7 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
     };
 
     if (opts.tool_auth) |tool_auth| {
-        tool_auth.check(entry.name, entry.kind, parsed_args) catch |auth_err| switch (auth_err) {
+        tool_auth.check(tc.id, entry.name, entry.kind, parsed_args) catch |auth_err| switch (auth_err) {
             error.PolicyDenied => {
                 return .{
                     .id = try opts.alloc.dupe(u8, tc.id),
@@ -1149,7 +1149,7 @@ fn noteApproval(
     try approver.check(key, false);
 }
 
-fn approvalSummaryAlloc(
+pub fn approvalSummaryAlloc(
     alloc: std.mem.Allocator,
     kind: tools.Kind,
     parsed_args: tools.Call.Args,

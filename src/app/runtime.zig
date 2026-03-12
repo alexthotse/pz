@@ -23,7 +23,9 @@ const tui_panels = @import("../modes/tui/panels.zig");
 const tui_pathcomp = @import("../modes/tui/pathcomp.zig");
 const args_mod = @import("args.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
+const audit_e2e = @import("../test/audit_e2e.zig");
 const provider_mock = @import("../test/provider_mock.zig");
+const syslog_mock = @import("../test/syslog_mock.zig");
 
 pub const Err = error{
     SessionNotFound,
@@ -215,10 +217,12 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
 const PolicyToolDispatch = struct {
     pol: *const RuntimePolicy,
     name: []const u8,
+    audit: ?PolicyToolAudit = null,
     inner: core.tools.Dispatch,
 
     fn run(self: *@This(), call: core.tools.Call, sink: core.tools.Sink) !core.tools.Result {
         if (!self.pol.allowsTool(self.name, call)) {
+            if (self.audit) |audit| try audit.emit(call, self.name);
             return .{
                 .call_id = call.id,
                 .started_at_ms = call.at_ms,
@@ -239,11 +243,12 @@ const PolicyToolRegistry = struct {
     entries: [10]core.tools.Entry = undefined,
     reg: core.tools.Registry = undefined,
 
-    fn init(self: *PolicyToolRegistry, pol: *const RuntimePolicy, base: core.tools.Registry) void {
+    fn init(self: *PolicyToolRegistry, pol: *const RuntimePolicy, base: core.tools.Registry, audit: ?PolicyToolAudit) void {
         for (base.entries, 0..) |entry, i| {
             self.ctxs[i] = .{
                 .pol = pol,
                 .name = entry.name,
+                .audit = audit,
                 .inner = entry.dispatch,
             };
             self.entries[i] = entry;
@@ -262,9 +267,15 @@ const PolicyToolRegistry = struct {
 };
 
 const PolicyToolAuth = struct {
+    alloc: std.mem.Allocator,
     pol: *const RuntimePolicy,
+    sid: []const u8,
+    emit_audit_ctx: ?*anyopaque = null,
+    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    now_ms: *const fn () i64 = std.time.milliTimestamp,
+    seq: *u64,
 
-    fn check(self: *@This(), name: []const u8, kind: core.tools.Kind, parsed_args: core.tools.Call.Args) !void {
+    fn check(self: *@This(), call_id: []const u8, name: []const u8, kind: core.tools.Kind, parsed_args: core.tools.Call.Args) !void {
         const call: core.tools.Call = .{
             .id = "",
             .kind = kind,
@@ -273,9 +284,66 @@ const PolicyToolAuth = struct {
             .at_ms = 0,
             .cancel = null,
         };
-        if (!self.pol.allowsTool(name, call)) return error.PolicyDenied;
+        if (!self.pol.allowsTool(name, call)) {
+            try self.emitDeny(call_id, name, kind, parsed_args);
+            return error.PolicyDenied;
+        }
+    }
+
+    fn emitDeny(self: *@This(), call_id: []const u8, name: []const u8, kind: core.tools.Kind, parsed_args: core.tools.Call.Args) !void {
+        const emit = self.emit_audit orelse return;
+        const seq = self.seq.*;
+        self.seq.* +%= 1;
+        const info = toolAuditInfo(kind, parsed_args);
+        try emit(self.emit_audit_ctx.?, self.alloc, .{
+            .ts_ms = self.now_ms(),
+            .sid = self.sid,
+            .seq = seq,
+            .sev = .warn,
+            .out = .deny,
+            .actor = .{
+                .kind = .tool,
+                .id = .{ .text = name, .vis = .@"pub" },
+            },
+            .res = .{
+                .kind = info.res_kind,
+                .name = .{ .text = info.target, .vis = .mask },
+                .op = info.op,
+            },
+            .msg = .{ .text = "policy denied", .vis = .@"pub" },
+            .data = .{
+                .tool = .{
+                    .name = .{ .text = name, .vis = .@"pub" },
+                    .call_id = call_id,
+                    .argv = .{ .text = info.argv, .vis = .mask },
+                },
+            },
+        });
     }
 };
+
+const ToolAuditInfo = struct {
+    res_kind: core.audit.ResKind,
+    op: []const u8,
+    target: []const u8,
+    argv: []const u8,
+};
+
+fn toolAuditInfo(kind: core.tools.Kind, parsed_args: core.tools.Call.Args) ToolAuditInfo {
+    return switch (kind) {
+        .read => .{ .res_kind = .file, .op = "read", .target = parsed_args.read.path, .argv = parsed_args.read.path },
+        .write => .{ .res_kind = .file, .op = "write", .target = parsed_args.write.path, .argv = parsed_args.write.path },
+        .bash => .{ .res_kind = .cmd, .op = "exec", .target = parsed_args.bash.cmd, .argv = parsed_args.bash.cmd },
+        .edit => .{ .res_kind = .file, .op = "edit", .target = parsed_args.edit.path, .argv = parsed_args.edit.path },
+        .grep => .{ .res_kind = .file, .op = "grep", .target = parsed_args.grep.path, .argv = parsed_args.grep.pattern },
+        .find => .{ .res_kind = .file, .op = "find", .target = parsed_args.find.path, .argv = parsed_args.find.name },
+        .ls => .{ .res_kind = .file, .op = "list", .target = parsed_args.ls.path, .argv = parsed_args.ls.path },
+        .agent => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.agent.agent_id, .argv = parsed_args.agent.agent_id },
+        .web => .{ .res_kind = .net, .op = "request", .target = parsed_args.web.url, .argv = parsed_args.web.url },
+        .ask => .{ .res_kind = .cfg, .op = "ask", .target = "ask", .argv = "ask" },
+        .skill => .{ .res_kind = .cmd, .op = "run", .target = parsed_args.skill.name, .argv = parsed_args.skill.name },
+    };
+}
 
 fn initSubagentStub(pol: *const RuntimePolicy, agent_id: []const u8) !core.agent.Stub {
     if (!pol.allowsSubagent(agent_id)) return error.PolicyDenied;
@@ -1552,6 +1620,62 @@ const RuntimeCtlAudit = struct {
     }
 };
 
+const PolicyToolAudit = struct {
+    alloc: std.mem.Allocator,
+    hooks: AuditHooks,
+    sid: []const u8,
+    seq: *u64,
+
+    fn emit(self: PolicyToolAudit, call: core.tools.Call, name: []const u8) !void {
+        const emit_fn = self.hooks.emit_audit orelse return;
+        const seq = self.seq.*;
+        self.seq.* +%= 1;
+        try emit_fn(self.hooks.emit_audit_ctx.?, self.alloc, .{
+            .ts_ms = self.hooks.now_ms(),
+            .sid = self.sid,
+            .seq = seq,
+            .out = .deny,
+            .actor = .{ .kind = .sys },
+            .res = .{
+                .kind = auditResKind(call.kind),
+                .name = .{ .text = name, .vis = .@"pub" },
+                .op = auditResOp(call.kind),
+            },
+            .msg = .{ .text = policy_denied_msg, .vis = .@"pub" },
+            .data = .{
+                .policy = .{
+                    .eff = .deny,
+                    .scope = "tool",
+                },
+            },
+        });
+    }
+};
+
+fn auditResKind(kind: core.tools.Kind) core.audit.ResKind {
+    return switch (kind) {
+        .read, .write, .edit, .grep, .find, .ls => .file,
+        .web => .net,
+        .agent, .bash => .cmd,
+        .ask => .cfg,
+    };
+}
+
+fn auditResOp(kind: core.tools.Kind) []const u8 {
+    return switch (kind) {
+        .read => "read",
+        .write => "write",
+        .edit => "edit",
+        .grep => "grep",
+        .find => "find",
+        .ls => "list",
+        .web => "request",
+        .agent => "spawn",
+        .bash => "run",
+        .ask => "prompt",
+    };
+}
+
 fn runtimeCfgResName() core.audit.Str {
     return .{ .text = "runtime", .vis = .@"pub" };
 }
@@ -1840,6 +1964,7 @@ fn execWithIoHooks(
                     &tools_rt,
                     writer,
                     sys_prompt,
+                    audit_hooks,
                 ),
                 .json => try runJson(
                     alloc,
@@ -1852,6 +1977,7 @@ fn execWithIoHooks(
                     reader,
                     writer,
                     sys_prompt,
+                    audit_hooks,
                 ),
                 .tui => try runTui(
                     alloc,
@@ -1904,6 +2030,7 @@ fn runPrint(
     tools_rt: *core.tools.builtin.Runtime,
     out: std.Io.AnyWriter,
     sys_prompt: ?[]const u8,
+    audit_hooks: AuditHooks,
 ) !void {
     const prompt = run_cmd.prompt orelse return error.EmptyPrompt;
 
@@ -1914,7 +2041,16 @@ fn runPrint(
     const mode = core.loop.ModeSink.from(PrintSink, &sink_impl, PrintSink.push);
     var reg: PolicyToolRegistry = undefined;
     reg.init(pol, tools_rt.registry());
-    var tool_auth_impl = PolicyToolAuth{ .pol = pol };
+    var tool_audit_seq: u64 = 1;
+    var tool_auth_impl = PolicyToolAuth{
+        .alloc = alloc,
+        .pol = pol,
+        .sid = sid,
+        .emit_audit_ctx = audit_hooks.emit_audit_ctx,
+        .emit_audit = audit_hooks.emit_audit,
+        .now_ms = audit_hooks.now_ms,
+        .seq = &tool_audit_seq,
+    };
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
     const approval_bind = try loadApprovalBindAlloc(alloc);
@@ -2061,6 +2197,7 @@ fn runJson(
     in: std.Io.AnyReader,
     out: std.Io.AnyWriter,
     sys_prompt: ?[]const u8,
+    audit_hooks: AuditHooks,
 ) !void {
     var sink_impl = JsonSink{
         .alloc = alloc,
@@ -2085,6 +2222,7 @@ fn runJson(
         .cmd_cache = &cmd_cache,
         .approval_bind = approval_bind,
         .approval_loc = approval_loc,
+        .audit_hooks = audit_hooks,
     };
 
     if (run_cmd.prompt) |prompt| {
@@ -6550,6 +6688,7 @@ const TurnCtx = struct {
     approval_bind: core.policy.ApprovalBind = .{ .version = core.policy.ver_current },
     approval_loc: ?core.loop.CmdCache.Loc = null,
     approver: ?core.loop.Approver = null,
+    audit_hooks: AuditHooks = .{},
 
     const TurnOpts = struct {
         sid: []const u8,
@@ -6573,7 +6712,16 @@ const TurnCtx = struct {
 
         var reg: PolicyToolRegistry = undefined;
         reg.init(self.pol, self.tools_rt.registry());
-        var tool_auth_impl = PolicyToolAuth{ .pol = self.pol };
+        var tool_audit_seq: u64 = 1;
+        var tool_auth_impl = PolicyToolAuth{
+            .alloc = self.alloc,
+            .pol = self.pol,
+            .sid = opts.sid,
+            .emit_audit_ctx = self.audit_hooks.emit_audit_ctx,
+            .emit_audit = self.audit_hooks.emit_audit,
+            .now_ms = self.audit_hooks.now_ms,
+            .seq = &tool_audit_seq,
+        };
 
         _ = try core.loop.run(.{
             .alloc = self.alloc,
@@ -7813,6 +7961,116 @@ test "runtime blocks tool dispatch under verified policy" {
         }
     }
     try std.testing.expect(saw_blocked);
+}
+
+fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    try writeRuntimePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/tool/bash", .effect = .deny, .tool = "bash" },
+            .{ .pattern = "*", .effect = .allow },
+        },
+    });
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+    const provider_cmd =
+        "req=$(cat); " ++
+        "if printf '%s' \"$req\" | grep -q '\"tool_result\"'; then " ++
+        "printf 'text:done\\nstop:done\\n'; " ++
+        "else " ++
+        "printf 'tool_call:call-1|bash|{\"cmd\":\"rm -rf /tmp/bash-secret/.env\"}\\nstop:tool\\n'; " ++
+        "fi";
+
+    var cfg = cli.Run{
+        .mode = .print,
+        .prompt = "ship",
+        .verbose = true,
+        .cfg = .{
+            .mode = .print,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, provider_cmd),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var out_buf: [4096]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        eofReader(),
+        out_fbs.writer().any(),
+        .{
+            .emit_audit_ctx = &rows,
+            .emit_audit = AuditRows.emit,
+            .now_ms = struct {
+                fn f() i64 {
+                    return 141;
+                }
+            }.f,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true out=\"blocked by policy\"") != null);
+    try std.testing.expect(rows.rows.items.len != 0);
+
+    switch (transport) {
+        .udp => {
+            var collector = try syslog_mock.UdpCollector.init();
+            defer collector.deinit();
+            const t = try collector.spawnCount(rows.rows.items.len);
+
+            var sender = try core.syslog.Sender.init(std.testing.allocator, .{
+                .transport = .udp,
+                .host = "127.0.0.1",
+                .port = collector.port(),
+            });
+            defer sender.deinit();
+
+            try audit_e2e.shipAuditRows(std.testing.allocator, &sender, rows.rows.items);
+            t.join();
+            try audit_e2e.verifyRoundTrip(&collector, rows.rows.items);
+        },
+        .tcp => {
+            var collector = try syslog_mock.TcpCollector.init();
+            defer collector.deinit();
+            const t = try collector.spawnCount(rows.rows.items.len);
+
+            var sender = try core.syslog.Sender.init(std.testing.allocator, .{
+                .transport = .tcp,
+                .host = "127.0.0.1",
+                .port = collector.port(),
+            });
+            defer sender.deinit();
+
+            try audit_e2e.shipAuditRows(std.testing.allocator, &sender, rows.rows.items);
+            t.join();
+            try audit_e2e.verifyRoundTrip(&collector, rows.rows.items);
+        },
+    }
+}
+
+test "runtime denied bash audit ships through udp syslog" {
+    try verifyDeniedBashAuditSyslog(.udp);
+}
+
+test "runtime denied bash audit ships through tcp syslog" {
+    try verifyDeniedBashAuditSyslog(.tcp);
 }
 
 test "subagent stub inherits effective policy hash" {
