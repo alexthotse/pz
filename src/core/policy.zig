@@ -841,21 +841,71 @@ test "evalEnv key=value pattern" {
 }
 
 test "parseDoc valid v1" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const json = "{\"version\":1,\"rules\":[{\"pattern\":\"*.zig\",\"effect\":\"allow\"},{\"pattern\":\"*.secret\",\"effect\":\"deny\"}]}";
     const doc = try parseDoc(testing.allocator, json);
     defer deinitDoc(testing.allocator, doc);
-    try testing.expectEqual(@as(u16, 1), doc.version);
-    try testing.expectEqual(@as(usize, 2), doc.rules.len);
-    try testing.expectEqual(Effect.allow, doc.rules[0].effect);
-    try testing.expectEqual(Effect.deny, doc.rules[1].effect);
+
+    const Snap = struct {
+        version: u16,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+        pat1: []const u8,
+        eff1: Effect,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.parseDoc valid v1.Snap
+        \\  .version: u16 = 1
+        \\  .n_rules: usize = 2
+        \\  .pat0: []const u8
+        \\    "*.zig"
+        \\  .eff0: core.policy.Effect
+        \\    .allow
+        \\  .pat1: []const u8
+        \\    "*.secret"
+        \\  .eff1: core.policy.Effect
+        \\    .deny
+    ).expectEqual(Snap{
+        .version = doc.version,
+        .n_rules = doc.rules.len,
+        .pat0 = doc.rules[0].pattern,
+        .eff0 = doc.rules[0].effect,
+        .pat1 = doc.rules[1].pattern,
+        .eff1 = doc.rules[1].effect,
+    });
 }
 
 test "parseDoc missing version defaults to v1" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const json = "{\"rules\":[{\"pattern\":\"*\",\"effect\":\"allow\"}]}";
     const doc = try parseDoc(testing.allocator, json);
     defer deinitDoc(testing.allocator, doc);
-    try testing.expectEqual(@as(u16, 1), doc.version);
-    try testing.expectEqual(@as(usize, 1), doc.rules.len);
+
+    const Snap = struct {
+        version: u16,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.parseDoc missing version defaults to v1.Snap
+        \\  .version: u16 = 1
+        \\  .n_rules: usize = 1
+        \\  .pat0: []const u8
+        \\    "*"
+        \\  .eff0: core.policy.Effect
+        \\    .allow
+    ).expectEqual(Snap{
+        .version = doc.version,
+        .n_rules = doc.rules.len,
+        .pat0 = doc.rules[0].pattern,
+        .eff0 = doc.rules[0].effect,
+    });
 }
 
 test "parseDoc rejects unsupported version" {
@@ -864,6 +914,8 @@ test "parseDoc rejects unsupported version" {
 }
 
 test "parseDoc roundtrip" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const rules = [_]Rule{
         .{ .pattern = "*.zig", .effect = .deny, .tool = "bash" },
         .{ .pattern = "*", .effect = .allow },
@@ -875,24 +927,82 @@ test "parseDoc roundtrip" {
     const doc2 = try parseDoc(testing.allocator, json);
     defer deinitDoc(testing.allocator, doc2);
 
-    try testing.expectEqual(@as(u16, ver_current), doc2.version);
-    try testing.expectEqual(@as(usize, 2), doc2.rules.len);
-    try testing.expectEqual(Effect.deny, doc2.rules[0].effect);
-    try testing.expect(std.mem.eql(u8, "bash", doc2.rules[0].tool.?));
-    try testing.expectEqual(Effect.allow, doc2.rules[1].effect);
-    try testing.expect(doc2.rules[1].tool == null);
+    const Snap = struct {
+        version: u16,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+        tool0: []const u8,
+        pat1: []const u8,
+        eff1: Effect,
+        tool1: []const u8,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.parseDoc roundtrip.Snap
+        \\  .version: u16 = 1
+        \\  .n_rules: usize = 2
+        \\  .pat0: []const u8
+        \\    "*.zig"
+        \\  .eff0: core.policy.Effect
+        \\    .deny
+        \\  .tool0: []const u8
+        \\    "bash"
+        \\  .pat1: []const u8
+        \\    "*"
+        \\  .eff1: core.policy.Effect
+        \\    .allow
+        \\  .tool1: []const u8
+        \\    ""
+    ).expectEqual(Snap{
+        .version = doc2.version,
+        .n_rules = doc2.rules.len,
+        .pat0 = doc2.rules[0].pattern,
+        .eff0 = doc2.rules[0].effect,
+        .tool0 = doc2.rules[0].tool.?,
+        .pat1 = doc2.rules[1].pattern,
+        .eff1 = doc2.rules[1].effect,
+        .tool1 = doc2.rules[1].tool orelse "",
+    });
 }
 
 test "parseDoc with tool filter" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const json = "{\"version\":1,\"rules\":[{\"pattern\":\"*\",\"effect\":\"deny\",\"tool\":\"rm\"}]}";
     const doc = try parseDoc(testing.allocator, json);
     defer deinitDoc(testing.allocator, doc);
-    try testing.expectEqual(@as(usize, 1), doc.rules.len);
-    try testing.expect(std.mem.eql(u8, "rm", doc.rules[0].tool.?));
-    try testing.expectEqual(Effect.deny, doc.rules[0].effect);
+
+    const Snap = struct {
+        version: u16,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+        tool0: []const u8,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.parseDoc with tool filter.Snap
+        \\  .version: u16 = 1
+        \\  .n_rules: usize = 1
+        \\  .pat0: []const u8
+        \\    "*"
+        \\  .eff0: core.policy.Effect
+        \\    .deny
+        \\  .tool0: []const u8
+        \\    "rm"
+    ).expectEqual(Snap{
+        .version = doc.version,
+        .n_rules = doc.rules.len,
+        .pat0 = doc.rules[0].pattern,
+        .eff0 = doc.rules[0].effect,
+        .tool0 = doc.rules[0].tool.?,
+    });
 }
 
 test "signed policy bundle verifies" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const seed = try signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     const kp = try signing.KeyPair.fromSeed(seed);
     const rules = [_]Rule{
@@ -906,11 +1016,50 @@ test "signed policy bundle verifies" {
     const signed = try parseSignedDoc(testing.allocator, json);
     defer deinitSignedDoc(testing.allocator, signed);
 
-    try testing.expectEqual(@as(u16, ver_current), signed.doc.version);
-    try testing.expectEqual(@as(usize, 2), signed.doc.rules.len);
-    try testing.expectEqual(Effect.allow, signed.doc.rules[0].effect);
-    try testing.expectEqual(Effect.deny, signed.doc.rules[1].effect);
-    try testing.expectEqualSlices(u8, kp.publicKey().raw[0..], signed.pk.raw[0..]);
+    const pk_hex = std.fmt.bytesToHex(signed.pk.raw, .lower);
+    const sig_hex = std.fmt.bytesToHex(signed.sig.raw, .lower);
+
+    const Snap = struct {
+        version: u16,
+        n_rules: usize,
+        pat0: []const u8,
+        eff0: Effect,
+        pat1: []const u8,
+        eff1: Effect,
+        tool1: []const u8,
+        pk_hex: []const u8,
+        sig_hex: []const u8,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.signed policy bundle verifies.Snap
+        \\  .version: u16 = 1
+        \\  .n_rules: usize = 2
+        \\  .pat0: []const u8
+        \\    "*.zig"
+        \\  .eff0: core.policy.Effect
+        \\    .allow
+        \\  .pat1: []const u8
+        \\    "*.secret"
+        \\  .eff1: core.policy.Effect
+        \\    .deny
+        \\  .tool1: []const u8
+        \\    "read"
+        \\  .pk_hex: []const u8
+        \\    "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083"
+        \\  .sig_hex: []const u8
+        \\    "f12613ffcdfb4fdd333488591e9689080967f42ea950d2bc798553dae63a7d1fac31ae727640b94483e41e2ee045fb53161d285dafed2947fadd2dac380da60e"
+    ).expectEqual(Snap{
+        .version = signed.doc.version,
+        .n_rules = signed.doc.rules.len,
+        .pat0 = signed.doc.rules[0].pattern,
+        .eff0 = signed.doc.rules[0].effect,
+        .pat1 = signed.doc.rules[1].pattern,
+        .eff1 = signed.doc.rules[1].effect,
+        .tool1 = signed.doc.rules[1].tool.?,
+        .pk_hex = pk_hex[0..],
+        .sig_hex = sig_hex[0..],
+    });
 }
 
 test "signed policy bundle rejects unsigned doc" {
@@ -962,13 +1111,43 @@ fn testKeyPair() !signing.KeyPair {
 }
 
 test "loadApprovalBind falls back to version without signed policy" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const bind = try loadApprovalBind(testing.allocator, null, null);
     defer bind.deinit(testing.allocator);
-    try testing.expect(bind == .version);
-    try testing.expectEqual(@as(u16, ver_current), bind.version);
+
+    const Snap = struct {
+        kind: []const u8,
+        version: u16,
+        hash_hex: []const u8,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.loadApprovalBind falls back to version without signed policy.Snap
+        \\  .kind: []const u8
+        \\    "version"
+        \\  .version: u16 = 1
+        \\  .hash_hex: []const u8
+        \\    ""
+    ).expectEqual(Snap{
+        .kind = switch (bind) {
+            .version => "version",
+            .hash => "hash",
+        },
+        .version = switch (bind) {
+            .version => |v| v,
+            .hash => 0,
+        },
+        .hash_hex = switch (bind) {
+            .version => "",
+            .hash => |v| v,
+        },
+    });
 }
 
 test "loadApprovalBind hashes verified home and cwd policy docs" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1002,8 +1181,45 @@ test "loadApprovalBind hashes verified home and cwd policy docs" {
 
     const bind_b = try loadApprovalBind(testing.allocator, repo, home);
     defer bind_b.deinit(testing.allocator);
-    try testing.expect(bind_b == .hash);
-    try testing.expect(!std.mem.eql(u8, bind_a.hash, bind_b.hash));
+
+    const Snap = struct {
+        kind_a: []const u8,
+        hash_a: []const u8,
+        kind_b: []const u8,
+        hash_b: []const u8,
+        changed: bool,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.loadApprovalBind hashes verified home and cwd policy docs.Snap
+        \\  .kind_a: []const u8
+        \\    "hash"
+        \\  .hash_a: []const u8
+        \\    "d987061230d7a458ffa2a621077af11b7454192d8fea50c9d747bac2e10c4b11"
+        \\  .kind_b: []const u8
+        \\    "hash"
+        \\  .hash_b: []const u8
+        \\    "ef03b986f298e27e9c3e1e6d05f11f63081b0db9ff9804d2c69fc495c45262dc"
+        \\  .changed: bool = true
+    ).expectEqual(Snap{
+        .kind_a = switch (bind_a) {
+            .version => "version",
+            .hash => "hash",
+        },
+        .hash_a = switch (bind_a) {
+            .version => "",
+            .hash => |v| v,
+        },
+        .kind_b = switch (bind_b) {
+            .version => "version",
+            .hash => "hash",
+        },
+        .hash_b = switch (bind_b) {
+            .version => "",
+            .hash => |v| v,
+        },
+        .changed = !bind_a.eql(bind_b),
+    });
 }
 
 test "loadResolved merges verified bundles and hashes effective doc" {
@@ -1085,17 +1301,43 @@ test "loadResolved merges verified bundles and hashes effective doc" {
 }
 
 test "loadResolved returns stable empty effective hash" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const resolved = try loadResolved(testing.allocator, null, null);
     defer deinitResolved(testing.allocator, resolved);
 
-    try testing.expect(!resolved.has_files);
-    try testing.expectEqual(@as(usize, 0), resolved.doc.rules.len);
-    try testing.expect(!resolved.doc.lock.cfg);
-    try testing.expect(!resolved.doc.lock.env);
-    try testing.expect(!resolved.doc.lock.cli);
-    try testing.expect(!resolved.doc.lock.context);
-    try testing.expect(!resolved.doc.lock.system_prompt);
-    try testing.expectEqualStrings("6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103", resolved.hash_hex[0..]);
+    const Snap = struct {
+        has_files: bool,
+        n_rules: usize,
+        lock_cfg: bool,
+        lock_env: bool,
+        lock_cli: bool,
+        lock_context: bool,
+        lock_system_prompt: bool,
+        hash_hex: []const u8,
+    };
+
+    try oh.snap(@src(),
+        \\core.policy.test.loadResolved returns stable empty effective hash.Snap
+        \\  .has_files: bool = false
+        \\  .n_rules: usize = 0
+        \\  .lock_cfg: bool = false
+        \\  .lock_env: bool = false
+        \\  .lock_cli: bool = false
+        \\  .lock_context: bool = false
+        \\  .lock_system_prompt: bool = false
+        \\  .hash_hex: []const u8
+        \\    "6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103"
+    ).expectEqual(Snap{
+        .has_files = resolved.has_files,
+        .n_rules = resolved.doc.rules.len,
+        .lock_cfg = resolved.doc.lock.cfg,
+        .lock_env = resolved.doc.lock.env,
+        .lock_cli = resolved.doc.lock.cli,
+        .lock_context = resolved.doc.lock.context,
+        .lock_system_prompt = resolved.doc.lock.system_prompt,
+        .hash_hex = resolved.hash_hex[0..],
+    });
 }
 
 const empty_eff_hash = "6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103";
