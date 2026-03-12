@@ -1656,7 +1656,7 @@ fn auditResKind(kind: core.tools.Kind) core.audit.ResKind {
     return switch (kind) {
         .read, .write, .edit, .grep, .find, .ls => .file,
         .web => .net,
-        .agent, .bash => .cmd,
+        .agent, .bash, .skill => .cmd,
         .ask => .cfg,
     };
 }
@@ -1672,6 +1672,7 @@ fn auditResOp(kind: core.tools.Kind) []const u8 {
         .web => "request",
         .agent => "spawn",
         .bash => "run",
+        .skill => "run",
         .ask => "prompt",
     };
 }
@@ -2040,8 +2041,14 @@ fn runPrint(
 
     const mode = core.loop.ModeSink.from(PrintSink, &sink_impl, PrintSink.push);
     var reg: PolicyToolRegistry = undefined;
-    reg.init(pol, tools_rt.registry());
     var tool_audit_seq: u64 = 1;
+    const tool_audit = PolicyToolAudit{
+        .alloc = alloc,
+        .hooks = audit_hooks,
+        .sid = sid,
+        .seq = &tool_audit_seq,
+    };
+    reg.init(pol, tools_rt.registry(), tool_audit);
     var tool_auth_impl = PolicyToolAuth{
         .alloc = alloc,
         .pol = pol,
@@ -6711,8 +6718,14 @@ const TurnCtx = struct {
         defer if (prompt_hint) |p| self.alloc.free(p);
 
         var reg: PolicyToolRegistry = undefined;
-        reg.init(self.pol, self.tools_rt.registry());
         var tool_audit_seq: u64 = 1;
+        const tool_audit = PolicyToolAudit{
+            .alloc = self.alloc,
+            .hooks = self.audit_hooks,
+            .sid = opts.sid,
+            .seq = &tool_audit_seq,
+        };
+        reg.init(self.pol, self.tools_rt.registry(), tool_audit);
         var tool_auth_impl = PolicyToolAuth{
             .alloc = self.alloc,
             .pol = self.pol,
