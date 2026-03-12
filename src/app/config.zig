@@ -51,6 +51,7 @@ pub const Config = struct {
     session_dir: []u8,
     theme: ?[]u8 = null,
     provider_cmd: ?[]u8 = null,
+    ca_file: ?[]u8 = null,
     enabled_models: ?[][]u8 = null, // model cycle list
     policy_lock: core.policy.Lock = .{},
 
@@ -60,6 +61,7 @@ pub const Config = struct {
         alloc.free(self.session_dir);
         if (self.theme) |v| alloc.free(v);
         if (self.provider_cmd) |v| alloc.free(v);
+        if (self.ca_file) |v| alloc.free(v);
         if (self.enabled_models) |models| {
             for (models) |m| alloc.free(m);
             alloc.free(models);
@@ -142,6 +144,8 @@ const SettingsCfg = struct {
     theme: ?[]const u8 = null,
     providerCommand: ?[]const u8 = null,
     provider_cmd: ?[]const u8 = null,
+    caFile: ?[]const u8 = null,
+    ca_file: ?[]const u8 = null,
     enabledModels: ?[]const []const u8 = null,
     models: ?[]const u8 = null,
 };
@@ -209,7 +213,9 @@ pub fn discover(
 
     const cwd = try dir.realpathAlloc(alloc, ".");
     defer alloc.free(cwd);
-    out.policy_lock = try core.policy.loadLock(alloc, cwd, env.home);
+    const resolved = try core.policy.loadResolved(alloc, cwd, env.home);
+    defer core.policy.deinitResolved(alloc, resolved);
+    out.policy_lock = resolved.doc.lock;
 
     if (out.policy_lock.cfg) {
         switch (parsed.cfg) {
@@ -236,6 +242,7 @@ pub fn discover(
                 file_cfg.value.mode,
                 file_cfg.value.theme,
                 file_cfg.value.provider_cmd,
+                pick(file_cfg.value.ca_file, file_cfg.value.caFile),
                 error.InvalidFileMode,
             );
             if (file_cfg.value.models) |csv| {
@@ -265,6 +272,7 @@ pub fn discover(
             env.mode,
             env.theme,
             env.provider_cmd,
+            null,
             error.InvalidEnvMode,
         );
 
@@ -294,6 +302,7 @@ pub fn discover(
             null,
             null,
             parsed.provider_cmd,
+            null,
             error.InvalidMode,
         );
 
@@ -308,6 +317,10 @@ pub fn discover(
         return error.PolicyLockedSystemPrompt;
     }
 
+    if (resolved.doc.ca_file) |v| {
+        try replaceOptStr(alloc, &out.ca_file, v);
+    }
+
     return out;
 }
 
@@ -319,6 +332,8 @@ const FileCfg = struct {
     mode: ?[]const u8 = null,
     theme: ?[]const u8 = null,
     provider_cmd: ?[]const u8 = null,
+    caFile: ?[]const u8 = null,
+    ca_file: ?[]const u8 = null,
 };
 
 fn loadFile(
@@ -385,6 +400,7 @@ fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, com
         pick(pi.mode, pi.defaultMode),
         pi.theme,
         pick(pi.provider_cmd, pi.providerCommand),
+        pick(pi.ca_file, pi.caFile),
         invalid_mode,
     );
     if (pi.enabledModels) |arr| {
@@ -403,6 +419,7 @@ fn applyRawCfg(
     mode: ?[]const u8,
     theme: ?[]const u8,
     provider_cmd: ?[]const u8,
+    ca_file: ?[]const u8,
     comptime invalid_mode: anytype,
 ) Err!void {
     if (model) |v| try replaceStr(alloc, &out.model, v);
@@ -411,6 +428,7 @@ fn applyRawCfg(
     if (mode) |v| out.mode = try parseMode(v, invalid_mode);
     if (theme) |v| try replaceOptStr(alloc, &out.theme, v);
     if (provider_cmd) |v| try replaceOptStr(alloc, &out.provider_cmd, v);
+    if (ca_file) |v| try replaceOptStr(alloc, &out.ca_file, v);
 }
 
 /// Parse comma-separated model list into enabled_models.
@@ -526,6 +544,7 @@ test "config uses defaults when no sources are present" {
     try std.testing.expectEqualStrings(session_dir_default, cfg.session_dir);
     try std.testing.expect(cfg.theme == null);
     try std.testing.expect(cfg.provider_cmd == null);
+    try std.testing.expect(cfg.ca_file == null);
 }
 
 test "config precedence is file then env then flags" {
@@ -578,7 +597,7 @@ test "config explicit path loads file" {
 
     try tmp.dir.writeFile(.{
         .sub_path = "custom.json",
-        .data = "{\"mode\":\"print\",\"model\":\"m\",\"session_dir\":\"s\",\"theme\":\"light\",\"provider_cmd\":\"cmd\"}",
+        .data = "{\"mode\":\"print\",\"model\":\"m\",\"session_dir\":\"s\",\"theme\":\"light\",\"provider_cmd\":\"cmd\",\"ca_file\":\"/etc/pz/custom.pem\"}",
     });
 
     const parsed = try args.parse(&.{ "--config", "custom.json" });
@@ -593,6 +612,8 @@ test "config explicit path loads file" {
     try std.testing.expectEqualStrings("light", cfg.theme.?);
     try std.testing.expect(cfg.provider_cmd != null);
     try std.testing.expectEqualStrings("cmd", cfg.provider_cmd.?);
+    try std.testing.expect(cfg.ca_file != null);
+    try std.testing.expectEqualStrings("/etc/pz/custom.pem", cfg.ca_file.?);
 }
 
 test "config rejects invalid env mode and invalid file mode" {
@@ -644,7 +665,8 @@ test "config auto imports global settings from home" {
         \\  "sessionDir":"/tmp/home-sessions",
         \\  "defaultMode":"interactive",
         \\  "theme":"light",
-        \\  "providerCommand":"home-provider-cmd"
+        \\  "providerCommand":"home-provider-cmd",
+        \\  "caFile":"/etc/pz/home-ca.pem"
         \\}
         ,
     });
@@ -666,6 +688,8 @@ test "config auto imports global settings from home" {
     try std.testing.expectEqualStrings("light", cfg.theme.?);
     try std.testing.expect(cfg.provider_cmd != null);
     try std.testing.expectEqualStrings("home-provider-cmd", cfg.provider_cmd.?);
+    try std.testing.expect(cfg.ca_file != null);
+    try std.testing.expectEqualStrings("/etc/pz/home-ca.pem", cfg.ca_file.?);
 }
 
 test "config local auto file overrides global settings" {
@@ -682,11 +706,12 @@ test "config local auto file overrides global settings" {
         \\  "sessionDir":"home-sessions",
         \\  "defaultMode":"json",
         \\  "theme":"dark",
-        \\  "providerCommand":"home-cmd"
+        \\  "providerCommand":"home-cmd",
+        \\  "caFile":"home-ca.pem"
         \\}
         ,
     });
-    try writeAutoCfg(tmp.dir, "{\"mode\":\"print\",\"model\":\"local-model\",\"provider\":\"local-provider\",\"session_dir\":\"local-sessions\",\"theme\":\"light\",\"provider_cmd\":\"local-cmd\"}");
+    try writeAutoCfg(tmp.dir, "{\"mode\":\"print\",\"model\":\"local-model\",\"provider\":\"local-provider\",\"session_dir\":\"local-sessions\",\"theme\":\"light\",\"provider_cmd\":\"local-cmd\",\"ca_file\":\"local-ca.pem\"}");
 
     const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
     defer std.testing.allocator.free(home_abs);
@@ -705,6 +730,48 @@ test "config local auto file overrides global settings" {
     try std.testing.expectEqualStrings("light", cfg.theme.?);
     try std.testing.expect(cfg.provider_cmd != null);
     try std.testing.expectEqualStrings("local-cmd", cfg.provider_cmd.?);
+    try std.testing.expect(cfg.ca_file != null);
+    try std.testing.expectEqualStrings("local-ca.pem", cfg.ca_file.?);
+}
+
+test "config policy ca_file overrides local config" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeAutoCfg(tmp.dir, "{\"ca_file\":\"local-ca.pem\"}");
+    try tmp.dir.makePath(".pz");
+    const kp = try testPolicyKeyPair();
+    const raw = try core.policy.encodeSignedDoc(std.testing.allocator, .{
+        .rules = &.{},
+        .ca_file = "policy-ca.pem",
+    }, kp);
+    defer std.testing.allocator.free(raw);
+    try tmp.dir.writeFile(.{ .sub_path = policy_rel_path, .data = raw });
+
+    const parsed = try args.parse(&.{});
+    var cfg = try discover(std.testing.allocator, tmp.dir, parsed, .{});
+    defer cfg.deinit(std.testing.allocator);
+
+    try std.testing.expect(cfg.ca_file != null);
+    try std.testing.expectEqualStrings("policy-ca.pem", cfg.ca_file.?);
+}
+
+test "config rejects ca_file config under policy lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeAutoCfg(tmp.dir, "{\"ca_file\":\"local-ca.pem\"}");
+    const kp = try testPolicyKeyPair();
+    const raw = try core.policy.encodeSignedDoc(std.testing.allocator, .{
+        .rules = &.{},
+        .ca_file = "policy-ca.pem",
+        .lock = .{ .cfg = true },
+    }, kp);
+    defer std.testing.allocator.free(raw);
+    try tmp.dir.writeFile(.{ .sub_path = policy_rel_path, .data = raw });
+
+    const parsed = try args.parse(&.{});
+    try std.testing.expectError(error.PolicyLockedConfig, discover(std.testing.allocator, tmp.dir, parsed, .{}));
 }
 
 test "config rejects explicit file override under policy lock" {

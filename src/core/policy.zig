@@ -234,6 +234,7 @@ pub fn evalEnv(rules: []const Rule, key: []const u8, val: []const u8) Effect {
 pub const Doc = struct {
     version: u16 = ver_current,
     rules: []const Rule,
+    ca_file: ?[]const u8 = null,
     lock: Lock = .{},
 };
 
@@ -319,6 +320,13 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         init_n += 1;
     }
 
+    var ca_file: ?[]u8 = null;
+    errdefer if (ca_file) |v| alloc.free(v);
+    if (root.object.get("ca_file")) |ca_val| {
+        if (ca_val != .string) return error.UnexpectedToken;
+        ca_file = try alloc.dupe(u8, ca_val.string);
+    }
+
     var lock = Lock{};
     if (root.object.get("lock")) |lock_val| {
         if (lock_val != .object) return error.UnexpectedToken;
@@ -344,7 +352,7 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         }
     }
 
-    return .{ .version = ver, .rules = rules, .lock = lock };
+    return .{ .version = ver, .rules = rules, .ca_file = ca_file, .lock = lock };
 }
 
 pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
@@ -392,6 +400,10 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
 
     try w.writeAll("{\"version\":");
     try w.print("{d}", .{doc.version});
+    if (doc.ca_file) |ca_file| {
+        try w.writeAll(",\"ca_file\":");
+        try writeJsonStr(w, ca_file);
+    }
     if (doc.lock.cfg or doc.lock.env or doc.lock.cli or doc.lock.context or doc.lock.system_prompt) {
         try w.writeAll(",\"lock\":{");
         var first = true;
@@ -496,10 +508,16 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
 
     var total_rules: usize = 0;
     var lock = Lock{};
+    var ca_file: ?[]u8 = null;
+    errdefer if (ca_file) |v| alloc.free(v);
     for (docs[0..doc_n]) |maybe_doc| {
         const doc = maybe_doc.?;
         total_rules += doc.doc.rules.len;
         lock = lock.merge(doc.doc.lock);
+        if (doc.doc.ca_file) |v| {
+            if (ca_file) |curr| alloc.free(curr);
+            ca_file = try alloc.dupe(u8, v);
+        }
     }
 
     const rules = try alloc.alloc(Rule, total_rules);
@@ -523,6 +541,7 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
     const merged = Doc{
         .version = ver_current,
         .rules = rules,
+        .ca_file = ca_file,
         .lock = lock,
     };
     errdefer deinitDoc(alloc, merged);
@@ -645,6 +664,7 @@ pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {
         if (rule.pattern.len > 0) alloc.free(rule.pattern);
         if (rule.tool) |t| alloc.free(t);
     }
+    if (doc.ca_file) |v| alloc.free(v);
     alloc.free(doc.rules);
 }
 
@@ -920,7 +940,11 @@ test "parseDoc roundtrip" {
         .{ .pattern = "*.zig", .effect = .deny, .tool = "bash" },
         .{ .pattern = "*", .effect = .allow },
     };
-    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const doc = Doc{
+        .version = ver_current,
+        .rules = &rules,
+        .ca_file = "/etc/pz/policy.pem",
+    };
     const json = try encodeDoc(testing.allocator, doc);
     defer testing.allocator.free(json);
 
@@ -936,6 +960,7 @@ test "parseDoc roundtrip" {
         pat1: []const u8,
         eff1: Effect,
         tool1: []const u8,
+        ca_file: []const u8,
     };
 
     try oh.snap(@src(),
@@ -954,6 +979,8 @@ test "parseDoc roundtrip" {
         \\    .allow
         \\  .tool1: []const u8
         \\    ""
+        \\  .ca_file: []const u8
+        \\    "/etc/pz/policy.pem"
     ).expectEqual(Snap{
         .version = doc2.version,
         .n_rules = doc2.rules.len,
@@ -963,6 +990,7 @@ test "parseDoc roundtrip" {
         .pat1 = doc2.rules[1].pattern,
         .eff1 = doc2.rules[1].effect,
         .tool1 = doc2.rules[1].tool orelse "",
+        .ca_file = doc2.ca_file orelse "",
     });
 }
 
@@ -1237,6 +1265,7 @@ test "loadResolved merges verified bundles and hashes effective doc" {
         .rules = &.{
             .{ .pattern = "runtime/cmd/*", .effect = .allow },
         },
+        .ca_file = "/etc/pz/home.pem",
         .lock = .{ .cfg = true },
     }, kp);
     defer testing.allocator.free(home_raw);
@@ -1246,6 +1275,7 @@ test "loadResolved merges verified bundles and hashes effective doc" {
         .rules = &.{
             .{ .pattern = "runtime/subagent/*", .effect = .deny },
         },
+        .ca_file = "/etc/pz/cwd.pem",
         .lock = .{ .cli = true },
     }, kp);
     defer testing.allocator.free(cwd_raw);
@@ -1267,6 +1297,7 @@ test "loadResolved merges verified bundles and hashes effective doc" {
         eff0: Effect,
         pat1: []const u8,
         eff1: Effect,
+        ca_file: []const u8,
         lock_cfg: bool,
         lock_cli: bool,
     };
@@ -1275,7 +1306,7 @@ test "loadResolved merges verified bundles and hashes effective doc" {
         \\core.policy.test.loadResolved merges verified bundles and hashes effective doc.Snap
         \\  .has_files: bool = true
         \\  .hash_hex: []const u8
-        \\    "d23f10456d00f7df571bf9251b5a024d8a8cffba0c30a4829ef011fe2d6df86b"
+        \\    "3ca7448a886db5ed41cb6515305c862d327f6a340d45673eeecea30afd384518"
         \\  .n_rules: usize = 2
         \\  .pat0: []const u8
         \\    "runtime/cmd/*"
@@ -1285,6 +1316,8 @@ test "loadResolved merges verified bundles and hashes effective doc" {
         \\    "runtime/subagent/*"
         \\  .eff1: core.policy.Effect
         \\    .deny
+        \\  .ca_file: []const u8
+        \\    "/etc/pz/cwd.pem"
         \\  .lock_cfg: bool = true
         \\  .lock_cli: bool = true
     ).expectEqual(Snap{
@@ -1295,6 +1328,7 @@ test "loadResolved merges verified bundles and hashes effective doc" {
         .eff0 = resolved.doc.rules[0].effect,
         .pat1 = resolved.doc.rules[1].pattern,
         .eff1 = resolved.doc.rules[1].effect,
+        .ca_file = resolved.doc.ca_file orelse "",
         .lock_cfg = resolved.doc.lock.cfg,
         .lock_cli = resolved.doc.lock.cli,
     });
@@ -1314,6 +1348,7 @@ test "loadResolved returns stable empty effective hash" {
         lock_cli: bool,
         lock_context: bool,
         lock_system_prompt: bool,
+        ca_file: []const u8,
         hash_hex: []const u8,
     };
 
@@ -1326,6 +1361,8 @@ test "loadResolved returns stable empty effective hash" {
         \\  .lock_cli: bool = false
         \\  .lock_context: bool = false
         \\  .lock_system_prompt: bool = false
+        \\  .ca_file: []const u8
+        \\    ""
         \\  .hash_hex: []const u8
         \\    "6be6bac38f2d35217ca3cd98e36322f9e8fb6638564f5a87ff660589f6302103"
     ).expectEqual(Snap{
@@ -1336,6 +1373,7 @@ test "loadResolved returns stable empty effective hash" {
         .lock_cli = resolved.doc.lock.cli,
         .lock_context = resolved.doc.lock.context,
         .lock_system_prompt = resolved.doc.lock.system_prompt,
+        .ca_file = resolved.doc.ca_file orelse "",
         .hash_hex = resolved.hash_hex[0..],
     });
 }

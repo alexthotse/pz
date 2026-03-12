@@ -212,3 +212,25 @@ test "cli propagates session and tool selections to run command" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+test "cli parse carries ca_file from config" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{
+        .sub_path = config.auto_cfg_path,
+        .data = "{\"ca_file\":\"/etc/pz/cli.pem\"}",
+    });
+
+    var cmd = try parse(std.testing.allocator, tmp.dir, &.{}, .{});
+    defer cmd.deinit(std.testing.allocator);
+
+    switch (cmd) {
+        .run => |run| {
+            try std.testing.expect(run.cfg.ca_file != null);
+            try std.testing.expectEqualStrings("/etc/pz/cli.pem", run.cfg.ca_file.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
