@@ -1857,12 +1857,32 @@ pub fn execWithIo(
     return execWithIoHooks(alloc, run_cmd, in, out, .{});
 }
 
+const TuiHooks = struct {
+    stdin_fd: std.posix.fd_t = std.posix.STDIN_FILENO,
+    live: ?bool = null,
+    raw_mode: bool = true,
+    exit_on_idle: bool = false,
+    stop_after_completions: ?u8 = null,
+    submit_text: ?[]const u8 = null,
+};
+
 fn execWithIoHooks(
     alloc: std.mem.Allocator,
     run_cmd: cli.Run,
     in: ?std.Io.AnyReader,
     out: ?std.Io.AnyWriter,
     audit_hooks: AuditHooks,
+) (Err || anyerror)![]u8 {
+    return execWithIoTuiHooks(alloc, run_cmd, in, out, audit_hooks, .{});
+}
+
+fn execWithIoTuiHooks(
+    alloc: std.mem.Allocator,
+    run_cmd: cli.Run,
+    in: ?std.Io.AnyReader,
+    out: ?std.Io.AnyWriter,
+    audit_hooks: AuditHooks,
+    tui_hooks: TuiHooks,
 ) (Err || anyerror)![]u8 {
     var provider_rt: ProviderRuntime = undefined;
     var native_rt: NativeProviderRuntime = undefined;
@@ -2002,6 +2022,7 @@ fn execWithIoHooks(
                     sys_prompt,
                     has_native_rt and native_rt.isSub(),
                     hooks,
+                    tui_hooks,
                 ),
                 .rpc => try runRpc(
                     alloc,
@@ -2288,6 +2309,7 @@ fn runTui(
     sys_prompt_arg: ?[]const u8,
     is_sub: bool,
     audit_hooks: AuditHooks,
+    tui_hooks: TuiHooks,
 ) !void {
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
@@ -2338,14 +2360,14 @@ fn runTui(
     };
     const mode = core.loop.ModeSink.from(TuiSink, &sink_impl, TuiSink.push);
 
-    const stdin_fd = std.posix.STDIN_FILENO;
-    const is_tty = std.posix.isatty(stdin_fd);
+    const stdin_fd = tui_hooks.stdin_fd;
+    const is_tty = tui_hooks.live orelse std.posix.isatty(stdin_fd);
 
     // Enable raw mode early so the InputWatcher's poll() works for -p prompts
-    if (is_tty) {
+    if (is_tty and tui_hooks.raw_mode) {
         if (!tui_term.enableRaw(stdin_fd)) return error.TerminalSetupFailed;
     }
-    defer if (is_tty) tui_term.restore(stdin_fd);
+    defer if (is_tty and tui_hooks.raw_mode) tui_term.restore(stdin_fd);
 
     var watcher = try InputWatcher.init(stdin_fd);
     defer watcher.deinit();
@@ -2584,7 +2606,12 @@ fn runTui(
         defer pending.deinit(alloc);
         const input_mode: tui_panels.InputMode = .steering;
         var retried_overflow = false;
+        var stop_after_completions = tui_hooks.stop_after_completions;
         syncInputFooter(&ui, input_mode, pending.total());
+        if (tui_hooks.submit_text) |prompt| {
+            try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, &retried_overflow);
+            try ui.draw(out);
+        }
 
         while (true) {
             try maybeShowVersionUpdate(alloc, &ui, &ver_check, &ver_notice_done, out);
@@ -2910,16 +2937,7 @@ fn runTui(
                                 continue;
                             }
 
-                            try live_turn.start(&live_tctx, .{
-                                .sid = sid.*,
-                                .prompt = prompt,
-                                .model = model,
-                                .provider_label = provider_label,
-                                .provider_opts = popts,
-                                .system_prompt = sys_prompt,
-                            });
-                            retried_overflow = false;
-                            ui.pn.run_state = .streaming;
+                            try startLiveTurnWithPrompt(&live_turn, &live_tctx, &ui, sid.*, prompt, model, provider_label, popts, sys_prompt, &retried_overflow);
                             try ui.draw(out);
                         },
                         .cancel => {
@@ -3175,11 +3193,22 @@ fn runTui(
                         } else {
                             ui.pn.run_state = .idle;
                         }
+                        if (stop_after_completions) |n| {
+                            const next_n = n - 1;
+                            stop_after_completions = next_n;
+                            if (next_n == 0 and pending.total() == 0 and !live_turn.isRunning()) {
+                                try flushBgDone(alloc, &ui, &bg_mgr);
+                                try syncBgFooter(alloc, &ui, &bg_mgr);
+                                try ui.draw(out);
+                                return;
+                            }
+                        }
                     }
 
                     try flushBgDone(alloc, &ui, &bg_mgr);
                     try syncBgFooter(alloc, &ui, &bg_mgr);
                     try ui.draw(out);
+                    if (tui_hooks.exit_on_idle and !live_turn.isRunning() and pending.total() == 0) return;
                 },
                 .paste => |text| {
                     if (text.len > 0) {
@@ -4936,6 +4965,30 @@ fn buildSettingsOverlay(alloc: std.mem.Allocator, ui: *const tui_harness.Ui, aut
         .kind = .settings,
         .toggles = toggles,
     };
+}
+
+fn startLiveTurnWithPrompt(
+    live_turn: *LiveTurn,
+    live_tctx: *const TurnCtx,
+    ui: *tui_harness.Ui,
+    sid: []const u8,
+    prompt: []const u8,
+    model: []const u8,
+    provider_label: []const u8,
+    popts: core.providers.Opts,
+    sys_prompt: ?[]const u8,
+    retried_overflow: *bool,
+) !void {
+    try live_turn.start(live_tctx, .{
+        .sid = sid,
+        .prompt = prompt,
+        .model = model,
+        .provider_label = provider_label,
+        .provider_opts = popts,
+        .system_prompt = sys_prompt,
+    });
+    retried_overflow.* = false;
+    ui.pn.run_state = .streaming;
 }
 
 fn normalizeRpcCmd(raw: []const u8) []const u8 {
@@ -8266,6 +8319,165 @@ test "runtime executes tui mode path with provided prompt" {
         .prompt => |out| try std.testing.expectEqualStrings("ping", out.text),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "runtime tui overflow retries once with injected live stdin" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+
+    var cfg = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    const stdin_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+    defer std.posix.close(stdin_pipe[0]);
+    defer std.posix.close(stdin_pipe[1]);
+
+    const RetryStream = struct {
+        alloc: std.mem.Allocator,
+        evs: []const core.providers.Ev,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?core.providers.Ev {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(self: *@This()) void {
+            self.alloc.destroy(self);
+        }
+    };
+
+    const RetryProvider = struct {
+        alloc: std.mem.Allocator,
+        starts: u8 = 0,
+        const first = [_]core.providers.Ev{
+            .{ .stop = .{ .reason = .max_out } },
+        };
+        const second = [_]core.providers.Ev{
+            .{ .text = "retry-ok" },
+            .{ .stop = .{ .reason = .done } },
+        };
+
+        fn asProvider(self: *@This()) core.providers.Provider {
+            return core.providers.Provider.from(@This(), self, start);
+        }
+
+        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
+            self.starts += 1;
+            const stream = try self.alloc.create(RetryStream);
+            stream.* = .{
+                .alloc = self.alloc,
+                .evs = if (self.starts == 1) &first else &second,
+            };
+            return core.providers.Stream.from(RetryStream, stream, RetryStream.next, RetryStream.deinit);
+        }
+    };
+    var provider_impl = RetryProvider{ .alloc = std.testing.allocator };
+
+    var pol = try RuntimePolicy.load(std.testing.allocator);
+    defer pol.deinit();
+    var tools_rt = core.tools.builtin.Runtime.init(.{
+        .alloc = std.testing.allocator,
+        .tool_mask = core.tools.builtin.mask_all,
+    });
+    const dir = try tmp.dir.openDir("sess", .{ .iterate = true });
+    var fs_store = try core.session.fs_store.Store.init(.{
+        .alloc = std.testing.allocator,
+        .dir = dir,
+        .flush = .{ .always = {} },
+        .replay = .{},
+    });
+    defer fs_store.deinit();
+    var sid = try std.testing.allocator.dupe(u8, "s1");
+    defer std.testing.allocator.free(sid);
+
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    try runTui(
+        std.testing.allocator,
+        cfg,
+        &sid,
+        provider_impl.asProvider(),
+        fs_store.asSessionStore(),
+        &pol,
+        &tools_rt,
+        eofReader(),
+        out_fbs.writer().any(),
+        "sess",
+        false,
+        null,
+        false,
+        .{},
+        .{
+            .stdin_fd = stdin_pipe[0],
+            .live = true,
+            .raw_mode = false,
+            .stop_after_completions = 1,
+            .submit_text = "ping",
+        },
+    );
+
+    var session_dir = try std.fs.openDirAbsolute(sess_abs, .{});
+    defer session_dir.close();
+    var rdr = try core.session.ReplayReader.init(std.testing.allocator, session_dir, sid, .{});
+    defer rdr.deinit();
+
+    var events = std.ArrayList(u8).empty;
+    defer events.deinit(std.testing.allocator);
+    const w = events.writer(std.testing.allocator);
+    while (try rdr.next()) |ev| {
+        switch (ev.data) {
+            .prompt => |p| try w.print("prompt:{s}\n", .{p.text}),
+            .text => |t| try w.print("text:{s}\n", .{t.text}),
+            else => {},
+        }
+    }
+
+    const Snap = struct {
+        retry_ct: u8,
+        saw_notice: bool,
+        saw_retry_text: bool,
+        events: []const u8,
+    };
+    try oh.snap(@src(),
+        \\app.runtime.test.runtime tui overflow retries once with injected live stdin.Snap
+        \\  .retry_ct: u8 = 2
+        \\  .saw_notice: bool = false
+        \\  .saw_retry_text: bool = false
+        \\  .events: []const u8
+        \\    "prompt:ping
+        \\prompt:ping
+        \\text:retry-ok
+        \\"
+    ).expectEqual(Snap{
+        .retry_ct = provider_impl.starts,
+        .saw_notice = std.mem.indexOf(u8, out_fbs.getWritten(), "[overflow detected: compacting and retrying]") != null,
+        .saw_retry_text = std.mem.indexOf(u8, out_fbs.getWritten(), "retry-ok") != null,
+        .events = events.items,
+    });
 }
 
 test "runtime tui reports error when no provider available" {
