@@ -313,6 +313,9 @@ pub const ChildProc = struct {
         proc.stdin_behavior = .Pipe;
         proc.stdout_behavior = .Pipe;
         proc.stderr_behavior = .Ignore;
+        if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .wasi) {
+            proc.pgid = 0;
+        }
         try proc.spawn();
         const stdin_file = proc.stdin orelse return error.BrokenPipe;
         const stdout_file = proc.stdout orelse return error.BrokenPipe;
@@ -906,4 +909,30 @@ test "spawned child inherits only stdio fds" {
     const out = res.out orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("0,1,2", out.text);
     try testing.expect(std.mem.indexOfScalar(u8, out.text, @as(u8, '3')) == null);
+}
+
+test "spawned child runs in its own process group" {
+    const build_options = @import("build_options");
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .pgid_report, "agent-child", hash);
+    defer child.deinit();
+
+    _ = try child.connect();
+    const res = try child.runReq(.{
+        .id = "job-pgid",
+        .prompt = "report pgid",
+    });
+    const out = res.out orelse return error.TestUnexpectedResult;
+
+    var it = std.mem.tokenizeScalar(u8, out.text, ' ');
+    const pid_raw = it.next() orelse return error.TestUnexpectedResult;
+    const pgid_raw = it.next() orelse return error.TestUnexpectedResult;
+    const pid = try std.fmt.parseInt(i32, pid_raw["pid=".len..], 10);
+    const pgid = try std.fmt.parseInt(i32, pgid_raw["pgid=".len..], 10);
+
+    try testing.expectEqual(pid, pgid);
+    try testing.expect(pgid != std.c.getpid());
 }
