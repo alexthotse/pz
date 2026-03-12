@@ -13,10 +13,10 @@ pub const Client = struct {
     http: std.http.Client,
     ca_file: ?[]u8,
 
-    pub fn init(alloc: std.mem.Allocator, ca_file: ?[]const u8) !Client {
-        var auth_res = try auth_mod.loadForProvider(alloc, .openai);
+    pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Client {
+        var auth_res = try auth_mod.loadForProviderWithHooks(alloc, .openai, hooks);
         errdefer auth_res.deinit();
-        const ca_dup = if (ca_file) |path| try alloc.dupe(u8, path) else null;
+        const ca_dup = if (hooks.ca_file) |path| try alloc.dupe(u8, path) else null;
         errdefer if (ca_dup) |path| alloc.free(path);
         return .{
             .alloc = alloc,

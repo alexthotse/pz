@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const oauth_callback = @import("oauth_callback.zig");
 const audit = @import("../audit.zig");
 const fs_secure = @import("../fs_secure.zig");
+const policy = @import("../policy.zig");
 const core_tls = @import("../tls.zig");
 
 pub const Auth = union(enum) {
@@ -45,6 +46,7 @@ pub const Hooks = struct {
 
     home_override: ?[]const u8 = null,
     ca_file: ?[]const u8 = null,
+    lock: policy.Lock = .{},
     get_home: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = std.process.getEnvVarOwned,
     exchange_code: *const fn (std.mem.Allocator, *const OAuthSpec, []const u8, []const u8, []const u8, []const u8, Self) anyerror!OAuth = exchangeAuthorizationCode,
     refresh_fetch: *const fn (std.mem.Allocator, Provider, OAuth, Self) anyerror!OAuth = fetchRefreshedOAuthForProvider,
@@ -208,27 +210,39 @@ pub fn load(alloc: std.mem.Allocator) !Result {
 }
 
 pub fn loadForProvider(alloc: std.mem.Allocator, provider: Provider) !Result {
-    return loadForProviderHome(alloc, std.process.getEnvVarOwned, provider);
+    return loadForProviderWithHooks(alloc, provider, .{});
+}
+
+pub fn loadForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, hooks: Hooks) !Result {
+    return loadForProviderHome(alloc, hooks, provider);
 }
 
 fn loadForProviderHome(
     alloc: std.mem.Allocator,
-    comptime get_home: fn (std.mem.Allocator, []const u8) anyerror![]u8,
+    hooks: Hooks,
     provider: Provider,
 ) !Result {
     var arena = std.heap.ArenaAllocator.init(alloc);
     errdefer arena.deinit();
     const ar = arena.allocator();
 
-    if (authFromEnv(providerEnvAuth(ar, provider))) |auth| {
+    if (!hooks.lock.auth) if (authFromEnv(providerEnvAuth(ar, provider))) |auth| {
         return .{ .arena = arena, .auth = auth };
-    }
+    };
 
-    const home = get_home(ar, "HOME") catch return error.AuthNotFound;
+    const home = try resolveHome(ar, hooks);
     return .{
         .arena = arena,
         .auth = try loadFileAuthForProvider(ar, home, provider),
     };
+}
+
+fn resolveHome(alloc: std.mem.Allocator, hooks: Hooks) ![]u8 {
+    if (hooks.home_override) |path| {
+        if (hooks.lock.auth) return error.AuthStoreLocked;
+        return alloc.dupe(u8, path);
+    }
+    return hooks.get_home(alloc, "HOME");
 }
 
 const EnvAuth = struct {
@@ -933,8 +947,7 @@ fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, 
 }
 
 fn saveOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, oauth: OAuth, hooks: Hooks) !void {
-    if (hooks.home_override) |home| return saveOAuthForProviderHome(alloc, home, provider, oauth);
-    const home = try hooks.get_home(alloc, "HOME");
+    const home = try resolveHome(alloc, hooks);
     defer alloc.free(home);
     return saveOAuthForProviderHome(alloc, home, provider, oauth);
 }
@@ -1015,10 +1028,7 @@ pub fn logout(alloc: std.mem.Allocator, provider: Provider) !void {
 }
 
 pub fn logoutWithHooks(alloc: std.mem.Allocator, provider: Provider, hooks: Hooks) !void {
-    const home = if (hooks.home_override) |path|
-        try alloc.dupe(u8, path)
-    else
-        try hooks.get_home(alloc, "HOME");
+    const home = try resolveHome(alloc, hooks);
     defer alloc.free(home);
     return logoutHomeWithHooks(alloc, home, provider, hooks);
 }
@@ -1066,10 +1076,7 @@ pub fn saveApiKey(alloc: std.mem.Allocator, provider: Provider, key: []const u8)
 }
 
 pub fn saveApiKeyWithHooks(alloc: std.mem.Allocator, provider: Provider, key: []const u8, hooks: Hooks) !void {
-    const home = if (hooks.home_override) |path|
-        try alloc.dupe(u8, path)
-    else
-        try hooks.get_home(alloc, "HOME");
+    const home = try resolveHome(alloc, hooks);
     defer alloc.free(home);
     return saveApiKeyHomeWithHooks(alloc, home, provider, key, hooks);
 }
@@ -1385,6 +1392,60 @@ test "listLoggedInHome returns stored providers without leaks" {
         \\openai
         \\"
     ).expectEqual(out.items);
+}
+
+test "auth lock still allows canonical file auth" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-file");
+
+    const Home = struct {
+        var path: []const u8 = undefined;
+
+        fn get(alloc: std.mem.Allocator, key: []const u8) ![]u8 {
+            try std.testing.expectEqualStrings("HOME", key);
+            return alloc.dupe(u8, path);
+        }
+    };
+    Home.path = home;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const resolved = try resolveHome(ar, .{
+        .lock = .{ .auth = true },
+        .get_home = Home.get,
+    });
+    const got = try loadFileAuthForProvider(ar, resolved, .openai);
+    const key = switch (got) {
+        .api_key => |v| try std.testing.allocator.dupe(u8, v),
+        else => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(key);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "sk-file"
+    ).expectEqual(key);
+}
+
+test "saveApiKeyWithHooks rejects home override under auth lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    try std.testing.expectError(error.AuthStoreLocked, saveApiKeyWithHooks(std.testing.allocator, .openai, "sk-openai", .{
+        .home_override = home,
+        .lock = .{ .auth = true },
+    }));
 }
 
 test "authFromEnv prefers oauth token over api key" {

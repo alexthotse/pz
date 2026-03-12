@@ -21,6 +21,7 @@ pub const Lock = struct {
     env: bool = false,
     cli: bool = false,
     context: bool = false,
+    auth: bool = false,
     system_prompt: bool = false,
 
     pub fn merge(a: Lock, b: Lock) Lock {
@@ -29,6 +30,7 @@ pub const Lock = struct {
             .env = a.env or b.env,
             .cli = a.cli or b.cli,
             .context = a.context or b.context,
+            .auth = a.auth or b.auth,
             .system_prompt = a.system_prompt or b.system_prompt,
         };
     }
@@ -346,6 +348,10 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
             if (v != .bool) return error.UnexpectedToken;
             lock.context = v.bool;
         }
+        if (lock_val.object.get("auth")) |v| {
+            if (v != .bool) return error.UnexpectedToken;
+            lock.auth = v.bool;
+        }
         if (lock_val.object.get("system_prompt")) |v| {
             if (v != .bool) return error.UnexpectedToken;
             lock.system_prompt = v.bool;
@@ -404,7 +410,7 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
         try w.writeAll(",\"ca_file\":");
         try writeJsonStr(w, ca_file);
     }
-    if (doc.lock.cfg or doc.lock.env or doc.lock.cli or doc.lock.context or doc.lock.system_prompt) {
+    if (doc.lock.cfg or doc.lock.env or doc.lock.cli or doc.lock.context or doc.lock.auth or doc.lock.system_prompt) {
         try w.writeAll(",\"lock\":{");
         var first = true;
         if (doc.lock.cfg) {
@@ -424,6 +430,11 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
         if (doc.lock.context) {
             if (!first) try w.writeByte(',');
             try w.writeAll("\"context\":true");
+            first = false;
+        }
+        if (doc.lock.auth) {
+            if (!first) try w.writeByte(',');
+            try w.writeAll("\"auth\":true");
             first = false;
         }
         if (doc.lock.system_prompt) {
@@ -1347,6 +1358,7 @@ test "loadResolved returns stable empty effective hash" {
         lock_env: bool,
         lock_cli: bool,
         lock_context: bool,
+        lock_auth: bool,
         lock_system_prompt: bool,
         ca_file: []const u8,
         hash_hex: []const u8,
@@ -1360,6 +1372,7 @@ test "loadResolved returns stable empty effective hash" {
         \\  .lock_env: bool = false
         \\  .lock_cli: bool = false
         \\  .lock_context: bool = false
+        \\  .lock_auth: bool = false
         \\  .lock_system_prompt: bool = false
         \\  .ca_file: []const u8
         \\    ""
@@ -1372,6 +1385,7 @@ test "loadResolved returns stable empty effective hash" {
         .lock_env = resolved.doc.lock.env,
         .lock_cli = resolved.doc.lock.cli,
         .lock_context = resolved.doc.lock.context,
+        .lock_auth = resolved.doc.lock.auth,
         .lock_system_prompt = resolved.doc.lock.system_prompt,
         .ca_file = resolved.doc.ca_file orelse "",
         .hash_hex = resolved.hash_hex[0..],
