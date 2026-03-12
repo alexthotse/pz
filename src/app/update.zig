@@ -5,6 +5,8 @@ const core = @import("../core/mod.zig");
 const app_tls = @import("tls.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
 const version = @import("version.zig");
+const http_mock = @import("../test/http_mock.zig");
+const time_mock = @import("../test/time_mock.zig");
 
 const ReleaseAsset = struct {
     name: []const u8,
@@ -586,6 +588,7 @@ fn httpGetResultOnce(
     var req = try http.request(.GET, uri, .{
         .extra_headers = extra_headers,
         .keep_alive = false,
+        .redirect_behavior = @enumFromInt(3),
     });
     defer req.deinit();
 
@@ -1415,4 +1418,347 @@ test "shouldRetryForBadHeaderResponse only retries matching 400 responses" {
     };
     defer non_match.deinit(std.testing.allocator);
     try std.testing.expect(!shouldRetryForBadHeaderResponse(non_match));
+}
+
+test "update e2e verify fail stays local and audits deterministically" {
+    if (targetAssetName() == null) return;
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const asset_name = targetAssetName() orelse unreachable;
+    const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
+    defer std.testing.allocator.free(archive);
+    const sig_hex = try updateTestSigHexAlloc(std.testing.allocator, archive, false);
+    defer std.testing.allocator.free(sig_hex);
+
+    var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
+    var server = try http_mock.Server.initSeq(&resps);
+    defer server.deinit();
+
+    const base_url = try server.urlAlloc(std.testing.allocator, "");
+    defer std.testing.allocator.free(base_url);
+    const latest_url = try server.urlAlloc(std.testing.allocator, "/release/latest");
+    defer std.testing.allocator.free(latest_url);
+    const archive_url = try server.urlAlloc(std.testing.allocator, "/asset/archive");
+    defer std.testing.allocator.free(archive_url);
+    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.sig");
+    defer std.testing.allocator.free(sig_url);
+    const release_body = try updateReleaseBodyAlloc(std.testing.allocator, "v9.9.9", asset_name, archive_url, sig_url);
+    defer std.testing.allocator.free(release_body);
+
+    resps[0] = .{ .status = "302 Found", .headers = &.{"Location: /release/meta"} };
+    resps[1] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: application/json"},
+        .body = release_body,
+    };
+    resps[2] = .{ .status = "302 Found", .headers = &.{"Location: /blob/archive"} };
+    resps[3] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: application/octet-stream"},
+        .body = archive,
+    };
+    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.sig"} };
+    resps[5] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: text/plain"},
+        .body = sig_hex,
+    };
+
+    var cap = AuditCap{};
+    defer cap.deinit(std.testing.allocator);
+
+    const FailHooks = struct {
+        var base: []const u8 = undefined;
+        var latest: []const u8 = undefined;
+        var clk = time_mock.FixedMs{ .now_ms = 111 };
+
+        fn nowMs() i64 {
+            return clk.nowMs();
+        }
+
+        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.startsWith(u8, url, base)) return;
+            return error.TestUnexpectedResult;
+        }
+
+        fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
+            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+                latest
+            else if (std.mem.startsWith(u8, url, base))
+                url
+            else
+                return error.TestUnexpectedResult;
+            return httpGetResult(alloc, local_url, accept, limit);
+        }
+
+        fn selfExePath(_: std.mem.Allocator) ![]u8 {
+            return error.TestUnexpectedResult;
+        }
+
+        fn installBinary(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestUnexpectedResult;
+        }
+    };
+    FailHooks.base = base_url;
+    FailHooks.latest = latest_url;
+
+    const thr = try server.spawn();
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = FailHooks.httpGet,
+        .self_exe_path = FailHooks.selfExePath,
+        .install_binary = FailHooks.installBinary,
+        .check_update_host = FailHooks.checkHost,
+        .emit_audit_ctx = &cap,
+        .emit_audit = AuditCap.emit,
+        .now_ms = FailHooks.nowMs,
+    });
+    try server.join(thr);
+    defer out.deinit(std.testing.allocator);
+
+    const reqs = try joinRequestLinesAlloc(std.testing.allocator, &server);
+    defer std.testing.allocator.free(reqs);
+    const rows = try cap.joinedAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(rows);
+
+    const Snap = struct {
+        ok: bool,
+        msg: []const u8,
+        reqs: []const u8,
+        rows: []const u8,
+    };
+    try oh.snap(@src(),
+        \\app.update.test.update e2e verify fail stays local and audits deterministically.Snap
+        \\  .ok: bool = false
+        \\  .msg: []const u8
+        \\    "upgrade failed: signature verification failed for pz-aarch64-macos.tar.gz
+        \\next: retry later or install manually from https://github.com/joelreymont/pz/releases/latest
+        \\"
+        \\  .reqs: []const u8
+        \\    "GET /release/latest HTTP/1.1
+        \\GET /release/meta HTTP/1.1
+        \\GET /asset/archive HTTP/1.1
+        \\GET /blob/archive HTTP/1.1
+        \\GET /asset/archive.sig HTTP/1.1
+        \\GET /blob/archive.sig HTTP/1.1"
+        \\  .rows: []const u8
+        \\    "{"v":1,"ts_ms":111,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":111,"sid":"upgrade","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"signature verify failed","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:b72e4e6e8646e320]","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(Snap{
+        .ok = out.ok,
+        .msg = out.msg,
+        .reqs = reqs,
+        .rows = rows,
+    });
+}
+
+test "update e2e verify success installs via local redirects and audits deterministically" {
+    if (targetAssetName() == null) return;
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const asset_name = targetAssetName() orelse unreachable;
+    const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
+    defer std.testing.allocator.free(archive);
+    const sig_hex = try updateTestSigHexAlloc(std.testing.allocator, archive, true);
+    defer std.testing.allocator.free(sig_hex);
+
+    var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
+    var server = try http_mock.Server.initSeq(&resps);
+    defer server.deinit();
+
+    const base_url = try server.urlAlloc(std.testing.allocator, "");
+    defer std.testing.allocator.free(base_url);
+    const latest_url = try server.urlAlloc(std.testing.allocator, "/release/latest");
+    defer std.testing.allocator.free(latest_url);
+    const archive_url = try server.urlAlloc(std.testing.allocator, "/asset/archive");
+    defer std.testing.allocator.free(archive_url);
+    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.sig");
+    defer std.testing.allocator.free(sig_url);
+    const release_body = try updateReleaseBodyAlloc(std.testing.allocator, "v9.9.9", asset_name, archive_url, sig_url);
+    defer std.testing.allocator.free(release_body);
+
+    resps[0] = .{ .status = "302 Found", .headers = &.{"Location: /release/meta"} };
+    resps[1] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: application/json"},
+        .body = release_body,
+    };
+    resps[2] = .{ .status = "302 Found", .headers = &.{"Location: /blob/archive"} };
+    resps[3] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: application/octet-stream"},
+        .body = archive,
+    };
+    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.sig"} };
+    resps[5] = .{
+        .status = "200 OK",
+        .headers = &.{"Content-Type: text/plain"},
+        .body = sig_hex,
+    };
+
+    var cap = AuditCap{};
+    defer cap.deinit(std.testing.allocator);
+
+    const SuccessHooks = struct {
+        var base: []const u8 = undefined;
+        var latest: []const u8 = undefined;
+        var clk = time_mock.FixedMs{ .now_ms = 222 };
+        var installed_path: ?[]u8 = null;
+        var installed_bin: ?[]u8 = null;
+
+        fn deinit(alloc: std.mem.Allocator) void {
+            if (installed_path) |v| alloc.free(v);
+            if (installed_bin) |v| alloc.free(v);
+            installed_path = null;
+            installed_bin = null;
+        }
+
+        fn nowMs() i64 {
+            return clk.nowMs();
+        }
+
+        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.startsWith(u8, url, base)) return;
+            return error.TestUnexpectedResult;
+        }
+
+        fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
+            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+                latest
+            else if (std.mem.startsWith(u8, url, base))
+                url
+            else
+                return error.TestUnexpectedResult;
+            return httpGetResult(alloc, local_url, accept, limit);
+        }
+
+        fn selfExePath(alloc: std.mem.Allocator) ![]u8 {
+            return alloc.dupe(u8, "/tmp/pz-self-test");
+        }
+
+        fn installBinary(alloc: std.mem.Allocator, exe_path: []const u8, binary: []const u8) !void {
+            installed_path = try alloc.dupe(u8, exe_path);
+            installed_bin = try alloc.dupe(u8, binary);
+        }
+    };
+    SuccessHooks.base = base_url;
+    SuccessHooks.latest = latest_url;
+    SuccessHooks.deinit(std.testing.allocator);
+    defer SuccessHooks.deinit(std.testing.allocator);
+
+    const thr = try server.spawn();
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = SuccessHooks.httpGet,
+        .self_exe_path = SuccessHooks.selfExePath,
+        .install_binary = SuccessHooks.installBinary,
+        .check_update_host = SuccessHooks.checkHost,
+        .emit_audit_ctx = &cap,
+        .emit_audit = AuditCap.emit,
+        .now_ms = SuccessHooks.nowMs,
+    });
+    try server.join(thr);
+    defer out.deinit(std.testing.allocator);
+
+    const reqs = try joinRequestLinesAlloc(std.testing.allocator, &server);
+    defer std.testing.allocator.free(reqs);
+    const rows = try cap.joinedAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(rows);
+
+    const Snap = struct {
+        ok: bool,
+        msg: []const u8,
+        install_path: ?[]const u8,
+        install_bin: ?[]const u8,
+        reqs: []const u8,
+        rows: []const u8,
+    };
+    try oh.snap(@src(),
+        \\app.update.test.update e2e verify success installs via local redirects and audits deterministically.Snap
+        \\  .ok: bool = true
+        \\  .msg: []const u8
+        \\    "updated 0.1.8 -> v9.9.9; verified signed archive; restart pz to use the new binary
+        \\"
+        \\  .install_path: ?[]const u8
+        \\    "/tmp/pz-self-test"
+        \\  .install_bin: ?[]const u8
+        \\    "next-pz
+        \\"
+        \\  .reqs: []const u8
+        \\    "GET /release/latest HTTP/1.1
+        \\GET /release/meta HTTP/1.1
+        \\GET /asset/archive HTTP/1.1
+        \\GET /blob/archive HTTP/1.1
+        \\GET /asset/archive.sig HTTP/1.1
+        \\GET /blob/archive.sig HTTP/1.1"
+        \\  .rows: []const u8
+        \\    "{"v":1,"ts_ms":222,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
+        \\{"v":1,"ts_ms":222,"sid":"upgrade","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade complete","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:d7880361f7426c62]","vis":"mask"}},"attrs":[]}"
+    ).expectEqual(Snap{
+        .ok = out.ok,
+        .msg = out.msg,
+        .install_path = SuccessHooks.installed_path,
+        .install_bin = SuccessHooks.installed_bin,
+        .reqs = reqs,
+        .rows = rows,
+    });
+}
+
+const AuditCap = struct {
+    rows: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        for (self.rows.items) |row| alloc.free(row);
+        self.rows.deinit(alloc);
+    }
+
+    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const raw = try core.audit.encodeAlloc(alloc, ent);
+        try self.rows.append(alloc, raw);
+    }
+
+    fn joinedAlloc(self: *const @This(), alloc: std.mem.Allocator) ![]u8 {
+        return std.mem.join(alloc, "\n", self.rows.items);
+    }
+};
+
+fn updateTestSigHexAlloc(alloc: std.mem.Allocator, archive: []const u8, valid: bool) ![]u8 {
+    const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    const kp = try core.signing.KeyPair.fromSeed(seed);
+    const sig = try kp.sign(archive);
+    const raw = sig.bytes();
+    const hex = std.fmt.bytesToHex(raw[0..], .lower);
+    const txt = try std.fmt.allocPrint(alloc, "{s}\n", .{hex[0..]});
+    if (!valid) txt[0] = if (txt[0] == '0') '1' else '0';
+    return txt;
+}
+
+fn updateReleaseBodyAlloc(
+    alloc: std.mem.Allocator,
+    tag_name: []const u8,
+    asset_name: []const u8,
+    asset_url: []const u8,
+    sig_url: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "{{\"tag_name\":\"{s}\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"{s}\"}},{{\"name\":\"{s}.sig\",\"browser_download_url\":\"{s}\"}}]}}",
+        .{ tag_name, asset_name, asset_url, asset_name, sig_url },
+    );
+}
+
+fn joinRequestLinesAlloc(alloc: std.mem.Allocator, server: *const http_mock.Server) ![]u8 {
+    var lines = std.ArrayListUnmanaged([]const u8){};
+    defer lines.deinit(alloc);
+    for (0..server.requestCount()) |i| {
+        const raw = server.requestAt(i);
+        const line_end = std.mem.indexOf(u8, raw, "\r\n") orelse raw.len;
+        try lines.append(alloc, raw[0..line_end]);
+    }
+    return std.mem.join(alloc, "\n", lines.items);
 }
