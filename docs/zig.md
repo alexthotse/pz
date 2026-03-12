@@ -169,6 +169,7 @@ try std.testing.expectError(error.X, err_union);
 - In `jj` repos, build metadata must not shell out to `git`. Use `jj log` or repository metadata already available to the build, or sibling workspaces will fail tests.
 - `ohsnap` raw-value snapshots must include the rendered type header, not just the value body.
 - When `ohsnap` needs to rewrite an existing snapshot, `<!update>` must be the first snapshot line, before the type header.
+- `ohsnap` rewrite mode opens the module root from the current working directory. Inside tests that `chdir` with `CwdGuard`, `<!update>` can fail with `FileNotFound`; patch the snapshot text manually instead of relying on rewrite mode there.
 - In raw multiline `ohsnap` snapshots, quotes are literal after `\\`. Do not escape JSON quotes inside the snapshot body.
 ```zig
 try oh.snap(@src(),

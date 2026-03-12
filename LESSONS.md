@@ -34,6 +34,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - For raw string snapshots, writing only the body text is wrong. `ohsnap` expects the full typed shape like `[]u8` plus the value line.
 - Escaping JSON quotes inside raw multiline `ohsnap` snapshots is wrong. After `\\`, the quotes are literal snapshot content.
 - Putting `<!update>` anywhere but the first snapshot line does not work; `ohsnap` will keep failing instead of rewriting the snapshot.
+- Using `<!update>` inside tests that temporarily `chdir` with `CwdGuard` is wrong. `ohsnap` resolves the module root from the current working directory, so rewrite mode can fail with `FileNotFound`; patch the snapshot text by hand in those tests.
 - Exposing Zig stdlib private error sets (for example `std.net.GetAddressListError`) from repo APIs is a dead end. Map them at the boundary.
 - Treating `std.net.Stream.writer` like the old zero-arg API caused wasted compile/debug churn. In Zig 0.15 it requires a caller-supplied buffer; direct `std.posix.write` is often simpler in tiny test servers.
 - Leaving temporary `std.debug.print` probes in inherited code polluted targeted test runs and risks shipping noise. Strip them before final validation, not after.
