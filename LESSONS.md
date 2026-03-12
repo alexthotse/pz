@@ -7,6 +7,7 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-03-11)
 
 ### Worked Well
+- Before `jj workspace add`, move root to a fresh empty child; creating workspaces from a non-empty working-copy commit can base the new workspace on the parent commit instead of the intended integrated head.
 - For cross-feature audit proof, keep the E2E harness under `src/test/`, feed it a mixed row set from real hook emitters where public (`auth`, `bg`) plus manual control fixtures where hooks stay private, and verify the sealed syslog bodies round-trip exactly through both UDP and TCP mocks.
 - For signed runtime-policy checks, map slash/tool/subagent actions onto a synthetic namespace like `runtime/...`; it stays outside policy self-protection and gives stable paths for hashable authority decisions.
 - Landing worker results with `jj restore --from <commit> <file>` kept dot merges exact and avoided stale workspace side-data.
