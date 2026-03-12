@@ -66,6 +66,7 @@ pub const Scheme = enum {
 };
 
 pub const RedirectPolicy = struct {
+    egress: policy_mod.Policy = .{ .rules = &.{} },
     allow_cross_host: bool = false,
     allow_cross_port: bool = false,
     allow_https_downgrade: bool = false,
@@ -88,11 +89,13 @@ pub const RedirectErr = std.Uri.ResolveInPlaceError || error{
     CrossHostRedirect,
     CrossPortRedirect,
     HttpsDowngrade,
+    HostDenied,
     BlockedAddr,
     OutOfMemory,
 };
 
 pub const ResolveErr = ParseErr || error{
+    HostDenied,
     BlockedAddr,
     ResolveFailed,
     OutOfMemory,
@@ -183,6 +186,7 @@ fn resolveConnectAddrWith(
     policy: RedirectPolicy,
     fns: ResolveFns,
 ) ResolveErr!std.net.Address {
+    try validateEgressHost(parsed.host, policy);
     const addrs = fns.resolve(alloc, parsed.host, parsed.port) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.ResolveFailed,
@@ -231,6 +235,18 @@ fn validateRedirect(base: ParsedUrl, uri: std.Uri, policy: RedirectPolicy) Redir
     }
     if (!policy.allow_cross_port and base.port != port) {
         return error.CrossPortRedirect;
+    }
+    try validateEgressHost(host, policy);
+}
+
+fn validateEgressHost(host: []const u8, policy: RedirectPolicy) error{HostDenied}!void {
+    var path_buf: [320]u8 = undefined;
+    const prefix = "runtime/web/";
+    if (prefix.len + host.len > path_buf.len) return error.HostDenied;
+    @memcpy(path_buf[0..prefix.len], prefix);
+    for (host, 0..) |c, i| path_buf[prefix.len + i] = std.ascii.toLower(c);
+    if (policy.egress.eval(path_buf[0 .. prefix.len + host.len], "web") != .allow) {
+        return error.HostDenied;
     }
 }
 
@@ -342,7 +358,12 @@ test "nextRedirectTargetAlloc follows safe local redirect chain" {
         },
     };
 
-    const hop1 = (try nextRedirectTargetAlloc(std.testing.allocator, req0, res0, .{})).?;
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.local", .effect = .allow, .tool = "web" },
+    };
+    const hop1 = (try nextRedirectTargetAlloc(std.testing.allocator, req0, res0, .{
+        .egress = .{ .rules = &rules },
+    })).?;
     defer hop1.deinit(std.testing.allocator);
 
     const req1: Request = .{
@@ -355,7 +376,9 @@ test "nextRedirectTargetAlloc follows safe local redirect chain" {
         },
     };
 
-    const hop2 = (try nextRedirectTargetAlloc(std.testing.allocator, req1, res1, .{})).?;
+    const hop2 = (try nextRedirectTargetAlloc(std.testing.allocator, req1, res1, .{
+        .egress = .{ .rules = &rules },
+    })).?;
     defer hop2.deinit(std.testing.allocator);
 
     const Snap = struct {
@@ -426,10 +449,13 @@ test "resolveConnectAddrAlloc blocks resolved private targets by default" {
     };
 
     const url = try parseUrl("https://svc.local/api");
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.local", .effect = .allow, .tool = "web" },
+    };
     try std.testing.expectError(error.BlockedAddr, resolveConnectAddrWith(
         std.testing.allocator,
         url,
-        .{},
+        .{ .egress = .{ .rules = &rules } },
         .{ .resolve = Mock.resolve, .free = Mock.free },
     ));
 }
@@ -448,10 +474,16 @@ test "resolveConnectAddrAlloc allows private targets when opted in" {
     };
 
     const url = try parseUrl("https://svc.local/api");
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.local", .effect = .allow, .tool = "web" },
+    };
     const addr = try resolveConnectAddrWith(
         std.testing.allocator,
         url,
-        .{ .allow_private_addrs = true },
+        .{
+            .egress = .{ .rules = &rules },
+            .allow_private_addrs = true,
+        },
         .{ .resolve = Mock.resolve, .free = Mock.free },
     );
     try std.testing.expect(std.net.Address.eql(std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 443), addr));
@@ -478,7 +510,12 @@ test "redirect hops revalidate resolved target addresses" {
         .status = 302,
         .headers = &.{.{ .name = "location", .value = "https://cdn.local/final" }},
     };
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.local", .effect = .allow, .tool = "web" },
+        .{ .pattern = "runtime/web/cdn.local", .effect = .allow, .tool = "web" },
+    };
     const next = (try nextRedirectTargetAlloc(std.testing.allocator, req, res, .{
+        .egress = .{ .rules = &rules },
         .allow_cross_host = true,
     })).?;
     defer next.deinit(std.testing.allocator);
@@ -486,7 +523,40 @@ test "redirect hops revalidate resolved target addresses" {
     try std.testing.expectError(error.BlockedAddr, resolveConnectAddrWith(
         std.testing.allocator,
         next.parsed,
+        .{ .egress = .{ .rules = &rules } },
+        .{ .resolve = Mock.resolve, .free = Mock.free },
+    ));
+}
+
+test "resolveConnectAddrWith denies hosts not explicitly allowed" {
+    const Mock = struct {
+        fn resolve(_: std.mem.Allocator, _: []const u8, _: u16) ![]std.net.Address {
+            return error.ShouldNotResolve;
+        }
+
+        fn free(_: std.mem.Allocator, _: []std.net.Address) void {}
+    };
+
+    const url = try parseUrl("https://svc.local/api");
+    try std.testing.expectError(error.HostDenied, resolveConnectAddrWith(
+        std.testing.allocator,
+        url,
         .{},
         .{ .resolve = Mock.resolve, .free = Mock.free },
     ));
+}
+
+test "resolveRedirectAlloc denies cross-host targets without explicit allow" {
+    const base = try parseUrl("https://svc.local/api");
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/svc.local", .effect = .allow, .tool = "web" },
+    };
+
+    try std.testing.expectError(
+        error.HostDenied,
+        resolveRedirectAlloc(std.testing.allocator, base, "https://cdn.local/final", .{
+            .egress = .{ .rules = &rules },
+            .allow_cross_host = true,
+        }),
+    );
 }
