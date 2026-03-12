@@ -337,6 +337,9 @@ fn validateHash(hash: []const u8) DecodeError!void {
 }
 
 test "frame hello roundtrip enforces protocol version" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const hash =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const frame = Frame.init(7, .{
@@ -355,15 +358,16 @@ test "frame hello roundtrip enforces protocol version" {
 
     try testing.expectEqual(@as(u16, protocol_version), parsed.value.protocol_version);
     try testing.expectEqual(@as(u32, 7), parsed.value.seq);
-
-    switch (parsed.value.msg) {
-        .hello => |hello| {
-            try testing.expectEqual(Role.child, hello.role);
-            try testing.expectEqualStrings("agent-core", hello.agent_id);
-            try testing.expectEqualStrings(hash, hello.policy_hash);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Msg
+        \\  .hello: core.agent.Hello
+        \\    .role: core.agent.Role
+        \\      .child
+        \\    .agent_id: []const u8
+        \\      "agent-core"
+        \\    .policy_hash: []const u8
+        \\      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ).expectEqual(parsed.value.msg);
 }
 
 test "decode rejects missing protocol version" {
@@ -405,6 +409,9 @@ test "decode rejects empty run prompt" {
 }
 
 test "info output and truncation survive roundtrip" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     const frame = Frame.init(3, .{
         .out = .{
             .id = "job-7",
@@ -419,15 +426,16 @@ test "info output and truncation survive roundtrip" {
 
     var out_parsed = try decodeSlice(testing.allocator, out_raw[0 .. out_raw.len - 1]);
     defer out_parsed.deinit();
-
-    switch (out_parsed.value.msg) {
-        .out => |out| {
-            try testing.expectEqual(OutKind.info, out.kind);
-            try testing.expectEqualStrings("job-7", out.id);
-            try testing.expectEqualStrings("delegated to child agent", out.text);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Msg
+        \\  .out: core.agent.Out
+        \\    .id: []const u8
+        \\      "job-7"
+        \\    .kind: core.agent.OutKind
+        \\      .info
+        \\    .text: []const u8
+        \\      "delegated to child agent"
+    ).expectEqual(out_parsed.value.msg);
 
     const done = Frame.init(4, .{
         .done = .{
@@ -441,14 +449,15 @@ test "info output and truncation survive roundtrip" {
 
     var done_parsed = try decodeSlice(testing.allocator, done_raw);
     defer done_parsed.deinit();
-
-    switch (done_parsed.value.msg) {
-        .done => |msg| {
-            try testing.expectEqual(Stop.done, msg.stop);
-            try testing.expect(msg.truncated);
-        },
-        else => try testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.agent.Msg
+        \\  .done: core.agent.Done
+        \\    .id: []const u8
+        \\      "job-7"
+        \\    .stop: core.agent.Stop
+        \\      .done
+        \\    .truncated: bool = true
+    ).expectEqual(done_parsed.value.msg);
 }
 
 test "stub handshake run output done flow" {
