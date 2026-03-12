@@ -264,3 +264,48 @@ test "write handler returns kind mismatch for wrong call kind" {
 
     try std.testing.expectError(error.KindMismatch, handler.run(call, sink));
 }
+
+test "write handler denies replaced target before truncation" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    const Hook = struct {
+        fn run(_: *anyopaque, dir: std.fs.Dir, path: []const u8) !void {
+            try dir.rename(path, "gone.txt");
+            try dir.rename("swap.txt", path);
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "victim.txt", .data = "keep\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "swap.txt", .data = "swap\n" });
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    var ctx: u8 = 0;
+    var hook = path_guard.installRaceHook(&ctx, Hook.run);
+    defer hook.deinit();
+
+    const handler = Handler.init(.{});
+    try std.testing.expectError(error.Denied, handler.run(.{
+        .id = "w-race",
+        .kind = .write,
+        .args = .{ .write = .{
+            .path = "victim.txt",
+            .text = "overwrite\n",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    }, sink));
+
+    const kept = try tmp.dir.readFileAlloc(std.testing.allocator, "victim.txt", 64);
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("swap\n", kept);
+}

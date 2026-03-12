@@ -342,3 +342,37 @@ test "edit handler returns kind mismatch for wrong call kind" {
 
     try std.testing.expectError(error.KindMismatch, handler.run(call, sink));
 }
+
+test "edit handler denies hardlinked file" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "base.txt", .data = "alpha\n" });
+    try std.posix.linkat(tmp.dir.fd, "base.txt", tmp.dir.fd, "alias.txt", 0);
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 64,
+    });
+    try std.testing.expectError(error.Denied, handler.run(.{
+        .id = "e-link",
+        .kind = .edit,
+        .args = .{ .edit = .{
+            .path = "alias.txt",
+            .old = "alpha",
+            .new = "beta",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    }, sink));
+}

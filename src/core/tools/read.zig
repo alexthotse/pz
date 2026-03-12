@@ -426,3 +426,33 @@ test "read handler can target a line in very large file without TooLarge" {
     try std.testing.expectEqualStrings("line-9999\n", res.out[0].chunk);
     try std.testing.expect(!res.out[0].truncated);
 }
+
+test "read handler denies hardlinked file" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "base.txt", .data = "secret\n" });
+    try std.posix.linkat(tmp.dir.fd, "base.txt", tmp.dir.fd, "alias.txt", 0);
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 64,
+    });
+    try std.testing.expectError(error.Denied, handler.run(.{
+        .id = "c-link",
+        .kind = .read,
+        .args = .{ .read = .{ .path = "alias.txt" } },
+        .src = .model,
+        .at_ms = 0,
+    }, sink));
+}

@@ -313,3 +313,40 @@ test "grep handler validates args and missing roots" {
     };
     try std.testing.expectError(error.NotFound, handler.run(missing, sink));
 }
+
+test "grep handler denies hardlinked leaf" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try path_guard.CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/base.txt", .data = "secret\n" });
+    try std.posix.linkat(tmp.dir.fd, "src/base.txt", tmp.dir.fd, "src/alias.txt", 0);
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, "src");
+    defer std.testing.allocator.free(root);
+
+    const SinkImpl = struct {
+        fn push(_: *@This(), _: tools.Event) !void {}
+    };
+    var sink_impl = SinkImpl{};
+    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+
+    const handler = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 128,
+    });
+    try std.testing.expectError(error.Denied, handler.run(.{
+        .id = "g-link",
+        .kind = .grep,
+        .args = .{ .grep = .{
+            .path = root,
+            .pattern = "secret",
+        } },
+        .src = .model,
+        .at_ms = 0,
+    }, sink));
+}

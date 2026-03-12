@@ -4,6 +4,14 @@ const posix = std.posix;
 
 const native_os = builtin.os.tag;
 
+const RaceHook = struct {
+    ctx: *anyopaque,
+    after_open: *const fn (*anyopaque, std.fs.Dir, []const u8) anyerror!void,
+};
+
+var race_mu: std.Thread.Mutex = .{};
+var race_hook: ?RaceHook = null;
+
 pub const CwdGuard = struct {
     prev: std.fs.Dir,
 
@@ -27,6 +35,26 @@ pub const CwdGuard = struct {
         self.* = undefined;
     }
 };
+
+pub const RaceGuard = struct {
+    pub fn deinit(self: *RaceGuard) void {
+        race_hook = null;
+        race_mu.unlock();
+        self.* = undefined;
+    }
+};
+
+pub fn installRaceHook(
+    ctx: *anyopaque,
+    after_open: *const fn (*anyopaque, std.fs.Dir, []const u8) anyerror!void,
+) RaceGuard {
+    race_mu.lock();
+    race_hook = .{
+        .ctx = ctx,
+        .after_open = after_open,
+    };
+    return .{};
+}
 
 pub fn openDir(path: []const u8, opts: std.fs.Dir.OpenOptions) !std.fs.Dir {
     const rel = try relPath(path);
@@ -209,6 +237,9 @@ fn openFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.OpenFlags
         };
     }
 
+    try maybeRace(dir_fd, path);
+    try ensureStableFile(dir_fd, path, fd);
+
     return .{ .handle = fd };
 }
 
@@ -216,7 +247,7 @@ fn createFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.CreateF
     var os_flags: posix.O = .{
         .ACCMODE = if (flags.read) .RDWR else .WRONLY,
         .CREAT = true,
-        .TRUNC = flags.truncate,
+        .TRUNC = false,
         .EXCL = flags.exclusive,
         .NOFOLLOW = true,
     };
@@ -248,5 +279,131 @@ fn createFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.CreateF
         });
     }
 
+    try maybeRace(dir_fd, path);
+    try ensureStableFile(dir_fd, path, fd);
+    if (flags.truncate) {
+        var file: std.fs.File = .{ .handle = fd };
+        try file.setEndPos(0);
+    }
+
     return .{ .handle = fd };
+}
+
+fn maybeRace(dir_fd: posix.fd_t, path: []const u8) !void {
+    if (race_hook) |hook| {
+        try hook.after_open(hook.ctx, .{ .fd = dir_fd }, path);
+    }
+}
+
+fn ensureStableFile(dir_fd: posix.fd_t, path: []const u8, fd: posix.fd_t) !void {
+    const got = posix.fstat(fd) catch return error.AccessDenied;
+    if (!isReg(got.mode)) return error.AccessDenied;
+    if (got.nlink != 1) return error.AccessDenied;
+
+    const want = posix.fstatat(dir_fd, path, posix.AT.SYMLINK_NOFOLLOW) catch |err| switch (err) {
+        error.FileNotFound,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.SymLinkLoop,
+        => return error.AccessDenied,
+        else => return err,
+    };
+    if (!isReg(want.mode)) return error.AccessDenied;
+    if (want.nlink != 1) return error.AccessDenied;
+    if (!sameFile(got, want)) return error.AccessDenied;
+}
+
+fn isReg(mode: posix.mode_t) bool {
+    return (mode & posix.S.IFMT) == posix.S.IFREG;
+}
+
+fn sameFile(a: posix.Stat, b: posix.Stat) bool {
+    return a.dev == b.dev and a.ino == b.ino;
+}
+
+test "openFile denies hardlinked leaf" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "base.txt", .data = "secret\n" });
+    try posix.linkat(tmp.dir.fd, "base.txt", tmp.dir.fd, "alias.txt", 0);
+
+    try std.testing.expectError(error.AccessDenied, openFile("alias.txt", .{ .mode = .read_only }));
+}
+
+test "createFile denies hardlinked leaf before truncation" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "base.txt", .data = "secret\n" });
+    try posix.linkat(tmp.dir.fd, "base.txt", tmp.dir.fd, "alias.txt", 0);
+
+    try std.testing.expectError(error.AccessDenied, createFile("alias.txt", .{ .truncate = true }));
+    const kept = try tmp.dir.readFileAlloc(std.testing.allocator, "base.txt", 64);
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("secret\n", kept);
+}
+
+test "openFile denies replaced leaf after open" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    const Ctx = struct {
+        fn run(_: *anyopaque, dir: std.fs.Dir, path: []const u8) !void {
+            try dir.rename(path, "gone.txt");
+            try dir.rename("swap.txt", path);
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "victim.txt", .data = "keep\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "swap.txt", .data = "swap\n" });
+
+    var ctx: u8 = 0;
+    var guard = installRaceHook(&ctx, Ctx.run);
+    defer guard.deinit();
+
+    try std.testing.expectError(error.AccessDenied, openFile("victim.txt", .{ .mode = .read_only }));
+    const now = try tmp.dir.readFileAlloc(std.testing.allocator, "victim.txt", 64);
+    defer std.testing.allocator.free(now);
+    try std.testing.expectEqualStrings("swap\n", now);
+}
+
+test "createFile denies replaced leaf before truncation" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    const Ctx = struct {
+        fn run(_: *anyopaque, dir: std.fs.Dir, path: []const u8) !void {
+            try dir.rename(path, "gone.txt");
+            try dir.rename("swap.txt", path);
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd = try CwdGuard.enter(tmp.dir);
+    defer cwd.deinit();
+
+    try tmp.dir.writeFile(.{ .sub_path = "victim.txt", .data = "keep\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "swap.txt", .data = "swap\n" });
+
+    var ctx: u8 = 0;
+    var guard = installRaceHook(&ctx, Ctx.run);
+    defer guard.deinit();
+
+    try std.testing.expectError(error.AccessDenied, createFile("victim.txt", .{ .truncate = true }));
+    const now = try tmp.dir.readFileAlloc(std.testing.allocator, "victim.txt", 64);
+    defer std.testing.allocator.free(now);
+    try std.testing.expectEqualStrings("swap\n", now);
 }
