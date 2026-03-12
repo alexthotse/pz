@@ -21,6 +21,7 @@ pub fn main() !void {
     const mode = std.meta.stringToEnum(Mode, argv[1]) orelse return error.InvalidArgs;
     const agent_id = argv[2];
     const pol_hash = argv[3];
+    try agent.closeInheritedFds();
     const stdout_file = std.fs.File.stdout();
     var stdout_buf: [4096]u8 = undefined;
     var stdout = stdout_file.writerStreaming(&stdout_buf);

@@ -298,6 +298,9 @@ pub const ChildProc = struct {
         agent_id: []const u8,
         policy_hash: []const u8,
     ) !ChildProc {
+        if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .wasi) {
+            try markOpenFdsCloexec();
+        }
         var arena = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
         const argv = [_][]const u8{
@@ -393,6 +396,37 @@ pub const ChildProc = struct {
         return parsed.value;
     }
 };
+
+fn markOpenFdsCloexec() !void {
+    const lim = try std.posix.getrlimit(.NOFILE);
+    const max_fd: usize = @intCast(@min(lim.cur, 1024));
+    var fd: usize = 3;
+    while (fd < max_fd) : (fd += 1) {
+        const raw_fd: std.posix.fd_t = @intCast(fd);
+        const flags_rc = std.posix.system.fcntl(raw_fd, std.posix.F.GETFD, @as(c_int, 0));
+        switch (std.posix.errno(flags_rc)) {
+            .SUCCESS => {
+                const flags: c_int = @intCast(flags_rc);
+                _ = std.posix.system.fcntl(raw_fd, std.posix.F.SETFD, flags | @as(c_int, std.posix.FD_CLOEXEC));
+            },
+            .BADF => {},
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+pub fn closeInheritedFds() !void {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+    const lim = try std.posix.getrlimit(.NOFILE);
+    const max_fd: usize = @intCast(@min(lim.cur, 1024));
+    var fd: usize = 3;
+    while (fd < max_fd) : (fd += 1) {
+        switch (std.posix.errno(std.posix.system.close(@intCast(fd)))) {
+            .SUCCESS, .BADF => {},
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
 
 pub fn encodeAlloc(alloc: std.mem.Allocator, frame: Frame) error{OutOfMemory}![]u8 {
     var out = frame;
@@ -852,4 +886,24 @@ test "spawned child rejects mismatched policy hash" {
     defer child.deinit();
 
     try testing.expectError(error.PolicyMismatch, child.connect());
+}
+
+test "spawned child inherits only stdio fds" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const leak_fd = try std.posix.openZ("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+    defer std.posix.close(leak_fd);
+
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .fd_report, "agent-child", hash);
+    defer child.deinit();
+
+    _ = try child.connect();
+    const res = try child.runReq(.{
+        .id = "job-fd",
+        .prompt = "list fds",
+    });
+    const out = res.out orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("0,1,2", out.text);
+    try testing.expect(std.mem.indexOfScalar(u8, out.text, @as(u8, '3')) == null);
 }
