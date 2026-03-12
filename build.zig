@@ -46,6 +46,12 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "changelog", vcs_log);
     options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
 
+    const core_agent_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/agent.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "pz",
         .root_module = b.createModule(.{
@@ -77,11 +83,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    agent_exit_harness.root_module.addImport("core_agent", b.createModule(.{
-        .root_source_file = b.path("src/core/agent.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
+    agent_exit_harness.root_module.addImport("core_agent", core_agent_mod);
     const agent_child_harness = b.addExecutable(.{
         .name = "agent-child-harness",
         .root_module = b.createModule(.{
@@ -90,11 +92,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    agent_child_harness.root_module.addImport("core_agent", b.createModule(.{
-        .root_source_file = b.path("src/core/agent.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
+    agent_child_harness.root_module.addImport("core_agent", core_agent_mod);
+    options.addOptionPath("agent_child_harness_path", agent_child_harness.getEmittedBin());
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,

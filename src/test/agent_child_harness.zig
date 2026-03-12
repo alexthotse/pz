@@ -98,14 +98,13 @@ fn writeFrame(alloc: std.mem.Allocator, stdout: anytype, seq: u32, msg: agent.Ms
     });
     defer alloc.free(raw);
     try stdout.writeAll(raw);
+    try stdout.flush();
 }
 
 fn readFrameAlloc(alloc: std.mem.Allocator, stdin: anytype) !?agent.Frame {
     const line = try stdin.takeDelimiter('\n');
     const raw = line orelse return null;
-    defer alloc.free(raw);
-    var parsed = try agent.decodeSlice(alloc, raw);
-    defer parsed.deinit();
+    const parsed = try agent.decodeSlice(alloc, raw);
     return parsed.value;
 }
 

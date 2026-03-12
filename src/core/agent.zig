@@ -266,6 +266,134 @@ pub const Stub = struct {
     }
 };
 
+pub const ChildMode = enum {
+    echo,
+    mismatch,
+    fd_report,
+    pgid_report,
+};
+
+pub const ChildProc = struct {
+    alloc: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    proc: std.process.Child,
+    stdin_file: std.fs.File,
+    stdout_file: std.fs.File,
+    stdin_writer: std.fs.File.Writer,
+    stdout_reader: std.fs.File.Reader,
+    stub: Stub,
+    in_buf: [4096]u8 = undefined,
+    out_buf: [4096]u8 = undefined,
+
+    pub const RunRes = struct {
+        out: ?Out = null,
+        done: ?Done = null,
+        err: ?Err = null,
+    };
+
+    pub fn spawnHarness(
+        alloc: std.mem.Allocator,
+        harness_path: []const u8,
+        mode: ChildMode,
+        agent_id: []const u8,
+        policy_hash: []const u8,
+    ) !ChildProc {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        const argv = [_][]const u8{
+            harness_path,
+            @tagName(mode),
+            agent_id,
+            policy_hash,
+        };
+        var proc = std.process.Child.init(argv[0..], alloc);
+        proc.stdin_behavior = .Pipe;
+        proc.stdout_behavior = .Pipe;
+        proc.stderr_behavior = .Ignore;
+        try proc.spawn();
+        const stdin_file = proc.stdin orelse return error.BrokenPipe;
+        const stdout_file = proc.stdout orelse return error.BrokenPipe;
+        proc.stdin = null;
+        proc.stdout = null;
+        var out: ChildProc = undefined;
+        out.alloc = alloc;
+        out.arena = arena;
+        out.proc = proc;
+        out.stdin_file = stdin_file;
+        out.stdout_file = stdout_file;
+        out.stdin_writer = stdin_file.writerStreaming(&out.in_buf);
+        out.stdout_reader = stdout_file.readerStreaming(&out.out_buf);
+        out.stub = try Stub.init(agent_id, policy_hash);
+        return out;
+    }
+
+    pub fn deinit(self: *ChildProc) void {
+        self.stdin_file.close();
+        self.stdout_file.close();
+        std.posix.kill(self.proc.id, std.posix.SIG.TERM) catch |err| switch (err) {
+            error.ProcessNotFound => {},
+            else => {},
+        };
+        _ = self.proc.wait() catch {};
+        self.arena.deinit();
+    }
+
+    pub fn connect(self: *ChildProc) !Hello {
+        try self.send(try self.stub.hello());
+        const ev = try self.stub.recv(try self.recv());
+        return switch (ev) {
+            .ready => |ready| ready,
+            else => error.UnexpectedMsg,
+        };
+    }
+
+    pub fn runReq(self: *ChildProc, req: Req) !RunRes {
+        try self.send(try self.stub.run(req));
+        var res: RunRes = .{};
+        while (true) {
+            const ev = try self.stub.recv(try self.recv());
+            switch (ev) {
+                .out => |out| res.out = out,
+                .done => |done| {
+                    res.done = done;
+                    return res;
+                },
+                .err => |rpc_err| {
+                    res.err = rpc_err;
+                    return res;
+                },
+                else => return error.UnexpectedMsg,
+            }
+        }
+    }
+
+    pub fn cancelReq(self: *ChildProc) !Done {
+        try self.send(try self.stub.cancel());
+        while (true) {
+            const ev = try self.stub.recv(try self.recv());
+            switch (ev) {
+                .done => |done| return done,
+                .err => |rpc_err| return if (rpc_err.fatal) error.UnexpectedMsg else error.UnexpectedMsg,
+                else => {},
+            }
+        }
+    }
+
+    fn send(self: *ChildProc, frame: Frame) !void {
+        const raw = try encodeLineAlloc(self.alloc, frame);
+        defer self.alloc.free(raw);
+        try self.stdin_writer.interface.writeAll(raw);
+        try self.stdin_writer.interface.flush();
+    }
+
+    fn recv(self: *ChildProc) !Frame {
+        const line = try self.stdout_reader.interface.takeDelimiter('\n');
+        const raw = line orelse return error.EndOfStream;
+        const parsed = try decodeSlice(self.arena.allocator(), raw);
+        return parsed.value;
+    }
+};
+
 pub fn encodeAlloc(alloc: std.mem.Allocator, frame: Frame) error{OutOfMemory}![]u8 {
     var out = frame;
     out.protocol_version = protocol_version;
@@ -666,4 +794,62 @@ test "stub rejects out of order inbound seq" {
             .text = "late frame",
         },
     })));
+}
+
+test "spawned child handshake and run succeed" {
+    const OhSnap = @import("ohsnap");
+    const build_options = @import("build_options");
+    const oh = OhSnap{};
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .echo, "agent-child", hash);
+    defer child.deinit();
+
+    const ready = try child.connect();
+    const res = try child.runReq(.{
+        .id = "job-1",
+        .prompt = "delegate this",
+    });
+    const Snap = struct {
+        ready: Hello,
+        out: ?Out,
+        done: ?Done,
+    };
+    try oh.snap(@src(),
+        \\core.agent.test.spawned child handshake and run succeed.Snap
+        \\  .ready: core.agent.Hello
+        \\    .role: core.agent.Role
+        \\      .child
+        \\    .agent_id: []const u8
+        \\      "agent-child"
+        \\    .policy_hash: []const u8
+        \\      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        \\  .out: ?core.agent.Out
+        \\    .id: []const u8
+        \\      "job-1"
+        \\    .kind: core.agent.OutKind
+        \\      .info
+        \\    .text: []const u8
+        \\      "echo:delegate this"
+        \\  .done: ?core.agent.Done
+        \\    .id: []const u8
+        \\      "job-1"
+        \\    .stop: core.agent.Stop
+        \\      .done
+        \\    .truncated: bool = false
+    ).expectEqual(Snap{
+        .ready = ready,
+        .out = res.out,
+        .done = res.done,
+    });
+}
+
+test "spawned child rejects mismatched policy hash" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .mismatch, "agent-child", hash);
+    defer child.deinit();
+
+    try testing.expectError(error.PolicyMismatch, child.connect());
 }
