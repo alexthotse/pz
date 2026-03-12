@@ -501,6 +501,29 @@ fn validateHash(hash: []const u8) DecodeError!void {
     }
 }
 
+fn propId(raw: []const u8) []const u8 {
+    return if (raw.len == 0) "a" else raw;
+}
+
+fn propHash(buf: *[hash_hex_len]u8, a: u64, b: u64, c: u64, d: u64) void {
+    var x = a ^ std.math.rotl(u64, b, 13) ^ std.math.rotl(u64, c, 29) ^ std.math.rotl(u64, d, 47);
+    for (buf, 0..) |*dst, i| {
+        x ^= 0x9e3779b97f4a7c15 +% @as(u64, @intCast(i));
+        x = std.math.rotl(u64, x *% 0xbf58476d1ce4e5b9, 7);
+        dst.* = "0123456789abcdef"[@intCast(x & 0x0f)];
+    }
+}
+
+fn mutateValidHash(buf: *[hash_hex_len]u8, flip: u8) void {
+    const idx: usize = @intCast(flip % hash_hex_len);
+    buf[idx] = if (buf[idx] == 'f') '0' else 'f';
+}
+
+fn mutateInvalidHash(buf: *[hash_hex_len]u8, flip: u8) void {
+    const idx: usize = @intCast(flip % hash_hex_len);
+    buf[idx] = 'x';
+}
+
 test "frame hello roundtrip enforces protocol version" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -935,4 +958,115 @@ test "spawned child runs in its own process group" {
 
     try testing.expectEqual(pid, pgid);
     try testing.expect(pgid != std.c.getpid());
+}
+
+test "property: valid ids and hashes validate" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            id: zc.String,
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+        }) bool {
+            var hash: [hash_hex_len]u8 = undefined;
+            propHash(&hash, args.a, args.b, args.c, args.d);
+            validateId(propId(args.id.slice())) catch return false;
+            validateHash(hash[0..]) catch return false;
+            return true;
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0xa93e_7101,
+    });
+}
+
+test "property: mutated hello hash is rejected or mismatched" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            id: zc.String,
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+            flip: u8,
+            invalid: bool,
+        }) bool {
+            const id = propId(args.id.slice());
+
+            var want: [hash_hex_len]u8 = undefined;
+            propHash(&want, args.a, args.b, args.c, args.d);
+            var got = want;
+            if (args.invalid) {
+                mutateInvalidHash(&got, args.flip);
+            } else {
+                mutateValidHash(&got, args.flip);
+            }
+
+            var stub = Stub.init(id, want[0..]) catch return false;
+            _ = stub.hello() catch return false;
+
+            const frame = Frame.init(1, .{
+                .hello = .{
+                    .role = .child,
+                    .agent_id = id,
+                    .policy_hash = got[0..],
+                },
+            });
+
+            if (args.invalid) {
+                return validateFrame(frame) catch |err| err == error.InvalidPolicyHash;
+            }
+
+            validateFrame(frame) catch return false;
+            return stub.recv(frame) catch |err| err == error.PolicyMismatch;
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0xa93e_7102,
+    });
+}
+
+test "property: mutated run frames reject empty id or prompt" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct {
+            id: zc.String,
+            prompt: zc.String,
+            clear_id: bool,
+        }) bool {
+            const good_id = propId(args.id.slice());
+            const good_prompt = propId(args.prompt.slice());
+
+            validateFrame(Frame.init(1, .{
+                .run = .{
+                    .id = good_id,
+                    .prompt = good_prompt,
+                },
+            })) catch return false;
+
+            const bad = if (args.clear_id)
+                Frame.init(1, .{
+                    .run = .{
+                        .id = "",
+                        .prompt = good_prompt,
+                    },
+                })
+            else
+                Frame.init(1, .{
+                    .run = .{
+                        .id = good_id,
+                        .prompt = "",
+                    },
+                });
+
+            return validateFrame(bad) catch |err|
+                err == if (args.clear_id) error.InvalidId else error.EmptyPrompt;
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0xa93e_7103,
+    });
 }
