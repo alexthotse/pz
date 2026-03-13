@@ -379,6 +379,19 @@ pub fn formatFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?[
     return try buf.toOwnedSlice(alloc);
 }
 
+pub fn appendFileOpsFooter(
+    alloc: std.mem.Allocator,
+    summary: []const u8,
+    events: []const schema.Event,
+) ![]u8 {
+    const footer = try formatFileOps(alloc, events);
+    if (footer == null) return try alloc.dupe(u8, summary);
+    defer alloc.free(footer.?);
+
+    if (summary.len == 0) return try alloc.dupe(u8, footer.?);
+    return try std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ summary, footer.? });
+}
+
 test "compaction rewrites stream and preserves semantic events" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -630,6 +643,41 @@ test "formatFileOps returns null when no file tools" {
         mkEv("bash", "{\"cmd\":\"ls\"}"),
     };
     try std.testing.expect(try formatFileOps(std.testing.allocator, &evs) == null);
+}
+
+test "appendFileOpsFooter appends read and modified lists after summary" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const evs = [_]schema.Event{
+        mkEv("read", "{\"path\":\"/src/a.zig\"}"),
+        mkEv("edit", "{\"path\":\"/src/b.zig\"}"),
+    };
+    const got = try appendFileOpsFooter(std.testing.allocator, "Session summary.", &evs);
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "Session summary.
+        \\
+        \\<read-files>
+        \\/src/a.zig
+        \\</read-files>
+        \\<modified-files>
+        \\/src/b.zig
+        \\</modified-files>
+        \\"
+    ).expectEqual(got);
+}
+
+test "appendFileOpsFooter leaves summary unchanged when no file tools" {
+    const evs = [_]schema.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "hello" } } },
+        mkEv("bash", "{\"cmd\":\"ls\"}"),
+    };
+    const got = try appendFileOpsFooter(std.testing.allocator, "Session summary.", &evs);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("Session summary.", got);
 }
 
 test "formatFileOps deduplicates read+write to modified only" {

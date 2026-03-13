@@ -93,13 +93,9 @@ fn versionUriFromEnv() ?std.Uri {
 }
 
 fn checkLatestWith(alloc: std.mem.Allocator, deps: Deps) !?[]u8 {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const ar = arena.allocator();
-
-    var http = try deps.init_client(deps.init_client_ctx, ar);
+    var http = try deps.init_client(deps.init_client_ctx, alloc);
     defer http.deinit();
-    try http.initDefaultProxies(ar);
+    try http.initDefaultProxies(alloc);
 
     const ua = "pz/" ++ cli.version;
     var req = try http.request(.GET, deps.uri, .{
@@ -122,7 +118,8 @@ fn checkLatestWith(alloc: std.mem.Allocator, deps: Deps) !?[]u8 {
     var decomp: std.http.Decompress = undefined;
     var decomp_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const reader = resp.readerDecompressing(&transfer_buf, &decomp, &decomp_buf);
-    const body = try reader.allocRemaining(ar, .limited(64 * 1024));
+    const body = try reader.allocRemaining(alloc, .limited(64 * 1024));
+    defer alloc.free(body);
 
     // Parse just the tag_name field
     const tag = extractTagName(body) orelse return null;

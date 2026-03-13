@@ -504,6 +504,15 @@ fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []con
     try oh.snap(src, snap).expectEqual(actual);
 }
 
+fn rowAscii(frm: *const Frame, y: usize, out: []u8) ![]const u8 {
+    var x: usize = 0;
+    while (x < frm.w) : (x += 1) {
+        const cp = (try frm.cell(x, y)).cp;
+        out[x] = if (cp <= 0x7f) @intCast(cp) else '?';
+    }
+    return out[0..frm.w];
+}
+
 test {
     _ = @import("ohsnap");
 }
@@ -517,15 +526,29 @@ test "overlay renders centered box" {
 
     try ov.render(&frm);
 
-    // Top-left corner should be ┌
     const x0 = (30 - (11 + 4)) / 2; // max_w=12("Select Model"), box_w=16
     const y0 = (10 - 5) / 2; // box_h = 3 items + 2 = 5
-    const c = try frm.cell(x0, y0);
-    try std.testing.expectEqual(@as(u21, 0x250C), c.cp);
-
-    // Selected item (idx 1) should have '>'
-    const sel_c = try frm.cell(x0 + 2, y0 + 2);
-    try std.testing.expectEqual(@as(u21, '>'), sel_c.cp);
+    var r0: [30]u8 = undefined;
+    var r1: [30]u8 = undefined;
+    var r2: [30]u8 = undefined;
+    var r3: [30]u8 = undefined;
+    var r4: [30]u8 = undefined;
+    const actual = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}\n{s}\n{s}\n{s}", .{
+        (try rowAscii(&frm, y0 + 0, r0[0..]))[x0 .. x0 + 15],
+        (try rowAscii(&frm, y0 + 1, r1[0..]))[x0 .. x0 + 15],
+        (try rowAscii(&frm, y0 + 2, r2[0..]))[x0 .. x0 + 15],
+        (try rowAscii(&frm, y0 + 3, r3[0..]))[x0 .. x0 + 15],
+        (try rowAscii(&frm, y0 + 4, r4[0..]))[x0 .. x0 + 15],
+    });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "??Select Model?\n" ++
+        "?   model-a    \n" ++
+        "? > model-b    \n" ++
+        "?   model-c    \n" ++
+        "???????????????",
+        actual,
+    );
 }
 
 test "overlay navigation wraps" {
