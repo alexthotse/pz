@@ -4,6 +4,11 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 
 ---
 
+## Session Notes (2026-03-13)
+
+### Worked Well
+- For invalid UTF-8 at provider/session boundaries, use one shared lossy helper plus short-lived arena-backed `sanitizeMaybeAlloc` during JSON serialization; it preserves the existing JSON shape for valid text and only allocates on the bad-byte path.
+
 ## Session Notes (2026-03-11)
 
 ### Worked Well

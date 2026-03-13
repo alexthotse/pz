@@ -2,6 +2,7 @@ const std = @import("std");
 const providers = @import("contract.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
+const utf8 = @import("../utf8.zig");
 
 const api_host = "api.openai.com";
 const api_path = "/v1/responses";
@@ -514,34 +515,7 @@ fn jsonU64(val: ?std.json.Value) u64 {
 }
 
 fn sanitizeUtf8(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
-    if (std.unicode.Utf8View.init(raw)) |_| return raw else |_| {}
-    var out = try alloc.alloc(u8, raw.len);
-    var i: usize = 0;
-    var o: usize = 0;
-    while (i < raw.len) {
-        const n = std.unicode.utf8ByteSequenceLength(raw[i]) catch {
-            out[o] = '?';
-            o += 1;
-            i += 1;
-            continue;
-        };
-        if (i + n > raw.len) {
-            out[o] = '?';
-            o += 1;
-            i += 1;
-            continue;
-        }
-        _ = std.unicode.utf8Decode(raw[i .. i + n]) catch {
-            out[o] = '?';
-            o += 1;
-            i += 1;
-            continue;
-        };
-        @memcpy(out[o .. o + n], raw[i .. i + n]);
-        o += n;
-        i += n;
-    }
-    return out[0..o];
+    return utf8.sanitizeMaybeAlloc(alloc, raw);
 }
 
 fn mapStopStatus(status: ?[]const u8) providers.StopReason {
@@ -577,6 +551,10 @@ fn reasoningEffort(opts: providers.Opts) ?[]const u8 {
 }
 
 fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
     var out: std.io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
 
@@ -618,11 +596,11 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
     }
 
     try js.objectField("input");
-    try writeInput(&js, req.msgs);
+    try writeInput(ar, &js, req.msgs);
 
     if (req.tools.len > 0) {
         try js.objectField("tools");
-        try writeTools(&js, req.tools);
+        try writeTools(ar, &js, req.tools);
     }
 
     try js.endObject();
@@ -630,20 +608,24 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeInput(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
+fn writeJsonLossy(alloc: std.mem.Allocator, js: *std.json.Stringify, raw: []const u8) !void {
+    try js.write(try utf8.sanitizeMaybeAlloc(alloc, raw));
+}
+
+fn writeInput(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     try js.beginArray();
     for (msgs) |msg| {
         switch (msg.role) {
-            .system => try writeSystemInput(js, msg.parts),
-            .user => try writeUserInput(js, msg.parts),
-            .assistant => try writeAssistantInput(js, msg.parts),
-            .tool => try writeToolInput(js, msg.parts),
+            .system => try writeSystemInput(alloc, js, msg.parts),
+            .user => try writeUserInput(alloc, js, msg.parts),
+            .assistant => try writeAssistantInput(alloc, js, msg.parts),
+            .tool => try writeToolInput(alloc, js, msg.parts),
         }
     }
     try js.endArray();
 }
 
-fn writeSystemInput(js: *std.json.Stringify, parts: []const providers.Part) !void {
+fn writeSystemInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []const providers.Part) !void {
     var text_count: usize = 0;
     for (parts) |part| {
         if (part == .text) text_count += 1;
@@ -661,7 +643,7 @@ fn writeSystemInput(js: *std.json.Stringify, parts: []const providers.Part) !voi
             try js.objectField("type");
             try js.write("input_text");
             try js.objectField("text");
-            try js.write(text);
+            try writeJsonLossy(alloc, js, text);
             try js.endObject();
         },
         else => {},
@@ -670,7 +652,7 @@ fn writeSystemInput(js: *std.json.Stringify, parts: []const providers.Part) !voi
     try js.endObject();
 }
 
-fn writeUserInput(js: *std.json.Stringify, parts: []const providers.Part) !void {
+fn writeUserInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []const providers.Part) !void {
     var text_count: usize = 0;
     for (parts) |part| {
         if (part == .text) text_count += 1;
@@ -688,7 +670,7 @@ fn writeUserInput(js: *std.json.Stringify, parts: []const providers.Part) !void 
             try js.objectField("type");
             try js.write("input_text");
             try js.objectField("text");
-            try js.write(text);
+            try writeJsonLossy(alloc, js, text);
             try js.endObject();
         },
         else => {},
@@ -697,7 +679,7 @@ fn writeUserInput(js: *std.json.Stringify, parts: []const providers.Part) !void 
     try js.endObject();
 }
 
-fn writeAssistantInput(js: *std.json.Stringify, parts: []const providers.Part) !void {
+fn writeAssistantInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []const providers.Part) !void {
     for (parts) |part| switch (part) {
         .text => |text| {
             try js.beginObject();
@@ -713,7 +695,7 @@ fn writeAssistantInput(js: *std.json.Stringify, parts: []const providers.Part) !
             try js.objectField("type");
             try js.write("output_text");
             try js.objectField("text");
-            try js.write(text);
+            try writeJsonLossy(alloc, js, text);
             try js.objectField("annotations");
             try js.beginArray();
             try js.endArray();
@@ -728,16 +710,16 @@ fn writeAssistantInput(js: *std.json.Stringify, parts: []const providers.Part) !
             try js.objectField("call_id");
             try js.write(callIdFromToolId(tc.id));
             try js.objectField("name");
-            try js.write(tc.name);
+            try writeJsonLossy(alloc, js, tc.name);
             try js.objectField("arguments");
-            try js.write(tc.args);
+            try writeJsonLossy(alloc, js, tc.args);
             try js.endObject();
         },
         else => {},
     };
 }
 
-fn writeToolInput(js: *std.json.Stringify, parts: []const providers.Part) !void {
+fn writeToolInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []const providers.Part) !void {
     for (parts) |part| switch (part) {
         .tool_result => |tr| {
             try js.beginObject();
@@ -746,23 +728,23 @@ fn writeToolInput(js: *std.json.Stringify, parts: []const providers.Part) !void 
             try js.objectField("call_id");
             try js.write(callIdFromToolId(tr.id));
             try js.objectField("output");
-            try js.write(tr.out);
+            try writeJsonLossy(alloc, js, tr.out);
             try js.endObject();
         },
         else => {},
     };
 }
 
-fn writeTools(js: *std.json.Stringify, tools: []const providers.Tool) !void {
+fn writeTools(alloc: std.mem.Allocator, js: *std.json.Stringify, tools: []const providers.Tool) !void {
     try js.beginArray();
     for (tools) |tool| {
         try js.beginObject();
         try js.objectField("type");
         try js.write("function");
         try js.objectField("name");
-        try js.write(tool.name);
+        try writeJsonLossy(alloc, js, tool.name);
         try js.objectField("description");
-        try js.write(tool.desc);
+        try writeJsonLossy(alloc, js, tool.desc);
         try js.objectField("parameters");
         if (tool.schema.len > 0) {
             try js.beginWriteRaw();
@@ -787,6 +769,7 @@ fn writeTools(js: *std.json.Stringify, tools: []const providers.Tool) !void {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const utf8_case = @import("../../test/utf8_case.zig");
 
 fn testStream() SseStream {
     return SseStream.initFields(testing.allocator);
@@ -1120,6 +1103,31 @@ test "buildBody includes system assistant tool history and tool definitions" {
     try expectSnap(@src(), body,
         \\[]u8
         \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"developer","content":[{"type":"input_text","text":"sys"}]},{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}],"tools":[{"type":"function","name":"bash","description":"Run shell","parameters":{"type":"object"},"strict":false}]}"
+    );
+}
+
+test "buildBody replaces invalid utf8 tool output lossy" {
+    const msgs = [_]providers.Msg{
+        .{ .role = .user, .parts = &.{.{ .text = "run" }} },
+        .{ .role = .assistant, .parts = &.{.{ .tool_call = .{
+            .id = "call-1|fc_1",
+            .name = "bash",
+            .args = "{\"cmd\":\"ls\"}",
+        } }} },
+        .{ .role = .tool, .parts = &.{.{ .tool_result = .{
+            .id = "call-1|fc_1",
+            .out = utf8_case.bad_tool_out[0..],
+        } }} },
+    };
+    const body = try buildBody(testing.allocator, .{
+        .model = "gpt-5",
+        .msgs = &msgs,
+        .opts = .{ .thinking = .off },
+    });
+    defer testing.allocator.free(body);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"o?k?"}]}"
     );
 }
 

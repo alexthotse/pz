@@ -2,6 +2,7 @@ const std = @import("std");
 const providers = @import("contract.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
+const utf8 = @import("../utf8.zig");
 
 const api_version = "2023-06-01";
 const api_host = "api.anthropic.com";
@@ -471,36 +472,7 @@ fn supportsThinking(model: []const u8) bool {
 }
 
 fn sanitizeUtf8(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
-    // If already valid UTF-8, return as-is
-    if (std.unicode.Utf8View.init(raw)) |_| return raw else |_| {}
-    // Replace invalid bytes with '?'
-    var out = try alloc.alloc(u8, raw.len);
-    var i: usize = 0;
-    var o: usize = 0;
-    while (i < raw.len) {
-        const n = std.unicode.utf8ByteSequenceLength(raw[i]) catch {
-            out[o] = '?';
-            o += 1;
-            i += 1;
-            continue;
-        };
-        if (i + n > raw.len) {
-            out[o] = '?';
-            o += 1;
-            i += 1;
-            continue;
-        }
-        _ = std.unicode.utf8Decode(raw[i .. i + n]) catch {
-            out[o] = '?';
-            o += 1;
-            i += 1;
-            continue;
-        };
-        @memcpy(out[o .. o + n], raw[i .. i + n]);
-        o += n;
-        i += n;
-    }
-    return out[0..o];
+    return utf8.sanitizeMaybeAlloc(alloc, raw);
 }
 
 /// Extract "message" from Anthropic JSON error: {"type":"error","error":{"message":"..."}}
@@ -536,6 +508,10 @@ fn jsonU64(val: ?std.json.Value) u64 {
 }
 
 fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
     var out: std.io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
 
@@ -601,10 +577,10 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
     }
 
     // Extract system messages as top-level "system" field
-    try writeSystem(&js, req.msgs);
+    try writeSystem(ar, &js, req.msgs);
 
     try js.objectField("messages");
-    try writeMessages(&js, req.msgs);
+    try writeMessages(ar, &js, req.msgs);
 
     if (req.tools.len > 0) {
         try js.objectField("tools");
@@ -612,9 +588,9 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
         for (req.tools) |tool| {
             try js.beginObject();
             try js.objectField("name");
-            try js.write(tool.name);
+            try writeJsonLossy(ar, &js, tool.name);
             try js.objectField("description");
-            try js.write(tool.desc);
+            try writeJsonLossy(ar, &js, tool.desc);
             try js.objectField("input_schema");
             if (tool.schema.len > 0) {
                 try js.beginWriteRaw();
@@ -636,7 +612,11 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeSystem(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
+fn writeJsonLossy(alloc: std.mem.Allocator, js: *std.json.Stringify, raw: []const u8) !void {
+    try js.write(try utf8.sanitizeMaybeAlloc(alloc, raw));
+}
+
+fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     // Count total system text parts for cache_control on last one
     var total: usize = 0;
     for (msgs) |msg| {
@@ -659,7 +639,7 @@ fn writeSystem(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
                     try js.objectField("type");
                     try js.write("text");
                     try js.objectField("text");
-                    try js.write(text);
+                    try writeJsonLossy(alloc, js, text);
                     // Mark last system block for prompt caching
                     idx += 1;
                     if (idx == total) {
@@ -678,7 +658,7 @@ fn writeSystem(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     try js.endArray();
 }
 
-fn writeMessages(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
+fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     try js.beginArray();
 
     var prev_role: ?[]const u8 = null;
@@ -715,7 +695,7 @@ fn writeMessages(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
                     try js.objectField("type");
                     try js.write("text");
                     try js.objectField("text");
-                    try js.write(text);
+                    try writeJsonLossy(alloc, js, text);
                 },
                 .tool_call => |tc| {
                     try js.objectField("type");
@@ -723,7 +703,7 @@ fn writeMessages(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
                     try js.objectField("id");
                     try js.write(tc.id);
                     try js.objectField("name");
-                    try js.write(tc.name);
+                    try writeJsonLossy(alloc, js, tc.name);
                     try js.objectField("input");
                     if (tc.args.len > 0) {
                         try js.beginWriteRaw();
@@ -740,7 +720,7 @@ fn writeMessages(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
                     try js.objectField("tool_use_id");
                     try js.write(tr.id);
                     try js.objectField("content");
-                    try js.write(tr.out);
+                    try writeJsonLossy(alloc, js, tr.out);
                     if (tr.is_err) {
                         try js.objectField("is_error");
                         try js.write(true);
@@ -764,6 +744,7 @@ fn writeMessages(js: *std.json.Stringify, msgs: []const providers.Msg) !void {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const utf8_case = @import("../../test/utf8_case.zig");
 
 fn testStream() SseStream {
     return SseStream.initFields(testing.allocator);
@@ -1320,6 +1301,31 @@ test "buildBody tool_result error flag" {
     try expectSnap(@src(), body,
         \\[]u8
         \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"run bad"}]},{"role":"assistant","content":[{"type":"tool_use","id":"tc2","name":"bash","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc2","content":"command failed","is_error":true}]}]}"
+    );
+}
+
+test "buildBody replaces invalid utf8 tool output lossy" {
+    const msgs = [_]providers.Msg{
+        .{ .role = .user, .parts = &.{.{ .text = "run" }} },
+        .{ .role = .assistant, .parts = &.{.{ .tool_call = .{
+            .id = "tc2",
+            .name = "bash",
+            .args = "{}",
+        } }} },
+        .{ .role = .tool, .parts = &.{.{ .tool_result = .{
+            .id = "tc2",
+            .out = utf8_case.bad_tool_out[0..],
+        } }} },
+    };
+    const body = try buildBody(testing.allocator, .{
+        .model = "claude-sonnet-4-20250514",
+        .msgs = &msgs,
+        .opts = .{ .thinking = .off },
+    });
+    defer testing.allocator.free(body);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"run"}]},{"role":"assistant","content":[{"type":"tool_use","id":"tc2","name":"bash","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc2","content":"o?k?"}]}]}"
     );
 }
 

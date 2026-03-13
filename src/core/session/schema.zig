@@ -1,4 +1,5 @@
 const std = @import("std");
+const utf8 = @import("../utf8.zig");
 
 pub const version_current: u16 = 1;
 
@@ -132,7 +133,32 @@ pub const DecodeError = std.json.ParseError(std.json.Scanner) || error{
 pub fn encodeAlloc(alloc: std.mem.Allocator, ev: Event) error{OutOfMemory}![]u8 {
     var out = ev;
     out.version = version_current;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    out.data = try sanitizeData(arena.allocator(), out.data);
     return std.json.Stringify.valueAlloc(alloc, out, .{});
+}
+
+fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!Event.Data {
+    return switch (data) {
+        .noop => .{ .noop = {} },
+        .prompt => |t| .{ .prompt = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
+        .text => |t| .{ .text = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
+        .thinking => |t| .{ .thinking = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
+        .tool_call => |tc| .{ .tool_call = .{
+            .id = try utf8.sanitizeMaybeAlloc(alloc, tc.id),
+            .name = try utf8.sanitizeMaybeAlloc(alloc, tc.name),
+            .args = try utf8.sanitizeMaybeAlloc(alloc, tc.args),
+        } },
+        .tool_result => |tr| .{ .tool_result = .{
+            .id = try utf8.sanitizeMaybeAlloc(alloc, tr.id),
+            .out = try utf8.sanitizeMaybeAlloc(alloc, tr.out),
+            .is_err = tr.is_err,
+        } },
+        .usage => |u| .{ .usage = u },
+        .stop => |s| .{ .stop = s },
+        .err => |t| .{ .err = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
+    };
 }
 
 pub fn decodeSlice(alloc: std.mem.Allocator, raw: []const u8) DecodeError!std.json.Parsed(Event) {
@@ -177,6 +203,27 @@ test "session event json roundtrip" {
         \\        "{"ok":true}"
         \\      .is_err: bool = false
     ).expectEqual(parsed.value);
+}
+
+test "session event json replaces invalid utf8 lossy" {
+    const utf8_case = @import("../../test/utf8_case.zig");
+    const ev = Event{
+        .at_ms = 7,
+        .data = .{ .tool_result = .{
+            .id = "call-1",
+            .out = utf8_case.bad_tool_out[0..],
+            .is_err = false,
+        } },
+    };
+
+    const raw = try encodeAlloc(std.testing.allocator, ev);
+    defer std.testing.allocator.free(raw);
+    try std.testing.expect(std.mem.indexOfScalar(u8, raw, 0xff) == null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, utf8_case.lossy_tool_out) != null);
+
+    var parsed = try decodeSlice(std.testing.allocator, raw);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(utf8_case.lossy_tool_out, parsed.value.data.tool_result.out);
 }
 
 test "session event json rejects wrong version" {

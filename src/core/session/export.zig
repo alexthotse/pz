@@ -1,6 +1,6 @@
 const std = @import("std");
 const audit = @import("../audit.zig");
-const schema = @import("schema.zig");
+const utf8 = @import("../utf8.zig");
 const reader_mod = @import("reader.zig");
 const sid_path = @import("path.zig");
 
@@ -64,7 +64,7 @@ fn toMarkdownWith(
             },
             .tool_call => |tc| {
                 try buf.appendSlice(alloc, "### Tool: ");
-                const safe_name = try audit.redactTextAlloc(alloc, tc.name, .@"pub");
+                const safe_name = try redactLossyAlloc(alloc, tc.name, .@"pub");
                 defer alloc.free(safe_name);
                 try buf.appendSlice(alloc, safe_name);
                 try buf.appendSlice(alloc, "\n\n");
@@ -76,9 +76,7 @@ fn toMarkdownWith(
                 // Truncate very long tool output
                 const max_out = 2000;
                 const raw_out = if (tr.out.len > max_out) tr.out[0..max_out] else tr.out;
-                const safe_out = try audit.redactTextAlloc(alloc, raw_out, .@"pub");
-                defer alloc.free(safe_out);
-                try appendFence(alloc, &buf, safe_out);
+                try appendFence(alloc, &buf, raw_out);
                 if (tr.out.len > max_out) {
                     const trunc_msg = try std.fmt.allocPrint(alloc, "\n... ({d} bytes truncated)", .{tr.out.len - max_out});
                     defer alloc.free(trunc_msg);
@@ -155,7 +153,7 @@ fn appendSection(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), tit
 }
 
 fn appendFence(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), txt: []const u8) !void {
-    const safe = try audit.redactTextAlloc(alloc, txt, .@"pub");
+    const safe = try redactLossyAlloc(alloc, txt, .@"pub");
     defer alloc.free(safe);
 
     const n = fenceLen(safe);
@@ -170,6 +168,12 @@ fn appendFence(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), txt: 
     if (safe.len == 0 or safe[safe.len - 1] != '\n') try buf.appendSlice(alloc, "\n");
     try buf.appendSlice(alloc, fence.items);
     try buf.appendSlice(alloc, "\n\n");
+}
+
+fn redactLossyAlloc(alloc: std.mem.Allocator, txt: []const u8, vis: audit.Vis) ![]u8 {
+    var safe = try utf8.Lossy.init(alloc, txt);
+    defer safe.deinit(alloc);
+    return audit.redactTextAlloc(alloc, safe.text, vis);
 }
 
 fn fenceLen(txt: []const u8) usize {
@@ -236,6 +240,8 @@ fn normalizeMd(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     }
     return try out.toOwnedSlice(alloc);
 }
+
+const utf8_case = @import("../../test/utf8_case.zig");
 
 test "export session to markdown" {
     const OhSnap = @import("ohsnap");
@@ -398,6 +404,62 @@ test "export markdown redacts secrets and neutralizes markdown" {
         \\
         \\```
         \\[secret:7ac2c068fc811ef1]
+        \\```"
+    ).expectEqual(snap);
+}
+
+test "export markdown replaces invalid utf8 from persisted tool output" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const writer_mod = @import("writer.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
+        .flush = .{ .always = {} },
+    });
+    try wr.append("utf8", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "run" } } });
+    try wr.append("utf8", .{ .at_ms = 2, .data = .{ .tool_result = .{
+        .id = "c1",
+        .out = utf8_case.bad_tool_out[0..],
+        .is_err = false,
+    } } });
+
+    const raw = try tmp.dir.readFileAlloc(std.testing.allocator, "utf8.jsonl", 4096);
+    defer std.testing.allocator.free(raw);
+    try std.testing.expect(std.mem.indexOfScalar(u8, raw, 0xff) == null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, utf8_case.lossy_tool_out) != null);
+
+    const real = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(real);
+    const dest = try std.fs.path.join(std.testing.allocator, &.{ real, "utf8.md" });
+    defer std.testing.allocator.free(dest);
+
+    const path = try toMarkdown(std.testing.allocator, tmp.dir, "utf8", dest);
+    defer std.testing.allocator.free(path);
+
+    const content = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+    defer content.close();
+    const md = try content.readToEndAlloc(std.testing.allocator, 64 * 1024);
+    defer std.testing.allocator.free(md);
+    const snap = try normalizeMd(std.testing.allocator, md);
+    defer std.testing.allocator.free(snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "# Session utf8
+        \\
+        \\## User
+        \\
+        \\```
+        \\run
+        \\```
+        \\
+        \\#### Result
+        \\
+        \\```
+        \\o?k?
         \\```"
     ).expectEqual(snap);
 }
