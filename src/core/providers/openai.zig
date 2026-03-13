@@ -893,6 +893,8 @@ test "parseSseData reasoning delta emits thinking event" {
 }
 
 test "parseSseData function call lifecycle emits tool_call" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
     defer stream.tool_call_id.deinit(testing.allocator);
@@ -911,52 +913,123 @@ test "parseSseData function call lifecycle emits tool_call" {
     const ev = try testParse(&stream,
         \\{"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1","name":"bash","arguments":"{\"cmd\":\"ls -la\"}"}}
     );
-    try testing.expect(ev != null);
-    const tc = ev.?.tool_call;
-    try testing.expectEqualStrings("c1", tc.id);
-    try testing.expectEqualStrings("bash", tc.name);
-    try testing.expectEqualStrings("{\"cmd\":\"ls -la\"}", tc.args);
+    const tc = switch (ev orelse return error.TestUnexpectedResult) {
+        .tool_call => |tool_call| tool_call,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "id={s}\nname={s}\nargs={s}\n", .{
+        tc.id,
+        tc.name,
+        tc.args,
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "id=c1
+        \\name=bash
+        \\args={"cmd":"ls -la"}
+        \\"
+    ).expectEqual(snap);
 }
 
 test "parseSseData completed emits usage and pending stop done" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
     const ev = try testParse(&stream,
         \\{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"input_tokens_details":{"cached_tokens":3}}}}
     );
-    try testing.expect(ev != null);
-    const usage = ev.?.usage;
-    try testing.expectEqual(@as(u64, 10), usage.in_tok);
-    try testing.expectEqual(@as(u64, 4), usage.out_tok);
-    try testing.expectEqual(@as(u64, 14), usage.tot_tok);
-    try testing.expectEqual(@as(u64, 3), usage.cache_read);
-    try testing.expect(stream.pending != null);
-    try testing.expectEqual(providers.StopReason.done, stream.pending.?.stop.reason);
-    try testing.expect(stream.done);
+    const usage = switch (ev orelse return error.TestUnexpectedResult) {
+        .usage => |got| got,
+        else => return error.TestUnexpectedResult,
+    };
+    const pending = switch (stream.pending orelse return error.TestUnexpectedResult) {
+        .stop => |stop| stop,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "usage={d}|{d}|{d}|{d}\npending={s}\ndone={any}\n", .{
+        usage.in_tok,
+        usage.out_tok,
+        usage.tot_tok,
+        usage.cache_read,
+        @tagName(pending.reason),
+        stream.done,
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "usage=10|4|14|3
+        \\pending=done
+        \\done=true
+        \\"
+    ).expectEqual(snap);
 }
 
 test "parseSseData completed maps tool stop when tool call seen" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
     stream.saw_tool_call = true;
     const ev = try testParse(&stream,
         \\{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
     );
-    try testing.expect(ev != null);
-    try testing.expect(stream.pending != null);
-    try testing.expectEqual(providers.StopReason.tool, stream.pending.?.stop.reason);
+    const usage = switch (ev orelse return error.TestUnexpectedResult) {
+        .usage => |got| got,
+        else => return error.TestUnexpectedResult,
+    };
+    const pending = switch (stream.pending orelse return error.TestUnexpectedResult) {
+        .stop => |stop| stop,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "usage={d}|{d}|{d}|{d}\npending={s}\ndone={any}\n", .{
+        usage.in_tok,
+        usage.out_tok,
+        usage.tot_tok,
+        usage.cache_read,
+        @tagName(pending.reason),
+        stream.done,
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "usage=1|1|2|0
+        \\pending=tool
+        \\done=true
+        \\"
+    ).expectEqual(snap);
 }
 
 test "parseSseData error emits err and stop" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
     const ev = try testParse(&stream,
         \\{"type":"error","message":"boom"}
     );
-    try testing.expect(ev != null);
-    try testing.expectEqualStrings("boom", ev.?.err);
-    try testing.expect(stream.pending != null);
-    try testing.expectEqual(providers.StopReason.err, stream.pending.?.stop.reason);
+    const err_txt = switch (ev orelse return error.TestUnexpectedResult) {
+        .err => |txt| txt,
+        else => return error.TestUnexpectedResult,
+    };
+    const pending = switch (stream.pending orelse return error.TestUnexpectedResult) {
+        .stop => |stop| stop,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "err={s}\npending={s}\ndone={any}\n", .{
+        err_txt,
+        @tagName(pending.reason),
+        stream.done,
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "err=boom
+        \\pending=err
+        \\done=true
+        \\"
+    ).expectEqual(snap);
 }
 
 test "parseSseData unknown and invalid return null" {

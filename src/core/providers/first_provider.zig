@@ -579,6 +579,8 @@ test "buildReq includes provider field when set" {
 }
 
 test "first provider retries transient start and streams parsed events" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{ .start_err = error.Timeout },
         .{ .chunks = &.{"text:hello\nstop:done\n"} },
@@ -620,17 +622,31 @@ test "first provider retries transient start and streams parsed events" {
         else => return error.TestUnexpectedResult,
     }
 
-    try std.testing.expectEqual(@as(usize, 2), tr.start_ct);
-    try std.testing.expectEqual(@as(usize, 2), tr.reqs.items.len);
-    try std.testing.expectEqualStrings(tr.reqs.items[0], tr.reqs.items[1]);
-    try std.testing.expect(std.mem.indexOf(u8, tr.reqs.items[0], "\"model\":\"first-model\"") != null);
-
-    try std.testing.expectEqual(@as(usize, 1), waits.len);
-    try std.testing.expectEqual(@as(u64, 10), waits.waits[0]);
-    try std.testing.expectEqual(@as(usize, 1), map_ctx.calls);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nreqs={d}\nsame_req={any}\nreq0={s}\nwaits={d}|{d}\nmap_calls={d}\n", .{
+        tr.start_ct,
+        tr.reqs.items.len,
+        std.mem.eql(u8, tr.reqs.items[0], tr.reqs.items[1]),
+        tr.reqs.items[0],
+        waits.len,
+        waits.waits[0],
+        map_ctx.calls,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=2
+        \\reqs=2
+        \\same_req=true
+        \\req0={"model":"first-model","msgs":[],"tools":[],"opts":{"stop":[]}}
+        \\waits=1|10
+        \\map_calls=1
+        \\"
+    ).expectEqual(snap);
 }
 
 test "first provider maps fatal transport errors without retry" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{ .start_err = error.BadGateway },
     };
@@ -656,12 +672,24 @@ test "first provider maps fatal transport errors without retry" {
     };
 
     try std.testing.expectError(error.TransportFatal, client.asProvider().start(req));
-    try std.testing.expectEqual(@as(usize, 1), tr.start_ct);
-    try std.testing.expectEqual(@as(usize, 0), waits.len);
-    try std.testing.expectEqual(@as(usize, 1), map_ctx.calls);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\nmap_calls={d}\n", .{
+        tr.start_ct,
+        waits.len,
+        map_ctx.calls,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=1
+        \\waits=0
+        \\map_calls=1
+        \\"
+    ).expectEqual(snap);
 }
 
 test "first provider retries on transient chunk read failures" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{
             .chunks = &.{"text:bad\n"},
@@ -709,8 +737,18 @@ test "first provider retries on transient chunk read failures" {
         else => return error.TestUnexpectedResult,
     }
 
-    try std.testing.expectEqual(@as(usize, 2), tr.start_ct);
-    try std.testing.expectEqual(@as(usize, 1), waits.len);
-    try std.testing.expectEqual(@as(u64, 10), waits.waits[0]);
-    try std.testing.expectEqual(@as(usize, 1), map_ctx.calls);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}|{d}\nmap_calls={d}\n", .{
+        tr.start_ct,
+        waits.len,
+        waits.waits[0],
+        map_ctx.calls,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=2
+        \\waits=1|10
+        \\map_calls=1
+        \\"
+    ).expectEqual(snap);
 }

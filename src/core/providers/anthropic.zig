@@ -897,6 +897,8 @@ test "parseSseData message_start extracts usage" {
 }
 
 test "parseSseData tool_use block accumulates" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
     defer stream.tool_id.deinit(testing.allocator);
@@ -907,9 +909,6 @@ test "parseSseData tool_use block accumulates" {
     _ = try testParse(&stream,
         \\{"type":"content_block_start","content_block":{"type":"tool_use","id":"t1","name":"bash"}}
     );
-    try testing.expect(stream.in_tool);
-    try testing.expectEqualStrings("t1", stream.tool_id.items);
-    try testing.expectEqualStrings("bash", stream.tool_name.items);
 
     // Accumulate args
     _ = try testParse(&stream,
@@ -918,21 +917,50 @@ test "parseSseData tool_use block accumulates" {
     _ = try testParse(&stream,
         \\{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"\"ls\"}"}}
     );
-    try testing.expectEqualStrings("{\"cmd\":\"ls\"}", stream.tool_args.items);
+    const state_snap = try std.fmt.allocPrint(testing.allocator, "in_tool={any}\nid={s}\nname={s}\nargs={s}\n", .{
+        stream.in_tool,
+        stream.tool_id.items,
+        stream.tool_name.items,
+        stream.tool_args.items,
+    });
+    defer testing.allocator.free(state_snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "in_tool=true
+        \\id=t1
+        \\name=bash
+        \\args={"cmd":"ls"}
+        \\"
+    ).expectEqual(state_snap);
 
     // Stop — should emit tool_call event
     const ev = try testParse(&stream,
         \\{"type":"content_block_stop"}
     );
-    try testing.expect(ev != null);
-    const tc = ev.?.tool_call;
-    try testing.expectEqualStrings("t1", tc.id);
-    try testing.expectEqualStrings("bash", tc.name);
-    try testing.expectEqualStrings("{\"cmd\":\"ls\"}", tc.args);
-    try testing.expect(!stream.in_tool);
+    const tc = switch (ev orelse return error.TestUnexpectedResult) {
+        .tool_call => |tool_call| tool_call,
+        else => return error.TestUnexpectedResult,
+    };
+    const ev_snap = try std.fmt.allocPrint(testing.allocator, "id={s}\nname={s}\nargs={s}\nin_tool={any}\n", .{
+        tc.id,
+        tc.name,
+        tc.args,
+        stream.in_tool,
+    });
+    defer testing.allocator.free(ev_snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "id=t1
+        \\name=bash
+        \\args={"cmd":"ls"}
+        \\in_tool=false
+        \\"
+    ).expectEqual(ev_snap);
 }
 
 test "parseSseData message_delta stop reason and usage" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
 
@@ -941,15 +969,29 @@ test "parseSseData message_delta stop reason and usage" {
     const ev = try testParse(&stream,
         \\{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}
     );
-    try testing.expect(ev != null);
-    const usage = ev.?.usage;
-    try testing.expectEqual(@as(u64, 100), usage.in_tok);
-    try testing.expectEqual(@as(u64, 42), usage.out_tok);
-    try testing.expectEqual(@as(u64, 142), usage.tot_tok);
-    // Pending stop event
-    try testing.expect(stream.pending != null);
-    try testing.expectEqual(providers.StopReason.done, stream.pending.?.stop.reason);
-    try testing.expect(stream.done);
+    const usage = switch (ev orelse return error.TestUnexpectedResult) {
+        .usage => |got| got,
+        else => return error.TestUnexpectedResult,
+    };
+    const pending = switch (stream.pending orelse return error.TestUnexpectedResult) {
+        .stop => |stop| stop,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(testing.allocator, "usage={d}|{d}|{d}\npending={s}\ndone={any}\n", .{
+        usage.in_tok,
+        usage.out_tok,
+        usage.tot_tok,
+        @tagName(pending.reason),
+        stream.done,
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "usage=100|42|142
+        \\pending=done
+        \\done=true
+        \\"
+    ).expectEqual(snap);
 }
 
 test "parseSseData property randomized tool_use lifecycle preserves args and tool stop" {

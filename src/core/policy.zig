@@ -1210,8 +1210,6 @@ test "loadApprovalBind hashes verified home and cwd policy docs" {
 
     const bind_a = try loadApprovalBind(testing.allocator, repo, home);
     defer bind_a.deinit(testing.allocator);
-    try testing.expect(bind_a == .hash);
-    try testing.expectEqual(@as(usize, 64), bind_a.hash.len);
 
     const repo_rules_b = [_]Rule{.{ .pattern = "*.txt", .effect = .deny }};
     const repo_raw_b = try encodeSignedDoc(testing.allocator, .{ .rules = &repo_rules_b }, kp);

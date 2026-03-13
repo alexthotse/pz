@@ -400,6 +400,8 @@ test "stream run drops partial events from failed retry attempt" {
 }
 
 test "stream run does not retry parser failures" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{
             .chunks = &.{"bad\n"},
@@ -420,11 +422,22 @@ test "stream run does not retry parser failures" {
             waits.asSleeper(),
         ),
     );
-    try std.testing.expectEqual(@as(usize, 1), tr.start_ct);
-    try std.testing.expectEqual(@as(usize, 0), waits.len);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\n", .{
+        tr.start_ct,
+        waits.len,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=1
+        \\waits=0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "stream run stops at max tries for transient failures" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const atts = [_]Attempt{
         .{
             .start_err = error.TransportTransient,
@@ -448,7 +461,16 @@ test "stream run stops at max tries for transient failures" {
             waits.asSleeper(),
         ),
     );
-    try std.testing.expectEqual(@as(usize, 2), tr.start_ct);
-    try std.testing.expectEqual(@as(usize, 1), waits.len);
-    try std.testing.expectEqual(@as(u64, 10), waits.waits[0]);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}|{d}\n", .{
+        tr.start_ct,
+        waits.len,
+        waits.waits[0],
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=2
+        \\waits=1|10
+        \\"
+    ).expectEqual(snap);
 }
