@@ -834,6 +834,16 @@ test "sanitizeUtf8 invalid bytes replaced" {
     try testing.expectEqualStrings("ab??cd", result);
 }
 
+test "sanitizeUtf8 property: output is valid utf8" {
+    const pbt = @import("../pbt.zig");
+    try pbt.expectSanValid(sanitizeUtf8, 64, .{ .iterations = 200 });
+}
+
+test "sanitizeUtf8 property: valid utf8 is preserved" {
+    const pbt = @import("../pbt.zig");
+    try pbt.expectSanPreserves(sanitizeUtf8, 24, .{ .iterations = 200 });
+}
+
 test "provider api message redacts secret-bearing body" {
     const safe = try sanitizeUtf8(testing.allocator,
         \\{"error":{"message":"authorization: bearer sk-live"}}

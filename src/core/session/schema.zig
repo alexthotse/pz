@@ -461,3 +461,201 @@ test "schema property: dupe preserves tool_result encode" {
         }
     }.prop, .{ .iterations = 200 });
 }
+
+test "schema property: event encode/decode roundtrip across tags" {
+    const pbt = @import("../pbt.zig");
+    const Text = pbt.Utf8(24);
+    const Tag = enum {
+        noop,
+        prompt,
+        text,
+        thinking,
+        tool_call,
+        tool_result,
+        usage,
+        stop,
+        err,
+    };
+    const Args = struct {
+        at_ms: i64,
+        tag: Tag,
+        text: Text,
+        id: pbt.Id,
+        name: pbt.Id,
+        out: Text,
+        is_err: bool,
+        in_tok: u64,
+        out_tok: u64,
+        tot_tok: u64,
+        cache_read: u64,
+        cache_write: u64,
+        stop: Event.StopReason,
+    };
+    const Store = struct {
+        a: [pbt.utf8MaxBytes(Text)]u8 = undefined,
+        id: [pbt.Id.MAX_LEN]u8 = undefined,
+        name: [pbt.Id.MAX_LEN]u8 = undefined,
+
+        fn keepId(self: *@This(), id: pbt.Id) []const u8 {
+            const raw = id.slice();
+            @memcpy(self.id[0..raw.len], raw);
+            return self.id[0..raw.len];
+        }
+
+        fn keepName(self: *@This(), name: pbt.Id) []const u8 {
+            const raw = name.slice();
+            @memcpy(self.name[0..raw.len], raw);
+            return self.name[0..raw.len];
+        }
+    };
+
+    const T = struct {
+        fn build(args: Args, store: *Store) Event {
+            return .{
+                .at_ms = args.at_ms,
+                .data = switch (args.tag) {
+                    .noop => .{ .noop = {} },
+                    .prompt => .{ .prompt = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .text => .{ .text = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .thinking => .{ .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .tool_call => .{ .tool_call = .{
+                        .id = store.keepId(args.id),
+                        .name = store.keepName(args.name),
+                        .args = pbt.utf8Slice(args.text, &store.a),
+                    } },
+                    .tool_result => .{ .tool_result = .{
+                        .id = store.keepId(args.id),
+                        .out = pbt.utf8Slice(args.out, &store.a),
+                        .is_err = args.is_err,
+                    } },
+                    .usage => .{ .usage = .{
+                        .in_tok = args.in_tok,
+                        .out_tok = args.out_tok,
+                        .tot_tok = args.tot_tok,
+                        .cache_read = args.cache_read,
+                        .cache_write = args.cache_write,
+                    } },
+                    .stop => .{ .stop = .{ .reason = args.stop } },
+                    .err => .{ .err = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                },
+            };
+        }
+
+        fn prop(args: Args) bool {
+            const alloc = std.testing.allocator;
+            var store: Store = .{};
+            const ev = build(args, &store);
+            const raw = encodeAlloc(alloc, ev) catch return false;
+            defer alloc.free(raw);
+            var parsed = decodeSlice(alloc, raw) catch return false;
+            defer parsed.deinit();
+            const got = encodeAlloc(alloc, parsed.value) catch return false;
+            defer alloc.free(got);
+            return std.mem.eql(u8, raw, got);
+        }
+    };
+
+    try pbt.run(T.prop, .{
+        .iterations = 200,
+        .use_default_values = false,
+    });
+}
+
+test "schema property: Event.dupe preserves encode across tags" {
+    const pbt = @import("../pbt.zig");
+    const Text = pbt.Utf8(24);
+    const Tag = enum {
+        noop,
+        prompt,
+        text,
+        thinking,
+        tool_call,
+        tool_result,
+        usage,
+        stop,
+        err,
+    };
+    const Args = struct {
+        at_ms: i64,
+        tag: Tag,
+        text: Text,
+        id: pbt.Id,
+        name: pbt.Id,
+        out: Text,
+        is_err: bool,
+        in_tok: u64,
+        out_tok: u64,
+        tot_tok: u64,
+        cache_read: u64,
+        cache_write: u64,
+        stop: Event.StopReason,
+    };
+    const Store = struct {
+        a: [pbt.utf8MaxBytes(Text)]u8 = undefined,
+        id: [pbt.Id.MAX_LEN]u8 = undefined,
+        name: [pbt.Id.MAX_LEN]u8 = undefined,
+
+        fn keepId(self: *@This(), id: pbt.Id) []const u8 {
+            const raw = id.slice();
+            @memcpy(self.id[0..raw.len], raw);
+            return self.id[0..raw.len];
+        }
+
+        fn keepName(self: *@This(), name: pbt.Id) []const u8 {
+            const raw = name.slice();
+            @memcpy(self.name[0..raw.len], raw);
+            return self.name[0..raw.len];
+        }
+    };
+
+    const T = struct {
+        fn build(args: Args, store: *Store) Event {
+            return .{
+                .at_ms = args.at_ms,
+                .data = switch (args.tag) {
+                    .noop => .{ .noop = {} },
+                    .prompt => .{ .prompt = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .text => .{ .text = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .thinking => .{ .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .tool_call => .{ .tool_call = .{
+                        .id = store.keepId(args.id),
+                        .name = store.keepName(args.name),
+                        .args = pbt.utf8Slice(args.text, &store.a),
+                    } },
+                    .tool_result => .{ .tool_result = .{
+                        .id = store.keepId(args.id),
+                        .out = pbt.utf8Slice(args.out, &store.a),
+                        .is_err = args.is_err,
+                    } },
+                    .usage => .{ .usage = .{
+                        .in_tok = args.in_tok,
+                        .out_tok = args.out_tok,
+                        .tot_tok = args.tot_tok,
+                        .cache_read = args.cache_read,
+                        .cache_write = args.cache_write,
+                    } },
+                    .stop => .{ .stop = .{ .reason = args.stop } },
+                    .err => .{ .err = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                },
+            };
+        }
+
+        fn prop(args: Args) bool {
+            const alloc = std.testing.allocator;
+            var store: Store = .{};
+            const ev = build(args, &store);
+            const raw = encodeAlloc(alloc, ev) catch return false;
+            defer alloc.free(raw);
+            const dup = ev.dupe(alloc) catch return false;
+            defer dup.free(alloc);
+            const got = encodeAlloc(alloc, dup) catch return false;
+            defer alloc.free(got);
+            return std.mem.eql(u8, raw, got);
+        }
+    };
+
+    try pbt.run(T.prop, .{
+        .iterations = 200,
+        .use_default_values = false,
+    });
+}

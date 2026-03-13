@@ -7897,28 +7897,13 @@ test "sanitizeUtf8LossyAlloc truncates incomplete multibyte suffix lossy" {
 }
 
 test "sanitizeUtf8LossyAlloc property: output is valid utf8" {
-    const zc = @import("zcheck");
     const pbt = @import("../core/pbt.zig");
-    try zc.check(struct {
-        fn prop(args: struct { raw: pbt.Bytes(64) }) bool {
-            const alloc = std.testing.allocator;
-            const out = sanitizeUtf8LossyAlloc(alloc, args.raw.slice()) catch return false;
-            defer alloc.free(out);
-            return std.unicode.utf8ValidateSlice(out);
-        }
-    }.prop, .{ .iterations = 200 });
+    try pbt.expectSanValid(sanitizeUtf8LossyAlloc, 64, .{ .iterations = 200 });
 }
 
 test "sanitizeUtf8LossyAlloc property: valid utf8 is preserved" {
-    const zc = @import("zcheck");
-    try zc.check(struct {
-        fn prop(args: struct { text: zc.String }) bool {
-            const alloc = std.testing.allocator;
-            const out = sanitizeUtf8LossyAlloc(alloc, args.text.slice()) catch return false;
-            defer alloc.free(out);
-            return std.mem.eql(u8, out, args.text.slice());
-        }
-    }.prop, .{ .iterations = 200 });
+    const pbt = @import("../core/pbt.zig");
+    try pbt.expectSanPreserves(sanitizeUtf8LossyAlloc, 24, .{ .iterations = 200 });
 }
 
 test "infoTextSafe accepts invalid utf8 command output" {

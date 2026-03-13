@@ -17,6 +17,57 @@ pub fn Bytes(comptime max_len: usize) type {
     return Slice(u8, max_len);
 }
 
+pub const Utf8Wide = enum(u8) {
+    nbsp,
+    e_acute,
+    euro,
+    han,
+    smile,
+    combining_acute,
+};
+
+pub const Utf8Unit = union(enum) {
+    ascii: u7,
+    wide: Utf8Wide,
+};
+
+pub fn Utf8(comptime max_cp: usize) type {
+    return Slice(Utf8Unit, max_cp);
+}
+
+pub fn utf8MaxBytes(comptime T: type) usize {
+    return T.MAX_LEN * 4;
+}
+
+pub fn utf8Len(text: anytype) usize {
+    return text.len;
+}
+
+pub fn utf8Slice(text: anytype, buf: anytype) []const u8 {
+    var n: usize = 0;
+    for (text.slice()) |unit| {
+        var enc: [4]u8 = undefined;
+        const enc_len = std.unicode.utf8Encode(utf8UnitCp(unit), &enc) catch unreachable;
+        @memcpy(buf[n .. n + enc_len], enc[0..enc_len]);
+        n += enc_len;
+    }
+    return buf[0..n];
+}
+
+fn utf8UnitCp(unit: Utf8Unit) u21 {
+    return switch (unit) {
+        .ascii => |cp| cp,
+        .wide => |wide| switch (wide) {
+            .nbsp => 0x00a0,
+            .e_acute => 0x00e9,
+            .euro => 0x20ac,
+            .han => 0x6f22,
+            .smile => 0x1f642,
+            .combining_acute => 0x0301,
+        },
+    };
+}
+
 pub const Gen = struct {
     pub fn any(comptime T: type, seed: u64) T {
         return anyWith(T, seed, .{});
@@ -289,6 +340,37 @@ pub fn reportAlloc(
     fail: FailureOf(prop),
 ) ![]u8 {
     return Fmt.failureAlloc(alloc, prop, fail);
+}
+
+pub fn expectSanValid(comptime san: anytype, comptime max_len: usize, opt: Opt) !void {
+    const Raw = Bytes(max_len);
+    var cfg0 = opt;
+    cfg0.use_default_values = false;
+    try run(struct {
+        fn prop(args: struct { raw: Raw }) bool {
+            const alloc = std.testing.allocator;
+            const input = args.raw.slice();
+            const out = san(alloc, input) catch return false;
+            defer freeSanOut(alloc, input, out);
+            return std.unicode.utf8ValidateSlice(out);
+        }
+    }.prop, cfg0);
+}
+
+pub fn expectSanPreserves(comptime san: anytype, comptime max_cp: usize, opt: Opt) !void {
+    const Text = Utf8(max_cp);
+    var cfg0 = opt;
+    cfg0.use_default_values = false;
+    try run(struct {
+        fn prop(args: struct { text: Text }) bool {
+            const alloc = std.testing.allocator;
+            var buf: [utf8MaxBytes(Text)]u8 = undefined;
+            const input = utf8Slice(args.text, &buf);
+            const out = san(alloc, input) catch return false;
+            defer freeSanOut(alloc, input, out);
+            return std.mem.eql(u8, out, input);
+        }
+    }.prop, cfg0);
 }
 
 fn cfg(opt: Opt) zc.Config {
@@ -793,4 +875,41 @@ test "pbt Mut mutateAlloc changes input and respects bounds" {
 
     try std.testing.expect(got.len <= raw.len);
     try std.testing.expect(!std.mem.eql(u8, got, raw));
+}
+
+fn freeSanOut(alloc: std.mem.Allocator, input: []const u8, out: []const u8) void {
+    if (out.ptr == input.ptr and out.len == input.len) return;
+    alloc.free(out);
+}
+
+test "pbt Utf8 emits valid slices deterministically" {
+    const U = Utf8(12);
+
+    const a = draw(U, 0x51c3_11d0);
+    const b = draw(U, 0x51c3_11d0);
+
+    var buf_a: [utf8MaxBytes(U)]u8 = undefined;
+    var buf_b: [utf8MaxBytes(U)]u8 = undefined;
+    const sa = utf8Slice(a, &buf_a);
+    const sb = utf8Slice(b, &buf_b);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(sa));
+    try std.testing.expectEqual(utf8Len(a), utf8Len(b));
+    try std.testing.expectEqualStrings(sa, sb);
+}
+
+test "pbt Utf8 counterexamples shrink by codepoint count" {
+    const U = Utf8(12);
+    const fail = try expectShrunk(struct {
+        fn prop(args: struct { text: U }) bool {
+            return utf8Len(args.text) == 0;
+        }
+    }.prop, .{
+        .iterations = 200,
+        .seed = 0x0bad_5eed,
+        .use_default_values = false,
+    });
+
+    try std.testing.expect(utf8Len(fail.original.text) > utf8Len(fail.shrunk.text));
+    try std.testing.expectEqual(@as(usize, 1), utf8Len(fail.shrunk.text));
 }

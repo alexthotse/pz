@@ -840,6 +840,16 @@ test "sanitizeUtf8 invalid bytes replaced" {
     try testing.expectEqualStrings("ab??cd", out);
 }
 
+test "sanitizeUtf8 property: output is valid utf8" {
+    const pbt = @import("../pbt.zig");
+    try pbt.expectSanValid(sanitizeUtf8, 64, .{ .iterations = 200 });
+}
+
+test "sanitizeUtf8 property: valid utf8 is preserved" {
+    const pbt = @import("../pbt.zig");
+    try pbt.expectSanPreserves(sanitizeUtf8, 24, .{ .iterations = 200 });
+}
+
 test "provider error text redacts secret-bearing body" {
     const safe = try sanitizeUtf8(testing.allocator, "authorization: bearer sk-live");
     const redacted = try audit.redactTextAlloc(testing.allocator, safe, .@"pub");
