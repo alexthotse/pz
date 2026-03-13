@@ -6539,6 +6539,25 @@ const BashCmd = struct {
     include: bool, // true = !cmd (include in context), false = !!cmd (exclude)
 };
 
+fn noteSessionWriteErr(ui: *tui_harness.Ui, msg: []const u8) !void {
+    const note = try std.fmt.allocPrint(ui.alloc, "[session write failed: {s}]", .{msg});
+    defer ui.alloc.free(note);
+    try ui.tr.infoText(note);
+}
+
+fn appendSessionOrNote(
+    ui: *tui_harness.Ui,
+    sid: []const u8,
+    store: core.session.SessionStore,
+    ev: core.session.Event,
+) !bool {
+    store.append(sid, ev) catch |append_err| {
+        try noteSessionWriteErr(ui, @errorName(append_err));
+        return false;
+    };
+    return true;
+}
+
 fn parseBashCmd(text: []const u8) ?BashCmd {
     if (text.len < 2 or text[0] != '!') return null;
     if (text[1] == '!') {
@@ -6571,13 +6590,13 @@ fn runBashMode(
         } });
 
         if (bcmd.include) {
-            try store.append(sid, .{ .data = .{ .prompt = .{ .text = bcmd.cmd } } });
-            try store.append(sid, .{ .data = .{ .tool_call = .{
+            _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .prompt = .{ .text = bcmd.cmd } } });
+            _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .tool_call = .{
                 .id = "bash",
                 .name = "bash",
                 .args = bcmd.cmd,
             } } });
-            try store.append(sid, .{ .data = .{ .tool_result = .{
+            _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .tool_result = .{
                 .id = "bash",
                 .out = "bash denied: protected path",
                 .is_err = true,
@@ -6621,13 +6640,13 @@ fn runBashMode(
 
     // Save to session if include mode
     if (bcmd.include) {
-        try store.append(sid, .{ .data = .{ .prompt = .{ .text = bcmd.cmd } } });
-        try store.append(sid, .{ .data = .{ .tool_call = .{
+        _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .prompt = .{ .text = bcmd.cmd } } });
+        _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .tool_call = .{
             .id = "bash",
             .name = "bash",
             .args = bcmd.cmd,
         } } });
-        try store.append(sid, .{ .data = .{ .tool_result = .{
+        _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .tool_result = .{
             .id = "bash",
             .out = if (output.len > 0) output else "(no output)",
             .is_err = is_err,
@@ -9230,6 +9249,70 @@ test "TuiSink surfaces session write errors in transcript" {
         }
     }
     try std.testing.expect(found);
+}
+
+test "runBashMode include write failure is non-fatal for denied bash" {
+    const StoreImpl = struct {
+        fn append(_: *@This(), _: []const u8, _: core.session.Event) !void {
+            return error.DiskFull;
+        }
+        fn replay(_: *@This(), _: []const u8) !core.session.Reader {
+            return error.Unexpected;
+        }
+        fn deinit(_: *@This()) void {}
+    };
+
+    var store_impl = StoreImpl{};
+    const store = core.session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
+    defer ui.deinit();
+
+    try runBashMode(std.testing.allocator, &ui, .{
+        .cmd = "cat ~/.pz/settings.json",
+        .include = true,
+    }, "sid-1", store);
+
+    var saw_deny = false;
+    var saw_write_err = false;
+    for (ui.tr.blocks.items) |blk| {
+        if (std.mem.indexOf(u8, blk.buf.items, "bash denied: protected path") != null) saw_deny = true;
+        if (std.mem.indexOf(u8, blk.buf.items, "session write failed: DiskFull") != null) saw_write_err = true;
+    }
+    try std.testing.expect(saw_deny);
+    try std.testing.expect(saw_write_err);
+}
+
+test "runBashMode include write failure is non-fatal for bash output" {
+    const StoreImpl = struct {
+        fn append(_: *@This(), _: []const u8, _: core.session.Event) !void {
+            return error.DiskFull;
+        }
+        fn replay(_: *@This(), _: []const u8) !core.session.Reader {
+            return error.Unexpected;
+        }
+        fn deinit(_: *@This()) void {}
+    };
+
+    var store_impl = StoreImpl{};
+    const store = core.session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
+    defer ui.deinit();
+
+    try runBashMode(std.testing.allocator, &ui, .{
+        .cmd = "printf ok",
+        .include = true,
+    }, "sid-1", store);
+
+    var saw_ok = false;
+    var saw_write_err = false;
+    for (ui.tr.blocks.items) |blk| {
+        if (std.mem.indexOf(u8, blk.buf.items, "ok") != null) saw_ok = true;
+        if (std.mem.indexOf(u8, blk.buf.items, "session write failed: DiskFull") != null) saw_write_err = true;
+    }
+    try std.testing.expect(saw_ok);
+    try std.testing.expect(saw_write_err);
 }
 
 test "runtime rpc mode handles session model prompt and quit commands" {
