@@ -694,11 +694,17 @@ test "multi-event roundtrip preserves all event types" {
 
     const ck = try run(std.testing.allocator, tmp.dir, "m1", 999);
 
-    try std.testing.expectEqual(@as(u64, 8), ck.in_lines);
-    try std.testing.expectEqual(@as(u64, 8), ck.out_lines);
-    try std.testing.expectEqual(@as(i64, 999), ck.compacted_at_ms);
     try std.testing.expect(ck.in_bytes > 0);
     try std.testing.expect(ck.out_bytes > 0);
+    try oh.snap(@src(),
+        \\core.session.compact.Checkpoint
+        \\  .version: u16 = 1
+        \\  .in_lines: u64 = 8
+        \\  .out_lines: u64 = 8
+        \\  .in_bytes: u64 = 568
+        \\  .out_bytes: u64 = 568
+        \\  .compacted_at_ms: i64 = 999
+    ).expectEqual(ck);
 
     const after = try collectSemanticJson(std.testing.allocator, tmp.dir, "m1");
     defer freeJsonSlice(std.testing.allocator, after);
@@ -780,6 +786,8 @@ test "double compact is idempotent" {
 }
 
 test "large event survives compaction" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -795,8 +803,15 @@ test "large event survives compaction" {
     try wr.append("lg", .{ .at_ms = 1, .data = .{ .text = .{ .text = big } } });
 
     const ck = try run(std.testing.allocator, tmp.dir, "lg", 42);
-    try std.testing.expectEqual(@as(u64, 1), ck.in_lines);
-    try std.testing.expectEqual(@as(u64, 1), ck.out_lines);
+    try oh.snap(@src(),
+        \\core.session.compact.Checkpoint
+        \\  .version: u16 = 1
+        \\  .in_lines: u64 = 1
+        \\  .out_lines: u64 = 1
+        \\  .in_bytes: u64 = 12052
+        \\  .out_bytes: u64 = 12052
+        \\  .compacted_at_ms: i64 = 42
+    ).expectEqual(ck);
 
     const rows = try collectSemanticJson(std.testing.allocator, tmp.dir, "lg");
     defer freeJsonSlice(std.testing.allocator, rows);
@@ -834,6 +849,13 @@ test "empty session compacts to zero lines" {
 }
 
 test "generateSummary with tool_call events produces file_ops" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const SummarySnap = struct {
+        file_ops: ?[]const u8,
+        event_jsons: []const []const u8,
+        req_event_jsons: []const []const u8,
+    };
     const alloc = std.testing.allocator;
     const events = [_]schema.Event{
         .{ .at_ms = 1, .data = .{ .text = .{ .text = "hello" } } },
@@ -851,12 +873,46 @@ test "generateSummary with tool_call events produces file_ops" {
     const summary = (try generateSummary(alloc, &events)) orelse return error.TestUnexpectedResult;
     defer freeGeneratedSummary(alloc, summary);
 
-    try std.testing.expect(summary.file_ops != null);
-    try std.testing.expectEqual(@as(usize, 3), summary.event_jsons.len);
-    try std.testing.expectEqual(@as(usize, 3), summary.req.events_json.len);
-    try std.testing.expect(std.mem.startsWith(u8, summary.event_jsons[0], "<untrusted-input kind=\"session-event\" name=\"text\">\n"));
-    try std.testing.expect(summary.file_ops != null);
-    try std.testing.expect(std.mem.startsWith(u8, summary.file_ops.?, "<untrusted-input kind=\"file-ops\">\n"));
+    try oh.snap(@src(),
+        \\core.session.compact.test.generateSummary with tool_call events produces file_ops.SummarySnap
+        \\  .file_ops: ?[]const u8
+        \\    "<untrusted-input kind="file-ops">
+        \\<modified-files>
+        \\/src/foo.zig
+        \\</modified-files>
+        \\
+        \\</untrusted-input>"
+        \\  .event_jsons: []const []const u8
+        \\    [0]: []const u8
+        \\      "<untrusted-input kind="session-event" name="text">
+        \\{"version":1,"at_ms":1,"data":{"text":{"text":"hello"}}}
+        \\</untrusted-input>"
+        \\    [1]: []const u8
+        \\      "<untrusted-input kind="session-event" name="tool_call">
+        \\{"version":1,"at_ms":2,"data":{"tool_call":{"id":"c1","name":"write","args":"{\"path\":\"/src/foo.zig\"}"}}}
+        \\</untrusted-input>"
+        \\    [2]: []const u8
+        \\      "<untrusted-input kind="session-event" name="tool_result">
+        \\{"version":1,"at_ms":3,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}
+        \\</untrusted-input>"
+        \\  .req_event_jsons: []const []const u8
+        \\    [0]: []const u8
+        \\      "<untrusted-input kind="session-event" name="text">
+        \\{"version":1,"at_ms":1,"data":{"text":{"text":"hello"}}}
+        \\</untrusted-input>"
+        \\    [1]: []const u8
+        \\      "<untrusted-input kind="session-event" name="tool_call">
+        \\{"version":1,"at_ms":2,"data":{"tool_call":{"id":"c1","name":"write","args":"{\"path\":\"/src/foo.zig\"}"}}}
+        \\</untrusted-input>"
+        \\    [2]: []const u8
+        \\      "<untrusted-input kind="session-event" name="tool_result">
+        \\{"version":1,"at_ms":3,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}
+        \\</untrusted-input>"
+    ).expectEqual(SummarySnap{
+        .file_ops = summary.file_ops,
+        .event_jsons = summary.event_jsons,
+        .req_event_jsons = summary.req.events_json,
+    });
 }
 
 test "generateSummary with text-only events has null file_ops" {

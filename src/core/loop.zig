@@ -1950,10 +1950,25 @@ test "loop cancellation emits canceled stop and exits early" {
         .cancel = cancel,
     });
 
-    try std.testing.expectEqual(@as(u16, 0), out.turns);
-    try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
-    try std.testing.expectEqual(@as(usize, 1), store_impl.canceled_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.provider_canceled_ct);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        store_canceled_ct: usize,
+        mode_provider_canceled_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop cancellation emits canceled stop and exits early.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 0
+        \\    .tool_calls: u32 = 0
+        \\  .store_canceled_ct: usize = 1
+        \\  .mode_provider_canceled_ct: usize = 1
+    ).expectEqual(Snap{
+        .out = out,
+        .store_canceled_ct = store_impl.canceled_ct,
+        .mode_provider_canceled_ct = mode_impl.provider_canceled_ct,
+    });
 }
 
 test "runTool forwards cancel source to dispatch" {
