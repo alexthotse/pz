@@ -7394,6 +7394,8 @@ test "queueItemLabel snapshots preview formatting" {
 }
 
 test "showQueueOverlay and dequeueQueuedIntoEditor edit selected message" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
 
@@ -7414,10 +7416,27 @@ test "showQueueOverlay and dequeueQueuedIntoEditor edit selected message" {
 
     ui.ov.?.sel = 1;
     try std.testing.expect(try dequeueQueuedIntoEditor(std.testing.allocator, &ui, &queue, ui.ov.?.sel));
-    try std.testing.expectEqualStrings("two", ui.ed.text());
-    try std.testing.expectEqual(@as(usize, 2), queue.items.len);
-    try std.testing.expectEqualStrings("one", queue.items[0]);
-    try std.testing.expectEqualStrings("three", queue.items[1]);
+    const Snap = struct {
+        ov_len: usize,
+        editor: []const u8,
+        q0: []const u8,
+        q1: []const u8,
+    };
+    try oh.snap(@src(),
+        \\app.runtime.test.showQueueOverlay and dequeueQueuedIntoEditor edit selected message.Snap
+        \\  .ov_len: usize = 3
+        \\  .editor: []const u8
+        \\    "two"
+        \\  .q0: []const u8
+        \\    "one"
+        \\  .q1: []const u8
+        \\    "three"
+    ).expectEqual(Snap{
+        .ov_len = ui.ov.?.dyn_items.?.len,
+        .editor = ui.ed.text(),
+        .q0 = queue.items[0],
+        .q1 = queue.items[1],
+    });
 
     ui.ov.?.deinit(std.testing.allocator);
     ui.ov = null;
@@ -7455,6 +7474,8 @@ fn frameRowBoxAlloc(alloc: std.mem.Allocator, frm: *const tui_frame.Frame, y: us
 }
 
 test "showResumeOverlay lists sessions and supports arrow navigation" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
@@ -7476,18 +7497,53 @@ test "showResumeOverlay lists sessions and supports arrow navigation" {
     try std.testing.expect(try showResumeOverlay(std.testing.allocator, &ui, sess_abs));
     try std.testing.expect(ui.ov != null);
     try std.testing.expect(ui.ov.?.kind == .session);
-    try std.testing.expectEqualStrings("Resume Session", ui.ov.?.title);
     try std.testing.expect(ui.ov.?.session_rows != null);
     const rows = ui.ov.?.session_rows.?;
-    try std.testing.expectEqual(@as(usize, 2), rows.len);
-    try std.testing.expectEqualStrings("100", rows[0].sid);
-    try std.testing.expectEqualStrings("100", rows[0].title);
-    try std.testing.expectEqualStrings("now", rows[0].time);
-    try std.testing.expectEqualStrings("0 tok", rows[0].tokens);
-    try std.testing.expectEqualStrings("200", rows[1].sid);
-    try std.testing.expectEqualStrings("200", rows[1].title);
+    const RowSnap = struct {
+        sid: []const u8,
+        title: []const u8,
+        time: []const u8,
+        tokens: []const u8,
+    };
+    const Snap = struct {
+        title: []const u8,
+        selected: []const u8,
+        rows: [2]RowSnap,
+    };
+    try oh.snap(@src(),
+        \\app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.Snap
+        \\  .title: []const u8
+        \\    "Resume Session"
+        \\  .selected: []const u8
+        \\    "100"
+        \\  .rows: [2]app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.RowSnap
+        \\    [0]: app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.RowSnap
+        \\      .sid: []const u8
+        \\        "100"
+        \\      .title: []const u8
+        \\        "100"
+        \\      .time: []const u8
+        \\        "now"
+        \\      .tokens: []const u8
+        \\        "0 tok"
+        \\    [1]: app.runtime.test.showResumeOverlay lists sessions and supports arrow navigation.RowSnap
+        \\      .sid: []const u8
+        \\        "200"
+        \\      .title: []const u8
+        \\        "200"
+        \\      .time: []const u8
+        \\        "now"
+        \\      .tokens: []const u8
+        \\        "0 tok"
+    ).expectEqual(Snap{
+        .title = ui.ov.?.title,
+        .selected = ui.ov.?.selected().?,
+        .rows = .{
+            .{ .sid = rows[0].sid, .title = rows[0].title, .time = rows[0].time, .tokens = rows[0].tokens },
+            .{ .sid = rows[1].sid, .title = rows[1].title, .time = rows[1].time, .tokens = rows[1].tokens },
+        },
+    });
 
-    try std.testing.expectEqualStrings("100", ui.ov.?.selected().?);
     ui.ov.?.down();
     try std.testing.expectEqualStrings("200", ui.ov.?.selected().?);
     ui.ov.?.down();
@@ -12529,6 +12585,8 @@ test "runtime rpc tools command updates tool availability per turn" {
 }
 
 test "showLogoutOverlay builds overlay and frees on deinit" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const alloc = std.testing.allocator;
     var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
     defer ui.deinit();
@@ -12550,9 +12608,13 @@ test "showLogoutOverlay builds overlay and frees on deinit" {
         try std.testing.expect(try showLogoutOverlay(alloc, &ui, provs));
         try std.testing.expect(ui.ov != null);
         try std.testing.expect(ui.ov.?.dyn_items != null);
-        try std.testing.expectEqual(@as(usize, 2), ui.ov.?.dyn_items.?.len);
-        try std.testing.expectEqualStrings("anthropic", ui.ov.?.dyn_items.?[0]);
-        try std.testing.expectEqualStrings("openai", ui.ov.?.dyn_items.?[1]);
+        try oh.snap(@src(),
+            \\[][]u8
+            \\  [0]: []u8
+            \\    "anthropic"
+            \\  [1]: []u8
+            \\    "openai"
+        ).expectEqual(ui.ov.?.dyn_items.?);
         ui.ov.?.deinit(alloc);
         ui.ov = null;
     }
@@ -12601,33 +12663,49 @@ test "slash logout without explicit provider frees logged-in list cleanly" {
 }
 
 test "LiveTurn tracks last_stop last_err and last_model" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const alloc = std.testing.allocator;
     var lt = try LiveTurn.init(alloc);
     defer lt.deinit();
 
     // Enqueue stop event
     try lt.enqueueProvider(.{ .stop = .{ .reason = .max_out } });
-    try std.testing.expectEqual(core.providers.StopReason.max_out, lt.last_stop.?);
 
     // Enqueue err event
     try lt.enqueueProvider(.{ .err = "bad request" });
-    try std.testing.expectEqualStrings("bad request", lt.last_err.?);
 
     // Drain events
     const ev1 = lt.popProvider().?;
     defer freeProviderEv(alloc, ev1.ev);
     const ev2 = lt.popProvider().?;
     defer freeProviderEv(alloc, ev2.ev);
-    try std.testing.expectEqual(@as(u64, 1), ev1.seq);
-    try std.testing.expectEqual(@as(u64, 2), ev2.seq);
     try std.testing.expect(lt.popProvider() == null);
 
     // Overwrite err
     try lt.enqueueProvider(.{ .err = "timeout" });
-    try std.testing.expectEqualStrings("timeout", lt.last_err.?);
     const ev3 = lt.popProvider().?;
     defer freeProviderEv(alloc, ev3.ev);
-    try std.testing.expectEqual(@as(u64, 3), ev3.seq);
+    const Snap = struct {
+        last_stop: ?core.providers.StopReason,
+        last_err: ?[]const u8,
+        seqs: [3]u64,
+    };
+    try oh.snap(@src(),
+        \\app.runtime.test.LiveTurn tracks last_stop last_err and last_model.Snap
+        \\  .last_stop: ?core.providers.contract.StopReason
+        \\    .max_out
+        \\  .last_err: ?[]const u8
+        \\    "timeout"
+        \\  .seqs: [3]u64
+        \\    [0]: u64 = 1
+        \\    [1]: u64 = 2
+        \\    [2]: u64 = 3
+    ).expectEqual(Snap{
+        .last_stop = lt.last_stop,
+        .last_err = lt.last_err,
+        .seqs = .{ ev1.seq, ev2.seq, ev3.seq },
+    });
 
     // Simulate turn reset
     lt.mu.lock();
