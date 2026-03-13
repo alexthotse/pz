@@ -392,6 +392,112 @@ pub fn appendFileOpsFooter(
     return try std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ summary, footer.? });
 }
 
+const SummaryCall = struct {
+    req: providers.Req,
+    msgs: []providers.Msg,
+    prompt: []u8,
+};
+
+fn freeSummaryCall(alloc: std.mem.Allocator, call: SummaryCall) void {
+    alloc.free(call.prompt);
+    alloc.free(call.msgs[0].parts.ptr[0..3]);
+    alloc.free(call.msgs);
+}
+
+fn buildSummaryPromptAlloc(
+    alloc: std.mem.Allocator,
+    req: providers.SummaryReq,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try out.appendSlice(alloc, "<conversation>\n");
+    for (req.events_json, 0..) |ev, i| {
+        if (i != 0) try out.appendSlice(alloc, "\n\n");
+        try out.appendSlice(alloc, ev);
+    }
+    try out.appendSlice(alloc, "\n</conversation>");
+    if (req.file_ops) |footer| {
+        try out.appendSlice(alloc, "\n\n");
+        try out.appendSlice(alloc, footer);
+    }
+    try out.appendSlice(alloc, "\n\n");
+    try out.appendSlice(alloc, prov_contract.summary_prompt);
+    return try out.toOwnedSlice(alloc);
+}
+
+fn buildSummaryCall(
+    alloc: std.mem.Allocator,
+    model: []const u8,
+    req: providers.SummaryReq,
+) !SummaryCall {
+    const prompt = try buildSummaryPromptAlloc(alloc, req);
+    errdefer alloc.free(prompt);
+
+    const msgs = try alloc.alloc(providers.Msg, 2);
+    errdefer alloc.free(msgs);
+    const parts = try alloc.alloc(providers.Part, 3);
+    errdefer alloc.free(parts);
+
+    parts[0] = .{ .text = prov_contract.prompt_guard };
+    parts[1] = .{ .text = prov_contract.summary_system_prompt };
+    parts[2] = .{ .text = prompt };
+    msgs[0] = .{ .role = .system, .parts = parts[0..2] };
+    msgs[1] = .{ .role = .user, .parts = parts[2..3] };
+
+    return .{
+        .req = .{
+            .model = model,
+            .msgs = msgs,
+            .tools = &.{},
+            .opts = .{
+                .max_out = req.max_tokens,
+                .thinking = .off,
+            },
+        },
+        .msgs = msgs,
+        .prompt = prompt,
+    };
+}
+
+fn collectSummaryText(alloc: std.mem.Allocator, provider: providers.Provider, req: providers.Req) ![]u8 {
+    var stream = try provider.start(req);
+    defer stream.deinit();
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    while (try stream.next()) |ev| switch (ev) {
+        .text => |text| try out.appendSlice(alloc, text),
+        .stop => |stop| if (stop.reason != .done) return error.SummaryFailed,
+        .err => return error.SummaryFailed,
+        .tool_call, .tool_result => return error.SummaryFailed,
+        .thinking, .usage => {},
+    };
+
+    return try out.toOwnedSlice(alloc);
+}
+
+pub fn generateSummaryWithProvider(
+    alloc: std.mem.Allocator,
+    provider: providers.Provider,
+    model: []const u8,
+    events: []const schema.Event,
+) !?[]u8 {
+    const generated = (try generateSummary(alloc, events)) orelse return null;
+    defer freeGeneratedSummary(alloc, generated);
+
+    const call = try buildSummaryCall(alloc, model, generated.req);
+    defer freeSummaryCall(alloc, call);
+
+    const text = collectSummaryText(alloc, provider, call.req) catch return null;
+    defer alloc.free(text);
+
+    const trimmed = std.mem.trim(u8, text, " \n\t");
+    if (trimmed.len == 0) return null;
+    return try appendFileOpsFooter(alloc, trimmed, events);
+}
+
 test "compaction rewrites stream and preserves semantic events" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -1086,4 +1192,91 @@ test "generateSummary skips noop events" {
         .{ .at_ms = 2, .data = .{ .noop = {} } },
     };
     try std.testing.expect((try generateSummary(alloc, &events)) == null);
+}
+
+test "generateSummaryWithProvider enforces thinking off and appends file footer" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const TestProvider = struct {
+        const StreamCtx = struct {
+            alloc: std.mem.Allocator,
+            idx: usize = 0,
+
+            fn next(self: *StreamCtx) !?providers.Ev {
+                const out = switch (self.idx) {
+                    0 => providers.Ev{ .text = "## Goal\nShip it." },
+                    1 => providers.Ev{ .stop = .{ .reason = .done } },
+                    else => null,
+                };
+                self.idx += 1;
+                return out;
+            }
+
+            fn deinit(self: *StreamCtx) void {
+                self.alloc.destroy(self);
+            }
+        };
+
+        fn asProvider(self: *@This()) providers.Provider {
+            return providers.Provider.from(@This(), self, start);
+        }
+
+        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+            _ = self;
+            try std.testing.expect(req.opts.thinking == .off);
+            try std.testing.expectEqual(@as(?u32, 1024), req.opts.max_out);
+            try std.testing.expectEqual(@as(usize, 2), req.msgs.len);
+            try std.testing.expectEqual(@as(usize, 2), req.msgs[0].parts.len);
+            try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, "<conversation>") != null);
+            try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, "<untrusted-input kind=\"file-ops\">") != null);
+            try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, prov_contract.summary_prompt) != null);
+
+            const ctx = try std.testing.allocator.create(StreamCtx);
+            ctx.* = .{ .alloc = std.testing.allocator };
+            return providers.Stream.from(StreamCtx, ctx, StreamCtx.next, StreamCtx.deinit);
+        }
+    };
+
+    const events = [_]schema.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "hello" } } },
+        .{ .at_ms = 2, .data = .{ .tool_call = .{
+            .id = "c1",
+            .name = "write",
+            .args = "{\"path\":\"/src/foo.zig\"}",
+        } } },
+    };
+    var provider = TestProvider{};
+    const got = (try generateSummaryWithProvider(std.testing.allocator, provider.asProvider(), "m", &events)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "## Goal
+        \\Ship it.
+        \\
+        \\<modified-files>
+        \\/src/foo.zig
+        \\</modified-files>
+        \\"
+    ).expectEqual(got);
+}
+
+test "generateSummaryWithProvider returns null on provider error" {
+    const FailingProvider = struct {
+        fn asProvider(self: *@This()) providers.Provider {
+            return providers.Provider.from(@This(), self, start);
+        }
+
+        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+            _ = self;
+            return error.TransportFatal;
+        }
+    };
+
+    const events = [_]schema.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "hello" } } },
+    };
+    var provider = FailingProvider{};
+    try std.testing.expect((try generateSummaryWithProvider(std.testing.allocator, provider.asProvider(), "m", &events)) == null);
 }

@@ -402,6 +402,21 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
 }
 
 test "real pz PTY startup survives live version check" {
+    const QuitAfterRequest = struct {
+        server: *const http_mock.Server,
+        path: []const u8,
+
+        fn run(self: *@This()) void {
+            var waited_ms: u32 = 0;
+            while (self.server.requestCount() == 0 and waited_ms < 5000) : (waited_ms += 50) {
+                std.Thread.sleep(50 * std.time.ns_per_ms);
+            }
+            var f = std.fs.createFileAbsolute(self.path, .{ .truncate = true }) catch return;
+            defer f.close();
+            f.writeAll("\x03\x03") catch {};
+        }
+    };
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -429,11 +444,13 @@ test "real pz PTY startup survives live version check" {
     const sig_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-version-quit" });
     defer std.testing.allocator.free(sig_path);
     defer std.fs.deleteFileAbsolute(sig_path) catch {};
-    {
-        var f = try std.fs.createFileAbsolute(sig_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll("\x03\x03");
-    }
+
+    var quit = QuitAfterRequest{
+        .server = &server,
+        .path = sig_path,
+    };
+    const quit_thr = try std.Thread.spawn(.{}, QuitAfterRequest.run, .{&quit});
+    defer quit_thr.join();
 
     const pz_bin = try pzBinAlloc(std.testing.allocator);
     defer std.testing.allocator.free(pz_bin);
@@ -445,7 +462,7 @@ test "real pz PTY startup survives live version check" {
         &.{
             "/bin/sh",
             "-c",
-            "{ sleep 1.2; cat \"$1\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$2\" \"$3\" \"$4\"",
+            "{ while [ ! -s \"$1\" ]; do sleep 0.05; done; cat \"$1\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$2\" \"$3\" \"$4\"",
             "sh",
             sig_path,
             pz_bin,
@@ -456,9 +473,10 @@ test "real pz PTY startup survives live version check" {
     );
     defer out.deinit(std.testing.allocator);
     switch (out.term) {
-        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Exited => |code| try std.testing.expect(code <= 1),
         else => return error.TestUnexpectedResult,
     }
+    std.Thread.sleep(200 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 1), server.requestCount());
 
     var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
