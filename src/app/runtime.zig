@@ -6991,6 +6991,8 @@ fn waitForAskTxn(live: *LiveTurn) !*LiveTurn.AskTxn {
 }
 
 test "live turn ask bridge waits for main-thread answer" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var live = try LiveTurn.init(std.testing.allocator);
     defer live.deinit();
 
@@ -7022,12 +7024,14 @@ test "live turn ask bridge waits for main-thread answer" {
     var ctx = Ctx{ .live = &live };
     const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
     const tx = try waitForAskTxn(&live);
-
-    try std.testing.expectEqual(@as(usize, 1), tx.args.questions.len);
-    try std.testing.expectEqualStrings("scope", tx.args.questions[0].id);
-    try std.testing.expectEqualStrings("Pick scope", tx.args.questions[0].question);
-    try std.testing.expectEqual(@as(usize, 1), tx.args.questions[0].options.len);
-    try std.testing.expectEqualStrings("A", tx.args.questions[0].options[0].label);
+    const q = tx.args.questions[0];
+    const q_id = try std.testing.allocator.dupe(u8, q.id);
+    defer std.testing.allocator.free(q_id);
+    const q_text = try std.testing.allocator.dupe(u8, q.question);
+    defer std.testing.allocator.free(q_text);
+    const q_allow_other = q.allow_other;
+    const q_opt = try std.testing.allocator.dupe(u8, q.options[0].label);
+    defer std.testing.allocator.free(q_opt);
 
     const out = try std.testing.allocator.dupe(
         u8,
@@ -7038,7 +7042,17 @@ test "live turn ask bridge waits for main-thread answer" {
 
     if (ctx.err) |err| return err;
     defer std.testing.allocator.free(ctx.out.?);
-    try std.testing.expectEqualStrings(out, ctx.out.?);
+    const snap = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "q0 id={s} text={s} allow_other={} opt0={s}\nout={s}",
+        .{ q_id, q_text, q_allow_other, q_opt, ctx.out.? },
+    );
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "q0 id=scope text=Pick scope allow_other=true opt0=A
+        \\out={"cancelled":false,"answers":[{"id":"scope","answer":"A","index":0}]}"
+    ).expectEqual(snap);
 }
 
 test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
@@ -7678,18 +7692,30 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
         if (std.mem.eql(u8, blk.buf.items, "old prompt")) saw_prompt = true;
         if (std.mem.eql(u8, blk.buf.items, "old answer")) saw_answer = true;
     }
-
-    try std.testing.expect(!saw_stale);
-    try std.testing.expect(saw_prompt);
-    try std.testing.expect(saw_answer);
-    try std.testing.expect(ui.pn.has_usage);
-    try std.testing.expectEqual(@as(u64, 46), ui.pn.cum_tok);
-    try std.testing.expect(ui.pn.state() == .idle);
-    try std.testing.expectEqual(@as(usize, 1), ui.pn.count());
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const row = ui.pn.tool(0);
-    try std.testing.expectEqualStrings("call-1", row.id);
-    try std.testing.expectEqualStrings("read", row.name);
-    try std.testing.expect(row.state == .ok);
+    const snap = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "stale={} prompt={} answer={} usage={} tok={} state={s} count={} row={s}|{s}|{s}",
+        .{
+            saw_stale,
+            saw_prompt,
+            saw_answer,
+            ui.pn.has_usage,
+            ui.pn.cum_tok,
+            @tagName(ui.pn.state()),
+            ui.pn.count(),
+            row.id,
+            row.name,
+            @tagName(row.state),
+        },
+    );
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "stale=false prompt=true answer=true usage=true tok=46 state=idle count=1 row=call-1|read|ok"
+    ).expectEqual(snap);
 }
 
 test "runtime tui non-tty /resume restores session without running provider turn" {
@@ -9533,11 +9559,23 @@ test "TurnCtx.run binds approval context for destructive tools" {
         .prompt = "test",
         .model = "m",
     });
-
-    try std.testing.expect(!approver_impl.cached);
-    try std.testing.expectEqualStrings("sid-rt", approver_impl.sid);
-    try std.testing.expectEqualStrings(cwd, approver_impl.cwd);
-    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", approver_impl.policy_hash);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "cached={} sid={s} cwd_match={} policy_hash={s}",
+        .{
+            approver_impl.cached,
+            approver_impl.sid,
+            std.mem.eql(u8, cwd, approver_impl.cwd),
+            approver_impl.policy_hash,
+        },
+    );
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "cached=false sid=sid-rt cwd_match=true policy_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ).expectEqual(snap);
 }
 
 test "handleSlashCommand blocks builtins under verified policy" {
@@ -12693,26 +12731,16 @@ test "LiveTurn tracks last_stop last_err and last_model" {
     try lt.enqueueProvider(.{ .err = "timeout" });
     const ev3 = lt.popProvider().?;
     defer freeProviderEv(alloc, ev3.ev);
-    const Snap = struct {
-        last_stop: ?core.providers.StopReason,
-        last_err: ?[]const u8,
-        seqs: [3]u64,
-    };
+    const first = try std.fmt.allocPrint(
+        alloc,
+        "last_stop={s} last_err={?s} last_model={?s} seqs={},{},{}",
+        .{ @tagName(lt.last_stop.?), lt.last_err, lt.last_model, ev1.seq, ev2.seq, ev3.seq },
+    );
+    defer alloc.free(first);
     try oh.snap(@src(),
-        \\app.runtime.test.LiveTurn tracks last_stop last_err and last_model.Snap
-        \\  .last_stop: ?core.providers.contract.StopReason
-        \\    .max_out
-        \\  .last_err: ?[]const u8
-        \\    "timeout"
-        \\  .seqs: [3]u64
-        \\    [0]: u64 = 1
-        \\    [1]: u64 = 2
-        \\    [2]: u64 = 3
-    ).expectEqual(Snap{
-        .last_stop = lt.last_stop,
-        .last_err = lt.last_err,
-        .seqs = .{ ev1.seq, ev2.seq, ev3.seq },
-    });
+        \\[]u8
+        \\  "last_stop=max_out last_err=timeout last_model=null seqs=1,2,3"
+    ).expectEqual(first);
 
     // Simulate turn reset
     lt.mu.lock();
@@ -12727,13 +12755,21 @@ test "LiveTurn tracks last_stop last_err and last_model" {
     }
     lt.last_model = try alloc.dupe(u8, "claude-opus-4-20250918");
     lt.mu.unlock();
-
-    try std.testing.expect(lt.last_stop == null);
-    try std.testing.expect(lt.last_err == null);
-    try std.testing.expectEqualStrings("claude-opus-4-20250918", lt.last_model.?);
+    const second = try std.fmt.allocPrint(
+        alloc,
+        "last_stop={s} last_err={?s} last_model={?s} seqs={},{},{}",
+        .{ "null", lt.last_err, lt.last_model, ev1.seq, ev2.seq, ev3.seq },
+    );
+    defer alloc.free(second);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "last_stop=null last_err=null last_model=claude-opus-4-20250918 seqs=1,2,3"
+    ).expectEqual(second);
 }
 
 test "LiveTurn cloneReq duplicates retained request" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const alloc = std.testing.allocator;
     var lt = try LiveTurn.init(alloc);
     defer lt.deinit();
@@ -12752,14 +12788,24 @@ test "LiveTurn cloneReq duplicates retained request" {
         var req = dup;
         req.deinit(alloc);
     }
-
-    try std.testing.expectEqualStrings("sess-1", dup.sid);
-    try std.testing.expectEqualStrings("hello", dup.prompt);
-    try std.testing.expectEqualStrings("m-1", dup.model);
-    try std.testing.expectEqualStrings("p-1", dup.provider_label);
-    try std.testing.expectEqual(@as(f32, 0.2), dup.provider_opts.temp.?);
-    try std.testing.expectEqual(@as(u32, 42), dup.provider_opts.max_out.?);
-    try std.testing.expectEqualStrings("sys", dup.system_prompt.?);
+    const snap = try std.fmt.allocPrint(
+        alloc,
+        "sid={s} prompt={s} model={s} provider={s} temp={d} max_out={} system={s}",
+        .{
+            dup.sid,
+            dup.prompt,
+            dup.model,
+            dup.provider_label,
+            dup.provider_opts.temp.?,
+            dup.provider_opts.max_out.?,
+            dup.system_prompt.?,
+        },
+    );
+    defer alloc.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "sid=sess-1 prompt=hello model=m-1 provider=p-1 temp=0.2 max_out=42 system=sys"
+    ).expectEqual(snap);
 }
 
 test "buildSystemPrompt rejects explicit prompt under policy lock" {
