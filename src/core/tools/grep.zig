@@ -282,6 +282,12 @@ fn mapFsErr(err: anyerror) Err {
 }
 
 test "grep handler finds matching lines with file and line numbers" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        has_a: bool,
+        has_b: bool,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -320,8 +326,14 @@ test "grep handler finds matching lines with file and line numbers" {
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
 
-    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "a.txt:2:beta\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "b.txt:1:Beta\n") != null);
+    try oh.snap(@src(),
+        \\core.tools.grep.test.grep handler finds matching lines with file and line numbers.Snap
+        \\  .has_a: bool = true
+        \\  .has_b: bool = true
+    ).expectEqual(Snap{
+        .has_a = std.mem.indexOf(u8, res.out[0].chunk, "a.txt:2:beta\n") != null,
+        .has_b = std.mem.indexOf(u8, res.out[0].chunk, "b.txt:1:Beta\n") != null,
+    });
 }
 
 test "grep handler validates args and missing roots" {

@@ -735,16 +735,34 @@ test "builtin runtime uses call timestamp in result envelope" {
 }
 
 test "builtin runtime supports deterministic tool mask filtering" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        len: usize,
+        first: []const u8,
+        second: []const u8,
+        has_write: bool,
+    };
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_read | mask_agent,
     });
     const reg = rt.registry();
 
-    try std.testing.expectEqual(@as(usize, 2), reg.entries.len);
-    try std.testing.expectEqualStrings("read", reg.entries[0].name);
-    try std.testing.expectEqualStrings("agent", reg.entries[1].name);
-    try std.testing.expect(reg.byName("write") == null);
+    try oh.snap(@src(),
+        \\core.tools.builtin.test.builtin runtime supports deterministic tool mask filtering.Snap
+        \\  .len: usize = 2
+        \\  .first: []const u8
+        \\    "read"
+        \\  .second: []const u8
+        \\    "agent"
+        \\  .has_write: bool = false
+    ).expectEqual(Snap{
+        .len = reg.entries.len,
+        .first = reg.entries[0].name,
+        .second = reg.entries[1].name,
+        .has_write = reg.byName("write") != null,
+    });
 }
 
 test "agent tool uses runtime hook output" {

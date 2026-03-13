@@ -338,6 +338,15 @@ test "read handler returns kind mismatch for wrong call kind" {
 }
 
 test "read handler truncates oversized output instead of failing TooLarge" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out_len: usize,
+        chunk_len: usize,
+        trunc: bool,
+        is_meta: bool,
+        has_trunc_meta: bool,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -376,14 +385,30 @@ test "read handler truncates oversized output instead of failing TooLarge" {
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
 
-    try std.testing.expectEqual(@as(usize, 2), res.out.len);
-    try std.testing.expectEqual(@as(usize, 128), res.out[0].chunk.len);
-    try std.testing.expect(res.out[0].truncated);
-    try std.testing.expect(res.out[1].stream == .meta);
-    try std.testing.expect(std.mem.indexOf(u8, res.out[1].chunk, "\"type\":\"trunc\"") != null);
+    try oh.snap(@src(),
+        \\core.tools.read.test.read handler truncates oversized output instead of failing TooLarge.Snap
+        \\  .out_len: usize = 2
+        \\  .chunk_len: usize = 128
+        \\  .trunc: bool = true
+        \\  .is_meta: bool = true
+        \\  .has_trunc_meta: bool = true
+    ).expectEqual(Snap{
+        .out_len = res.out.len,
+        .chunk_len = res.out[0].chunk.len,
+        .trunc = res.out[0].truncated,
+        .is_meta = res.out[1].stream == .meta,
+        .has_trunc_meta = std.mem.indexOf(u8, res.out[1].chunk, "\"type\":\"trunc\"") != null,
+    });
 }
 
 test "read handler can target a line in very large file without TooLarge" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out_len: usize,
+        chunk: []const u8,
+        trunc: bool,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -427,9 +452,18 @@ test "read handler can target a line in very large file without TooLarge" {
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
 
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqualStrings("line-9999\n", res.out[0].chunk);
-    try std.testing.expect(!res.out[0].truncated);
+    try oh.snap(@src(),
+        \\core.tools.read.test.read handler can target a line in very large file without TooLarge.Snap
+        \\  .out_len: usize = 1
+        \\  .chunk: []const u8
+        \\    "line-9999
+        \\"
+        \\  .trunc: bool = false
+    ).expectEqual(Snap{
+        .out_len = res.out.len,
+        .chunk = res.out[0].chunk,
+        .trunc = res.out[0].truncated,
+    });
 }
 
 test "read handler denies hardlinked file" {

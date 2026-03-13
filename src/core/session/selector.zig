@@ -157,6 +157,12 @@ fn fileSid(name: []const u8) ?[]const u8 {
 }
 
 test "latest selector picks newest session and falls back deterministically" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        sid: []const u8,
+        same_dir: bool,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -175,8 +181,15 @@ test "latest selector picks newest session and falls back deterministically" {
     var plan = try latestInDir(std.testing.allocator, dir_path);
     defer plan.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("200", plan.sid);
-    try std.testing.expectEqualStrings(dir_path, plan.dir_path);
+    try oh.snap(@src(),
+        \\core.session.selector.test.latest selector picks newest session and falls back deterministically.Snap
+        \\  .sid: []const u8
+        \\    "200"
+        \\  .same_dir: bool = true
+    ).expectEqual(Snap{
+        .sid = plan.sid,
+        .same_dir = std.mem.eql(u8, dir_path, plan.dir_path),
+    });
 }
 
 test "id selector resolves exact id and unique prefix" {
@@ -226,6 +239,12 @@ test "id selector rejects ambiguous prefix" {
 }
 
 test "path selector resolves sid and directory from jsonl path" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        sid: []const u8,
+        same_dir: bool,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -238,12 +257,18 @@ test "path selector resolves sid and directory from jsonl path" {
     const file_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess/sid-1.jsonl");
     defer std.testing.allocator.free(file_abs);
     const dir_abs = std.fs.path.dirname(file_abs) orelse return error.TestUnexpectedResult;
-
     var plan = try fromPath(std.testing.allocator, file_abs);
     defer plan.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("sid-1", plan.sid);
-    try std.testing.expectEqualStrings(dir_abs, plan.dir_path);
+    try oh.snap(@src(),
+        \\core.session.selector.test.path selector resolves sid and directory from jsonl path.Snap
+        \\  .sid: []const u8
+        \\    "sid-1"
+        \\  .same_dir: bool = true
+    ).expectEqual(Snap{
+        .sid = plan.sid,
+        .same_dir = std.mem.eql(u8, dir_abs, plan.dir_path),
+    });
 
     const missing_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
     defer std.testing.allocator.free(missing_abs);

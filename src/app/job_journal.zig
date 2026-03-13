@@ -276,6 +276,14 @@ test "resolveStateDirEnv is home-overrideable" {
 }
 
 test "journal replay tracks active launches only" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        len: usize,
+        id: u64,
+        pid: i32,
+        cmd: []const u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -294,10 +302,19 @@ test "journal replay tracks active launches only" {
     const active = try j.replayActive(std.testing.allocator);
     defer deinitActives(std.testing.allocator, active);
 
-    try std.testing.expectEqual(@as(usize, 1), active.len);
-    try std.testing.expectEqual(@as(u64, 2), active[0].id);
-    try std.testing.expectEqual(@as(i32, 222), active[0].pid);
-    try std.testing.expectEqualStrings("sleep 20", active[0].cmd);
+    try oh.snap(@src(),
+        \\app.job_journal.test.journal replay tracks active launches only.Snap
+        \\  .len: usize = 1
+        \\  .id: u64 = 2
+        \\  .pid: i32 = 222
+        \\  .cmd: []const u8
+        \\    "sleep 20"
+    ).expectEqual(Snap{
+        .len = active.len,
+        .id = active[0].id,
+        .pid = active[0].pid,
+        .cmd = active[0].cmd,
+    });
 }
 
 test "journal cleanup removes active launch" {
@@ -321,6 +338,12 @@ test "journal cleanup removes active launch" {
 }
 
 test "journal replay ignores malformed lines" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        len: usize,
+        id: u64,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -343,11 +366,23 @@ test "journal replay ignores malformed lines" {
 
     const active = try j.replayActive(std.testing.allocator);
     defer deinitActives(std.testing.allocator, active);
-    try std.testing.expectEqual(@as(usize, 1), active.len);
-    try std.testing.expectEqual(@as(u64, 11), active[0].id);
+    try oh.snap(@src(),
+        \\app.job_journal.test.journal replay ignores malformed lines.Snap
+        \\  .len: usize = 1
+        \\  .id: u64 = 11
+    ).expectEqual(Snap{
+        .len = active.len,
+        .id = active[0].id,
+    });
 }
 
 test "journal init creates nested absolute state dirs" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        has_dir: bool,
+        ends_with_jobs: bool,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -361,6 +396,12 @@ test "journal init creates nested absolute state dirs" {
     });
     defer j.deinit();
 
-    try std.testing.expect(j.dir_path != null);
-    try std.testing.expect(std.mem.endsWith(u8, j.dir_path.?, "/pz/jobs"));
+    try oh.snap(@src(),
+        \\app.job_journal.test.journal init creates nested absolute state dirs.Snap
+        \\  .has_dir: bool = true
+        \\  .ends_with_jobs: bool = true
+    ).expectEqual(Snap{
+        .has_dir = j.dir_path != null,
+        .ends_with_jobs = j.dir_path != null and std.mem.endsWith(u8, j.dir_path.?, "/pz/jobs"),
+    });
 }

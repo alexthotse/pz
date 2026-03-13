@@ -146,6 +146,16 @@ pub const SessionStore = struct {
 pub const Store = SessionStore;
 
 test "session store contract dispatches through vtable" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        first: bool,
+        second_null: bool,
+        append_ct: usize,
+        replay_ct: usize,
+        sid_len: usize,
+        deinit_ct: usize,
+    };
     const ReaderImpl = struct {
         left: u8 = 0,
 
@@ -195,12 +205,23 @@ test "session store contract dispatches through vtable" {
     var rdr = try store.replay("abc");
     defer rdr.deinit();
 
-    try std.testing.expect((try rdr.next()) != null);
-    try std.testing.expect((try rdr.next()) == null);
-    try std.testing.expect(impl.append_ct == 1);
-    try std.testing.expect(impl.replay_ct == 1);
-    try std.testing.expect(impl.sid_len == 3);
-
+    const first = (try rdr.next()) != null;
+    const second_null = (try rdr.next()) == null;
     store.deinit();
-    try std.testing.expect(impl.deinit_ct == 1);
+    try oh.snap(@src(),
+        \\core.session.mod.test.session store contract dispatches through vtable.Snap
+        \\  .first: bool = true
+        \\  .second_null: bool = true
+        \\  .append_ct: usize = 1
+        \\  .replay_ct: usize = 1
+        \\  .sid_len: usize = 3
+        \\  .deinit_ct: usize = 1
+    ).expectEqual(Snap{
+        .first = first,
+        .second_null = second_null,
+        .append_ct = impl.append_ct,
+        .replay_ct = impl.replay_ct,
+        .sid_len = impl.sid_len,
+        .deinit_ct = impl.deinit_ct,
+    });
 }

@@ -73,6 +73,8 @@ pub fn load(
 }
 
 test "retry state persists and restores counters after reload" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -87,11 +89,14 @@ test "retry state persists and restores counters after reload" {
     const out = (try load(std.testing.allocator, tmp.dir, "s1")) orelse {
         return error.TestUnexpectedResult;
     };
-    try std.testing.expectEqual(@as(u16, version_current), out.version);
-    try std.testing.expectEqual(@as(u16, 4), out.tries_done);
-    try std.testing.expectEqual(@as(u16, 3), out.fail_ct);
-    try std.testing.expectEqual(@as(u64, 250), out.next_wait_ms);
-    try std.testing.expect(out.last_err == .transient);
+    try oh.snap(@src(),
+        \\core.session.retry_state.State
+        \\  .version: u16 = 1
+        \\  .tries_done: u16 = 4
+        \\  .fail_ct: u16 = 3
+        \\  .next_wait_ms: u64 = 250
+        \\  .last_err: core.session.retry_state.ErrKind = .transient
+    ).expectEqual(out);
     if (@import("builtin").os.tag != .windows) {
         const st = try tmp.dir.statFile("s1.retry.json");
         try std.testing.expectEqual(@as(std.fs.File.Mode, fs_secure.file_mode), st.mode & 0o777);

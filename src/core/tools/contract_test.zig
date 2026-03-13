@@ -254,14 +254,6 @@ test "tool contract handlers emit deterministic envelopes" {
         try snapshotResult(std.testing.allocator, grep_res),
     };
     defer for (snaps) |snap| std.testing.allocator.free(snap.out);
-    try std.testing.expectEqualStrings(rd_call.id, snaps[0].call_id);
-    try std.testing.expectEqualStrings(wr_call.id, snaps[1].call_id);
-    try std.testing.expectEqualStrings(ed_call.id, snaps[2].call_id);
-    try std.testing.expectEqualStrings(sh_call.id, snaps[3].call_id);
-    try std.testing.expectEqualStrings(ls_call.id, snaps[4].call_id);
-    try std.testing.expectEqualStrings(agent_call.id, snaps[5].call_id);
-    try std.testing.expectEqualStrings(find_call.id, snaps[6].call_id);
-    try std.testing.expectEqualStrings(grep_call.id, snaps[7].call_id);
     try oh.snap(@src(),
         \\[8]core.tools.contract_test.ResultSnap
         \\  [0]: core.tools.contract_test.ResultSnap

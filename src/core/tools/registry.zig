@@ -163,6 +163,14 @@ const TResult = struct {
 const TReg = bind(TKind, TSpec, TCall, TEv, TResult);
 
 test "registry lookup resolves by name and kind" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        read_is_read: bool,
+        write_is_write: bool,
+        write_name: []const u8,
+        missing: bool,
+    };
     const DispatchImpl = struct {
         fn run(_: *@This(), call: TCall, _: TReg.Sink) !TResult {
             return .{ .code = call.value };
@@ -190,10 +198,19 @@ test "registry lookup resolves by name and kind" {
     const read = reg.byName("read") orelse return error.TestUnexpectedResult;
     const write = reg.byKind(.write) orelse return error.TestUnexpectedResult;
 
-    try std.testing.expect(read.kind == .read);
-    try std.testing.expect(write.kind == .write);
-    try std.testing.expectEqualStrings("write", write.name);
-    try std.testing.expect(reg.byName("missing") == null);
+    try oh.snap(@src(),
+        \\core.tools.registry.test.registry lookup resolves by name and kind.Snap
+        \\  .read_is_read: bool = true
+        \\  .write_is_write: bool = true
+        \\  .write_name: []const u8
+        \\    "write"
+        \\  .missing: bool = true
+    ).expectEqual(Snap{
+        .read_is_read = read.kind == .read,
+        .write_is_write = write.kind == .write,
+        .write_name = write.name,
+        .missing = reg.byName("missing") == null,
+    });
 }
 
 test "registry run dispatches to named handler" {

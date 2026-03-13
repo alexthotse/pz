@@ -5,6 +5,8 @@ const compact = @import("compact.zig");
 const retry_state = @import("retry_state.zig");
 
 test "session persistence regression covers compacted replay and retry restore" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -48,21 +50,29 @@ test "session persistence regression covers compacted replay and retry restore" 
     }
 
     const ev1 = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    switch (ev1.data) {
-        .tool_result => |tr| {
-            try std.testing.expectEqualStrings("c1", tr.id);
-            try std.testing.expectEqualStrings("ok", tr.out);
-            try std.testing.expect(!tr.is_err);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.session.schema.Event
+        \\  .version: u16 = 1
+        \\  .at_ms: i64 = 3
+        \\  .data: core.session.schema.Event.Data
+        \\    .tool_result: core.session.schema.Event.ToolResult
+        \\      .id: []const u8
+        \\        "c1"
+        \\      .out: []const u8
+        \\        "ok"
+        \\      .is_err: bool = false
+    ).expectEqual(ev1);
     try std.testing.expect((try rdr.next()) == null);
 
     const rs = (try retry_state.load(std.testing.allocator, tmp.dir, "sid-1")) orelse {
         return error.TestUnexpectedResult;
     };
-    try std.testing.expectEqual(@as(u16, 2), rs.tries_done);
-    try std.testing.expectEqual(@as(u16, 1), rs.fail_ct);
-    try std.testing.expectEqual(@as(u64, 100), rs.next_wait_ms);
-    try std.testing.expect(rs.last_err == .transient);
+    try oh.snap(@src(),
+        \\core.session.retry_state.State
+        \\  .version: u16 = 1
+        \\  .tries_done: u16 = 2
+        \\  .fail_ct: u16 = 1
+        \\  .next_wait_ms: u64 = 100
+        \\  .last_err: core.session.retry_state.ErrKind = .transient
+    ).expectEqual(rs);
 }

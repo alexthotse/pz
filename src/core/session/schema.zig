@@ -147,6 +147,8 @@ pub fn decodeSlice(alloc: std.mem.Allocator, raw: []const u8) DecodeError!std.js
 }
 
 test "session event json roundtrip" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const ev = Event{
         .version = 99,
         .at_ms = 42,
@@ -163,17 +165,18 @@ test "session event json roundtrip" {
     var parsed = try decodeSlice(std.testing.allocator, raw);
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(u16, version_current), parsed.value.version);
-    try std.testing.expectEqual(@as(i64, 42), parsed.value.at_ms);
-
-    switch (parsed.value.data) {
-        .tool_result => |out| {
-            try std.testing.expectEqualStrings("call-1", out.id);
-            try std.testing.expectEqualStrings("{\"ok\":true}", out.out);
-            try std.testing.expect(!out.is_err);
-        },
-        else => try std.testing.expect(false),
-    }
+    try oh.snap(@src(),
+        \\core.session.schema.Event
+        \\  .version: u16 = 1
+        \\  .at_ms: i64 = 42
+        \\  .data: core.session.schema.Event.Data
+        \\    .tool_result: core.session.schema.Event.ToolResult
+        \\      .id: []const u8
+        \\        "call-1"
+        \\      .out: []const u8
+        \\        "{"ok":true}"
+        \\      .is_err: bool = false
+    ).expectEqual(parsed.value);
 }
 
 test "session event json rejects wrong version" {
@@ -182,6 +185,8 @@ test "session event json rejects wrong version" {
 }
 
 test "Event.dupe deep-copies tool_call strings" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const alloc = std.testing.allocator;
     const orig = Event{
         .at_ms = 42,
@@ -194,19 +199,30 @@ test "Event.dupe deep-copies tool_call strings" {
     const d = try orig.dupe(alloc);
     defer d.free(alloc);
 
-    try std.testing.expectEqual(@as(i64, 42), d.at_ms);
-    const tc = d.data.tool_call;
-    try std.testing.expectEqualStrings("call-1", tc.id);
-    try std.testing.expectEqualStrings("bash", tc.name);
-    try std.testing.expectEqualStrings("{\"cmd\":\"ls\"}", tc.args);
+    try oh.snap(@src(),
+        \\core.session.schema.Event
+        \\  .version: u16 = 1
+        \\  .at_ms: i64 = 42
+        \\  .data: core.session.schema.Event.Data
+        \\    .tool_call: core.session.schema.Event.ToolCall
+        \\      .id: []const u8
+        \\        "call-1"
+        \\      .name: []const u8
+        \\        "bash"
+        \\      .args: []const u8
+        \\        "{"cmd":"ls"}"
+    ).expectEqual(d);
 
     // Verify independent allocation (pointers differ)
+    const tc = d.data.tool_call;
     try std.testing.expect(tc.id.ptr != orig.data.tool_call.id.ptr);
     try std.testing.expect(tc.name.ptr != orig.data.tool_call.name.ptr);
     try std.testing.expect(tc.args.ptr != orig.data.tool_call.args.ptr);
 }
 
 test "Event.dupe deep-copies tool_result strings" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const alloc = std.testing.allocator;
     const orig = Event{
         .at_ms = 10,
@@ -219,10 +235,19 @@ test "Event.dupe deep-copies tool_result strings" {
     const d = try orig.dupe(alloc);
     defer d.free(alloc);
 
+    try oh.snap(@src(),
+        \\core.session.schema.Event
+        \\  .version: u16 = 1
+        \\  .at_ms: i64 = 10
+        \\  .data: core.session.schema.Event.Data
+        \\    .tool_result: core.session.schema.Event.ToolResult
+        \\      .id: []const u8
+        \\        "c2"
+        \\      .out: []const u8
+        \\        "output-data"
+        \\      .is_err: bool = true
+    ).expectEqual(d);
     const tr = d.data.tool_result;
-    try std.testing.expectEqualStrings("c2", tr.id);
-    try std.testing.expectEqualStrings("output-data", tr.out);
-    try std.testing.expect(tr.is_err);
     try std.testing.expect(tr.id.ptr != orig.data.tool_result.id.ptr);
 }
 

@@ -388,7 +388,8 @@ fn sendLocalRequestAlloc(
     else
         try alloc.dupe(u8, parsed.path);
     const host = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ parsed.host, parsed.port });
-    const raw_req = try std.fmt.allocPrint(alloc,
+    const raw_req = try std.fmt.allocPrint(
+        alloc,
         "{s} {s} HTTP/1.1\r\n" ++
             "Host: {s}\r\n" ++
             "Connection: close\r\n" ++
@@ -448,14 +449,34 @@ fn hostName(host_port: []const u8) []const u8 {
 }
 
 test "parseUrl returns normalized fields for request targets" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        https: bool,
+        host: []const u8,
+        port: u16,
+        path: []const u8,
+        query: []const u8,
+    };
     const url = try parseUrl(" https://EXAMPLE.test:8443/api/v1?q=ok ");
 
-    try std.testing.expect(url.scheme == .https);
-    try std.testing.expectEqualStrings("EXAMPLE.test", url.host);
-    try std.testing.expectEqual(@as(u16, 8443), url.port);
-    try std.testing.expectEqualStrings("/api/v1", url.path);
-    try std.testing.expect(url.query != null);
-    try std.testing.expectEqualStrings("q=ok", url.query.?);
+    try oh.snap(@src(),
+        \\core.tools.web.test.parseUrl returns normalized fields for request targets.Snap
+        \\  .https: bool = true
+        \\  .host: []const u8
+        \\    "EXAMPLE.test"
+        \\  .port: u16 = 8443
+        \\  .path: []const u8
+        \\    "/api/v1"
+        \\  .query: []const u8
+        \\    "q=ok"
+    ).expectEqual(Snap{
+        .https = url.scheme == .https,
+        .host = url.host,
+        .port = url.port,
+        .path = url.path,
+        .query = url.query.?,
+    });
 }
 
 test "requiresEscalationApproval only allows silent safe reads" {
@@ -819,6 +840,12 @@ test "redirect e2e allows public redirect chains over local mock sockets" {
 }
 
 test "redirect e2e denies redirect hosts not in policy" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        ct: usize,
+        line: []const u8,
+    };
     var steps = [_]http_mock.Step{
         .{
             .resp = .{
@@ -870,11 +897,24 @@ test "redirect e2e denies redirect hosts not in policy" {
         .allow_cross_host = true,
     }, .{ .resolve = Mock.resolve, .free = Mock.free }));
     try server.join(thr);
-    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
-    try std.testing.expectEqualStrings("GET /start HTTP/1.1", http_mock.requestLine(server.request(0)).?);
+    try oh.snap(@src(),
+        \\core.tools.web.test.redirect e2e denies redirect hosts not in policy.Snap
+        \\  .ct: usize = 1
+        \\  .line: []const u8
+        \\    "GET /start HTTP/1.1"
+    ).expectEqual(Snap{
+        .ct = server.requestCount(),
+        .line = http_mock.requestLine(server.request(0)).?,
+    });
 }
 
 test "redirect e2e blocks literal private redirect targets" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        ct: usize,
+        host_ok: bool,
+    };
     var steps = [_]http_mock.Step{
         .{
             .resp = .{
@@ -926,11 +966,23 @@ test "redirect e2e blocks literal private redirect targets" {
         .allow_cross_host = true,
     }, .{ .resolve = Mock.resolve, .free = Mock.free }));
     try server.join(thr);
-    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
-    try std.testing.expectEqualStrings(svc_host, http_mock.header(server.request(0), "host").?);
+    try oh.snap(@src(),
+        \\core.tools.web.test.redirect e2e blocks literal private redirect targets.Snap
+        \\  .ct: usize = 1
+        \\  .host_ok: bool = true
+    ).expectEqual(Snap{
+        .ct = server.requestCount(),
+        .host_ok = std.mem.startsWith(u8, http_mock.header(server.request(0), "host").?, "svc.test:"),
+    });
 }
 
 test "redirect e2e blocks rebound redirect targets" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        ct: usize,
+        line: []const u8,
+    };
     var steps = [_]http_mock.Step{
         .{
             .resp = .{
@@ -983,6 +1035,13 @@ test "redirect e2e blocks rebound redirect targets" {
         .allow_cross_host = true,
     }, .{ .resolve = Mock.resolve, .free = Mock.free }));
     try server.join(thr);
-    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
-    try std.testing.expectEqualStrings("GET /start HTTP/1.1", http_mock.requestLine(server.request(0)).?);
+    try oh.snap(@src(),
+        \\core.tools.web.test.redirect e2e blocks rebound redirect targets.Snap
+        \\  .ct: usize = 1
+        \\  .line: []const u8
+        \\    "GET /start HTTP/1.1"
+    ).expectEqual(Snap{
+        .ct = server.requestCount(),
+        .line = http_mock.requestLine(server.request(0)).?,
+    });
 }
