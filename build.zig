@@ -19,6 +19,8 @@ pub fn build(b: *std.Build) void {
     // Build options: version, VCS hash, changelog
     const options = b.addOptions();
     options.addOption([]const u8, "version", pkg.version);
+    const test_options = b.addOptions();
+    test_options.addOption([]const u8, "version", pkg.version);
 
     var code: u8 = 0;
     const vcs_hash_raw = b.runAllowFail(
@@ -28,6 +30,7 @@ pub fn build(b: *std.Build) void {
     ) catch "unknown";
     const vcs_hash = std.mem.trimRight(u8, vcs_hash_raw, "\n\r ");
     options.addOption([]const u8, "git_hash", vcs_hash);
+    test_options.addOption([]const u8, "git_hash", vcs_hash);
 
     const vcs_log_raw = b.runAllowFail(
         &.{
@@ -45,6 +48,8 @@ pub fn build(b: *std.Build) void {
     const vcs_log = std.mem.trimRight(u8, vcs_log_raw, "\n\r ");
     options.addOption([]const u8, "changelog", vcs_log);
     options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
+    test_options.addOption([]const u8, "changelog", vcs_log);
+    test_options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
 
     const core_agent_mod = b.createModule(.{
         .root_source_file = b.path("src/core/agent.zig"),
@@ -62,6 +67,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addOptions("build_options", options);
     b.installArtifact(exe);
+    test_options.addOptionPath("pz_bin_path", exe.getEmittedBin());
 
     const build_step = b.step("build", "Build the executable");
     build_step.dependOn(&exe.step);
@@ -93,7 +99,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     agent_child_harness.root_module.addImport("core_agent", core_agent_mod);
-    options.addOptionPath("agent_child_harness_path", agent_child_harness.getEmittedBin());
+    test_options.addOptionPath("agent_child_harness_path", agent_child_harness.getEmittedBin());
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
@@ -111,7 +117,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    suite_tests.root_module.addOptions("build_options", options);
+    suite_tests.root_module.addOptions("build_options", test_options);
     if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
         suite_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
     }

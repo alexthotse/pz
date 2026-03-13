@@ -32,6 +32,7 @@ const test_cancel_mock = @import("test/cancel_mock.zig");
 const test_http_mock = @import("test/http_mock.zig");
 const test_syslog_mock = @import("test/syslog_mock.zig");
 const test_provider_mock = @import("test/provider_mock.zig");
+const test_pty_harness = @import("test/pty_harness.zig");
 
 test "all module tests" {
     _ = app_cli;
@@ -68,4 +69,5 @@ test "all module tests" {
     _ = test_http_mock;
     _ = test_syslog_mock;
     _ = test_provider_mock;
+    _ = test_pty_harness;
 }
