@@ -8,6 +8,8 @@ const release_uri = std.Uri{
     .path = .{ .raw = "/repos/joelreymont/pz/releases/latest" },
 };
 
+const version_url_env = "PZ_VERSION_URL";
+
 /// Semver triple for comparison.
 pub const Ver = struct {
     major: u16,
@@ -82,7 +84,12 @@ fn initClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client 
 
 /// Check GitHub releases for a newer version. Returns version string if newer, null otherwise.
 fn checkLatest(alloc: std.mem.Allocator) !?[]u8 {
-    return try checkLatestWith(alloc, .{});
+    return try checkLatestWith(alloc, .{ .uri = versionUriFromEnv() orelse release_uri });
+}
+
+fn versionUriFromEnv() ?std.Uri {
+    const raw = std.posix.getenv(version_url_env) orelse return null;
+    return std.Uri.parse(raw) catch null;
 }
 
 fn checkLatestWith(alloc: std.mem.Allocator, deps: Deps) !?[]u8 {

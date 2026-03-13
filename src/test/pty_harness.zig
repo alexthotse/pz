@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const vscreen = @import("../modes/tui/vscreen.zig");
 const ansi_ast = @import("ansi_ast.zig");
+const http_mock = @import("http_mock.zig");
 const c = @cImport({
     @cInclude("errno.h");
     @cInclude("signal.h");
@@ -381,6 +382,74 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
         \\csi H 0
         \\"
     ).expectEqual(ctl);
+
+    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "drop files"));
+}
+
+test "real pz PTY startup survives live version check" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+    _ = env.remove("PZ_SKIP_VERSION_CHECK");
+
+    var server = try http_mock.Server.initSeq(&.{.{
+        .headers = &.{"Content-Type: application/json"},
+        .body = "{\"tag_name\":\"v9.9.9\"}",
+    }});
+    defer server.deinit();
+    const thr = try server.spawn();
+    const version_url = try server.urlAlloc(std.testing.allocator, "/repos/joelreymont/pz/releases/latest");
+    defer std.testing.allocator.free(version_url);
+    try env.put("PZ_VERSION_URL", version_url);
+
+    const sig_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-version-quit" });
+    defer std.testing.allocator.free(sig_path);
+    defer std.fs.deleteFileAbsolute(sig_path) catch {};
+    {
+        var f = try std.fs.createFileAbsolute(sig_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("\x03\x03");
+    }
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "/bin/sh",
+            "-c",
+            "{ sleep 0.6; cat \"$1\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$2\" \"$3\" \"$4\"",
+            "sh",
+            sig_path,
+            pz_bin,
+            "--no-config",
+            "--no-session",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+    try server.join(thr);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
+
+    var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
+    defer vs.deinit();
+    vs.feed(out.stdout);
 
     try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "drop files"));
 }
