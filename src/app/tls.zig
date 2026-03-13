@@ -101,3 +101,13 @@ test "initClient fails closed on invalid custom ca bundle" {
 
     try std.testing.expectError(error.MissingEndCertificateMarker, initClient(std.testing.allocator, bad_path));
 }
+
+test "initClient preloads default ca bundle and disables rescan" {
+    if (std.http.Client.disable_tls) return error.SkipZigTest;
+
+    var http = try initClient(std.testing.allocator, null);
+    defer http.deinit();
+
+    try std.testing.expect(http.ca_bundle.bytes.items.len != 0);
+    try std.testing.expect(!@atomicLoad(bool, &http.next_https_rescan_certs, .acquire));
+}
