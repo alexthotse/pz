@@ -7108,6 +7108,73 @@ test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
     try std.testing.expect(ui.ov == null);
 }
 
+test "live turn ask handoff frees custom other answers cleanly" {
+    var live = try LiveTurn.init(std.testing.allocator);
+    defer live.deinit();
+
+    const opts = [_]core.tools.Call.AskArgs.Option{
+        .{ .label = "A" },
+    };
+    const qs = [_]core.tools.Call.AskArgs.Question{
+        .{
+            .id = "scope",
+            .question = "Pick scope",
+            .options = opts[0..],
+            .allow_other = true,
+        },
+    };
+
+    const Ctx = struct {
+        live: *LiveTurn,
+        out: ?[]u8 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.out = self.live.ask(.{ .questions = qs[0..] }) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
+    defer ui.deinit();
+    try ui.ed.setText("draft");
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    const pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+    defer std.posix.close(pipe[0]);
+    defer std.posix.close(pipe[1]);
+    var watcher = try InputWatcher.init(pipe[0]);
+    defer watcher.deinit();
+    var ask_ui_ctx = AskUiCtx{
+        .alloc = std.testing.allocator,
+        .ui = &ui,
+        .out = out_fbs.writer().any(),
+        .watcher = &watcher,
+    };
+    _ = try std.posix.write(pipe[1], "\x1b[B\rZ\r\x1b[B\r");
+    var reader = tui_input.Reader.init(watcher.fd);
+
+    var ctx = Ctx{ .live = &live };
+    const thr = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
+    const tx = try waitForAskTxn(&live);
+
+    live.finishAsk(tx, ask_ui_ctx.runOnMain(&reader, tx.args.view()));
+    thr.join();
+
+    if (ctx.err) |err| return err;
+    defer std.testing.allocator.free(ctx.out.?);
+    try std.testing.expectEqualStrings(
+        "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"Z\",\"index\":1}]}",
+        ctx.out.?,
+    );
+    try std.testing.expectEqualStrings("draft", ui.ed.text());
+    try std.testing.expect(!watcher.isPaused());
+    try std.testing.expect(ui.ov == null);
+}
+
 test "ask ui cancel frees temporary state and overlay" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -12374,6 +12441,48 @@ test "showLogoutOverlay builds overlay and frees on deinit" {
         ui.ov.?.deinit(alloc);
         ui.ov = null;
     }
+}
+
+test "slash logout without explicit provider frees logged-in list cleanly" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+    try tmp.dir.makePath("home");
+
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var cfg = cli.Run{
+        .mode = .tui,
+        .prompt = null,
+        .cfg = .{
+            .mode = .tui,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "openai"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream("/login openai sk-openai-secret\n/logout\n/quit\n");
+    var out_buf: [32768]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const sid = try execWithIoHooks(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+        .{
+            .auth_home = home_abs,
+        },
+    );
+    defer std.testing.allocator.free(sid);
+
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "API key saved for openai") != null);
 }
 
 test "LiveTurn tracks last_stop last_err and last_model" {
