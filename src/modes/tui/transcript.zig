@@ -1579,6 +1579,28 @@ fn rowAscii(frm: *const frame.Frame, y: usize, out: []u8) ![]const u8 {
     return out[0..frm.w];
 }
 
+fn frameRowsSnap(
+    alloc: std.mem.Allocator,
+    frm: *const frame.Frame,
+    y0: usize,
+    y1: usize,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    const raw = try alloc.alloc(u8, frm.w);
+    defer alloc.free(raw);
+
+    var y = y0;
+    while (y <= y1) : (y += 1) {
+        if (y != y0) try out.append(alloc, '\n');
+        const row = try rowAscii(frm, y, raw);
+        const trimmed = std.mem.trimRight(u8, row, " ");
+        try std.fmt.format(out.writer(alloc), "{d}:{s}", .{ y, trimmed });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn allocBigMdTable(alloc: std.mem.Allocator, n: usize) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
@@ -1810,6 +1832,8 @@ test "markdown wrap keeps table rows intact" {
 }
 
 test "markdown table keeps aligned padded columns and full enclosure" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tr = Transcript.init(std.testing.allocator);
     defer tr.deinit();
 
@@ -1822,67 +1846,18 @@ test "markdown table keeps aligned padded columns and full enclosure" {
     defer frm.deinit(std.testing.allocator);
     try tr.render(&frm, .{ .x = 0, .y = 0, .w = 80, .h = 10 });
 
-    var hcols: [8]usize = undefined;
-    var top_cols: [8]usize = undefined;
-    var r1cols: [8]usize = undefined;
-    var r3cols: [8]usize = undefined;
-    var r5cols: [8]usize = undefined;
-    var bot_cols: [8]usize = undefined;
-    const hn = try tableBorderCols(&frm, 0, hcols[0..]);
-    const tn = try tableBorderCols(&frm, 0, top_cols[0..]);
-    const r1n = try tableBorderCols(&frm, 1, r1cols[0..]);
-    const r3n = try tableBorderCols(&frm, 3, r3cols[0..]);
-    const r5n = try tableBorderCols(&frm, 5, r5cols[0..]);
-    const bn = try tableBorderCols(&frm, 6, bot_cols[0..]);
-
-    try std.testing.expectEqual(@as(usize, 3), hn);
-    try std.testing.expectEqual(@as(usize, 3), tn);
-    try std.testing.expectEqual(@as(usize, 3), r1n);
-    try std.testing.expectEqual(@as(usize, 3), r3n);
-    try std.testing.expectEqual(@as(usize, 3), r5n);
-    try std.testing.expectEqual(@as(usize, 3), bn);
-
-    try std.testing.expectEqual(hcols[0], r1cols[0]);
-    try std.testing.expectEqual(hcols[1], r1cols[1]);
-    try std.testing.expectEqual(hcols[2], r1cols[2]);
-    try std.testing.expectEqual(hcols[0], r3cols[0]);
-    try std.testing.expectEqual(hcols[1], r3cols[1]);
-    try std.testing.expectEqual(hcols[2], r3cols[2]);
-    try std.testing.expectEqual(hcols[0], r5cols[0]);
-    try std.testing.expectEqual(hcols[1], r5cols[1]);
-    try std.testing.expectEqual(hcols[2], r5cols[2]);
-    try std.testing.expectEqual(hcols[0], bot_cols[0]);
-    try std.testing.expectEqual(hcols[1], bot_cols[1]);
-    try std.testing.expectEqual(hcols[2], bot_cols[2]);
-
-    const top_l = try frm.cell(hcols[0], 0);
-    const top_m = try frm.cell(hcols[1], 0);
-    const top_r = try frm.cell(hcols[2], 0);
-    try std.testing.expectEqual(@as(u21, 0x250C), top_l.cp); // ┌
-    try std.testing.expectEqual(@as(u21, 0x252C), top_m.cp); // ┬
-    try std.testing.expectEqual(@as(u21, 0x2510), top_r.cp); // ┐
-
-    const sep_l = try frm.cell(hcols[0], 2);
-    const sep_m = try frm.cell(hcols[1], 2);
-    const sep_r = try frm.cell(hcols[2], 2);
-    try std.testing.expectEqual(@as(u21, 0x251C), sep_l.cp); // ├
-    try std.testing.expectEqual(@as(u21, 0x253C), sep_m.cp); // ┼
-    try std.testing.expectEqual(@as(u21, 0x2524), sep_r.cp); // ┤
-
-    const bot_l = try frm.cell(hcols[0], 6);
-    const bot_m = try frm.cell(hcols[1], 6);
-    const bot_r = try frm.cell(hcols[2], 6);
-    try std.testing.expectEqual(@as(u21, 0x2514), bot_l.cp); // └
-    try std.testing.expectEqual(@as(u21, 0x2534), bot_m.cp); // ┴
-    try std.testing.expectEqual(@as(u21, 0x2518), bot_r.cp); // ┘
-
-    // Cells are padded with spaces around content: "│ a           │ 1     │"
-    try std.testing.expectEqual(@as(u21, ' '), (try frm.cell(hcols[0] + 1, 3)).cp);
-    try std.testing.expectEqual(@as(u21, 'a'), (try frm.cell(hcols[0] + 2, 3)).cp);
-    try std.testing.expectEqual(@as(u21, ' '), (try frm.cell(hcols[1] - 1, 3)).cp);
-    try std.testing.expectEqual(@as(u21, ' '), (try frm.cell(hcols[1] + 1, 3)).cp);
-    try std.testing.expectEqual(@as(u21, '1'), (try frm.cell(hcols[1] + 2, 3)).cp);
-    try std.testing.expectEqual(@as(u21, ' '), (try frm.cell(hcols[2] - 1, 3)).cp);
+    const rows = try frameRowsSnap(std.testing.allocator, &frm, 0, 6);
+    defer std.testing.allocator.free(rows);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "0: ???????????????????????
+        \\1: ? Name        ? Value ?
+        \\2: ???????????????????????
+        \\3: ? a           ? 1     ?
+        \\4: ???????????????????????
+        \\5: ? longer-name ? 12345 ?
+        \\6: ???????????????????????"
+    ).expectEqual(rows);
 }
 
 test "markdown wrap still wraps non-table lines" {
