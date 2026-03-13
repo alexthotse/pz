@@ -71,7 +71,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, _: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, sink: tools.Sink) Err!tools.Result {
         if (call.kind != .bash) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .bash) return error.KindMismatch;
 
@@ -113,7 +113,7 @@ pub const Handler = struct {
         const run_res = if (self.runner) |runner|
             try runner.exec(self, launch)
         else
-            try runChild(self, launch.argv, launch.cwd, launch.env, launch.cancel);
+            try runChild(self, launch.argv, launch.cwd, launch.env, launch.cancel, call.id, self.now_ms, sink);
 
         var stdout_chunk = run_res.stdout.chunk;
         errdefer self.alloc.free(stdout_chunk);
@@ -220,6 +220,7 @@ pub const Handler = struct {
             .ended_at_ms = self.now_ms,
             .out = out,
             .out_owned = true,
+            .out_streamed = self.runner == null,
             .final = run_res.final,
         };
     }
@@ -265,47 +266,15 @@ const WaitPoll = union(enum) {
 const wait_poll_ms: u64 = 10;
 const term_grace_ms: u64 = 150;
 
-const CollectCtx = struct {
-    alloc: std.mem.Allocator,
-    file: std.fs.File,
-    max_bytes: usize,
-    buf: std.ArrayList(u8) = .empty,
-    full_bytes: usize = 0,
-    err: ?anyerror = null,
-
-    fn run(self: *@This()) void {
-        defer self.file.close();
-
-        var keep = true;
-        var scratch: [4096]u8 = undefined;
-        while (true) {
-            const n = self.file.read(&scratch) catch |read_err| {
-                if (self.err == null) self.err = read_err;
-                return;
-            };
-            if (n == 0) return;
-
-            self.full_bytes = satAdd(self.full_bytes, n);
-
-            if (keep and self.buf.items.len < self.max_bytes) {
-                const keep_len = @min(n, self.max_bytes - self.buf.items.len);
-                if (keep_len != 0) {
-                    self.buf.appendSlice(self.alloc, scratch[0..keep_len]) catch |append_err| {
-                        if (self.err == null) self.err = append_err;
-                        keep = false;
-                    };
-                }
-            }
-        }
-    }
-};
-
 fn runChild(
     self: Handler,
     argv: []const []const u8,
     cwd: ?[]const u8,
     env: *const std.process.EnvMap,
     cancel: ?tools.CancelSrc,
+    call_id: []const u8,
+    at_ms: i64,
+    sink: tools.Sink,
 ) Err!RunOut {
     var child = std.process.Child.init(argv, self.alloc);
     child.stdin_behavior = .Ignore;
@@ -322,92 +291,114 @@ fn runChild(
     child.stdout = null;
     child.stderr = null;
 
-    var stdout_ctx = CollectCtx{
-        .alloc = self.alloc,
-        .file = stdout_file,
-        .max_bytes = self.max_bytes,
-    };
-    var stderr_ctx = CollectCtx{
-        .alloc = self.alloc,
-        .file = stderr_file,
-        .max_bytes = self.max_bytes,
-    };
+    setNonblock(stdout_file.handle) catch |set_err| return mapProcErr(set_err);
+    setNonblock(stderr_file.handle) catch |set_err| return mapProcErr(set_err);
 
-    const stdout_thr = std.Thread.spawn(.{}, CollectCtx.run, .{&stdout_ctx}) catch |thr_err| {
-        stdout_ctx.file.close();
-        stderr_ctx.file.close();
-        killAndWait(&child) catch |kill_err| {
-            return kill_err;
-        };
-        return mapProcErr(thr_err);
-    };
+    var stdout_buf = std.ArrayList(u8).empty;
+    errdefer stdout_buf.deinit(self.alloc);
+    var stderr_buf = std.ArrayList(u8).empty;
+    errdefer stderr_buf.deinit(self.alloc);
 
-    const stderr_thr = std.Thread.spawn(.{}, CollectCtx.run, .{&stderr_ctx}) catch |thr_err| {
-        stderr_ctx.file.close();
-        killAndWait(&child) catch |kill_err| {
-            stdout_thr.join();
-            stdout_ctx.buf.deinit(self.alloc);
-            stderr_ctx.buf.deinit(self.alloc);
-            return kill_err;
-        };
-        stdout_thr.join();
-        stdout_ctx.buf.deinit(self.alloc);
-        stderr_ctx.buf.deinit(self.alloc);
-        return mapProcErr(thr_err);
-    };
+    var stdout_full: usize = 0;
+    var stderr_full: usize = 0;
+    var stdout_open = true;
+    var stderr_open = true;
+    var seq: u32 = 0;
+    var final: ?tools.Result.Final = null;
 
-    const final = waitWithCancel(&child, cancel) catch |wait_err| {
-        killAndWait(&child) catch |kill_err| {
-            stdout_thr.join();
-            stderr_thr.join();
-            stdout_ctx.buf.deinit(self.alloc);
-            stderr_ctx.buf.deinit(self.alloc);
-            return kill_err;
-        };
-        stdout_thr.join();
-        stderr_thr.join();
-        stdout_ctx.buf.deinit(self.alloc);
-        stderr_ctx.buf.deinit(self.alloc);
-        return mapProcErr(wait_err);
-    };
+    while (stdout_open or stderr_open or final == null) {
+        if (cancel) |src| {
+            if (final == null and src.isCanceled()) {
+                _ = terminateAndReap(&child) catch |kill_err| return mapProcErr(kill_err);
+                final = .{ .cancelled = .{ .reason = .user } };
+            }
+        }
 
-    stdout_thr.join();
-    stderr_thr.join();
+        if (final == null) {
+            switch (pollChild(&child)) {
+                .status => |status| final = statusToFinal(status),
+                .pending => {},
+            }
+        }
 
-    if (stdout_ctx.err) |collect_err| {
-        stdout_ctx.buf.deinit(self.alloc);
-        stderr_ctx.buf.deinit(self.alloc);
-        return mapCollectErr(collect_err);
+        var fds: [2]std.posix.pollfd = undefined;
+        var n_fds: usize = 0;
+        if (stdout_open) {
+            fds[n_fds] = .{
+                .fd = stdout_file.handle,
+                .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
+                .revents = 0,
+            };
+            n_fds += 1;
+        }
+        if (stderr_open) {
+            fds[n_fds] = .{
+                .fd = stderr_file.handle,
+                .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
+                .revents = 0,
+            };
+            n_fds += 1;
+        }
+        if (n_fds != 0) {
+            _ = std.posix.poll(fds[0..n_fds], @intCast(wait_poll_ms)) catch |poll_err| {
+                return mapCollectErr(poll_err);
+            };
+            var idx: usize = 0;
+            if (stdout_open) {
+                stdout_open = readReady(
+                    self.alloc,
+                    stdout_file.handle,
+                    call_id,
+                    at_ms,
+                    .stdout,
+                    self.max_bytes,
+                    &stdout_buf,
+                    &stdout_full,
+                    sink,
+                    &seq,
+                    fds[idx].revents,
+                ) catch |read_err| return mapCollectErr(read_err);
+                idx += 1;
+            }
+            if (stderr_open) {
+                stderr_open = readReady(
+                    self.alloc,
+                    stderr_file.handle,
+                    call_id,
+                    at_ms,
+                    .stderr,
+                    self.max_bytes,
+                    &stderr_buf,
+                    &stderr_full,
+                    sink,
+                    &seq,
+                    fds[idx].revents,
+                ) catch |read_err| return mapCollectErr(read_err);
+            }
+        }
     }
 
-    if (stderr_ctx.err) |collect_err| {
-        stdout_ctx.buf.deinit(self.alloc);
-        stderr_ctx.buf.deinit(self.alloc);
-        return mapCollectErr(collect_err);
-    }
+    stdout_file.close();
+    stderr_file.close();
 
-    const stdout_chunk = stdout_ctx.buf.toOwnedSlice(self.alloc) catch {
-        stdout_ctx.buf.deinit(self.alloc);
-        stderr_ctx.buf.deinit(self.alloc);
-        return error.OutOfMemory;
-    };
+    const stdout_chunk = stdout_buf.toOwnedSlice(self.alloc) catch return error.OutOfMemory;
+    errdefer self.alloc.free(stdout_chunk);
 
-    const stderr_chunk = stderr_ctx.buf.toOwnedSlice(self.alloc) catch {
-        self.alloc.free(stdout_chunk);
-        stderr_ctx.buf.deinit(self.alloc);
-        return error.OutOfMemory;
-    };
+    const stderr_chunk = stderr_buf.toOwnedSlice(self.alloc) catch return error.OutOfMemory;
 
     return .{
         .stdout = .{
             .chunk = stdout_chunk,
-            .full_bytes = stdout_ctx.full_bytes,
+            .full_bytes = stdout_full,
         },
         .stderr = .{
             .chunk = stderr_chunk,
-            .full_bytes = stderr_ctx.full_bytes,
+            .full_bytes = stderr_full,
         },
-        .final = final,
+        .final = final orelse .{ .failed = .{
+            .kind = .internal,
+            .msg = "bash terminated without status",
+        } },
     };
 }
 
@@ -415,23 +406,51 @@ fn killAndWait(child: *std.process.Child) Err!void {
     _ = terminateAndReap(child) catch |kill_err| return mapProcErr(kill_err);
 }
 
-fn waitWithCancel(child: *std.process.Child, cancel: ?tools.CancelSrc) anyerror!tools.Result.Final {
-    try child.waitForSpawn();
+fn setNonblock(fd: std.posix.fd_t) !void {
+    const cur = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    const want = cur | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }));
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, want);
+}
 
+fn readReady(
+    alloc: std.mem.Allocator,
+    fd: std.posix.fd_t,
+    call_id: []const u8,
+    at_ms: i64,
+    stream: tools.Output.Stream,
+    max_bytes: usize,
+    buf: *std.ArrayList(u8),
+    full_bytes: *usize,
+    sink: tools.Sink,
+    seq: *u32,
+    revents: i16,
+) !bool {
+    if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) == 0) return true;
+
+    var scratch: [4096]u8 = undefined;
     while (true) {
-        switch (pollChild(child)) {
-            .status => |status| return statusToFinal(status),
-            .pending => {},
+        const n = std.posix.read(fd, &scratch) catch |read_err| switch (read_err) {
+            error.WouldBlock => return true,
+            else => return read_err,
+        };
+        if (n == 0) return false;
+
+        full_bytes.* = satAdd(full_bytes.*, n);
+        if (buf.items.len < max_bytes) {
+            const keep_len = @min(n, max_bytes - buf.items.len);
+            if (keep_len != 0) try buf.appendSlice(alloc, scratch[0..keep_len]);
         }
 
-        if (cancel) |src| {
-            if (src.isCanceled()) {
-                _ = try terminateAndReap(child);
-                return .{ .cancelled = .{ .reason = .user } };
-            }
-        }
-
-        std.Thread.sleep(wait_poll_ms * std.time.ns_per_ms);
+        try sink.push(.{
+            .output = .{
+                .call_id = call_id,
+                .seq = seq.*,
+                .at_ms = at_ms,
+                .stream = stream,
+                .chunk = scratch[0..n],
+            },
+        });
+        seq.* += 1;
     }
 }
 
@@ -1316,7 +1335,23 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
         }
     };
     const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
+        mu: std.Thread.Mutex = .{},
+        saw_out: bool = false,
+        out_before_done: bool = false,
+        done: bool = false,
+
+        fn push(self: *@This(), ev: tools.Event) !void {
+            self.mu.lock();
+            defer self.mu.unlock();
+            switch (ev) {
+                .output => {
+                    self.saw_out = true;
+                    if (!self.done) self.out_before_done = true;
+                },
+                .finish => self.done = true,
+                else => {},
+            }
+        }
     };
     const CancelImpl = struct {
         canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -1375,8 +1410,15 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
     const res = ctx.res orelse return error.TestUnexpectedResult;
     defer handler.deinitResult(res);
 
+    sink_impl.mu.lock();
+    const saw_out = sink_impl.saw_out;
+    const out_before_done = sink_impl.out_before_done;
+    sink_impl.mu.unlock();
+
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
     try std.testing.expect(res.out[0].stream == .stdout);
+    try std.testing.expect(saw_out);
+    try std.testing.expect(out_before_done);
     const bg_pid = try std.fmt.parseInt(std.posix.pid_t, res.out[0].chunk, 10);
     defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {};
     try WaitGone.run(bg_pid);

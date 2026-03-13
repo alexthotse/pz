@@ -137,6 +137,7 @@ test "write handler overwrites file with deterministic timestamps" {
         \\    .out: []const core.tools.mod.Output
         \\      (empty)
         \\    .out_owned: bool = false
+        \\    .out_streamed: bool = false
         \\    .final: core.tools.mod.Result.Final
         \\      .ok: core.tools.mod.Result.Ok
         \\        .code: i32 = 0

@@ -217,6 +217,7 @@ pub const Result = struct {
     ended_at_ms: i64,
     out: []const Output,
     out_owned: bool = false,
+    out_streamed: bool = false,
     final: Final,
 
     pub const Final = union(Tag) {

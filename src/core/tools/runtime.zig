@@ -55,8 +55,11 @@ pub fn bind(
 
                 const res = try ent.dispatch.run(call, sink);
 
-                for (res.out) |out| {
-                    try sink.push(.{ .output = out });
+                const out_streamed = if (@hasField(Result, "out_streamed")) res.out_streamed else false;
+                if (!out_streamed) {
+                    for (res.out) |out| {
+                        try sink.push(.{ .output = out });
+                    }
                 }
 
                 try sink.push(.{ .finish = res });
