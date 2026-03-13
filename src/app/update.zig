@@ -1300,7 +1300,7 @@ const UpdateClientTap = struct {
         const tap: *UpdateClientTap = @ptrCast(@alignCast(ctx.?));
         var http = try app_tls.initRuntimeClient(alloc);
         tap.fetch_ct += 1;
-        if (http.ca_bundle.bytes.items.len == 0) tap.no_ca_ct += 1;
+        if (http.ca_bundle.map.size == 0) tap.no_ca_ct += 1;
         if (@atomicLoad(bool, &http.next_https_rescan_certs, .acquire)) tap.rescan_ct += 1;
         return http;
     }

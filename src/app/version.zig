@@ -152,23 +152,23 @@ const CwdGuard = @import("../core/tools/path_guard.zig").CwdGuard;
 
 const test_ca_pem =
     \\-----BEGIN CERTIFICATE-----
-    \\MIIDCzCCAfOgAwIBAgIURa7/IGeeVRlDa4FwDe++jL0QdxwwDQYJKoZIhvcNAQEL
-    \\BQAwFTETMBEGA1UEAwwKcHotdGVzdC1jYTAeFw0yNjAzMTIxNjE2NDRaFw0yNjAz
-    \\MTMxNjE2NDRaMBUxEzARBgNVBAMMCnB6LXRlc3QtY2EwggEiMA0GCSqGSIb3DQEB
-    \\AQUAA4IBDwAwggEKAoIBAQDPijTFBaC7eSjSfbDdlSperM4GjuUI4kFPjkNZeMfs
-    \\QeQZtLaNRsiDmDrj4gupRt0FjaH+vpW77xinL/XCCC+h3QnbmYBAk1RjrCUDcIMS
-    \\kfqZPhc7qfKsBJCK+pio5IZGSvCNDeny32zxy6mYKBUN2UMyeLOJGKUxQTR3DJ1n
-    \\Z9z0DaNloQK80x/EA59BaHEaKlBOUhiGpZWzykXAWxH9DszXGX9WcneskaS9DKt4
-    \\l8UYEzn/E5Lw5k+91XQJAAtiKCR69lorOJPIhe/iTsdFQ/4L75PRzaLzjPAFjFcX
-    \\KMUndj4y/rpWEfVwG3eyN0HobTIydLEsaCBS3grFwWGDAgMBAAGjUzBRMB0GA1Ud
-    \\DgQWBBSgqshoiKDsFd/cdjw9ISdRZl5r7zAfBgNVHSMEGDAWgBSgqshoiKDsFd/c
-    \\djw9ISdRZl5r7zAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCT
-    \\rRyDf+axvu0uLXpqGcJM3/xdcidqJhrFtkOAu/EufGFYr3W0QSl3lVlDpy2cvsIS
-    \\FBqYEL8n31AVq5+Tfi8ORQCu6SrxuFv2lO6qit4xIRpqIwO6pfiNw6PKKkHpJheV
-    \\+r0w1VpEsKKOrZQsD2m6/PkMTLrpFcjGD9EBWy23Ox+zVNVtdcYnT/FszUdHpQfs
-    \\bAfNtHkWEmpZ3eBj2wXtAYlSZpwT44iLbywR+Os9jOzAEiscig2Q0SYZiO8XEQ0i
-    \\/yGcMd+7viFlE60oib0k2Q4IPDnLhPm0JWXb0aWBnginT+RcjKnaEUmtuXbjG6RZ
-    \\AxzSE0ZI8572sfc7EEB+
+    \\MIIDDTCCAfWgAwIBAgIUa9wBgCgyzJ8+FyfVZ2UIxqDyL+UwDQYJKoZIhvcNAQEL
+    \\BQAwFTETMBEGA1UEAwwKcHotdGVzdC1jYTAgFw0yNjAzMTMxNjM3MTBaGA8yMTI2
+    \\MDIxNzE2MzcxMFowFTETMBEGA1UEAwwKcHotdGVzdC1jYTCCASIwDQYJKoZIhvcN
+    \\AQEBBQADggEPADCCAQoCggEBALaSWKvfyHWnkE3fVUOONQ4kpbAVO4NvYs37sdhI
+    \\xyiIG27aOyUcEtc8wpEO3Yv29adrSoJ8CvRNS8gETJ6aZ6wsc1E/0Bf4/U49m2kv
+    \\F7yc9TmzFEnjKxFdHbyxGb5A84c433dsyKWcO8BaUiZIjV/c7VpufdaaidcBH8uA
+    \\Ak4E+ZTlfJqY8h7GJdiIsEZZR03tOgfGpHl4T6B5hmioOcPLZUpg9ABYv9zCC+lz
+    \\mwWiLvNx8YmT2izRvcwFqHc/0NpnRcJVXm+bGK4Rt8qZs96utplnZFmkSPdv4Gh/
+    \\qTh2rFKpYSBBPN+4FhBgqS55i/No+CBsmYU27OX+EPFabFECAwEAAaNTMFEwHQYD
+    \\VR0OBBYEFOB03guA9B6hV/yKORkgbU5aZOB/MB8GA1UdIwQYMBaAFOB03guA9B6h
+    \\V/yKORkgbU5aZOB/MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB
+    \\ABYx2oG5ES4b5i+ebNzRjp4X4xjTDo9HN3yTYyYfrTfgJ/VP7yLEB+Pc6kJua4bO
+    \\nQrTOJ06zfO5te81FeW+LDr2G8uXxRnWogLhQOOaTCQTlSnztJvhsWB/6cQ6V7G+
+    \\0JMi6LKVlxJhwOJvcT9kf2cdEDei8XnjN6VOF9a7Rn0+piL8TZPRhGIL8SByXs4d
+    \\YHvHPaHVM6wRck/jJpDKlvUPkgLtm6FiUnVrPzY1pd1BLOc5WMhushSQbszh0ugC
+    \\zWI1mb/4cPiqBmTqfosJpdqall0DvEKJhTFXXF13fF9UYL3i2ahK7kEuAYRmpvRV
+    \\CYk12lwrB49yf82IqcaWrdY=
     \\-----END CERTIFICATE-----
 ;
 
@@ -188,7 +188,7 @@ const ClientTap = struct {
     fn init(ctx: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
         const tap: *ClientTap = @ptrCast(@alignCast(ctx.?));
         var http = try app_tls.initRuntimeClient(alloc);
-        tap.ca_len = http.ca_bundle.bytes.items.len;
+        tap.ca_len = http.ca_bundle.map.size;
         tap.rescan_disabled = !@atomicLoad(bool, &http.next_https_rescan_certs, .acquire);
         return http;
     }
