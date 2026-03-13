@@ -46,6 +46,14 @@ fn writePolicy(dir: std.fs.Dir, doc: core.policy.Doc) !void {
 fn baseEnv(alloc: std.mem.Allocator, home_abs: []const u8) !std.process.EnvMap {
     var env = try std.process.getEnvMap(alloc);
     errdefer env.deinit();
+    _ = env.remove("HTTP_PROXY");
+    _ = env.remove("http_proxy");
+    _ = env.remove("HTTPS_PROXY");
+    _ = env.remove("https_proxy");
+    _ = env.remove("ALL_PROXY");
+    _ = env.remove("all_proxy");
+    _ = env.remove("NO_PROXY");
+    _ = env.remove("no_proxy");
     try env.put("HOME", home_abs);
     try env.put("TERM", "xterm-256color");
     try env.put("COLUMNS", "100");
@@ -404,15 +412,16 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
 test "real pz PTY startup survives live version check" {
     const SignalAfterRequest = struct {
         server: *const http_mock.Server,
-        stdin: std.fs.File,
+        path: []const u8,
 
         fn run(self: *@This()) void {
             var waited_ms: u32 = 0;
             while (self.server.requestCount() == 0 and waited_ms < 30000) : (waited_ms += 50) {
                 std.Thread.sleep(50 * std.time.ns_per_ms);
             }
-            self.stdin.writeAll("\x03\x03") catch {};
-            self.stdin.close();
+            var f = std.fs.createFileAbsolute(self.path, .{ .truncate = true }) catch return;
+            defer f.close();
+            f.writeAll("\x03\x03") catch {};
         }
     };
 
@@ -441,54 +450,50 @@ test "real pz PTY startup survives live version check" {
     defer std.testing.allocator.free(version_url);
     try env.put("PZ_VERSION_URL", version_url);
 
+    const sig_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-version-quit" });
+    defer std.testing.allocator.free(sig_path);
+    defer std.fs.deleteFileAbsolute(sig_path) catch {};
+    std.fs.deleteFileAbsolute(sig_path) catch {};
+
     const pz_bin = try pzBinAlloc(std.testing.allocator);
     defer std.testing.allocator.free(pz_bin);
-    var child = std.process.Child.init(&.{
-        "/usr/bin/script",
-        "-q",
-        "/dev/null",
-        pz_bin,
-        "--no-config",
-        "--no-session",
-    }, std.testing.allocator);
-    child.cwd = cwd_abs;
-    child.env_map = &env;
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    try child.spawn();
-
-    const stdin_file = child.stdin orelse return error.TestUnexpectedResult;
-    child.stdin = null;
     var signal = SignalAfterRequest{
         .server = &server,
-        .stdin = stdin_file,
+        .path = sig_path,
     };
     const signal_thr = try std.Thread.spawn(.{}, SignalAfterRequest.run, .{&signal});
     defer signal_thr.join();
 
-    const stdout = try (child.stdout orelse return error.TestUnexpectedResult).readToEndAlloc(std.testing.allocator, 1024 * 1024);
-    defer std.testing.allocator.free(stdout);
-    const stderr = try (child.stderr orelse return error.TestUnexpectedResult).readToEndAlloc(std.testing.allocator, 256 * 1024);
-    defer std.testing.allocator.free(stderr);
-    const term = try child.wait();
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "/bin/sh",
+            "-c",
+            "{ while [ ! -s \"$1\" ]; do sleep 0.05; done; cat \"$1\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$2\" \"$3\" \"$4\"",
+            "sh",
+            sig_path,
+            pz_bin,
+            "--no-config",
+            "--no-session",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
 
-    switch (term) {
+    switch (out.term) {
         .Exited => |code| try std.testing.expect(code == 0 or code == 1 or code == 130),
         .Signal => |sig| try std.testing.expect(sig == std.posix.SIG.INT),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(std.mem.indexOf(u8, stdout, "Segmentation fault") == null);
-    try std.testing.expect(std.mem.indexOf(u8, stderr, "Segmentation fault") == null);
-    var waited_ms: u32 = 0;
-    while (server.requestCount() == 0 and waited_ms < 2000) : (waited_ms += 50) {
-        std.Thread.sleep(50 * std.time.ns_per_ms);
-    }
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Segmentation fault") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stderr, "Segmentation fault") == null);
     try std.testing.expectEqual(@as(usize, 1), server.requestCount());
 
     var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
     defer vs.deinit();
-    vs.feed(stdout);
+    vs.feed(out.stdout);
 
     try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "drop files"));
 }
