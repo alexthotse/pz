@@ -22,7 +22,7 @@ pub fn run() !void {
         const msg = try report.cli(alloc, "parse arguments", err);
         defer alloc.free(msg);
         try out.writeAll(msg);
-        return;
+        std.process.exit(1);
     };
     defer cmd.deinit(alloc);
 
@@ -41,7 +41,7 @@ pub fn run() !void {
                 const msg = try report.cli(alloc, "run command", err);
                 defer alloc.free(msg);
                 try out.writeAll(msg);
-                return;
+                std.process.exit(1);
             };
             alloc.free(sid);
         },

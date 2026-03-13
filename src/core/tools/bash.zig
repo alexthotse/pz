@@ -4,6 +4,7 @@ const policy = @import("../policy.zig");
 const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const tools = @import("mod.zig");
+const tool_snap = @import("../../test/tool_snap.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -1209,6 +1210,8 @@ test "bash handler allows workspace file actions inside sandbox" {
 }
 
 test "bash handler truncates oversized output and emits metadata" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -1232,25 +1235,19 @@ test "bash handler truncates oversized output and emits metadata" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    try std.testing.expectEqual(@as(usize, 2), res.out.len);
-
-    try std.testing.expectEqual(@as(u32, 0), res.out[0].seq);
-    try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expectEqualStrings("abc", res.out[0].chunk);
-    try std.testing.expect(res.out[0].truncated);
-
-    try std.testing.expectEqual(@as(u32, 1), res.out[1].seq);
-    try std.testing.expect(res.out[1].stream == .meta);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"trunc\",\"stream\":\"stdout\",\"limit_bytes\":3,\"full_bytes\":4,\"kept_bytes\":3,\"dropped_bytes\":1}",
-        res.out[1].chunk,
-    );
-
-    switch (res.final) {
-        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=b7
+        \\start=0
+        \\end=0
+        \\out=2
+        \\0=b7|0|stdout|true|abc
+        \\1=b7|0|meta|false|{\"type\":\"trunc\",\"stream\":\"stdout\",\"limit_bytes\":3,\"full_bytes\":4,\"kept_bytes\":3,\"dropped_bytes\":1}
+        \\final=ok|0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler returns kind mismatch for wrong call kind" {

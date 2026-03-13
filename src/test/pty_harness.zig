@@ -229,6 +229,92 @@ test "real pz binary print mode works without tui" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "pong") != null);
 }
 
+test "real pz binary json mode consumes stdin prompts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    const provider_cmd =
+        "req=$(cat); " ++
+        "model=$(printf '%s' \"$req\" | grep -o '\"model\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "prov=$(printf '%s' \"$req\" | grep -o '\"provider\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "printf 'text:model=%s provider=%s\\nstop:done\\n' \"$model\" \"$prov\"";
+    var out = try runPty(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-config",
+            "--no-session",
+            "--mode",
+            "json",
+            "--model",
+            "cfg-json-model",
+            "--provider",
+            "cfg-json-provider",
+            "--provider-cmd",
+            provider_cmd,
+        },
+        "from-stdin\n",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\"type\":\"provider\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "model=cfg-json-model provider=cfg-json-provider") != null);
+}
+
+test "real pz binary json mode rejects empty stdin without prompt" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    var out = try runPty(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-config",
+            "--no-session",
+            "--mode",
+            "json",
+            "--provider-cmd",
+            "cat >/dev/null; printf 'text:noop\\nstop:done\\n'",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "reason: EmptyPrompt") != null);
+}
+
 test "real pz PTY renders slash help over the live terminal path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

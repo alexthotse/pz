@@ -1,6 +1,7 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
+const tool_snap = @import("../../test/tool_snap.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -222,6 +223,8 @@ fn mapFsErr(err: anyerror) Err {
 }
 
 test "find handler lists matching paths in sorted order" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -259,9 +262,20 @@ test "find handler lists matching paths in sorted order" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqualStrings("a.zig\nlib/b.zig\n", res.out[0].chunk);
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=f1
+        \\start=7
+        \\end=7
+        \\out=1
+        \\0=f1|7|stdout|false|a.zig
+        \\lib/b.zig
+        \\
+        \\final=ok|0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "find handler validates args and handles missing roots" {

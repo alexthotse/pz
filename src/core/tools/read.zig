@@ -1,6 +1,7 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
+const tool_snap = @import("../../test/tool_snap.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -204,6 +205,8 @@ fn satAddU32(a: u32, b: u32) u32 {
 }
 
 test "read handler returns selected lines with deterministic timestamps" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -240,18 +243,20 @@ test "read handler returns selected lines with deterministic timestamps" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    try std.testing.expectEqual(@as(i64, 55), res.started_at_ms);
-    try std.testing.expectEqual(@as(i64, 55), res.ended_at_ms);
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqual(@as(i64, 55), res.out[0].at_ms);
-    try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expectEqualStrings("b\nc\n", res.out[0].chunk);
-
-    switch (res.final) {
-        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=c1
+        \\start=55
+        \\end=55
+        \\out=1
+        \\0=c1|55|stdout|false|b
+        \\c
+        \\
+        \\final=ok|0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "read handler returns invalid args on reversed line range" {

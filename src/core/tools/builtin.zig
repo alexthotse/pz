@@ -10,6 +10,7 @@ const ls = @import("ls.zig");
 const agent_tool = @import("agent.zig");
 const path_guard = @import("path_guard.zig");
 const skill = @import("skill.zig");
+const tool_snap = @import("../../test/tool_snap.zig");
 
 const default_max_bytes: usize = 64 * 1024;
 pub const mask_read: u16 = 1 << 0;
@@ -681,6 +682,8 @@ test "builtin runtime registry exposes all core tools" {
 }
 
 test "builtin runtime uses call timestamp in result envelope" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -716,11 +719,19 @@ test "builtin runtime uses call timestamp in result envelope" {
 
     const res = try reg.run("read", call, sink);
     defer rt.deinitResult(res);
-
-    try std.testing.expectEqual(@as(i64, 12345), res.started_at_ms);
-    try std.testing.expectEqual(@as(i64, 12345), res.ended_at_ms);
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expectEqual(@as(i64, 12345), res.out[0].at_ms);
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=t1
+        \\start=12345
+        \\end=12345
+        \\out=1
+        \\0=t1|12345|stdout|false|abc
+        \\
+        \\final=ok|0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "builtin runtime supports deterministic tool mask filtering" {

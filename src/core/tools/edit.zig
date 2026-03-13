@@ -1,6 +1,7 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("mod.zig");
+const tool_snap = @import("../../test/tool_snap.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -137,6 +138,8 @@ fn mapWriteErr(err: anyerror) Err {
 }
 
 test "edit handler replaces first match with deterministic timestamps" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
@@ -172,14 +175,17 @@ test "edit handler replaces first match with deterministic timestamps" {
     };
 
     const res = try handler.run(call, sink);
-
-    try std.testing.expectEqual(@as(i64, 123), res.started_at_ms);
-    try std.testing.expectEqual(@as(i64, 123), res.ended_at_ms);
-    try std.testing.expectEqual(@as(usize, 0), res.out.len);
-    switch (res.final) {
-        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=e1
+        \\start=123
+        \\end=123
+        \\out=0
+        \\final=ok|0
+        \\"
+    ).expectEqual(snap);
 
     const got = try tmp.dir.readFileAlloc(std.testing.allocator, "in.txt", 64);
     defer std.testing.allocator.free(got);
