@@ -1709,6 +1709,8 @@ test "syslog shipper drops oldest on ring overflow" {
 }
 
 test "syslog shipper bounds reconnect backoff and resets after connect" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var net = MockNet{
         .alloc = testing.allocator,
         .conn_steps = &.{ .fail, .fail, .fail, .ok },
@@ -1729,24 +1731,59 @@ test "syslog shipper bounds reconnect backoff and resets after connect" {
     defer ship.deinit();
 
     _ = try ship.send(testEntry(1), 0);
-    var st = ship.stats();
-    try testing.expectEqual(@as(?i64, 5), st.next_retry_ms);
-    try testing.expectEqual(@as(u32, 10), st.backoff_ms);
+    const s0 = ship.stats();
 
     _ = try ship.flush(5);
-    st = ship.stats();
-    try testing.expectEqual(@as(?i64, 15), st.next_retry_ms);
-    try testing.expectEqual(@as(u32, 12), st.backoff_ms);
+    const s1 = ship.stats();
 
     _ = try ship.flush(15);
-    st = ship.stats();
-    try testing.expectEqual(@as(?i64, 27), st.next_retry_ms);
-    try testing.expectEqual(@as(u32, 12), st.backoff_ms);
+    const s2 = ship.stats();
 
     const fl = try ship.flush(27);
-    st = ship.stats();
+    const s3 = ship.stats();
     try testing.expectEqual(@as(usize, 1), fl.sent);
-    try testing.expectEqual(@as(?i64, null), st.next_retry_ms);
-    try testing.expectEqual(@as(u32, 5), st.backoff_ms);
     try testing.expectEqual(@as(usize, 1), net.sent.items.len);
+
+    const Snap = struct {
+        s0: Stats,
+        s1: Stats,
+        s2: Stats,
+        s3: Stats,
+    };
+    try oh.snap(@src(),
+        \\core.audit.test.syslog shipper bounds reconnect backoff and resets after connect.Snap
+        \\  .s0: core.audit.Stats
+        \\    .connected: bool = false
+        \\    .queued: usize = 1
+        \\    .dropped: u64 = 0
+        \\    .backoff_ms: u32 = 10
+        \\    .next_retry_ms: ?i64
+        \\      5
+        \\  .s1: core.audit.Stats
+        \\    .connected: bool = false
+        \\    .queued: usize = 1
+        \\    .dropped: u64 = 0
+        \\    .backoff_ms: u32 = 12
+        \\    .next_retry_ms: ?i64
+        \\      15
+        \\  .s2: core.audit.Stats
+        \\    .connected: bool = false
+        \\    .queued: usize = 1
+        \\    .dropped: u64 = 0
+        \\    .backoff_ms: u32 = 12
+        \\    .next_retry_ms: ?i64
+        \\      27
+        \\  .s3: core.audit.Stats
+        \\    .connected: bool = true
+        \\    .queued: usize = 0
+        \\    .dropped: u64 = 0
+        \\    .backoff_ms: u32 = 5
+        \\    .next_retry_ms: ?i64
+        \\      null
+    ).expectEqual(Snap{
+        .s0 = s0,
+        .s1 = s1,
+        .s2 = s2,
+        .s3 = s3,
+    });
 }
