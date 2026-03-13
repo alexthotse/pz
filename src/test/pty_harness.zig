@@ -428,6 +428,58 @@ test "real pz binary print mode works without tui" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "pong") != null);
 }
 
+test "real pz binary print mode uses config model and provider" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath(".pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    const provider_cmd =
+        "req=$(cat); " ++
+        "model=$(printf '%s' \"$req\" | grep -o '\"model\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "prov=$(printf '%s' \"$req\" | grep -o '\"provider\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "printf 'text:model=%s provider=%s\\nstop:done\\n' \"$model\" \"$prov\"";
+    const provider_cmd_json = try std.json.Stringify.valueAlloc(std.testing.allocator, provider_cmd, .{});
+    defer std.testing.allocator.free(provider_cmd_json);
+    const cfg = try std.fmt.allocPrint(std.testing.allocator,
+        "{{\"mode\":\"print\",\"model\":\"cfg-print-model\",\"provider\":\"cfg-print-provider\",\"provider_cmd\":{s}}}",
+        .{provider_cmd_json},
+    );
+    defer std.testing.allocator.free(cfg);
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/settings.json", .data = cfg });
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-session",
+            "--mode",
+            "print",
+            "--prompt",
+            "ping",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "model=cfg-print-model provider=cfg-print-provider") != null);
+}
+
 test "real pz binary json mode consumes stdin prompts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
