@@ -8953,6 +8953,121 @@ test "runtime json mode emits JSON lines for loop events" {
     try std.testing.expect(std.mem.indexOf(u8, written, "pong") != null);
 }
 
+test "runtime print mode uses configured model and provider" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    const provider_cmd =
+        "req=$(cat); " ++
+        "model=$(printf '%s' \"$req\" | grep -o '\"model\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "prov=$(printf '%s' \"$req\" | grep -o '\"provider\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "printf 'text:model=%s provider=%s\\nstop:done\\n' \"$model\" \"$prov\"";
+
+    var cfg = cli.Run{
+        .mode = .print,
+        .prompt = "ping",
+        .cfg = .{
+            .mode = .print,
+            .model = try std.testing.allocator.dupe(u8, "cfg-model"),
+            .provider = try std.testing.allocator.dupe(u8, "cfg-provider"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, provider_cmd),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var out_buf: [2048]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const sid = try execWithIo(std.testing.allocator, cfg, eofReader(), out_fbs.writer().any());
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "model=cfg-model provider=cfg-provider") != null);
+}
+
+test "runtime json mode uses configured model and stdin prompts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    const provider_cmd =
+        "req=$(cat); " ++
+        "model=$(printf '%s' \"$req\" | grep -o '\"model\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "prov=$(printf '%s' \"$req\" | grep -o '\"provider\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "printf 'text:model=%s provider=%s\\nstop:done\\n' \"$model\" \"$prov\"";
+
+    var cfg = cli.Run{
+        .mode = .json,
+        .prompt = null,
+        .cfg = .{
+            .mode = .json,
+            .model = try std.testing.allocator.dupe(u8, "cfg-json-model"),
+            .provider = try std.testing.allocator.dupe(u8, "cfg-json-provider"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, provider_cmd),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var in_fbs = std.io.fixedBufferStream("from-stdin\n");
+    var out_buf: [4096]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const sid = try execWithIo(
+        std.testing.allocator,
+        cfg,
+        in_fbs.reader().any(),
+        out_fbs.writer().any(),
+    );
+    defer std.testing.allocator.free(sid);
+
+    const written = out_fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "model=cfg-json-model provider=cfg-json-provider") != null);
+}
+
+test "runtime json mode errors on empty stdin when no prompt is supplied" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var cfg = cli.Run{
+        .mode = .json,
+        .prompt = null,
+        .cfg = .{
+            .mode = .json,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:noop\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var out_buf: [1024]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    try std.testing.expectError(
+        error.EmptyPrompt,
+        execWithIo(
+            std.testing.allocator,
+            cfg,
+            eofReader(),
+            out_fbs.writer().any(),
+        ),
+    );
+}
+
 test "PrintSink surfaces session write errors non-fatally" {
     var out_buf: [512]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);

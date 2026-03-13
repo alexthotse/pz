@@ -550,6 +550,12 @@ test "errors when print mode has no prompt" {
     try std.testing.expectError(error.MissingPrintPrompt, parse(&.{"--print"}));
 }
 
+test "json mode accepts missing prompt for stdin-driven headless use" {
+    const out = try parse(&.{ "json" });
+    try std.testing.expect(out.mode == .json);
+    try std.testing.expect(out.prompt == null);
+}
+
 test "help bypasses prompt requirement checks" {
     const out = try parse(&.{ "--print", "--help" });
     try std.testing.expect(out.show_help);

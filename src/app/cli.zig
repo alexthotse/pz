@@ -86,13 +86,13 @@ pub const help_text =
     \\  tui                         Interactive terminal mode (default)
     \\  interactive                 Alias for tui
     \\  print <PROMPT>              Headless print mode
-    \\  json <PROMPT>               Headless JSONL events mode
+    \\  json [PROMPT]               Headless JSONL events mode; reads stdin lines when PROMPT is omitted
     \\  rpc                         JSON-RPC over stdin/stdout
     \\
     \\Options:
     \\  -m, --mode <tui|interactive|print|json|rpc>
     \\                             Select mode
-    \\  -p, --prompt <TEXT>         Prompt text (print/json modes)
+    \\  -p, --prompt <TEXT>         Prompt text (required for print; optional seed for json)
     \\  -C, --config <PATH>         Config file path
     \\      --no-config             Disable config file loading
     \\  -c, --continue              Continue most recent session
@@ -166,6 +166,30 @@ test "cli mode dispatch uses config mode when mode flag absent" {
             try std.testing.expect(run.mode == .print);
             try std.testing.expect(run.prompt != null);
             try std.testing.expectEqualStrings("ship", run.prompt.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "cli config-driven json mode does not require prompt" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{
+        .sub_path = config.auto_cfg_path,
+        .data = "{\"mode\":\"json\",\"model\":\"cfg-model\",\"provider\":\"cfg-provider\"}",
+    });
+
+    var cmd = try parse(std.testing.allocator, tmp.dir, &.{}, .{});
+    defer cmd.deinit(std.testing.allocator);
+
+    switch (cmd) {
+        .run => |run| {
+            try std.testing.expect(run.mode == .json);
+            try std.testing.expect(run.prompt == null);
+            try std.testing.expectEqualStrings("cfg-model", run.cfg.model);
+            try std.testing.expectEqualStrings("cfg-provider", run.cfg.provider);
         },
         else => return error.TestUnexpectedResult,
     }
