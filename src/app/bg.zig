@@ -784,6 +784,20 @@ fn toJobSnap(v: View) JobSnap {
     };
 }
 
+const ChainSnap = struct {
+    lines: u64,
+    last_key_id: ?u32,
+    has_last_mac: bool,
+};
+
+fn toChainSnap(ok: anytype) ChainSnap {
+    return .{
+        .lines = ok.lines,
+        .last_key_id = ok.last_key_id,
+        .has_last_mac = ok.last_mac != null,
+    };
+}
+
 const AuditCap = struct {
     rows: std.ArrayListUnmanaged([]u8) = .empty,
 
@@ -1080,6 +1094,9 @@ test "bg manager records non-zero exit code" {
 }
 
 test "bg manager view handles missing ids" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var mgr = try Mgr.init(std.testing.allocator);
     defer mgr.deinit();
 
@@ -1088,7 +1105,17 @@ test "bg manager view handles missing ids" {
     const id = try mgr.start("sleep 1", null);
     const view = (try mgr.view(std.testing.allocator, id)) orelse return error.TestUnexpectedResult;
     defer deinitView(std.testing.allocator, view);
-    try std.testing.expectEqual(id, view.id);
+    try oh.snap(@src(),
+        \\app.bg.JobSnap
+        \\  .id: u64 = 1
+        \\  .state: []const u8
+        \\    "running"
+        \\  .code: ?i32
+        \\    null
+        \\  .cmd: []const u8
+        \\    "sleep 1"
+        \\  .has_log: bool = true
+    ).expectEqual(toJobSnap(view));
 
     try std.testing.expect((try mgr.view(std.testing.allocator, id + 9999)) == null);
 }
@@ -1111,6 +1138,9 @@ test "bg manager drainDone is empty after first drain" {
 }
 
 test "bg manager stop reports already_done after completion" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var mgr = try Mgr.init(std.testing.allocator);
     defer mgr.deinit();
 
@@ -1121,7 +1151,17 @@ test "bg manager stop reports already_done after completion" {
     const done = try mgr.drainDone(std.testing.allocator);
     defer deinitViews(std.testing.allocator, done);
     try std.testing.expectEqual(@as(usize, 1), done.len);
-    try std.testing.expectEqual(id, done[0].id);
+    try oh.snap(@src(),
+        \\app.bg.JobSnap
+        \\  .id: u64 = 1
+        \\  .state: []const u8
+        \\    "exited"
+        \\  .code: ?i32
+        \\    0
+        \\  .cmd: []const u8
+        \\    "printf done"
+        \\  .has_log: bool = true
+    ).expectEqual(toJobSnap(done[0]));
 
     const stop = try mgr.stop(id);
     try std.testing.expect(stop == .already_done);
@@ -1247,6 +1287,9 @@ test "bg manager audit emits failure entries for invalid start and missing stop"
 }
 
 test "bg manager syslog e2e ships redacted chained success audit over udp" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var cap = AuditCap{};
     defer cap.deinit(std.testing.allocator);
 
@@ -1296,11 +1339,13 @@ test "bg manager syslog e2e ships redacted chained success audit over udp" {
     defer std.testing.allocator.free(shipped_lines);
     const got_chain = try core.audit_integrity.verifyLogAlloc(std.testing.allocator, shipped_lines, &.{e2eAuditKey()});
     switch (got_chain) {
-        .ok => |ok| {
-            try std.testing.expectEqual(@as(u64, @intCast(cap.rows.items.len)), ok.lines);
-            try std.testing.expectEqual(@as(?u32, e2eAuditKey().id), ok.last_key_id);
-            try std.testing.expect(ok.last_mac != null);
-        },
+        .ok => |ok| try oh.snap(@src(),
+            \\app.bg.ChainSnap
+            \\  .lines: u64 = 8
+            \\  .last_key_id: ?u32
+            \\    7
+            \\  .has_last_mac: bool = true
+        ).expectEqual(toChainSnap(ok)),
         .fail => return error.InvalidAuditChain,
     }
 
@@ -1325,6 +1370,9 @@ test "bg manager syslog e2e ships redacted chained success audit over udp" {
 }
 
 test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
     var cap = AuditCap{};
     defer cap.deinit(std.testing.allocator);
 
@@ -1362,11 +1410,13 @@ test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
     defer std.testing.allocator.free(shipped_lines);
     const got_chain = try core.audit_integrity.verifyLogAlloc(std.testing.allocator, shipped_lines, &.{e2eAuditKey()});
     switch (got_chain) {
-        .ok => |ok| {
-            try std.testing.expectEqual(@as(u64, @intCast(cap.rows.items.len)), ok.lines);
-            try std.testing.expectEqual(@as(?u32, e2eAuditKey().id), ok.last_key_id);
-            try std.testing.expect(ok.last_mac != null);
-        },
+        .ok => |ok| try oh.snap(@src(),
+            \\app.bg.ChainSnap
+            \\  .lines: u64 = 4
+            \\  .last_key_id: ?u32
+            \\    7
+            \\  .has_last_mac: bool = true
+        ).expectEqual(toChainSnap(ok)),
         .fail => return error.InvalidAuditChain,
     }
 
