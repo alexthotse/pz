@@ -115,3 +115,48 @@ fn flattenAlloc(a: std.mem.Allocator, raw: []const u8) ![]u8 {
 fn isSpace(c: u8) bool {
     return c == ' ' or c == '\n' or c == '\r' or c == '\t';
 }
+
+const testing = std.testing;
+
+test "property: flattenAlloc strips line-breaking control whitespace" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: zc.String, b: zc.String, c: zc.String }) bool {
+            const alloc = testing.allocator;
+            const raw = std.fmt.allocPrint(alloc, "{s}\n{s}\r\t{s}", .{
+                args.a.slice(),
+                args.b.slice(),
+                args.c.slice(),
+            }) catch return false;
+            defer alloc.free(raw);
+            const flat = flattenAlloc(alloc, raw) catch return false;
+            defer alloc.free(flat);
+            for (flat) |ch| {
+                if (ch == '\n' or ch == '\r' or ch == '\t') return false;
+            }
+            return true;
+        }
+    }.prop, .{ .iterations = 300 });
+}
+
+test "property: makeAlloc renders bounded single-line bash previews" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: zc.Id, b: zc.Id, c: zc.Id }) bool {
+            const alloc = testing.allocator;
+            const json = std.fmt.allocPrint(alloc, "{{\"cmd\":\"{s}\\n{s}\\t{s}\"}}", .{
+                args.a.slice(),
+                args.b.slice(),
+                args.c.slice(),
+            }) catch return false;
+            defer alloc.free(json);
+            const out = makeAlloc(alloc, "bash", json, 48) catch return false;
+            defer alloc.free(out);
+            if (out.len > 48) return false;
+            for (out) |ch| {
+                if (ch == '\n' or ch == '\r' or ch == '\t') return false;
+            }
+            return std.unicode.utf8ValidateSlice(out);
+        }
+    }.prop, .{ .iterations = 300 });
+}
