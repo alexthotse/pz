@@ -46,6 +46,12 @@ Use `jj`, not `git`.
 
 For multi-agent work, use separate `jj` workspaces.
 
+Default shape:
+
+1. Keep `1` local lane for integration, rebases, merges, flakes, and shared-surface debugging.
+2. Launch only `2-3` worker lanes by default.
+3. Expand past `3` workers only if the next dots are truly disjoint in files and dependencies.
+
 1. Create workspace per agent:
    - `jj workspace add ../pz-<agent>`
 2. Assign file ownership per workspace.
@@ -58,6 +64,8 @@ For multi-agent work, use separate `jj` workspaces.
 ## File Ownership Rule
 
 If a file is touched by another active agent, stop and reassign before editing.
+Do not launch overlapping dots in parallel just because they look “small”.
+If dots overlap in runtime/provider/session/core surfaces, serialize them unless a prior dot closes the dependency.
 
 ## Commit Rule
 

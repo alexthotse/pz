@@ -7,6 +7,9 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-03-13)
 
 ### Worked Well
+- Keep one local integration/debug lane and only 2-3 worker lanes; beyond that, overlap and flaky shared-surface debugging erase the parallelism win.
+- Parallelize only disjoint dots, not “similar” dots; runtime/provider/session/core work tends to couple even when file lists look different.
+- When a worker stalls or the wrapper goes silent, inspect the workspace state directly and reclaim the slot fast instead of waiting on agent status alone.
 - For invalid UTF-8 at provider/session boundaries, use one shared lossy helper plus short-lived arena-backed `sanitizeMaybeAlloc` during JSON serialization; it preserves the existing JSON shape for valid text and only allocates on the bad-byte path.
 
 ## Session Notes (2026-03-11)
