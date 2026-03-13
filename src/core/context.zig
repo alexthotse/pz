@@ -1,6 +1,7 @@
 const std = @import("std");
 const policy = @import("policy.zig");
 const prov_contract = @import("providers/contract.zig");
+const path_guard = @import("tools/path_guard.zig");
 
 /// Discover and load AGENTS.md context files.
 /// Searches global dir, then walks cwd upward to root.
@@ -23,8 +24,8 @@ pub fn load(alloc: std.mem.Allocator) !?[]u8 {
     }
 
     // Walk cwd upward
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch return assembleParts(alloc, parts.items);
+    const cwd = realCwdAlloc(alloc) orelse return assembleParts(alloc, parts.items);
+    defer alloc.free(cwd);
 
     var dir: []const u8 = cwd;
     while (true) {
@@ -75,8 +76,8 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
         if (findFile(alloc, gdir)) |p| try paths.append(alloc, p);
     }
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch return try paths.toOwnedSlice(alloc);
+    const cwd = realCwdAlloc(alloc) orelse return try paths.toOwnedSlice(alloc);
+    defer alloc.free(cwd);
 
     var dir: []const u8 = cwd;
     while (true) {
@@ -90,12 +91,8 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
 }
 
 fn findFile(alloc: std.mem.Allocator, dir: []const u8) ?[]u8 {
-    const path = std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{dir}) catch return null;
-    std.fs.accessAbsolute(path, .{}) catch {
-        alloc.free(path);
-        return null;
-    };
-    return path;
+    if (!hasSecureFile(dir, "AGENTS.md")) return null;
+    return std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{dir}) catch return null;
 }
 
 fn globalDir(alloc: std.mem.Allocator) ?[]u8 {
@@ -109,8 +106,8 @@ fn readContext(alloc: std.mem.Allocator, dir: []const u8) ?[]u8 {
 }
 
 fn loadPolicyLock(alloc: std.mem.Allocator) !policy.Lock {
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch return .{};
+    const cwd = realCwdAlloc(alloc) orelse return .{};
+    defer alloc.free(cwd);
     const home = std.process.getEnvVarOwned(alloc, "HOME") catch null;
     defer if (home) |v| alloc.free(v);
     return policy.loadLock(alloc, cwd, home);
@@ -120,7 +117,10 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]u8 {
     const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch return null;
     defer alloc.free(path);
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    var abs_dir = std.fs.openDirAbsolute(dir, .{ .no_follow = true }) catch return null;
+    defer abs_dir.close();
+
+    const file = path_guard.openFileInDir(abs_dir, name, .{ .mode = .read_only }) catch return null;
     defer file.close();
 
     const content = file.readToEndAlloc(alloc, 1024 * 1024) catch return null;
@@ -146,6 +146,18 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]u8 {
     };
     alloc.free(content);
     return result;
+}
+
+fn realCwdAlloc(alloc: std.mem.Allocator) ?[]u8 {
+    return std.fs.cwd().realpathAlloc(alloc, ".") catch null;
+}
+
+fn hasSecureFile(dir: []const u8, name: []const u8) bool {
+    var abs_dir = std.fs.openDirAbsolute(dir, .{ .no_follow = true }) catch return false;
+    defer abs_dir.close();
+    const file = path_guard.openFileInDir(abs_dir, name, .{ .mode = .read_only }) catch return false;
+    file.close();
+    return true;
 }
 
 fn parent(path: []const u8) ?[]const u8 {
@@ -199,6 +211,64 @@ test "readFile wraps context content as untrusted input" {
     );
     defer std.testing.allocator.free(want);
     try std.testing.expectEqualStrings(want, got);
+}
+
+test "readFile rejects symlinked AGENTS leaf" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var outer = std.testing.tmpDir(.{});
+    defer outer.cleanup();
+
+    try outer.dir.writeFile(.{ .sub_path = "secret.md", .data = "nope" });
+    const outer_path = try outer.dir.realpathAlloc(std.testing.allocator, "secret.md");
+    defer std.testing.allocator.free(outer_path);
+
+    try tmp.dir.symLink(outer_path, "AGENTS.md", .{});
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    try std.testing.expect(readFile(std.testing.allocator, dir_path, "AGENTS.md") == null);
+}
+
+test "discoverPaths walks real cwd ancestry, not symlink aliases" {
+    if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("real/sub");
+    try tmp.dir.writeFile(.{ .sub_path = "real/AGENTS.md", .data = "ctx" });
+    try tmp.dir.symLink("real", "alias", .{ .is_directory = true });
+
+    const old = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(old);
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const alias_sub = try std.fs.path.join(std.testing.allocator, &.{ root, "alias/sub" });
+    defer std.testing.allocator.free(alias_sub);
+    try std.posix.chdir(alias_sub);
+    defer std.posix.chdir(old) catch {};
+
+    const paths = try discoverPaths(std.testing.allocator);
+    defer {
+        for (paths) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(paths);
+    }
+
+    const want = try tmp.dir.realpathAlloc(std.testing.allocator, "real/AGENTS.md");
+    defer std.testing.allocator.free(want);
+    const alias = try std.fs.path.join(std.testing.allocator, &.{ root, "alias/AGENTS.md" });
+    defer std.testing.allocator.free(alias);
+
+    var saw_real = false;
+    for (paths) |p| {
+        if (std.mem.eql(u8, p, want)) saw_real = true;
+        try std.testing.expect(!std.mem.eql(u8, p, alias));
+    }
+    try std.testing.expect(saw_real);
 }
 
 test "load returns null when policy locks context" {
