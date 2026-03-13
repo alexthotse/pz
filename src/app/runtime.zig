@@ -7801,6 +7801,13 @@ test "sanitizeUtf8LossyAlloc replaces invalid bytes" {
     try std.testing.expectEqualStrings("o?k?", out);
 }
 
+test "sanitizeUtf8LossyAlloc truncates incomplete multibyte suffix lossy" {
+    const bad = [_]u8{ 'a', 0xe2, 0x82 };
+    const out = try sanitizeUtf8LossyAlloc(std.testing.allocator, bad[0..]);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("a?", out);
+}
+
 test "sanitizeUtf8LossyAlloc property: output is valid utf8" {
     const zc = @import("zcheck");
     const pbt = @import("../core/pbt.zig");
