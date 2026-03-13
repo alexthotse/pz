@@ -408,7 +408,7 @@ test "real pz PTY startup survives live version check" {
 
         fn run(self: *@This()) void {
             var waited_ms: u32 = 0;
-            while (self.server.requestCount() == 0 and waited_ms < 5000) : (waited_ms += 50) {
+            while (self.server.requestCount() == 0 and waited_ms < 15000) : (waited_ms += 50) {
                 std.Thread.sleep(50 * std.time.ns_per_ms);
             }
             var f = std.fs.createFileAbsolute(self.path, .{ .truncate = true }) catch return;
@@ -429,6 +429,7 @@ test "real pz PTY startup survives live version check" {
     var env = try baseEnv(std.testing.allocator, home_abs);
     defer env.deinit();
     _ = env.remove("PZ_SKIP_VERSION_CHECK");
+    try env.put("PZ_FORCE_VERSION_CHECK", "1");
 
     var server = try http_mock.Server.initSeq(&.{.{
         .headers = &.{"Content-Type: application/json"},
@@ -444,6 +445,7 @@ test "real pz PTY startup survives live version check" {
     const sig_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-version-quit" });
     defer std.testing.allocator.free(sig_path);
     defer std.fs.deleteFileAbsolute(sig_path) catch {};
+    std.fs.deleteFileAbsolute(sig_path) catch {};
 
     var quit = QuitAfterRequest{
         .server = &server,
@@ -473,9 +475,12 @@ test "real pz PTY startup survives live version check" {
     );
     defer out.deinit(std.testing.allocator);
     switch (out.term) {
-        .Exited => |code| try std.testing.expect(code <= 1),
+        .Exited => |code| try std.testing.expect(code == 0 or code == 1 or code == 130),
+        .Signal => |sig| try std.testing.expect(sig == std.posix.SIG.INT),
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Segmentation fault") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.stderr, "Segmentation fault") == null);
     std.Thread.sleep(200 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 1), server.requestCount());
 

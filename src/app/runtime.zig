@@ -2428,7 +2428,8 @@ fn runTui(
     ui.border_fg = thinkingBorderFg(thinking);
 
     // Background version check (TUI only, skip for dev builds)
-    const skip_ver = builtin.is_test or
+    const force_ver_in_test = builtin.is_test and std.posix.getenv("PZ_FORCE_VERSION_CHECK") != null;
+    const skip_ver = (!force_ver_in_test and builtin.is_test) or
         std.posix.getenv("PZ_SKIP_VERSION_CHECK") != null or
         std.mem.indexOf(u8, cli.version, "-dev") != null;
     var ver_check = version_check.Check.init(alloc);
