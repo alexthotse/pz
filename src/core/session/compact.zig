@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const schema = @import("schema.zig");
 const reader = @import("reader.zig");
 const sid_path = @import("path.zig");
+const session_file = @import("session_file.zig");
 const providers = @import("../providers/mod.zig");
 const prov_contract = @import("../providers/contract.zig");
 const fs_secure = @import("../fs_secure.zig");
@@ -27,12 +28,6 @@ pub fn run(
     const src_path = try sid_path.sidJsonlAlloc(alloc, sid);
     defer alloc.free(src_path);
 
-    const tmp_path = try sid_path.sidExtAlloc(alloc, sid, ".jsonl.compact.tmp");
-    defer alloc.free(tmp_path);
-    errdefer dir.deleteFile(tmp_path) catch |err| {
-        std.debug.print("warning: temp file cleanup failed: {s}\n", .{@errorName(err)});
-    };
-
     const in_file = try dir.openFile(src_path, .{ .mode = .read_only });
     const in_bytes = try in_file.getEndPos();
     in_file.close();
@@ -40,7 +35,10 @@ pub fn run(
     var rdr = try reader.ReplayReader.init(alloc, dir, sid, .{});
     defer rdr.deinit();
 
-    var out_file = try fs_secure.createFileAt(dir, tmp_path, .{
+    var tmp = try session_file.createSessionFile(alloc, dir, sid, ".jsonl.compact.tmp");
+    defer tmp.deinit();
+
+    var out_file = try fs_secure.createFileAt(dir, tmp.path, .{
         .truncate = true,
     });
     defer out_file.close();
@@ -62,7 +60,8 @@ pub fn run(
     }
     try out_file.sync();
 
-    try dir.rename(tmp_path, src_path);
+    try dir.rename(tmp.path, src_path);
+    tmp.close();
 
     const ck = Checkpoint{
         .in_lines = in_lines,

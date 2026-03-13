@@ -1966,6 +1966,7 @@ fn execWithIoTuiHooks(
                 try core.fs_secure.ensureDirPath(plan.dir_path);
                 var session_dir = try std.fs.cwd().openDir(plan.dir_path, .{ .iterate = true });
                 errdefer session_dir.close();
+                core.session.cleanOrphanTmpFiles(session_dir);
                 fs_store_impl = try core.session.fs_store.Store.init(.{
                     .alloc = alloc,
                     .dir = session_dir,
@@ -9215,6 +9216,39 @@ test "runtime json mode errors on empty stdin when no prompt is supplied" {
             out_fbs.writer().any(),
         ),
     );
+}
+
+test "execWithIo cleans orphan compact temp files on startup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    {
+        var f = try tmp.dir.createFile("sess/orphan.jsonl.compact.tmp", .{});
+        f.close();
+    }
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var cfg = cli.Run{
+        .mode = .print,
+        .prompt = "ping",
+        .cfg = .{
+            .mode = .print,
+            .model = try std.testing.allocator.dupe(u8, "m"),
+            .provider = try std.testing.allocator.dupe(u8, "p"),
+            .session_dir = try std.testing.allocator.dupe(u8, sess_abs),
+            .provider_cmd = try std.testing.allocator.dupe(u8, "cat >/dev/null; printf 'text:pong\\nstop:done\\n'"),
+        },
+    };
+    defer cfg.cfg.deinit(std.testing.allocator);
+
+    var out_buf: [2048]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    const sid = try execWithIo(std.testing.allocator, cfg, eofReader(), out_fbs.writer().any());
+    defer std.testing.allocator.free(sid);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("sess/orphan.jsonl.compact.tmp"));
 }
 
 test "PrintSink surfaces session write errors non-fatally" {

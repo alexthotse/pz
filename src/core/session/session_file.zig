@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fs_secure = @import("../fs_secure.zig");
+const sid_path = @import("path.zig");
 
 /// Wraps a session file path with lifecycle tracking.
 /// If `close()` is never called, `deinit()` logs a warning and deletes the orphan.
@@ -45,6 +46,17 @@ pub const SessionFile = struct {
         self.* = undefined;
     }
 };
+
+pub fn createSessionFile(
+    alloc: std.mem.Allocator,
+    dir: std.fs.Dir,
+    sid: []const u8,
+    ext: []const u8,
+) !SessionFile {
+    const path = try sid_path.sidExtAlloc(alloc, sid, ext);
+    defer alloc.free(path);
+    return SessionFile.init(alloc, dir, path);
+}
 
 /// Delete any orphaned `.compact.tmp` files left by interrupted compactions.
 pub fn cleanOrphanTmpFiles(dir: std.fs.Dir) void {
@@ -127,4 +139,14 @@ test "cleanOrphanTmpFiles removes compact.tmp files" {
 
     // Normal file should survive.
     _ = try tmp.dir.statFile("s1.jsonl");
+}
+
+test "createSessionFile uses session id plus extension" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var sf = try createSessionFile(std.testing.allocator, tmp.dir, "s1", ".jsonl.compact.tmp");
+    defer sf.deinit();
+
+    try std.testing.expectEqualStrings("s1.jsonl.compact.tmp", sf.path);
 }
