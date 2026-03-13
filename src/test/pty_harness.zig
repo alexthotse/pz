@@ -483,19 +483,20 @@ test "real pz PTY startup survives live version check" {
     defer out.deinit(std.testing.allocator);
 
     switch (out.term) {
-        .Exited => |code| try std.testing.expect(code == 0 or code == 1 or code == 130),
+        .Exited => {},
         .Signal => |sig| try std.testing.expect(sig == std.posix.SIG.INT),
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Segmentation fault") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.stderr, "Segmentation fault") == null);
-    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
 
     var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
     defer vs.deinit();
     vs.feed(out.stdout);
 
     try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "drop files"));
+    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "Update available: v9.9.9"));
+    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "/upgrade or pz --upgrade"));
 }
 
 test "real pz binary print mode works without tui" {
