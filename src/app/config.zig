@@ -361,6 +361,7 @@ fn loadGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!?std.json
     const home_path = home orelse return null;
     const path = try std.fs.path.join(alloc, &.{ home_path, auto_cfg_path });
     defer alloc.free(path);
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidHomePath;
 
     var file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -382,6 +383,7 @@ fn hasGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!bool {
     const home_path = home orelse return false;
     const path = try std.fs.path.join(alloc, &.{ home_path, auto_cfg_path });
     defer alloc.free(path);
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidHomePath;
 
     std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,

@@ -577,6 +577,7 @@ pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) a
 }
 
 fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8) anyerror!?SignedDoc {
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidPolicy;
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return error.InvalidPolicy,
@@ -629,6 +630,7 @@ fn hashPolicyFile(
     tag: []const u8,
     path: []const u8,
 ) anyerror!bool {
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidPolicy;
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return error.InvalidPolicy,

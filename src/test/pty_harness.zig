@@ -440,7 +440,6 @@ test "real pz PTY startup survives live version check" {
     );
     defer out.deinit(std.testing.allocator);
     try server.join(thr);
-
     switch (out.term) {
         .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         else => return error.TestUnexpectedResult,
