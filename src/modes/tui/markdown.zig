@@ -589,6 +589,97 @@ fn u21Eql(a: []const u21, b: []const u21) bool {
     return true;
 }
 
+fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
+        @typeName(@TypeOf(actual)),
+        body,
+    });
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
+fn appendColorName(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, c: frame.Color) !void {
+    switch (c) {
+        .default => try out.appendSlice(alloc, "default"),
+        .idx => |idx| try std.fmt.format(out.writer(alloc), "idx:{d}", .{idx}),
+        .rgb => |rgb| try std.fmt.format(out.writer(alloc), "rgb:{x:0>6}", .{rgb}),
+    }
+}
+
+fn appendCodepoint(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, cp: u21) !void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch {
+        try out.append(alloc, '?');
+        return;
+    };
+    try out.appendSlice(alloc, buf[0..n]);
+}
+
+fn frameRowsStyleSnapAlloc(
+    alloc: std.mem.Allocator,
+    frm: *const frame.Frame,
+    y0: usize,
+    y1: usize,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var y = y0;
+    while (y <= y1) : (y += 1) {
+        if (y != y0) try out.append(alloc, '\n');
+        var last: usize = 0;
+        var found = false;
+        var x: usize = 0;
+        while (x < frm.w) : (x += 1) {
+            const c = try frm.cell(x, y);
+            if (c.cp != ' ') {
+                last = x + 1;
+                found = true;
+            }
+        }
+        try std.fmt.format(out.writer(alloc), "{d}:", .{y});
+        if (found) {
+            x = 0;
+            while (x < last) : (x += 1) {
+                const c = try frm.cell(x, y);
+                try appendCodepoint(&out, alloc, c.cp);
+            }
+        }
+
+        var any = false;
+        x = 0;
+        while (x < last) {
+            const c = try frm.cell(x, y);
+            if (c.style.isDefault()) {
+                x += 1;
+                continue;
+            }
+            any = true;
+            const st = c.style;
+            const x0 = x;
+            x += 1;
+            while (x < last) : (x += 1) {
+                const next = try frm.cell(x, y);
+                if (!frame.Style.eql(st, next.style)) break;
+            }
+            try std.fmt.format(out.writer(alloc), "\n  {d}..{d} fg=", .{ x0, x });
+            try appendColorName(&out, alloc, st.fg);
+            try out.appendSlice(alloc, " bg=");
+            try appendColorName(&out, alloc, st.bg);
+            try std.fmt.format(out.writer(alloc), " b={d} d={d} i={d} u={d} inv={d}", .{
+                @intFromBool(st.bold),
+                @intFromBool(st.dim),
+                @intFromBool(st.italic),
+                @intFromBool(st.underline),
+                @intFromBool(st.inverse),
+            });
+        }
+        if (!any) try out.appendSlice(alloc, "\n  styles=0");
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 test "heading renders bold with md_heading color" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
@@ -596,11 +687,12 @@ test "heading renders bold with md_heading color" {
     var md = MdRenderer{};
     const n = try md.renderLine(&frm, 0, 0, "## Hello", 20, .{});
     try testing.expectEqual(@as(usize, 5), n);
-
-    const c = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 'H'), c.cp);
-    try testing.expect(frame.Color.eql(c.style.fg, theme.get().md_heading));
-    try testing.expect(c.style.bold);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:Hello
+        \\  0..5 fg=rgb:f0c674 bg=default b=1 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "code fence toggles code block mode" {
@@ -614,24 +706,18 @@ test "code fence toggles code block mode" {
     try testing.expect(md.in_code_block);
     try testing.expectEqual(syntax.Lang.zig, md.code_lang);
 
-    // Code line — "const" is a keyword, gets syn_keyword color + bold
     const n = try md.renderLine(&frm, 0, 1, "const x = 1;", 30, .{});
     try testing.expect(n > 0);
-    const c = try frm.cell(0, 1);
-    try testing.expect(frame.Color.eql(c.style.fg, theme.get().syn_keyword));
-    try testing.expect(c.style.bold);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 1, 1);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\1:const x = 1;
+        \\  0..5 fg=rgb:569cd6 bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  8..9 fg=rgb:d4d4d4 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  10..11 fg=rgb:b5cea8 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  11..12 fg=rgb:d4d4d4 bg=default b=0 d=1 i=0 u=0 inv=0
+    , snap);
 
-    // "x" at col 6 is plain text — default fg
-    const cx = try frm.cell(6, 1);
-    try testing.expectEqual(@as(u21, 'x'), cx.cp);
-    try testing.expect(cx.style.fg.isDefault());
-
-    // "1" at col 10 is a number
-    const cn = try frm.cell(10, 1);
-    try testing.expectEqual(@as(u21, '1'), cn.cp);
-    try testing.expect(frame.Color.eql(cn.style.fg, theme.get().syn_number));
-
-    // Closing fence
     _ = try md.renderLine(&frm, 0, 2, "```", 30, .{});
     try testing.expect(!md.in_code_block);
     try testing.expectEqual(syntax.Lang.unknown, md.code_lang);
@@ -648,12 +734,13 @@ test "code block without lang hint uses generic highlighting" {
 
     const n = try md.renderLine(&frm, 0, 1, "x = \"hi\"", 30, .{});
     try testing.expect(n > 0);
-
-    // String "hi" should get syn_string color
-    // x = "hi" => positions: x(0) ' '(1) =(2) ' '(3) "(4) h(5) i(6) "(7)
-    const cs = try frm.cell(4, 1);
-    try testing.expectEqual(@as(u21, '"'), cs.cp);
-    try testing.expect(frame.Color.eql(cs.style.fg, theme.get().syn_string));
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 1, 1);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\1:x = "hi"
+        \\  2..3 fg=rgb:d4d4d4 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  4..8 fg=rgb:ce9178 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "blockquote renders bar prefix" {
@@ -662,13 +749,12 @@ test "blockquote renders bar prefix" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "> quoted", 20, .{});
-
-    const c0 = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 0x2502), c0.cp); // │
-    try testing.expect(frame.Color.eql(c0.style.fg, theme.get().md_quote));
-
-    const c2 = try frm.cell(2, 0);
-    try testing.expectEqual(@as(u21, 'q'), c2.cp);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:│ quoted
+        \\  0..2 fg=rgb:808080 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "unordered list renders bullet" {
@@ -677,13 +763,12 @@ test "unordered list renders bullet" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "- item", 20, .{});
-
-    const c0 = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 0x2022), c0.cp); // •
-    try testing.expect(frame.Color.eql(c0.style.fg, theme.get().md_list_bullet));
-
-    const c2 = try frm.cell(2, 0);
-    try testing.expectEqual(@as(u21, 'i'), c2.cp);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:• item
+        \\  0..1 fg=rgb:8abeb7 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "ordered list renders number" {
@@ -692,13 +777,12 @@ test "ordered list renders number" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "3. third", 20, .{});
-
-    const c0 = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, '3'), c0.cp);
-    try testing.expect(frame.Color.eql(c0.style.fg, theme.get().md_list_bullet));
-
-    const c1 = try frm.cell(1, 0);
-    try testing.expectEqual(@as(u21, '.'), c1.cp);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:3. third
+        \\  0..2 fg=rgb:8abeb7 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "horizontal rule fills with line char" {
@@ -708,10 +792,12 @@ test "horizontal rule fills with line char" {
     var md = MdRenderer{};
     const n = try md.renderLine(&frm, 0, 0, "---", 10, .{});
     try testing.expectEqual(@as(usize, 10), n);
-
-    const c = try frm.cell(5, 0);
-    try testing.expectEqual(@as(u21, 0x2500), c.cp); // ─
-    try testing.expect(frame.Color.eql(c.style.fg, theme.get().md_hr));
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:──────────
+        \\  0..10 fg=rgb:808080 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "inline code gets md_code style" {
@@ -720,16 +806,12 @@ test "inline code gets md_code style" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "use `foo` here", 30, .{});
-
-    // 'u','s','e',' ' then 'f','o','o' then ' ','h','e','r','e'
-    const c4 = try frm.cell(4, 0);
-    try testing.expectEqual(@as(u21, 'f'), c4.cp);
-    try testing.expect(frame.Color.eql(c4.style.fg, theme.get().md_code));
-
-    // 'h' should be default
-    const c8 = try frm.cell(8, 0);
-    try testing.expectEqual(@as(u21, 'h'), c8.cp);
-    try testing.expect(c8.style.fg.isDefault());
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:use foo here
+        \\  4..7 fg=rgb:8abeb7 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "bold text gets bold attribute" {
@@ -738,14 +820,12 @@ test "bold text gets bold attribute" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "a **bold** z", 30, .{});
-
-    // 'a',' ','b','o','l','d',' ','z'
-    const c2 = try frm.cell(2, 0);
-    try testing.expectEqual(@as(u21, 'b'), c2.cp);
-    try testing.expect(c2.style.bold);
-
-    const c0 = try frm.cell(0, 0);
-    try testing.expect(!c0.style.bold);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:a bold z
+        \\  2..6 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "italic text gets italic attribute" {
@@ -754,10 +834,12 @@ test "italic text gets italic attribute" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "a *em* z", 30, .{});
-
-    const c2 = try frm.cell(2, 0);
-    try testing.expectEqual(@as(u21, 'e'), c2.cp);
-    try testing.expect(c2.style.italic);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:a em z
+        \\  2..4 fg=default bg=default b=0 d=0 i=1 u=0 inv=0
+    , snap);
 }
 
 test "link renders label in md_link color" {
@@ -766,14 +848,12 @@ test "link renders label in md_link color" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "[click](http://x.com)", 30, .{});
-
-    const c0 = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 'c'), c0.cp);
-    try testing.expect(frame.Color.eql(c0.style.fg, theme.get().md_link));
-
-    // After "click" (5 chars), should be space (nothing more rendered)
-    const c5 = try frm.cell(5, 0);
-    try testing.expectEqual(@as(u21, ' '), c5.cp);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:click
+        \\  0..5 fg=rgb:81a2be bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "fence lang tag rendered in code_border color" {
@@ -782,10 +862,12 @@ test "fence lang tag rendered in code_border color" {
 
     var md = MdRenderer{};
     _ = try md.renderLine(&frm, 0, 0, "```python", 20, .{});
-
-    const c0 = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 'p'), c0.cp);
-    try testing.expect(frame.Color.eql(c0.style.fg, theme.get().md_code_border));
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:python
+        \\  0..6 fg=rgb:808080 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "plain text renders unchanged" {
@@ -795,10 +877,12 @@ test "plain text renders unchanged" {
     var md = MdRenderer{};
     const n = try md.renderLine(&frm, 0, 0, "hello", 20, .{});
     try testing.expectEqual(@as(usize, 5), n);
-
-    const c = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 'h'), c.cp);
-    try testing.expect(c.style.isDefault());
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:hello
+        \\  styles=0
+    , snap);
 }
 
 test "max_w clips output" {
@@ -808,10 +892,12 @@ test "max_w clips output" {
     var md = MdRenderer{};
     const n = try md.renderLine(&frm, 0, 0, "abcdefghij", 3, .{});
     try testing.expectEqual(@as(usize, 3), n);
-
-    // Column 3 should still be space
-    const c3 = try frm.cell(3, 0);
-    try testing.expectEqual(@as(u21, ' '), c3.cp);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:abc
+        \\  styles=0
+    , snap);
 }
 
 test "table header renders bold with borders" {
@@ -822,15 +908,16 @@ test "table header renders bold with borders" {
     const n = try md.renderLine(&frm, 0, 0, "| Name | Age |", 40, .{});
     try testing.expect(n > 0);
     try testing.expect(md.in_table);
-
-    // First char should be │ (border)
-    const c0 = try frm.cell(0, 0);
-    try testing.expectEqual(@as(u21, 0x2502), c0.cp);
-
-    // "N" at col 2 should be bold (header)
-    const c2 = try frm.cell(2, 0);
-    try testing.expectEqual(@as(u21, 'N'), c2.cp);
-    try testing.expect(c2.style.bold);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:│ Name │ Age │
+        \\  0..1 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  2..6 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  7..8 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  9..12 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  13..14 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "table separator renders as box-drawing" {
@@ -844,13 +931,18 @@ test "table separator renders as box-drawing" {
     const n = try md.renderLine(&frm, 0, 1, "|---|---|", 40, .{});
     try testing.expect(n > 0);
     try testing.expect(md.saw_table_sep);
-
-    // Pipe positions → ┼, dash positions → ─
-    const c0 = try frm.cell(0, 1);
-    try testing.expectEqual(@as(u21, 0x253C), c0.cp); // ┼
-
-    const c1 = try frm.cell(1, 1);
-    try testing.expectEqual(@as(u21, 0x2500), c1.cp); // ─
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 1);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:│ A │ B │
+        \\  0..1 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  2..3 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  4..5 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  6..7 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  8..9 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\1:┼───┼───┼
+        \\  0..9 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "table data row renders normal text with borders" {
@@ -861,11 +953,22 @@ test "table data row renders normal text with borders" {
     _ = try md.renderLine(&frm, 0, 0, "| H1 | H2 |", 40, .{});
     _ = try md.renderLine(&frm, 0, 1, "|-----|-----|", 40, .{});
     _ = try md.renderLine(&frm, 0, 2, "| foo | bar |", 40, .{});
-
-    // "f" should not be bold (data row, not header)
-    const cf = try frm.cell(2, 2);
-    try testing.expectEqual(@as(u21, 'f'), cf.cp);
-    try testing.expect(!cf.style.bold);
+    const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 2);
+    defer testing.allocator.free(snap);
+    try expectSnapText(@src(),
+        \\0:│ H1 │ H2 │
+        \\  0..1 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  2..4 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  5..6 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  7..9 fg=default bg=default b=1 d=0 i=0 u=0 inv=0
+        \\  10..11 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\1:┼─────┼─────┼
+        \\  0..13 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\2:│ foo │ bar │
+        \\  0..1 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  6..7 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+        \\  12..13 fg=rgb:505050 bg=default b=0 d=0 i=0 u=0 inv=0
+    , snap);
 }
 
 test "table state resets on non-table line" {
