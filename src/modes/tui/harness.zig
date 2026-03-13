@@ -742,6 +742,24 @@ test "harness renders full-width transcript with footer" {
     try std.testing.expect(std.mem.indexOf(u8, out.view(), "\x1b[2J") != null);
 }
 
+test "harness tool footer shows redacted bash command" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var ui = try Ui.init(std.testing.allocator, 48, 8, "gpt-5", "openai");
+    defer ui.deinit();
+
+    try ui.onProvider(.{ .tool_call = .{
+        .id = "b1",
+        .name = "bash",
+        .args = "{\"cmd\":\"curl 'https://svc.local/x?token=secret' /Users/joel/.ssh/id_rsa\"}",
+    } });
+
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "curl '[secret:f46ae11f145e0f15]' [path:7bb914..."
+    ).expectEqual(ui.pn.toolLabel());
+}
+
 test "harness editor interaction returns submit and clears line" {
     var ui = try Ui.init(std.testing.allocator, 20, 4, "gpt", "prov-a");
     defer ui.deinit();

@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("../../core/mod.zig");
 const frame = @import("frame.zig");
+const tool_display = @import("tool_display.zig");
 const theme = @import("theme.zig");
 const spinner = @import("spinner.zig");
 
@@ -449,38 +450,12 @@ pub const Panels = struct {
     }
 
     fn setToolLabel(self: *Panels, name: []const u8, args: []const u8) void {
-        // For bash: extract command from JSON args
-        if (std.mem.eql(u8, name, "bash") or std.mem.eql(u8, name, "Bash")) {
-            const parsed = std.json.parseFromSlice(
-                std.json.Value,
-                self.alloc,
-                args,
-                .{},
-            ) catch {
-                self.writeLabel(name);
-                return;
-            };
-            defer parsed.deinit();
-            const obj = switch (parsed.value) {
-                .object => |o| o,
-                else => {
-                    self.writeLabel(name);
-                    return;
-                },
-            };
-            if (obj.get("command")) |cmd| {
-                switch (cmd) {
-                    .string => |s| {
-                        // First line only
-                        const line = if (std.mem.indexOfScalar(u8, s, '\n')) |nl| s[0..nl] else s;
-                        self.writeLabel(line);
-                        return;
-                    },
-                    else => {},
-                }
-            }
-        }
-        self.writeLabel(name);
+        const disp = tool_display.makeAlloc(self.alloc, name, args, self.tool_label_buf.len) catch {
+            self.writeLabel(name);
+            return;
+        };
+        defer self.alloc.free(disp);
+        self.writeLabel(disp);
     }
 
     fn writeLabel(self: *Panels, s: []const u8) void {

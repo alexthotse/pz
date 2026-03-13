@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("../../core/mod.zig");
 const frame = @import("frame.zig");
+const tool_display = @import("tool_display.zig");
 const markdown = @import("markdown.zig");
 const theme = @import("theme.zig");
 const wc = @import("wcwidth.zig");
@@ -734,48 +735,9 @@ fn needsGap(prev: *const Block, cur: *const Block) bool {
 // -- Tool call formatting --
 
 fn fmtToolCall(alloc: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 {
-    // Parse JSON args to extract display-friendly command
-    // For bash: show "$ cd ... && cmd"
-    // For file tools: show "$ tool_name path"
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, args, .{}) catch
-        return std.fmt.allocPrint(alloc, " $ {s}", .{name});
-    defer parsed.deinit();
-
-    const obj = switch (parsed.value) {
-        .object => |o| o,
-        else => return std.fmt.allocPrint(alloc, " $ {s}", .{name}),
-    };
-
-    // bash tool: show command
-    if (std.mem.eql(u8, name, "bash")) {
-        if (obj.get("cmd") orelse obj.get("command")) |cmd| {
-            const cmd_str = switch (cmd) {
-                .string => |s| s,
-                else => return std.fmt.allocPrint(alloc, " $ bash", .{}),
-            };
-            return std.fmt.allocPrint(alloc, " $ {s}", .{cmd_str});
-        }
-    }
-
-    // File tools: show path
-    if (obj.get("path")) |path| {
-        const path_str = switch (path) {
-            .string => |s| s,
-            else => return std.fmt.allocPrint(alloc, " $ {s}", .{name}),
-        };
-        return std.fmt.allocPrint(alloc, " $ {s} {s}", .{ name, path_str });
-    }
-
-    // edit: show file_path
-    if (obj.get("file_path")) |path| {
-        const path_str = switch (path) {
-            .string => |s| s,
-            else => return std.fmt.allocPrint(alloc, " $ {s}", .{name}),
-        };
-        return std.fmt.allocPrint(alloc, " $ {s} {s}", .{ name, path_str });
-    }
-
-    return std.fmt.allocPrint(alloc, " $ {s}", .{name});
+    const disp = try tool_display.makeAlloc(alloc, name, args, 160);
+    defer alloc.free(disp);
+    return std.fmt.allocPrint(alloc, " $ {s}", .{disp});
 }
 
 const AskResult = struct {
@@ -2399,7 +2361,7 @@ test "transcript appendSeq keeps deny blocks in causal order" {
     var y: usize = 0;
     while (y < frm.h) : (y += 1) {
         const row = try rowAscii(&frm, y, raw[0..]);
-        if (call_y == null and std.mem.indexOf(u8, row, "$ cat ~/.ssh/id_rsa") != null) call_y = y;
+        if (call_y == null and std.mem.indexOf(u8, row, "$ cat ") != null) call_y = y;
         if (deny_y == null and std.mem.indexOf(u8, row, "permission denied") != null) deny_y = y;
         if (later_y == null and std.mem.indexOf(u8, row, "later provider text") != null) later_y = y;
     }
@@ -2608,6 +2570,30 @@ test "bash tool call row truncates with ellipsis and stays single-line" {
 
     const r1 = try rowAscii(&frm, 1, raw[0..]);
     try std.testing.expect(std.mem.trim(u8, r1, " ").len == 0);
+}
+
+test "bash tool call row redacts sensitive command fragments" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.append(.{ .tool_call = .{
+        .id = "bash-redact",
+        .name = "bash",
+        .args = "{\"cmd\":\"curl 'https://svc.local/x?token=secret' /Users/joel/.ssh/id_rsa\"}",
+    } });
+
+    var frm = try frame.Frame.init(std.testing.allocator, 64, 2);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 64, .h = 2 });
+
+    var raw: [64]u8 = undefined;
+    const r0 = try rowAscii(&frm, 0, raw[0..]);
+    try oh.snap(@src(),
+        \\[]const u8
+        \\  "  $ curl '[secret:f46ae11f145e0f15]' [path:7bb914945c8f6207]    "
+    ).expectEqual(r0);
 }
 
 test "tool call recolors to error with failed result" {
