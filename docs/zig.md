@@ -171,6 +171,7 @@ try std.testing.expectError(error.X, err_union);
 - When `ohsnap` needs to rewrite an existing snapshot, `<!update>` must be the first snapshot line, before the type header.
 - `ohsnap` rewrite mode opens the module root from the current working directory. Inside tests that `chdir` with `CwdGuard`, `<!update>` can fail with `FileNotFound`; patch the snapshot text manually instead of relying on rewrite mode there.
 - In raw multiline `ohsnap` snapshots, quotes are literal after `\\`. Do not escape JSON quotes inside the snapshot body.
+- For parser/serializer robustness, use the shared crap-and-mutate pattern: generate garbage bytes plus deterministic mutations of valid examples, then assert typed success/failure with no crash, hang, or fail-open behavior.
 ```zig
 try oh.snap(@src(),
     \\[]u8

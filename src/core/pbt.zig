@@ -60,6 +60,100 @@ pub const Gen = struct {
     }
 };
 
+pub const Mut = struct {
+    pub fn crapAlloc(alloc: std.mem.Allocator, max_len: usize, seed: u64) ![]u8 {
+        const len = if (max_len == 0) 0 else blk: {
+            const n = @as(usize, @intCast(seed % @as(u64, @intCast(max_len))));
+            break :blk n + 1;
+        };
+        const out = try alloc.alloc(u8, len);
+        var prng = std.Random.DefaultPrng.init(seed ^ 0x4352_4150_4d5554);
+        prng.random().bytes(out);
+        return out;
+    }
+
+    pub fn mutateAlloc(alloc: std.mem.Allocator, raw: []const u8, seed: u64, max_len: usize) ![]u8 {
+        const lim = blk: {
+            if (max_len != 0) break :blk max_len;
+            if (raw.len != 0) break :blk raw.len;
+            break :blk 1;
+        };
+        if (raw.len == 0) return crapAlloc(alloc, lim, seed);
+
+        const base = raw[0..@min(raw.len, lim)];
+        var prng = std.Random.DefaultPrng.init(seed ^ 0x4d55_5441_5445_31);
+        const rnd = prng.random();
+        const op = rnd.intRangeAtMost(u8, 0, 5);
+
+        return switch (op) {
+            0 => flipAlloc(alloc, base, rnd),
+            1 => dropAlloc(alloc, base, rnd),
+            2 => dupAlloc(alloc, base, lim, rnd),
+            3 => insertAlloc(alloc, base, lim, rnd),
+            4 => swapAlloc(alloc, base, rnd),
+            else => truncateAlloc(alloc, base, rnd),
+        };
+    }
+
+    pub fn crapOrMutateAlloc(alloc: std.mem.Allocator, raw: []const u8, seed: u64, max_len: usize) ![]u8 {
+        if ((seed & 1) == 0) return crapAlloc(alloc, if (max_len == 0) @max(raw.len, 1) else max_len, seed);
+        return mutateAlloc(alloc, raw, seed, max_len);
+    }
+
+    fn flipAlloc(alloc: std.mem.Allocator, base: []const u8, rnd: std.Random) ![]u8 {
+        const out = try alloc.dupe(u8, base);
+        const idx = rnd.intRangeLessThan(usize, 0, out.len);
+        out[idx] ^= @as(u8, rnd.intRangeAtMost(u8, 1, 0xff));
+        if (std.mem.eql(u8, out, base)) out[idx] ^= 1;
+        return out;
+    }
+
+    fn dropAlloc(alloc: std.mem.Allocator, base: []const u8, rnd: std.Random) ![]u8 {
+        if (base.len == 1) return flipAlloc(alloc, base, rnd);
+        const idx = rnd.intRangeLessThan(usize, 0, base.len);
+        const out = try alloc.alloc(u8, base.len - 1);
+        std.mem.copyForwards(u8, out[0..idx], base[0..idx]);
+        std.mem.copyForwards(u8, out[idx..], base[idx + 1 ..]);
+        return out;
+    }
+
+    fn dupAlloc(alloc: std.mem.Allocator, base: []const u8, lim: usize, rnd: std.Random) ![]u8 {
+        if (base.len >= lim) return flipAlloc(alloc, base, rnd);
+        const idx = rnd.intRangeLessThan(usize, 0, base.len);
+        const out = try alloc.alloc(u8, base.len + 1);
+        std.mem.copyForwards(u8, out[0 .. idx + 1], base[0 .. idx + 1]);
+        out[idx + 1] = base[idx];
+        std.mem.copyForwards(u8, out[idx + 2 ..], base[idx + 1 ..]);
+        return out;
+    }
+
+    fn insertAlloc(alloc: std.mem.Allocator, base: []const u8, lim: usize, rnd: std.Random) ![]u8 {
+        if (base.len >= lim) return flipAlloc(alloc, base, rnd);
+        const idx = rnd.intRangeAtMost(usize, 0, base.len);
+        const out = try alloc.alloc(u8, base.len + 1);
+        std.mem.copyForwards(u8, out[0..idx], base[0..idx]);
+        out[idx] = rnd.int(u8);
+        std.mem.copyForwards(u8, out[idx + 1 ..], base[idx..]);
+        return out;
+    }
+
+    fn swapAlloc(alloc: std.mem.Allocator, base: []const u8, rnd: std.Random) ![]u8 {
+        if (base.len == 1) return flipAlloc(alloc, base, rnd);
+        const out = try alloc.dupe(u8, base);
+        const a = rnd.intRangeLessThan(usize, 0, out.len);
+        var b = rnd.intRangeLessThan(usize, 0, out.len);
+        if (a == b) b = (b + 1) % out.len;
+        std.mem.swap(u8, &out[a], &out[b]);
+        return out;
+    }
+
+    fn truncateAlloc(alloc: std.mem.Allocator, base: []const u8, rnd: std.Random) ![]u8 {
+        if (base.len == 1) return flipAlloc(alloc, base, rnd);
+        const len = rnd.intRangeAtMost(usize, 1, base.len - 1);
+        return alloc.dupe(u8, base[0..len]);
+    }
+};
+
 pub const Shrink = struct {
     pub fn one(comptime T: type, value: T) ?T {
         return oneWith(T, value, .{});
@@ -665,4 +759,38 @@ test "pbt reportAlloc formatting is deterministic" {
         \\shrunk=.{a=1}
         \\"
     ).expectEqual(report_a);
+}
+
+test "pbt Mut crap-and-mutate helpers are deterministic" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const raw = "agent-frame\n";
+    const mut = try Mut.mutateAlloc(std.testing.allocator, raw, 0x1234_5678_9abc_def0, raw.len + 4);
+    defer std.testing.allocator.free(mut);
+    const crap = try Mut.crapAlloc(std.testing.allocator, 8, 0x0bad_f00d);
+    defer std.testing.allocator.free(crap);
+    const either = try Mut.crapOrMutateAlloc(std.testing.allocator, raw, 0x35, raw.len + 4);
+    defer std.testing.allocator.free(either);
+
+    const got = try valueAlloc(std.testing.allocator, .{
+        .mut = mut,
+        .crap = crap,
+        .either = either,
+    });
+    defer std.testing.allocator.free(got);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  ".{mut={ 97, 103, 101, 110, 20, 116, 45, 102, 114, 97, 109, 101, 10 }, crap={ 140, 208, 135, 5, 233, 205 }, either={ 97, 103, 101, 110, 116, 45, 102, 114, 100, 97, 109, 101, 10 }}"
+    ).expectEqual(got);
+}
+
+test "pbt Mut mutateAlloc changes input and respects bounds" {
+    const raw = "hello";
+    const got = try Mut.mutateAlloc(std.testing.allocator, raw, 0x77, raw.len);
+    defer std.testing.allocator.free(got);
+
+    try std.testing.expect(got.len <= raw.len);
+    try std.testing.expect(!std.mem.eql(u8, got, raw));
 }

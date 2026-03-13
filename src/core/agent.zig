@@ -1112,3 +1112,42 @@ test "property: mutated run frames reject empty id or prompt" {
         .seed = 0xa93e_7103,
     });
 }
+
+test "property: decodeSlice survives crap-and-mutate hello frames" {
+    const zc = @import("zcheck");
+    const pbt = @import("pbt.zig");
+
+    try zc.check(struct {
+        fn prop(args: struct {
+            id: zc.String,
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+            seed: u64,
+            slack: u8,
+        }) bool {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+
+            var hash: [hash_hex_len]u8 = undefined;
+            propHash(&hash, args.a, args.b, args.c, args.d);
+            const raw = encodeLineAlloc(alloc, Frame.init(1, .{
+                .hello = .{
+                    .role = .child,
+                    .agent_id = propId(args.id.slice()),
+                    .policy_hash = hash[0..],
+                },
+            })) catch return false;
+            const lim = raw.len + @as(usize, args.slack % 8);
+            const bad = pbt.Mut.crapOrMutateAlloc(alloc, raw, args.seed, lim) catch return false;
+
+            _ = decodeSlice(alloc, bad) catch |err| return err != error.OutOfMemory;
+            return true;
+        }
+    }.prop, .{
+        .iterations = 500,
+        .seed = 0xa93e_7104,
+    });
+}
