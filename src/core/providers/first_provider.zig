@@ -472,6 +472,12 @@ fn expectFloat(v: std.json.Value, want: f64) !void {
     }
 }
 
+fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    try oh.snap(src, want).expectEqual(got);
+}
+
 test "buildReq emits request fixture JSON" {
     const user_parts = [_]providers.Part{
         .{ .text = "hello" },
@@ -503,58 +509,10 @@ test "buildReq emits request fixture JSON" {
 
     const raw = try buildReq(std.testing.allocator, req);
     defer std.testing.allocator.free(raw);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, raw, .{});
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    try expectString(root.get("model") orelse return error.TestUnexpectedResult, "first-model");
-    try std.testing.expect(root.get("provider") == null);
-
-    const msgs_v = root.get("msgs") orelse return error.TestUnexpectedResult;
-    const msgs_arr = switch (msgs_v) {
-        .array => |arr| arr,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(@as(usize, 2), msgs_arr.items.len);
-
-    const first_msg = switch (msgs_arr.items[0]) {
-        .object => |obj| obj,
-        else => return error.TestUnexpectedResult,
-    };
-    try expectString(first_msg.get("role") orelse return error.TestUnexpectedResult, "user");
-
-    const parts_v = first_msg.get("parts") orelse return error.TestUnexpectedResult;
-    const parts_arr = switch (parts_v) {
-        .array => |arr| arr,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(@as(usize, 2), parts_arr.items.len);
-
-    const part0 = switch (parts_arr.items[0]) {
-        .object => |obj| obj,
-        else => return error.TestUnexpectedResult,
-    };
-    try expectString(part0.get("type") orelse return error.TestUnexpectedResult, "text");
-    try expectString(part0.get("text") orelse return error.TestUnexpectedResult, "hello");
-
-    const opts_v = root.get("opts") orelse return error.TestUnexpectedResult;
-    const opts = switch (opts_v) {
-        .object => |obj| obj,
-        else => return error.TestUnexpectedResult,
-    };
-    try expectFloat(opts.get("temp") orelse return error.TestUnexpectedResult, 0.25);
-    try expectFloat(opts.get("top_p") orelse return error.TestUnexpectedResult, 0.9);
-    try expectInt(opts.get("max_out") orelse return error.TestUnexpectedResult, 128);
-
-    const stop_v = opts.get("stop") orelse return error.TestUnexpectedResult;
-    const stop_arr = switch (stop_v) {
-        .array => |arr| arr,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(@as(usize, 2), stop_arr.items.len);
-    try expectString(stop_arr.items[0], "DONE");
-    try expectString(stop_arr.items[1], "ERR");
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"first-model","msgs":[{"role":"user","parts":[{"type":"text","text":"hello"},{"type":"tool_call","id":"c1","name":"read","args":"{\"path\":\"/tmp\"}"}]},{"role":"tool","parts":[{"type":"tool_result","id":"c1","out":"ok","is_err":false}]}],"tools":[{"name":"read","desc":"Read file","schema":"{}"}],"opts":{"temp":0.25,"top_p":0.8999999761581421,"max_out":128,"stop":["DONE","ERR"]}}"
+    );
 }
 
 test "buildReq includes provider field when set" {
@@ -569,13 +527,10 @@ test "buildReq includes provider field when set" {
 
     const raw = try buildReq(std.testing.allocator, req);
     defer std.testing.allocator.free(raw);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, raw, .{});
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    try expectString(root.get("model") orelse return error.TestUnexpectedResult, "m1");
-    try expectString(root.get("provider") orelse return error.TestUnexpectedResult, "anthropic");
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"m1","provider":"anthropic","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[]}}"
+    );
 }
 
 test "first provider retries transient start and streams parsed events" {

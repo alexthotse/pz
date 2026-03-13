@@ -825,6 +825,12 @@ fn resetParserState(stream: *SseStream) void {
     stream.tool_args.clearRetainingCapacity();
 }
 
+fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    try oh.snap(src, want).expectEqual(got);
+}
+
 test "mapStopStatus maps known statuses" {
     try testing.expectEqual(providers.StopReason.done, mapStopStatus("completed"));
     try testing.expectEqual(providers.StopReason.max_out, mapStopStatus("incomplete"));
@@ -1054,19 +1060,10 @@ test "buildBody minimal request has model stream and input" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    try testing.expectEqualStrings("gpt-5", root.get("model").?.string);
-    try testing.expect(root.get("stream").?.bool);
-    try testing.expect(!root.get("store").?.bool);
-    try testing.expectEqual(@as(i64, 16384), root.get("max_output_tokens").?.integer);
-    try testing.expect(root.get("input") != null);
-    try testing.expect(root.get("reasoning") == null);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+    );
 }
 
 test "buildBody includes reasoning for adaptive and budget" {
@@ -1079,12 +1076,10 @@ test "buildBody includes reasoning for adaptive and budget" {
         .opts = .{ .thinking = .adaptive },
     });
     defer testing.allocator.free(adaptive);
-    const parsed_ad = try std.json.parseFromSlice(std.json.Value, testing.allocator, adaptive, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed_ad.deinit();
-    const reasoning_ad = parsed_ad.value.object.get("reasoning").?.object;
-    try testing.expectEqualStrings("medium", reasoning_ad.get("effort").?.string);
+    try expectSnap(@src(), adaptive,
+        \\[]u8
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"medium","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+    );
 
     const budget = try buildBody(testing.allocator, .{
         .model = "gpt-5",
@@ -1092,12 +1087,10 @@ test "buildBody includes reasoning for adaptive and budget" {
         .opts = .{ .thinking = .budget, .thinking_budget = 500 },
     });
     defer testing.allocator.free(budget);
-    const parsed_bg = try std.json.parseFromSlice(std.json.Value, testing.allocator, budget, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed_bg.deinit();
-    const reasoning_bg = parsed_bg.value.object.get("reasoning").?.object;
-    try testing.expectEqualStrings("minimal", reasoning_bg.get("effort").?.string);
+    try expectSnap(@src(), budget,
+        \\[]u8
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"minimal","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
+    );
 }
 
 test "buildBody includes system assistant tool history and tool definitions" {
@@ -1124,46 +1117,10 @@ test "buildBody includes system assistant tool history and tool definitions" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const input = root.get("input").?.array;
-    try testing.expect(input.items.len >= 4);
-
-    var saw_dev = false;
-    var saw_fc = false;
-    var saw_fc_out = false;
-    for (input.items) |it| {
-        const obj = it.object;
-        if (obj.get("role")) |role| {
-            if (role == .string and std.mem.eql(u8, role.string, "developer")) saw_dev = true;
-        }
-        if (obj.get("type")) |typ| {
-            if (typ == .string and std.mem.eql(u8, typ.string, "function_call")) {
-                saw_fc = true;
-                const call_id = obj.get("call_id") orelse return error.TestUnexpectedResult;
-                try testing.expectEqualStrings("call-1", call_id.string);
-            }
-            if (typ == .string and std.mem.eql(u8, typ.string, "function_call_output")) {
-                saw_fc_out = true;
-                const call_id = obj.get("call_id") orelse return error.TestUnexpectedResult;
-                try testing.expectEqualStrings("call-1", call_id.string);
-            }
-        }
-    }
-    try testing.expect(saw_dev);
-    try testing.expect(saw_fc);
-    try testing.expect(saw_fc_out);
-
-    const tools_arr = root.get("tools").?.array;
-    try testing.expectEqual(@as(usize, 1), tools_arr.items.len);
-    const t0 = tools_arr.items[0].object;
-    try testing.expectEqualStrings("function", t0.get("type").?.string);
-    try testing.expectEqualStrings("bash", t0.get("name").?.string);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"input":[{"role":"developer","content":[{"type":"input_text","text":"sys"}]},{"role":"user","content":[{"type":"input_text","text":"run"}]},{"type":"function_call","call_id":"call-1","name":"bash","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}],"tools":[{"type":"function","name":"bash","description":"Run shell","parameters":{"type":"object"},"strict":false}]}"
+    );
 }
 
 test "parseSseData property randomized tool lifecycle preserves args and tool stop" {

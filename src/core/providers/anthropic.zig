@@ -802,6 +802,12 @@ fn resetParserState(stream: *SseStream) void {
     stream.tool_args.clearRetainingCapacity();
 }
 
+fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    try oh.snap(src, want).expectEqual(got);
+}
+
 test "mapStopReason known values" {
     try testing.expectEqual(providers.StopReason.done, mapStopReason("end_turn"));
     try testing.expectEqual(providers.StopReason.max_out, mapStopReason("max_tokens"));
@@ -1135,21 +1141,10 @@ test "buildBody minimal request" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    try testing.expectEqualStrings("claude-sonnet-4-20250514", root.get("model").?.string);
-    try testing.expect(root.get("stream").?.bool);
-    try testing.expectEqual(@as(i64, 16384), root.get("max_tokens").?.integer);
-    try testing.expect(root.get("messages").?.array.items.len > 0);
-    try testing.expect(root.get("thinking") == null);
-    try testing.expect(root.get("temperature") == null);
-    try testing.expect(root.get("top_p") == null);
-    try testing.expect(root.get("stop_sequences") == null);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"
+    );
 }
 
 test "buildBody includes temp top_p and stop sequences" {
@@ -1168,20 +1163,10 @@ test "buildBody includes temp top_p and stop sequences" {
         },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    try testing.expect(root.get("temperature") != null);
-    try testing.expect(root.get("top_p") != null);
-    try testing.expect(root.get("stop_sequences") != null);
-    const stop_arr = root.get("stop_sequences").?.array;
-    try testing.expectEqual(@as(usize, 2), stop_arr.items.len);
-    try testing.expectEqualStrings("END", stop_arr.items[0].string);
-    try testing.expectEqualStrings("STOP", stop_arr.items[1].string);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"temperature":0.25,"top_p":0.8999999761581421,"stop_sequences":["END","STOP"],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"
+    );
 }
 
 test "buildBody with system message and cache_control" {
@@ -1195,18 +1180,10 @@ test "buildBody with system message and cache_control" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const sys = root.get("system").?.array;
-    try testing.expectEqual(@as(usize, 1), sys.items.len);
-    const sys0 = sys.items[0].object;
-    try testing.expectEqualStrings("You are helpful.", sys0.get("text").?.string);
-    try testing.expect(sys0.get("cache_control") != null);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"system":[{"type":"text","text":"You are helpful.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"
+    );
 }
 
 test "buildBody with tools" {
@@ -1223,19 +1200,10 @@ test "buildBody with tools" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const tl = root.get("tools").?.array;
-    try testing.expectEqual(@as(usize, 1), tl.items.len);
-    const t0 = tl.items[0].object;
-    try testing.expectEqualStrings("bash", t0.get("name").?.string);
-    try testing.expectEqualStrings("Run commands", t0.get("description").?.string);
-    try testing.expect(t0.get("input_schema") != null);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"run ls"}]}],"tools":[{"name":"bash","description":"Run commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}"
+    );
 }
 
 test "buildBody thinking adaptive" {
@@ -1248,15 +1216,10 @@ test "buildBody thinking adaptive" {
         .opts = .{ .thinking = .adaptive },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const think = root.get("thinking").?.object;
-    try testing.expectEqualStrings("adaptive", think.get("type").?.string);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-opus-4-20250514","max_tokens":16384,"stream":true,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":[{"type":"text","text":"think"}]}]}"
+    );
 }
 
 test "buildBody thinking budget" {
@@ -1269,17 +1232,10 @@ test "buildBody thinking budget" {
         .opts = .{ .thinking = .budget, .thinking_budget = 8192 },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const think = root.get("thinking").?.object;
-    try testing.expectEqualStrings("enabled", think.get("type").?.string);
-    try testing.expectEqual(@as(i64, 8192), think.get("budget_tokens").?.integer);
-    try testing.expect(root.get("max_tokens").?.integer >= 8192);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"thinking":{"type":"enabled","budget_tokens":8192},"messages":[{"role":"user","content":[{"type":"text","text":"think"}]}]}"
+    );
 }
 
 test "buildBody thinking budget exceeds max_tokens" {
@@ -1292,14 +1248,10 @@ test "buildBody thinking budget exceeds max_tokens" {
         .opts = .{ .thinking = .budget, .thinking_budget = 32768 },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    try testing.expectEqual(@as(i64, 49152), root.get("max_tokens").?.integer);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-opus-4-20250514","max_tokens":49152,"stream":true,"thinking":{"type":"enabled","budget_tokens":32768},"messages":[{"role":"user","content":[{"type":"text","text":"think"}]}]}"
+    );
 }
 
 test "buildBody message merging same roles" {
@@ -1314,18 +1266,10 @@ test "buildBody message merging same roles" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const messages = root.get("messages").?.array;
-    try testing.expectEqual(@as(usize, 2), messages.items.len);
-    const first = messages.items[0].object;
-    try testing.expectEqualStrings("user", first.get("role").?.string);
-    try testing.expectEqual(@as(usize, 2), first.get("content").?.array.items.len);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]},{"role":"assistant","content":[{"type":"text","text":"reply"}]}]}"
+    );
 }
 
 test "buildBody tool_call and tool_result" {
@@ -1347,28 +1291,10 @@ test "buildBody tool_call and tool_result" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
-    const messages = root.get("messages").?.array;
-    try testing.expectEqual(@as(usize, 3), messages.items.len);
-
-    const asst = messages.items[1].object;
-    try testing.expectEqualStrings("assistant", asst.get("role").?.string);
-    const asst_content = asst.get("content").?.array;
-    const tc = asst_content.items[0].object;
-    try testing.expectEqualStrings("tool_use", tc.get("type").?.string);
-    try testing.expectEqualStrings("tc1", tc.get("id").?.string);
-
-    const tool_msg = messages.items[2].object;
-    try testing.expectEqualStrings("user", tool_msg.get("role").?.string);
-    const tr = tool_msg.get("content").?.array.items[0].object;
-    try testing.expectEqualStrings("tool_result", tr.get("type").?.string);
-    try testing.expectEqualStrings("tc1", tr.get("tool_use_id").?.string);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"run ls"}]},{"role":"assistant","content":[{"type":"tool_use","id":"tc1","name":"bash","input":{"cmd":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc1","content":"file.txt"}]}]}"
+    );
 }
 
 test "buildBody tool_result error flag" {
@@ -1391,15 +1317,10 @@ test "buildBody tool_result error flag" {
         .opts = .{ .thinking = .off },
     });
     defer testing.allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const messages = parsed.value.object.get("messages").?.array;
-    const tr = messages.items[2].object.get("content").?.array.items[0].object;
-    try testing.expect(tr.get("is_error").?.bool);
+    try expectSnap(@src(), body,
+        \\[]u8
+        \\  "{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"run bad"}]},{"role":"assistant","content":[{"type":"tool_use","id":"tc2","name":"bash","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tc2","content":"command failed","is_error":true}]}]}"
+    );
 }
 
 test "supportsThinking" {
