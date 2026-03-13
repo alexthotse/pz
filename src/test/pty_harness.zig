@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const vscreen = @import("../modes/tui/vscreen.zig");
+const ansi_ast = @import("ansi_ast.zig");
 
 const RunOut = struct {
     term: std.process.Child.Term,
@@ -130,6 +131,59 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
     var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
     defer vs.deinit();
     vs.feed(out.stdout);
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const ops = try ansi_ast.parseAlloc(std.testing.allocator, out.stdout);
+    defer ansi_ast.freeOps(std.testing.allocator, ops);
+
+    var ctl_buf = std.ArrayList(u8).empty;
+    defer ctl_buf.deinit(std.testing.allocator);
+    var kept: usize = 0;
+    for (ops) |op| {
+        if (kept >= 10) break;
+        switch (op) {
+            .text => continue,
+            .csi => |csi| {
+                try ctl_buf.appendSlice(std.testing.allocator, "csi ");
+                if (csi.prefix) |p| try ctl_buf.append(std.testing.allocator, p);
+                try ctl_buf.append(std.testing.allocator, csi.final);
+                try ctl_buf.append(std.testing.allocator, ' ');
+                for (csi.params, 0..) |param, idx| {
+                    if (idx > 0) try ctl_buf.append(std.testing.allocator, ',');
+                    try ctl_buf.writer(std.testing.allocator).print("{d}", .{param});
+                }
+                try ctl_buf.append(std.testing.allocator, '\n');
+            },
+            .osc => |payload| {
+                const head = std.mem.indexOfScalar(u8, payload, ';') orelse payload.len;
+                try ctl_buf.appendSlice(std.testing.allocator, "osc ");
+                try ctl_buf.appendSlice(std.testing.allocator, payload[0..head]);
+                try ctl_buf.append(std.testing.allocator, '\n');
+            },
+            .esc => |raw| {
+                try ctl_buf.writer(std.testing.allocator).print("esc {d}\n", .{raw.len});
+            },
+        }
+        kept += 1;
+    }
+    const ctl = try ctl_buf.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(ctl);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "csi ?h 1049
+        \\csi ?l 25
+        \\csi ?h 2004
+        \\csi >u 1
+        \\osc 0
+        \\osc 0
+        \\csi u 0
+        \\csi ?l 2004
+        \\csi ?l 1006
+        \\csi ?l 1000
+        \\"
+    ).expectEqual(ctl);
 
     try std.testing.expect((try countNonEmptyRows(&vs, std.testing.allocator)) >= 1);
 }

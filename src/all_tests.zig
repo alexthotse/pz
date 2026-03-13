@@ -29,6 +29,7 @@ const core_watcher = @import("core/watcher.zig");
 const tool_web = @import("core/tools/web.zig");
 const session_file = @import("core/session/session_file.zig");
 const test_cancel_mock = @import("test/cancel_mock.zig");
+const test_ansi_ast = @import("test/ansi_ast.zig");
 const test_http_mock = @import("test/http_mock.zig");
 const test_syslog_mock = @import("test/syslog_mock.zig");
 const test_provider_mock = @import("test/provider_mock.zig");
@@ -66,6 +67,7 @@ test "all module tests" {
     _ = tool_web;
     _ = session_file;
     _ = test_cancel_mock;
+    _ = test_ansi_ast;
     _ = test_http_mock;
     _ = test_syslog_mock;
     _ = test_provider_mock;
