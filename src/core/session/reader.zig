@@ -335,6 +335,35 @@ test "jsonl replay rejects final line without trailing newline" {
     try std.testing.expectEqual(@as(usize, 0), rdr.line());
 }
 
+test "jsonl replay keeps committed rows and rejects torn tail" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const ev = Event{
+        .at_ms = 1,
+        .data = .{ .text = .{ .text = "ok" } },
+    };
+    const raw = try schema.encodeAlloc(std.testing.allocator, ev);
+    defer std.testing.allocator.free(raw);
+
+    {
+        const file = try tmp.dir.createFile("tail2.jsonl", .{});
+        defer file.close();
+        try file.writeAll(raw);
+        try file.writeAll("\n");
+        try file.writeAll(raw[0 .. raw.len / 2]);
+    }
+
+    var rdr = try ReplayReader.init(std.testing.allocator, tmp.dir, "tail2", .{});
+    defer rdr.deinit();
+
+    const first = (try rdr.next()) orelse return error.TestUnexpectedResult;
+    try expectSameEvent(ev, first);
+    try std.testing.expectEqual(@as(usize, 1), rdr.line());
+    try std.testing.expectError(error.TornReplayLine, rdr.next());
+    try std.testing.expectEqual(@as(usize, 1), rdr.line());
+}
+
 test "jsonl replay enforces max line bytes in streaming mode" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
