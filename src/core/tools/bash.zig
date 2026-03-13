@@ -997,6 +997,8 @@ test "bash handler denies wrapped protected state access" {
 }
 
 test "bash handler denies file reads outside workspace inside sandbox" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -1030,18 +1032,24 @@ test "bash handler denies file reads outside workspace inside sandbox" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    switch (res.final) {
-        .failed => |failed| try std.testing.expectEqual(@as(i32, 1), failed.code.?),
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expect(res.out[0].stream == .stderr);
-    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "Operation not permitted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "top-secret") == null);
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=b-file-deny
+        \\start=0
+        \\end=0
+        \\out=1
+        \\0=b-file-deny|0|stderr|false|cat: /Users/joel/Work/pz/README.md: Operation not permitted
+        \\
+        \\final=failed|exec|bash exited non-zero|.{ 1 }
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler denies process exec outside workspace inside sandbox" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -1081,18 +1089,24 @@ test "bash handler denies process exec outside workspace inside sandbox" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    switch (res.final) {
-        .failed => |failed| try std.testing.expectEqual(@as(i32, 126), failed.code.?),
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expect(res.out[0].stream == .stderr);
-    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "Operation not permitted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, res.out[0].chunk, "nope") == null);
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=b-proc-deny
+        \\start=0
+        \\end=0
+        \\out=1
+        \\0=b-proc-deny|0|stderr|false|/bin/bash: /Users/joel/Work/pz/.zig-cache/p30a-run.sh: Operation not permitted
+        \\
+        \\final=failed|exec|bash exited non-zero|.{ 126 }
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler denies network connects inside sandbox" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -1163,14 +1177,22 @@ test "bash handler denies network connects inside sandbox" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    switch (res.final) {
-        .failed => |failed| try std.testing.expectEqual(@as(i32, 1), failed.code.?),
-        else => return error.TestUnexpectedResult,
-    }
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=b-net-deny
+        \\start=0
+        \\end=0
+        \\out=0
+        \\final=failed|exec|bash exited non-zero|.{ 1 }
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler allows workspace file actions inside sandbox" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -1199,14 +1221,18 @@ test "bash handler allows workspace file actions inside sandbox" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-
-    switch (res.final) {
-        .ok => |ok| try std.testing.expectEqual(@as(i32, 0), ok.code),
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expectEqualStrings("ok", res.out[0].chunk);
+    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "call=b-allow-workspace
+        \\start=0
+        \\end=0
+        \\out=1
+        \\0=b-allow-workspace|0|stdout|false|ok
+        \\final=ok|0
+        \\"
+    ).expectEqual(snap);
 }
 
 test "bash handler truncates oversized output and emits metadata" {
