@@ -199,6 +199,8 @@ fn parseChunks(alloc: std.mem.Allocator, chunks: []const []const u8) Err!ParseRe
 }
 
 test "parser normalizes chunked frames and preserves order" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const chunks = [_][]const u8{
         "text:he",
         "llo\r\nthinking:plan\n",
@@ -210,30 +212,20 @@ test "parser normalizes chunked frames and preserves order" {
     defer out.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), out.evs.len);
-
-    switch (out.evs[0]) {
-        .text => |txt| try std.testing.expectEqualStrings("hello", txt),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[1]) {
-        .thinking => |txt| try std.testing.expectEqualStrings("plan", txt),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[2]) {
-        .tool_call => |tc| {
-            try std.testing.expectEqualStrings("id-1", tc.id);
-            try std.testing.expectEqualStrings("read", tc.name);
-            try std.testing.expectEqualStrings("{\"path\":\"a\"}", tc.args);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[3]) {
-        .stop => |stop| try std.testing.expect(stop.reason == .done),
-        else => return error.TestUnexpectedResult,
-    }
+    const got = try eventsJson(std.testing.allocator, out.evs);
+    defer std.testing.allocator.free(got);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{\"text\":\"hello\"}"
+        \\  "{\"thinking\":\"plan\"}"
+        \\  "{\"tool_call\":{\"id\":\"id-1\",\"name\":\"read\",\"args\":\"{\\\"path\\\":\\\"a\\\"}\"}}"
+        \\  "{\"stop\":{\"reason\":\"done\"}}"
+    ).expectEqual(got);
 }
 
 test "parser handles tool_result usage and err frames" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const chunks = [_][]const u8{
         "tool_result:call-7|1|stderr\nusage:3,5,8\nerr:oops\nstop:err",
     };
@@ -242,31 +234,15 @@ test "parser handles tool_result usage and err frames" {
     defer out.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), out.evs.len);
-
-    switch (out.evs[0]) {
-        .tool_result => |res| {
-            try std.testing.expectEqualStrings("call-7", res.id);
-            try std.testing.expect(res.is_err);
-            try std.testing.expectEqualStrings("stderr", res.out);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[1]) {
-        .usage => |usage| {
-            try std.testing.expectEqual(@as(u64, 3), usage.in_tok);
-            try std.testing.expectEqual(@as(u64, 5), usage.out_tok);
-            try std.testing.expectEqual(@as(u64, 8), usage.tot_tok);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[2]) {
-        .err => |txt| try std.testing.expectEqualStrings("oops", txt),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (out.evs[3]) {
-        .stop => |stop| try std.testing.expect(stop.reason == .err),
-        else => return error.TestUnexpectedResult,
-    }
+    const got = try eventsJson(std.testing.allocator, out.evs);
+    defer std.testing.allocator.free(got);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "{\"tool_result\":{\"id\":\"call-7\",\"is_err\":true,\"out\":\"stderr\"}}"
+        \\  "{\"usage\":{\"in_tok\":3,\"out_tok\":5,\"tot_tok\":8}}"
+        \\  "{\"err\":\"oops\"}"
+        \\  "{\"stop\":{\"reason\":\"err\"}}"
+    ).expectEqual(got);
 }
 
 test "parser rejects malformed frames and missing stop" {
@@ -299,6 +275,18 @@ fn splitWithSeed(alloc: std.mem.Allocator, raw: []const u8, seed: u64) ![][]cons
 
 fn eventJson(alloc: std.mem.Allocator, ev: providers.Ev) ![]u8 {
     return std.json.Stringify.valueAlloc(alloc, ev, .{});
+}
+
+fn eventsJson(alloc: std.mem.Allocator, evs: []const providers.Ev) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    for (evs, 0..) |ev, i| {
+        if (i != 0) try out.append(alloc, '\n');
+        const raw = try eventJson(alloc, ev);
+        defer alloc.free(raw);
+        try out.appendSlice(alloc, raw);
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 test "parser property random chunk boundaries preserve parsed stream" {
