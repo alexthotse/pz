@@ -1033,7 +1033,7 @@ test "bash handler denies wrapped protected state access" {
         .id = "b6-deny-wrap",
         .kind = .bash,
         .args = .{ .bash = .{
-            .cmd = "bash -c 'cat ~/.pz/settings.json'",
+            .cmd = "env FOO=1 bash -c 'cat ~/.pz/settings.json AGENTS.md'",
         } },
         .src = .model,
         .at_ms = 0,
