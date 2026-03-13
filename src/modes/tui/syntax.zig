@@ -466,6 +466,57 @@ fn isPascalCase(word: []const u8) bool {
 
 const testing = std.testing;
 
+fn writeSnapStr(w: anytype, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '\\' => try w.writeAll("\\\\"),
+        '"' => try w.writeAll("\\\""),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+fn tokSnapAlloc(alloc: std.mem.Allocator, line: []const u8, toks: []const Token) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(alloc);
+
+    const w = buf.writer(alloc);
+    try w.writeAll("line=");
+    try writeSnapStr(w, line);
+    for (toks, 0..) |tok, i| {
+        try w.print("\n{d}|{s}|{d}..{d}|", .{
+            i,
+            @tagName(tok.kind),
+            tok.start,
+            tok.end,
+        });
+        try writeSnapStr(w, line[tok.start..tok.end]);
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
+fn expectTokSnap(
+    comptime src: std.builtin.SourceLocation,
+    comptime snap: []const u8,
+    line: []const u8,
+    toks: []const Token,
+) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const actual = try tokSnapAlloc(testing.allocator, line, toks);
+    defer testing.allocator.free(actual);
+
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
+test {
+    _ = @import("ohsnap");
+}
+
 test "Lang.detect maps known hints" {
     try testing.expectEqual(Lang.zig, Lang.detect("zig"));
     try testing.expectEqual(Lang.python, Lang.detect("py"));
@@ -483,230 +534,335 @@ test "Lang.detect maps known hints" {
 
 test "zig: keywords highlighted" {
     var buf: [64]Token = undefined;
-    const toks = tokenize("const x = 1;", .zig, &buf);
-    // First token should be keyword "const"
-    try testing.expectEqual(Kind.keyword, toks[0].kind);
-    try testing.expectEqualStrings("const", "const x = 1;"[toks[0].start..toks[0].end]);
+    const line = "const x = 1;";
+    const toks = tokenize(line, .zig, &buf);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="const x = 1;"
+        \\0|keyword|0..5|"const"
+        \\1|text|5..6|" "
+        \\2|text|6..7|"x"
+        \\3|text|7..8|" "
+        \\4|operator|8..9|"="
+        \\5|text|9..10|" "
+        \\6|number|10..11|"1"
+        \\7|punct|11..12|";""
+    , line, toks);
 }
 
 test "zig: string literal" {
     var buf: [64]Token = undefined;
     const line = "const s = \"hello\";";
     const toks = tokenize(line, .zig, &buf);
-    var found = false;
-    for (toks) |t| {
-        if (t.kind == .string) {
-            try testing.expectEqualStrings("\"hello\"", line[t.start..t.end]);
-            found = true;
-        }
-    }
-    try testing.expect(found);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="const s = \"hello\";"
+        \\0|keyword|0..5|"const"
+        \\1|text|5..6|" "
+        \\2|text|6..7|"s"
+        \\3|text|7..8|" "
+        \\4|operator|8..9|"="
+        \\5|text|9..10|" "
+        \\6|string|10..17|"\"hello\""
+        \\7|punct|17..18|";""
+    , line, toks);
 }
 
 test "zig: line comment" {
     var buf: [64]Token = undefined;
     const line = "x + 1 // add one";
     const toks = tokenize(line, .zig, &buf);
-    const last = toks[toks.len - 1];
-    try testing.expectEqual(Kind.comment, last.kind);
-    try testing.expectEqualStrings("// add one", line[last.start..last.end]);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="x + 1 // add one"
+        \\0|text|0..1|"x"
+        \\1|text|1..2|" "
+        \\2|operator|2..3|"+"
+        \\3|text|3..4|" "
+        \\4|number|4..5|"1"
+        \\5|text|5..6|" "
+        \\6|comment|6..16|"// add one""
+    , line, toks);
 }
 
 test "zig: number literals" {
     var buf: [64]Token = undefined;
     const line = "0xff + 42 + 3.14";
     const toks = tokenize(line, .zig, &buf);
-    try testing.expectEqual(Kind.number, toks[0].kind);
-    try testing.expectEqualStrings("0xff", line[toks[0].start..toks[0].end]);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="0xff + 42 + 3.14"
+        \\0|number|0..4|"0xff"
+        \\1|text|4..5|" "
+        \\2|operator|5..6|"+"
+        \\3|text|6..7|" "
+        \\4|number|7..9|"42"
+        \\5|text|9..10|" "
+        \\6|operator|10..11|"+"
+        \\7|text|11..12|" "
+        \\8|number|12..16|"3.14""
+    , line, toks);
 }
 
 test "zig: function call" {
     var buf: [64]Token = undefined;
     const line = "foo(bar)";
     const toks = tokenize(line, .zig, &buf);
-    try testing.expectEqual(Kind.func, toks[0].kind);
-    try testing.expectEqualStrings("foo", line[toks[0].start..toks[0].end]);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="foo(bar)"
+        \\0|func|0..3|"foo"
+        \\1|punct|3..4|"("
+        \\2|text|4..7|"bar"
+        \\3|punct|7..8|")""
+    , line, toks);
 }
 
 test "zig: PascalCase type" {
     var buf: [64]Token = undefined;
     const line = "var x: MyType = .{};";
     const toks = tokenize(line, .zig, &buf);
-    var found = false;
-    for (toks) |t| {
-        if (t.kind == .type_name) {
-            try testing.expectEqualStrings("MyType", line[t.start..t.end]);
-            found = true;
-        }
-    }
-    try testing.expect(found);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="var x: MyType = .{};"
+        \\0|keyword|0..3|"var"
+        \\1|text|3..4|" "
+        \\2|text|4..5|"x"
+        \\3|text|5..6|":"
+        \\4|text|6..7|" "
+        \\5|type_name|7..13|"MyType"
+        \\6|text|13..14|" "
+        \\7|operator|14..15|"="
+        \\8|text|15..16|" "
+        \\9|punct|16..17|"."
+        \\10|punct|17..18|"{"
+        \\11|punct|18..19|"}"
+        \\12|punct|19..20|";""
+    , line, toks);
 }
 
 test "python: keywords and hash comment" {
     var buf: [64]Token = undefined;
     const line = "def foo(): # comment";
     const toks = tokenize(line, .python, &buf);
-    try testing.expectEqual(Kind.keyword, toks[0].kind);
-    try testing.expectEqualStrings("def", line[toks[0].start..toks[0].end]);
-    const last = toks[toks.len - 1];
-    try testing.expectEqual(Kind.comment, last.kind);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="def foo(): # comment"
+        \\0|keyword|0..3|"def"
+        \\1|text|3..4|" "
+        \\2|func|4..7|"foo"
+        \\3|punct|7..8|"("
+        \\4|punct|8..9|")"
+        \\5|text|9..10|":"
+        \\6|text|10..11|" "
+        \\7|comment|11..20|"# comment""
+    , line, toks);
 }
 
 test "python: single-quote string" {
     var buf: [64]Token = undefined;
     const line = "x = 'hello'";
     const toks = tokenize(line, .python, &buf);
-    var found = false;
-    for (toks) |t| {
-        if (t.kind == .string) {
-            try testing.expectEqualStrings("'hello'", line[t.start..t.end]);
-            found = true;
-        }
-    }
-    try testing.expect(found);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="x = 'hello'"
+        \\0|text|0..1|"x"
+        \\1|text|1..2|" "
+        \\2|operator|2..3|"="
+        \\3|text|3..4|" "
+        \\4|string|4..11|"'hello'""
+    , line, toks);
 }
 
 test "bash: keywords" {
     var buf: [64]Token = undefined;
     const line = "if [ -f file ]; then";
     const toks = tokenize(line, .bash, &buf);
-    try testing.expectEqual(Kind.keyword, toks[0].kind);
-    try testing.expectEqualStrings("if", line[toks[0].start..toks[0].end]);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="if [ -f file ]; then"
+        \\0|keyword|0..2|"if"
+        \\1|text|2..3|" "
+        \\2|punct|3..4|"["
+        \\3|text|4..5|" "
+        \\4|operator|5..6|"-"
+        \\5|text|6..7|"f"
+        \\6|text|7..8|" "
+        \\7|text|8..12|"file"
+        \\8|text|12..13|" "
+        \\9|punct|13..14|"]"
+        \\10|punct|14..15|";"
+        \\11|text|15..16|" "
+        \\12|keyword|16..20|"then""
+    , line, toks);
 }
 
 test "javascript: keywords and comment" {
     var buf: [64]Token = undefined;
     const line = "const x = 42; // num";
     const toks = tokenize(line, .javascript, &buf);
-    try testing.expectEqual(Kind.keyword, toks[0].kind);
-    const last = toks[toks.len - 1];
-    try testing.expectEqual(Kind.comment, last.kind);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="const x = 42; // num"
+        \\0|keyword|0..5|"const"
+        \\1|text|5..6|" "
+        \\2|text|6..7|"x"
+        \\3|text|7..8|" "
+        \\4|operator|8..9|"="
+        \\5|text|9..10|" "
+        \\6|number|10..12|"42"
+        \\7|punct|12..13|";"
+        \\8|text|13..14|" "
+        \\9|comment|14..20|"// num""
+    , line, toks);
 }
 
 test "json: key vs string value" {
     var buf: [64]Token = undefined;
     const line = "  \"name\": \"alice\"";
     const toks = tokenize(line, .json, &buf);
-    // Find the key and value
-    var key_found = false;
-    var val_found = false;
-    for (toks) |t| {
-        if (t.kind == .func) {
-            try testing.expectEqualStrings("\"name\"", line[t.start..t.end]);
-            key_found = true;
-        }
-        if (t.kind == .string) {
-            try testing.expectEqualStrings("\"alice\"", line[t.start..t.end]);
-            val_found = true;
-        }
-    }
-    try testing.expect(key_found);
-    try testing.expect(val_found);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="  \"name\": \"alice\""
+        \\0|text|0..1|" "
+        \\1|text|1..2|" "
+        \\2|func|2..8|"\"name\""
+        \\3|punct|8..9|":"
+        \\4|text|9..10|" "
+        \\5|string|10..17|"\"alice\"""
+    , line, toks);
 }
 
 test "json: boolean and null keywords" {
     var buf: [64]Token = undefined;
     const line = "true false null";
     const toks = tokenize(line, .json, &buf);
-    for (toks) |t| {
-        if (t.kind != .text) {
-            try testing.expectEqual(Kind.keyword, t.kind);
-        }
-    }
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="true false null"
+        \\0|keyword|0..4|"true"
+        \\1|text|4..5|" "
+        \\2|keyword|5..10|"false"
+        \\3|text|10..11|" "
+        \\4|keyword|11..15|"null""
+    , line, toks);
 }
 
 test "operators and punctuation" {
     var buf: [64]Token = undefined;
     const line = "a + b(c);";
     const toks = tokenize(line, .zig, &buf);
-    var has_op = false;
-    var has_punct = false;
-    for (toks) |t| {
-        if (t.kind == .operator) has_op = true;
-        if (t.kind == .punct) has_punct = true;
-    }
-    try testing.expect(has_op);
-    try testing.expect(has_punct);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="a + b(c);"
+        \\0|text|0..1|"a"
+        \\1|text|1..2|" "
+        \\2|operator|2..3|"+"
+        \\3|text|3..4|" "
+        \\4|func|4..5|"b"
+        \\5|punct|5..6|"("
+        \\6|text|6..7|"c"
+        \\7|punct|7..8|")"
+        \\8|punct|8..9|";""
+    , line, toks);
 }
 
 test "escaped string characters" {
     var buf: [64]Token = undefined;
     const line = "\"he\\\"llo\"";
     const toks = tokenize(line, .zig, &buf);
-    try testing.expectEqual(Kind.string, toks[0].kind);
-    try testing.expectEqualStrings(line, line[toks[0].start..toks[0].end]);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="\"he\\\"llo\""
+        \\0|string|0..9|"\"he\\\"llo\"""
+    , line, toks);
 }
 
 test "unknown lang uses generic tokenizer" {
     var buf: [64]Token = undefined;
     const line = "x = \"hi\" + 42";
     const toks = tokenize(line, .unknown, &buf);
-    var has_str = false;
-    var has_num = false;
-    for (toks) |t| {
-        if (t.kind == .string) has_str = true;
-        if (t.kind == .number) has_num = true;
-    }
-    try testing.expect(has_str);
-    try testing.expect(has_num);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="x = \"hi\" + 42"
+        \\0|text|0..1|"x"
+        \\1|text|1..2|" "
+        \\2|operator|2..3|"="
+        \\3|text|3..4|" "
+        \\4|string|4..8|"\"hi\""
+        \\5|text|8..9|" "
+        \\6|operator|9..10|"+"
+        \\7|text|10..11|" "
+        \\8|number|11..13|"42""
+    , line, toks);
 }
 
 test "zig: multi-token statement" {
     var buf: [64]Token = undefined;
     const line = "const x: MyType = foo(42); // call";
     const toks = tokenize(line, .zig, &buf);
-    // Verify token sequence: keyword, text, punct, type, operator, func, number, punct, punct, comment
-    try testing.expectEqual(Kind.keyword, toks[0].kind);
-    try testing.expectEqualStrings("const", line[toks[0].start..toks[0].end]);
-    var found_type = false;
-    var found_func = false;
-    var found_num = false;
-    var found_comment = false;
-    for (toks) |t| {
-        if (t.kind == .type_name) found_type = true;
-        if (t.kind == .func) found_func = true;
-        if (t.kind == .number) found_num = true;
-        if (t.kind == .comment) found_comment = true;
-    }
-    try testing.expect(found_type);
-    try testing.expect(found_func);
-    try testing.expect(found_num);
-    try testing.expect(found_comment);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="const x: MyType = foo(42); // call"
+        \\0|keyword|0..5|"const"
+        \\1|text|5..6|" "
+        \\2|text|6..7|"x"
+        \\3|text|7..8|":"
+        \\4|text|8..9|" "
+        \\5|type_name|9..15|"MyType"
+        \\6|text|15..16|" "
+        \\7|operator|16..17|"="
+        \\8|text|17..18|" "
+        \\9|func|18..21|"foo"
+        \\10|punct|21..22|"("
+        \\11|number|22..24|"42"
+        \\12|punct|24..25|")"
+        \\13|punct|25..26|";"
+        \\14|text|26..27|" "
+        \\15|comment|27..34|"// call""
+    , line, toks);
 }
 
 test "json: multi-token object line" {
     var buf: [64]Token = undefined;
     const line = "  \"count\": 42, \"active\": true";
     const toks = tokenize(line, .json, &buf);
-    var keys: usize = 0;
-    var nums: usize = 0;
-    var kws: usize = 0;
-    for (toks) |t| {
-        if (t.kind == .func) keys += 1;
-        if (t.kind == .number) nums += 1;
-        if (t.kind == .keyword) kws += 1;
-    }
-    try testing.expectEqual(@as(usize, 2), keys); // "count" and "active"
-    try testing.expectEqual(@as(usize, 1), nums); // 42
-    try testing.expectEqual(@as(usize, 1), kws); // true
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="  \"count\": 42, \"active\": true"
+        \\0|text|0..1|" "
+        \\1|text|1..2|" "
+        \\2|func|2..9|"\"count\""
+        \\3|punct|9..10|":"
+        \\4|text|10..11|" "
+        \\5|number|11..13|"42"
+        \\6|punct|13..14|","
+        \\7|text|14..15|" "
+        \\8|func|15..23|"\"active\""
+        \\9|punct|23..24|":"
+        \\10|text|24..25|" "
+        \\11|keyword|25..29|"true""
+    , line, toks);
 }
 
 test "json: negative number and null" {
     var buf: [64]Token = undefined;
     const line = "{\"val\": -3.14, \"x\": null}";
     const toks = tokenize(line, .json, &buf);
-    var found_neg = false;
-    var found_null = false;
-    for (toks) |t| {
-        if (t.kind == .number) {
-            try testing.expectEqualStrings("-3.14", line[t.start..t.end]);
-            found_neg = true;
-        }
-        if (t.kind == .keyword) {
-            try testing.expectEqualStrings("null", line[t.start..t.end]);
-            found_null = true;
-        }
-    }
-    try testing.expect(found_neg);
-    try testing.expect(found_null);
+    try expectTokSnap(@src(),
+        \\[]u8
+        \\  "line="{\"val\": -3.14, \"x\": null}"
+        \\0|punct|0..1|"{"
+        \\1|func|1..6|"\"val\""
+        \\2|punct|6..7|":"
+        \\3|text|7..8|" "
+        \\4|number|8..13|"-3.14"
+        \\5|punct|13..14|","
+        \\6|text|14..15|" "
+        \\7|func|15..18|"\"x\""
+        \\8|punct|18..19|":"
+        \\9|text|19..20|" "
+        \\10|keyword|20..24|"null"
+        \\11|punct|24..25|"}""
+    , line, toks);
 }

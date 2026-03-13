@@ -513,6 +513,64 @@ fn rowAscii(frm: *const Frame, y: usize, out: []u8) ![]const u8 {
     return out[0..frm.w];
 }
 
+fn rowSegmentsAlloc(alloc: std.mem.Allocator, row: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var x: usize = 0;
+    var first = true;
+    while (x < row.len) {
+        if (row[x] == ' ') {
+            x += 1;
+            continue;
+        }
+        if (!first) try out.appendSlice(alloc, " | ");
+        first = false;
+        try std.fmt.format(out.writer(alloc), "@{d}:", .{x});
+        const start = x;
+        while (x < row.len and row[x] != ' ') : (x += 1) {}
+        try out.appendSlice(alloc, row[start..x]);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn trimmedBoxSegmentsAlloc(alloc: std.mem.Allocator, frm: *const Frame) ![]u8 {
+    var x0: ?usize = null;
+    var y0: ?usize = null;
+    var x1: usize = 0;
+    var y1: usize = 0;
+
+    var y: usize = 0;
+    while (y < frm.h) : (y += 1) {
+        var x: usize = 0;
+        while (x < frm.w) : (x += 1) {
+            const cp = (try frm.cell(x, y)).cp;
+            if (cp == ' ' or cp == Frame.wide_pad) continue;
+            x0 = if (x0) |cur| @min(cur, x) else x;
+            y0 = if (y0) |cur| @min(cur, y) else y;
+            x1 = @max(x1, x);
+            y1 = @max(y1, y);
+        }
+    }
+
+    if (x0 == null or y0 == null) return try alloc.dupe(u8, "");
+
+    const buf = try alloc.alloc(u8, frm.w);
+    defer alloc.free(buf);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    y = y0.?;
+    while (y <= y1) : (y += 1) {
+        if (y > y0.?) try out.append(alloc, '\n');
+        const row = try rowAscii(frm, y, buf);
+        const segs = try rowSegmentsAlloc(alloc, row[x0.? .. x1 + 1]);
+        defer alloc.free(segs);
+        try std.fmt.format(out.writer(alloc), "row{d} {s}", .{ y - y0.?, segs });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 test {
     _ = @import("ohsnap");
 }
@@ -603,15 +661,12 @@ test "overlay session kind renders without shortLabel" {
     var frm = try Frame.init(std.testing.allocator, 40, 10);
     defer frm.deinit(std.testing.allocator);
     try ov.render(&frm);
-
-    var saw_sel = false;
-    for (0..40) |x| {
-        if ((try frm.cell(x, 4)).cp == '>') {
-            saw_sel = true;
-            break;
-        }
-    }
-    try std.testing.expect(saw_sel);
+    const actual = try trimmedBoxSegmentsAlloc(std.testing.allocator, &frm);
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @0:?????????Resume | @16:Session?????????\nrow1 @0:? | @2:> | @4:sess-abc-123 | @20:2h | @24:10 | @27:tok | @31:?\nrow2 @0:? | @4:sess-def-456 | @20:5m | @25:2 | @27:tok | @31:?\nrow3 @0:????????????????????????????????",
+        actual,
+    );
     try expectSnapText(@src(), "sess-abc-123", ov.selected().?);
 }
 
@@ -634,10 +689,19 @@ test "settings overlay toggle and render" {
     var frm = try Frame.init(std.testing.allocator, 40, 10);
     defer frm.deinit(std.testing.allocator);
     try ov.render(&frm);
-
-    // Check for ✗ indicator (0x2717) on first row (toggled off)
-    const box_w = @min(@as(usize, 14) + 4, @as(usize, 40)); // "Show thinking" = 13 + 4 pad = 17 + 4 = 21
-    _ = box_w;
+    const full = try trimmedBoxSegmentsAlloc(std.testing.allocator, &frm);
+    defer std.testing.allocator.free(full);
+    var it = std.mem.splitScalar(u8, full, '\n');
+    _ = it.next().?;
+    const row1 = it.next().?;
+    const row2 = it.next().?;
+    const row3 = it.next().?;
+    const actual = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}\n{s}", .{ row1, row2, row3 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row1 @0:? | @2:> | @4:Show | @9:tools | @18:? | @20:?\nrow2 @0:? | @4:Show | @9:thinking | @18:? | @20:?\nrow3 @0:? | @4:Auto-compact | @18:? | @20:?",
+        actual,
+    );
 }
 
 test "shortLabel strips date suffix" {

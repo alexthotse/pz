@@ -722,12 +722,57 @@ fn rowAscii(frm: *const frame.Frame, y: usize, out: []u8) ![]const u8 {
     return out[0..frm.w];
 }
 
-fn expectPrefix(frm: *const frame.Frame, y: usize, prefix: []const u8) !void {
+fn trimRightSpaces(text: []const u8) []const u8 {
+    var end = text.len;
+    while (end > 0 and text[end - 1] == ' ') : (end -= 1) {}
+    return text[0..end];
+}
+
+fn appendCp(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, cp: u21) !void {
+    if (cp == frame.Frame.wide_pad) return;
+    var buf: [4]u8 = undefined;
+    const n = try std.unicode.utf8Encode(cp, &buf);
+    try out.appendSlice(alloc, buf[0..n]);
+}
+
+fn rowSegmentsAlloc(alloc: std.mem.Allocator, frm: *const frame.Frame, y: usize) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
     var x: usize = 0;
-    while (x < prefix.len) : (x += 1) {
+    var first = true;
+    while (x < frm.w) {
         const c = try frm.cell(x, y);
-        try std.testing.expectEqual(@as(u21, prefix[x]), c.cp);
+        if (c.cp == ' ' or c.cp == frame.Frame.wide_pad) {
+            x += 1;
+            continue;
+        }
+
+        if (!first) try out.appendSlice(alloc, " | ");
+        first = false;
+        try std.fmt.format(out.writer(alloc), "@{d}:", .{x});
+
+        while (x < frm.w) : (x += 1) {
+            const cur = try frm.cell(x, y);
+            if (cur.cp == ' ' or cur.cp == frame.Frame.wide_pad) break;
+            try appendCp(&out, alloc, cur.cp);
+        }
     }
+    return out.toOwnedSlice(alloc);
+}
+
+fn footerSegmentsAlloc(alloc: std.mem.Allocator, frm: *const frame.Frame, rect: Rect) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var y: usize = 0;
+    while (y < rect.h) : (y += 1) {
+        if (y > 0) try out.append(alloc, '\n');
+        const segs = try rowSegmentsAlloc(alloc, frm, rect.y + y);
+        defer alloc.free(segs);
+        try std.fmt.format(out.writer(alloc), "row{d} {s}", .{ y, trimRightSpaces(segs) });
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
@@ -815,28 +860,12 @@ test "panels render 2-line footer with cwd and model" {
     defer frm.deinit(std.testing.allocator);
 
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
-
-    // Line 1: "myproj (main)" with dim color
-    try expectPrefix(&frm, 0, "myproj");
-    const cwd_cell = try frm.cell(0, 0);
-    try std.testing.expect(frame.Color.eql(cwd_cell.style.fg, theme.get().dim));
-    try std.testing.expect(findAsciiSeq(&frm, 0, "(main)"));
-
-    // Line 2: model name right-aligned
-    // Find 'g' of "gpt-4" on line 2
-    var found_model = false;
-    var col: usize = 0;
-    while (col < 60) : (col += 1) {
-        const c = try frm.cell(col, 1);
-        if (c.cp == 'g') {
-            const c2 = try frm.cell(col + 1, 1);
-            if (c2.cp == 'p') {
-                found_model = true;
-                break;
-            }
-        }
-    }
-    try std.testing.expect(found_model);
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @0:myproj | @7:(main) | @42:shift+drag: | @54:select\nrow1 @0:↓10 | @4:↑20 | @8:$0.000 | @15:90.0%/200k | @55:gpt-4",
+        actual,
+    );
 
     // 90% context should use error color
     var pct_col: usize = 59;
@@ -858,15 +887,12 @@ test "panels render footer cwd only no branch" {
     defer frm.deinit(std.testing.allocator);
 
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
-
-    // "proj" at col 0
-    try expectPrefix(&frm, 0, "proj");
-    const cwd_cell = try frm.cell(0, 0);
-    try std.testing.expect(frame.Color.eql(cwd_cell.style.fg, theme.get().dim));
-
-    // No parens at col 4 - should be space (no branch)
-    const after = try frm.cell(4, 0);
-    try std.testing.expectEqual(@as(u21, ' '), after.cp);
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @0:proj | @22:shift+drag: | @34:select\nrow1 @39:m",
+        actual,
+    );
 }
 
 test "panels footer keeps branch visible with long path" {
@@ -877,7 +903,12 @@ test "panels footer keeps branch visible with long path" {
     defer frm.deinit(std.testing.allocator);
 
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 24, .h = 2 });
-    try std.testing.expect(findAsciiSeq(&frm, 0, "(main)"));
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 24, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @0:long/project/path | @18:(main)\nrow1 @23:m",
+        actual,
+    );
 }
 
 test "panels footer shows initial 0.0%" {
@@ -889,12 +920,12 @@ test "panels footer shows initial 0.0%" {
     defer frm.deinit(std.testing.allocator);
 
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
-
-    var buf: [60]u8 = undefined;
-    const row = try rowAscii(&frm, 1, buf[0..]);
-    // Should have 0.0% and never show the old auto badge in footer.
-    try std.testing.expect(std.mem.indexOf(u8, row, "0.0%") != null);
-    try std.testing.expect(std.mem.indexOf(u8, row, "(auto)") == null);
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @0:~/proj | @42:shift+drag: | @54:select\nrow1 @0:0.0%/200k | @54:claude",
+        actual,
+    );
 }
 
 test "panels footer uses pi style R/W cache labels" {
@@ -912,11 +943,12 @@ test "panels footer uses pi style R/W cache labels" {
     var frm = try frame.Frame.init(std.testing.allocator, 90, 2);
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 90, .h = 2 });
-
-    try std.testing.expect(findAsciiSeq(&frm, 1, " R5.5k"));
-    try std.testing.expect(findAsciiSeq(&frm, 1, " W1.2k"));
-    try std.testing.expect(!findAsciiSeq(&frm, 1, " CR"));
-    try std.testing.expect(!findAsciiSeq(&frm, 1, " CW"));
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 90, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @72:shift+drag: | @84:select\nrow1 @0:↓1.2k | @6:↑345 | @11:R5.5k | @17:W1.2k | @23:$0.014 | @73:claude-sonnet-4-6",
+        actual,
+    );
 }
 
 test "panels footer accumulates token totals across usage events" {
@@ -941,14 +973,12 @@ test "panels footer accumulates token totals across usage events" {
     var frm = try frame.Frame.init(std.testing.allocator, 100, 2);
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 100, .h = 2 });
-
-    // cumulative: in=2.0k out=1.0k R1.0k W1.0k
-    try std.testing.expect(hasCp(&frm, 1, 0x2193)); // ↓
-    try std.testing.expect(hasCp(&frm, 1, 0x2191)); // ↑
-    try std.testing.expect(findAsciiSeq(&frm, 1, "2.0k"));
-    try std.testing.expect(findAsciiSeq(&frm, 1, "1.0k"));
-    try std.testing.expect(findAsciiSeq(&frm, 1, " R1.0k"));
-    try std.testing.expect(findAsciiSeq(&frm, 1, " W1.0k"));
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 100, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @82:shift+drag: | @94:select\nrow1 @0:↓2.0k | @6:↑1.0k | @12:R1.0k | @18:W1.0k | @24:$0.025 | @83:claude-sonnet-4-6",
+        actual,
+    );
 }
 
 test "panels compaction indicator expires" {
@@ -965,23 +995,6 @@ test "panels compaction indicator expires" {
     try std.testing.expect(!ps.compactionActive(t0 + Panels.compaction_indicator_ms + 1));
 }
 
-fn findAsciiSeq(frm: *const frame.Frame, y: usize, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    var x: usize = 0;
-    while (x + needle.len <= frm.w) : (x += 1) {
-        var ok = true;
-        for (needle, 0..) |ch, j| {
-            const c = frm.cell(x + j, y) catch return false;
-            if (c.cp != @as(u21, ch)) {
-                ok = false;
-                break;
-            }
-        }
-        if (ok) return true;
-    }
-    return false;
-}
-
 fn firstSpinnerCp(frm: *const frame.Frame, y: usize) ?u21 {
     var x: usize = 0;
     while (x < frm.w) : (x += 1) {
@@ -991,15 +1004,6 @@ fn firstSpinnerCp(frm: *const frame.Frame, y: usize) ?u21 {
         }
     }
     return null;
-}
-
-fn hasCp(frm: *const frame.Frame, y: usize, needle: u21) bool {
-    var x: usize = 0;
-    while (x < frm.w) : (x += 1) {
-        const c = frm.cell(x, y) catch return false;
-        if (c.cp == needle) return true;
-    }
-    return false;
 }
 
 test "panels validate utf8 model and event fields" {
@@ -1077,10 +1081,12 @@ test "panels footer shows cost and sub" {
     var frm = try frame.Frame.init(std.testing.allocator, 80, 2);
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
-
-    // Should have "$" and "(sub)" in line 2
-    try std.testing.expect(findAsciiSeq(&frm, 1, "$"));
-    try std.testing.expect(findAsciiSeq(&frm, 1, "(sub)"));
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @0:~/proj | @7:(main) | @62:shift+drag: | @74:select\nrow1 @0:↓1.0k | @6:↑200 | @11:$0.030 | @18:(sub) | @24:0.6%/200k | @65:claude-opus-4-6",
+        actual,
+    );
 }
 
 test "panels footer shows turn count" {
@@ -1091,8 +1097,12 @@ test "panels footer shows turn count" {
     var frm = try frame.Frame.init(std.testing.allocator, 40, 2);
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
-
-    try std.testing.expect(findAsciiSeq(&frm, 1, "5 turns"));
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @22:shift+drag: | @34:select\nrow1 @1:5 | @3:turns | @39:m",
+        actual,
+    );
 }
 
 test "panels footer hides input mode and queue count and starts with arrows+counts" {
@@ -1104,19 +1114,21 @@ test "panels footer hides input mode and queue count and starts with arrows+coun
     var frm = try frame.Frame.init(std.testing.allocator, 60, 2);
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
-
-    const first = try frm.cell(0, 1);
-    try std.testing.expectEqual(@as(u21, 0x2193), first.cp); // ↓ at beginning
-    try std.testing.expect(hasCp(&frm, 1, 0x2191)); // ↑ present
-    try std.testing.expect(findAsciiSeq(&frm, 1, "12"));
-    try std.testing.expect(findAsciiSeq(&frm, 1, "3"));
-    try std.testing.expect(!findAsciiSeq(&frm, 1, "queue"));
-    try std.testing.expect(!findAsciiSeq(&frm, 1, "q3"));
+    const first = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
+    defer std.testing.allocator.free(first);
+    try expectSnapText(@src(),
+        "row0 @42:shift+drag: | @54:select\nrow1 @0:↓12 | @4:↑3 | @7:$0.000 | @59:m",
+        first,
+    );
 
     ps.setInputStatus(.steering, 0);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
-    try std.testing.expect(!findAsciiSeq(&frm, 1, "steering"));
-    try std.testing.expect(!findAsciiSeq(&frm, 1, "q0"));
+    const second = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
+    defer std.testing.allocator.free(second);
+    try expectSnapText(@src(),
+        "row0 @42:shift+drag: | @54:select\nrow1 @0:↓12 | @4:↑3 | @7:$0.000 | @59:m",
+        second,
+    );
 }
 
 test "panels footer shows background job counts" {
@@ -1127,8 +1139,12 @@ test "panels footer shows background job counts" {
     var frm = try frame.Frame.init(std.testing.allocator, 50, 2);
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
-
-    try std.testing.expect(findAsciiSeq(&frm, 1, "bg L3 R1 D2"));
+    const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "row0 @32:shift+drag: | @44:select\nrow1 @1:bg | @4:L3 | @7:R1 | @10:D2 | @13:⠋ | @49:m",
+        actual,
+    );
 }
 
 test "panels footer animates background spinner while running" {
@@ -1140,9 +1156,19 @@ test "panels footer animates background spinner while running" {
     defer frm.deinit(std.testing.allocator);
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
     const first = firstSpinnerCp(&frm, 1) orelse return error.TestUnexpectedResult;
+    const before = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
+    defer std.testing.allocator.free(before);
 
     ps.tickBgSpinner();
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
     const second = firstSpinnerCp(&frm, 1) orelse return error.TestUnexpectedResult;
+    const after = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
+    defer std.testing.allocator.free(after);
+    const actual = try std.fmt.allocPrint(std.testing.allocator, "before {s}\nafter {s}", .{ before, after });
+    defer std.testing.allocator.free(actual);
+    try expectSnapText(@src(),
+        "before row0 @32:shift+drag: | @44:select\nrow1 @1:bg | @4:L2 | @7:R1 | @10:D1 | @13:⠋ | @49:m\nafter row0 @32:shift+drag: | @44:select\nrow1 @1:bg | @4:L2 | @7:R1 | @10:D1 | @13:⠙ | @49:m",
+        actual,
+    );
     try std.testing.expect(first != second);
 }
