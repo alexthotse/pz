@@ -392,16 +392,112 @@ pub fn appendFileOpsFooter(
     return try std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ summary, footer.? });
 }
 
+const summary_conv_open = "<conversation>\n";
+const summary_conv_close = "\n</conversation>";
+const summary_chunk_sep = "\n\n";
+
 const SummaryCall = struct {
     req: providers.Req,
     msgs: []providers.Msg,
     prompt: []u8,
+    meta: prov_contract.SummaryMeta,
 };
 
 fn freeSummaryCall(alloc: std.mem.Allocator, call: SummaryCall) void {
     alloc.free(call.prompt);
     alloc.free(call.msgs[0].parts.ptr[0..3]);
     alloc.free(call.msgs);
+}
+
+fn satAddU64(a: u64, b: usize) u64 {
+    return std.math.add(u64, a, @as(u64, @intCast(b))) catch std.math.maxInt(u64);
+}
+
+fn satAddU32(a: u32, b: usize) u32 {
+    const add: u32 = if (b > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(b);
+    return std.math.add(u32, a, add) catch std.math.maxInt(u32);
+}
+
+fn pushTextMeta(meta: *prov_contract.SummaryMeta, text: []const u8) void {
+    meta.input_bytes = satAddU64(meta.input_bytes, text.len);
+    // Exact provider tokenizers vary; byte count is a deterministic upper bound.
+    meta.input_tokens = satAddU32(meta.input_tokens, text.len);
+}
+
+fn clampCount(n: usize) u32 {
+    return if (n > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(n);
+}
+
+fn summaryInputMeta(events_json: []const []const u8, file_ops: ?[]const u8, budget: prov_contract.SummaryBudget) prov_contract.SummaryMeta {
+    var meta = prov_contract.SummaryMeta{
+        .max_bytes = budget.max_bytes,
+        .max_input_tokens = budget.max_input_tokens,
+        .kept_events = clampCount(events_json.len),
+        .dropped_events = 0,
+    };
+
+    pushTextMeta(&meta, prov_contract.prompt_guard);
+    pushTextMeta(&meta, prov_contract.summary_system_prompt);
+    pushTextMeta(&meta, summary_conv_open);
+    for (events_json, 0..) |ev, i| {
+        if (i != 0) pushTextMeta(&meta, summary_chunk_sep);
+        pushTextMeta(&meta, ev);
+    }
+    pushTextMeta(&meta, summary_conv_close);
+    if (file_ops) |footer| {
+        pushTextMeta(&meta, summary_chunk_sep);
+        pushTextMeta(&meta, footer);
+    }
+    pushTextMeta(&meta, summary_chunk_sep);
+    pushTextMeta(&meta, prov_contract.summary_prompt);
+    return meta;
+}
+
+fn metaWithinBudget(meta: prov_contract.SummaryMeta) bool {
+    return meta.input_bytes <= meta.max_bytes and meta.input_tokens <= meta.max_input_tokens;
+}
+
+fn fitSummaryReq(req: providers.SummaryReq) providers.SummaryReq {
+    var out = req;
+    const full = summaryInputMeta(req.events_json, req.file_ops, req.budget);
+    if (metaWithinBudget(full)) {
+        out.meta = full;
+        return out;
+    }
+
+    var keep_start = req.events_json.len;
+    var keep_len: usize = 0;
+    while (keep_start > 0) {
+        const next_start = keep_start - 1;
+        const meta = summaryInputMeta(req.events_json[next_start..], req.file_ops, req.budget);
+        if (metaWithinBudget(meta)) {
+            keep_start = next_start;
+            keep_len = req.events_json.len - next_start;
+            break;
+        }
+        keep_start = next_start;
+    }
+
+    if (keep_len == 0) {
+        out.events_json = req.events_json[req.events_json.len..];
+        out.meta = prov_contract.SummaryMeta{
+            .outcome = .over_budget,
+            .input_bytes = full.input_bytes,
+            .input_tokens = full.input_tokens,
+            .max_bytes = req.budget.max_bytes,
+            .max_input_tokens = req.budget.max_input_tokens,
+            .kept_events = 0,
+            .dropped_events = clampCount(req.events_json.len),
+        };
+        return out;
+    }
+
+    out.events_json = req.events_json[keep_start..];
+    out.meta = summaryInputMeta(out.events_json, req.file_ops, req.budget);
+    out.meta.outcome = .scaled;
+    out.meta.kept_events = clampCount(out.events_json.len);
+    out.meta.dropped_events = clampCount(req.events_json.len - out.events_json.len);
+    return out;
 }
 
 fn buildSummaryPromptAlloc(
@@ -411,17 +507,17 @@ fn buildSummaryPromptAlloc(
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
 
-    try out.appendSlice(alloc, "<conversation>\n");
+    try out.appendSlice(alloc, summary_conv_open);
     for (req.events_json, 0..) |ev, i| {
-        if (i != 0) try out.appendSlice(alloc, "\n\n");
+        if (i != 0) try out.appendSlice(alloc, summary_chunk_sep);
         try out.appendSlice(alloc, ev);
     }
-    try out.appendSlice(alloc, "\n</conversation>");
+    try out.appendSlice(alloc, summary_conv_close);
     if (req.file_ops) |footer| {
-        try out.appendSlice(alloc, "\n\n");
+        try out.appendSlice(alloc, summary_chunk_sep);
         try out.appendSlice(alloc, footer);
     }
-    try out.appendSlice(alloc, "\n\n");
+    try out.appendSlice(alloc, summary_chunk_sep);
     try out.appendSlice(alloc, prov_contract.summary_prompt);
     return try out.toOwnedSlice(alloc);
 }
@@ -431,7 +527,10 @@ fn buildSummaryCall(
     model: []const u8,
     req: providers.SummaryReq,
 ) !SummaryCall {
-    const prompt = try buildSummaryPromptAlloc(alloc, req);
+    const fit_req = fitSummaryReq(req);
+    if (fit_req.meta.outcome == .over_budget) return error.SummaryInputOverBudget;
+
+    const prompt = try buildSummaryPromptAlloc(alloc, fit_req);
     errdefer alloc.free(prompt);
 
     const msgs = try alloc.alloc(providers.Msg, 2);
@@ -451,12 +550,13 @@ fn buildSummaryCall(
             .msgs = msgs,
             .tools = &.{},
             .opts = .{
-                .max_out = req.max_tokens,
+                .max_out = fit_req.max_tokens,
                 .thinking = .off,
             },
         },
         .msgs = msgs,
         .prompt = prompt,
+        .meta = fit_req.meta,
     };
 }
 
@@ -483,19 +583,28 @@ pub fn generateSummaryWithProvider(
     provider: providers.Provider,
     model: []const u8,
     events: []const schema.Event,
-) !?[]u8 {
+    budget: ?prov_contract.SummaryBudget,
+) !?providers.SummaryResult {
     const generated = (try generateSummary(alloc, events)) orelse return null;
     defer freeGeneratedSummary(alloc, generated);
 
-    const call = try buildSummaryCall(alloc, model, generated.req);
+    var req = generated.req;
+    if (budget) |cfg| req.budget = cfg;
+
+    const call = try buildSummaryCall(alloc, model, req);
     defer freeSummaryCall(alloc, call);
 
-    const text = collectSummaryText(alloc, provider, call.req) catch return null;
+    const text = try collectSummaryText(alloc, provider, call.req);
     defer alloc.free(text);
 
     const trimmed = std.mem.trim(u8, text, " \n\t");
-    if (trimmed.len == 0) return null;
-    return try appendFileOpsFooter(alloc, trimmed, events);
+    if (trimmed.len == 0) return error.SummaryFailed;
+
+    const summary = try appendFileOpsFooter(alloc, trimmed, events);
+    return .{
+        .summary = summary,
+        .meta = call.meta,
+    };
 }
 
 test "compaction rewrites stream and preserves semantic events" {
@@ -1194,7 +1303,7 @@ test "generateSummary skips noop events" {
     try std.testing.expect((try generateSummary(alloc, &events)) == null);
 }
 
-test "generateSummaryWithProvider enforces thinking off and appends file footer" {
+test "generateSummaryWithProvider enforces thinking off and returns summary metadata" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
@@ -1247,11 +1356,25 @@ test "generateSummaryWithProvider enforces thinking off and appends file footer"
         } } },
     };
     var provider = TestProvider{};
-    const got = (try generateSummaryWithProvider(std.testing.allocator, provider.asProvider(), "m", &events)) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(got);
+    const got = (try generateSummaryWithProvider(std.testing.allocator, provider.asProvider(), "m", &events, null)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(got.summary);
+    const meta_snap = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "outcome={s} input={d}/{d} limit={d}/{d} kept={d} dropped={d}",
+        .{
+            @tagName(got.meta.outcome),
+            got.meta.input_bytes,
+            got.meta.input_tokens,
+            got.meta.max_bytes,
+            got.meta.max_input_tokens,
+            got.meta.kept_events,
+            got.meta.dropped_events,
+        },
+    );
+    defer std.testing.allocator.free(meta_snap);
 
     try oh.snap(@src(),
-        \\[]u8
+        \\[]const u8
         \\  "## Goal
         \\Ship it.
         \\
@@ -1259,10 +1382,109 @@ test "generateSummaryWithProvider enforces thinking off and appends file footer"
         \\/src/foo.zig
         \\</modified-files>
         \\"
-    ).expectEqual(got);
+    ).expectEqual(got.summary);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "outcome=fit input=1315/1315 limit=65536/65536 kept=2 dropped=0"
+    ).expectEqual(meta_snap);
 }
 
-test "generateSummaryWithProvider returns null on provider error" {
+test "buildSummaryCall scales oversized compaction input deterministically" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const alloc = std.testing.allocator;
+
+    const events = [_]schema.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "old context that should be dropped first" } } },
+        .{ .at_ms = 2, .data = .{ .text = .{ .text = "middle context that should also be dropped" } } },
+        .{ .at_ms = 3, .data = .{ .text = .{ .text = "latest context that must survive compaction" } } },
+    };
+
+    const generated = (try generateSummary(alloc, &events)) orelse return error.TestUnexpectedResult;
+    defer freeGeneratedSummary(alloc, generated);
+
+    const one_ev = summaryInputMeta(generated.req.events_json[2..], generated.req.file_ops, .{
+        .max_bytes = std.math.maxInt(u64),
+        .max_input_tokens = std.math.maxInt(u32),
+    });
+
+    var req = generated.req;
+    req.budget = .{
+        .max_bytes = one_ev.input_bytes,
+        .max_input_tokens = one_ev.input_tokens,
+    };
+
+    const call_a = try buildSummaryCall(alloc, "m", req);
+    defer freeSummaryCall(alloc, call_a);
+    const call_b = try buildSummaryCall(alloc, "m", req);
+    defer freeSummaryCall(alloc, call_b);
+
+    try std.testing.expectEqualStrings(call_a.prompt, call_b.prompt);
+
+    const prompt_snap = try std.fmt.allocPrint(
+        alloc,
+        "old={any} middle={any} latest={any}",
+        .{
+            std.mem.indexOf(u8, call_a.prompt, "old context") != null,
+            std.mem.indexOf(u8, call_a.prompt, "middle context") != null,
+            std.mem.indexOf(u8, call_a.prompt, "latest context") != null,
+        },
+    );
+    defer alloc.free(prompt_snap);
+    const meta_snap = try std.fmt.allocPrint(
+        alloc,
+        "outcome={s} input={d}/{d} limit={d}/{d} kept={d} dropped={d}",
+        .{
+            @tagName(call_a.meta.outcome),
+            call_a.meta.input_bytes,
+            call_a.meta.input_tokens,
+            call_a.meta.max_bytes,
+            call_a.meta.max_input_tokens,
+            call_a.meta.kept_events,
+            call_a.meta.dropped_events,
+        },
+    );
+    defer alloc.free(meta_snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "outcome=scaled input=1065/1065 limit=1065/1065 kept=1 dropped=2"
+    ).expectEqual(meta_snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "old=false middle=false latest=true"
+    ).expectEqual(prompt_snap);
+}
+
+test "generateSummaryWithProvider stops before provider when input cannot fit budget" {
+    const alloc = std.testing.allocator;
+
+    const NeverCalledProvider = struct {
+        fn asProvider(self: *@This()) providers.Provider {
+            return providers.Provider.from(@This(), self, start);
+        }
+
+        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+            _ = self;
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    const events = [_]schema.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "single event that cannot fit" } } },
+    };
+
+    var provider = NeverCalledProvider{};
+    try std.testing.expectError(error.SummaryInputOverBudget, generateSummaryWithProvider(
+        alloc,
+        provider.asProvider(),
+        "m",
+        &events,
+        .{ .max_bytes = 32, .max_input_tokens = 32 },
+    ));
+}
+
+test "generateSummaryWithProvider returns provider error" {
     const FailingProvider = struct {
         fn asProvider(self: *@This()) providers.Provider {
             return providers.Provider.from(@This(), self, start);
@@ -1278,5 +1500,11 @@ test "generateSummaryWithProvider returns null on provider error" {
         .{ .at_ms = 1, .data = .{ .text = .{ .text = "hello" } } },
     };
     var provider = FailingProvider{};
-    try std.testing.expect((try generateSummaryWithProvider(std.testing.allocator, provider.asProvider(), "m", &events)) == null);
+    try std.testing.expectError(error.TransportFatal, generateSummaryWithProvider(
+        std.testing.allocator,
+        provider.asProvider(),
+        "m",
+        &events,
+        null,
+    ));
 }

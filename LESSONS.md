@@ -12,12 +12,17 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 - When a worker stalls or the wrapper goes silent, inspect the workspace state directly and reclaim the slot fast instead of waiting on agent status alone.
 - For invalid UTF-8 at provider/session boundaries, use one shared lossy helper plus short-lived arena-backed `sanitizeMaybeAlloc` during JSON serialization; it preserves the existing JSON shape for valid text and only allocates on the bad-byte path.
 - For property-built session events, copy generated `Id`/`String`-like data into explicit local storage before constructing slice-backed event structs. Method-call slices taken straight from generated values can point at short-lived temporaries and corrupt roundtrip/dupe properties.
+- For compaction budget coverage, snapshot a compact formatted metadata string (`outcome/input/limit/kept/dropped`) instead of relying on `ohsnap`'s raw enum-struct layout; the string stays stable while still proving the important fields.
+- For deterministic compaction fitting, compute one shared metadata pass over the full provider input text (guard, system prompt, conversation wrapper, footer, summary prompt) and reuse that in both budget checks and tests so suffix retention stays exact.
 
 ### Do More
 - When a new property introduces helper generators, add one shrink-specific property in `core/pbt.zig` so generator semantics fail locally before they get buried under larger suite noise.
 
 ### Do Not Do
 - Do not trust filtered `zig build test -- --test-filter ...` output as isolated coverage in this repo; the build step still runs unrelated PTY/e2e work, so note flaky external failures separately and keep one clean full-suite run for final verification.
+
+### Did Not Work
+- Trying to use standalone `zig test --test-filter ...` against the build-generated suite roots returned zero matching tests for imported module cases here, so end-to-end confidence still had to come from the full `zig build test` suite.
 ## Session Notes (2026-03-11)
 
 ### Worked Well

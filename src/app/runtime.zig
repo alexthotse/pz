@@ -9,6 +9,7 @@ const version_check = @import("version.zig");
 const config = @import("config.zig");
 const core = @import("../core/mod.zig");
 const core_skill = @import("../core/skill.zig");
+const prov_contract = @import("../core/providers/contract.zig");
 const print_fmt = @import("../modes/print/format.zig");
 const print_err = @import("../modes/print/errors.zig");
 const tui_harness = @import("../modes/tui/harness.zig");
@@ -3121,9 +3122,11 @@ fn runTui(
 
                     if (live_turn.takeCompletion()) |done| {
                         defer if (done.err_name) |name| alloc.free(name);
+                        var compact_out: AutoCompactOutcome = .skipped;
 
                         if (shouldRetryOverflow(alloc, &live_turn, model, retried_overflow)) {
-                            if (try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, true)) {
+                            compact_out = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, true);
+                            if (compact_out == .compacted) {
                                 const retry_req = (try live_turn.cloneReq(alloc)) orelse return error.TestUnexpectedResult;
                                 defer {
                                     var req = retry_req;
@@ -3161,9 +3164,11 @@ fn runTui(
 
                         retried_overflow = false;
                         if (done.err_name) |name| {
-                            const msg = try std.fmt.allocPrint(alloc, "[turn failed: {s}]", .{name});
-                            defer alloc.free(msg);
-                            try ui.tr.infoText(msg);
+                            if (compact_out != .stopped) {
+                                const msg = try std.fmt.allocPrint(alloc, "[turn failed: {s}]", .{name});
+                                defer alloc.free(msg);
+                                try ui.tr.infoText(msg);
+                            }
                         } else if (auto_compact_on) {
                             _ = try autoCompact(alloc, &ui, out, sid.*, session_dir_path, no_session, false);
                         }
@@ -6245,13 +6250,25 @@ fn shouldRetryOverflowState(
     return false;
 }
 
+const CompactRun = union(enum) {
+    compacted,
+    stopped: prov_contract.SummaryMeta,
+};
+
+const AutoCompactOutcome = enum {
+    skipped,
+    compacted,
+    stopped,
+    failed,
+};
+
 const CompactFn = *const fn (
     ctx: ?*anyopaque,
     alloc: std.mem.Allocator,
     dir: std.fs.Dir,
     sid: []const u8,
     now: i64,
-) anyerror!void;
+) anyerror!CompactRun;
 
 fn compactNow(
     _: ?*anyopaque,
@@ -6259,8 +6276,24 @@ fn compactNow(
     dir: std.fs.Dir,
     sid: []const u8,
     now: i64,
-) !void {
+) !CompactRun {
     _ = try core.session.compactSession(alloc, dir, sid, now);
+    return .compacted;
+}
+
+fn formatCompactStopAlloc(alloc: std.mem.Allocator, meta: prov_contract.SummaryMeta) ![]u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "[auto-compact stopped: summary input over budget bytes={d}/{d} tokens={d}/{d} kept={d} dropped={d}]",
+        .{
+            meta.input_bytes,
+            meta.max_bytes,
+            meta.input_tokens,
+            meta.max_input_tokens,
+            meta.kept_events,
+            meta.dropped_events,
+        },
+    );
 }
 
 fn autoCompact(
@@ -6271,7 +6304,7 @@ fn autoCompact(
     session_dir_path: ?[]const u8,
     no_session: bool,
     force: bool,
-) !bool {
+) !AutoCompactOutcome {
     return autoCompactWith(alloc, ui, out, sid, session_dir_path, no_session, force, null, compactNow);
 }
 
@@ -6285,13 +6318,13 @@ fn autoCompactWith(
     force: bool,
     compact_ctx: ?*anyopaque,
     compact_fn: CompactFn,
-) !bool {
-    if (no_session or session_dir_path == null) return false;
+) !AutoCompactOutcome {
+    if (no_session or session_dir_path == null) return .skipped;
     if (!force) {
-        if (ui.pn.ctx_limit == 0) return false;
-        if (!ui.pn.has_usage) return false;
+        if (ui.pn.ctx_limit == 0) return .skipped;
+        if (!ui.pn.has_usage) return .skipped;
         const pct = ui.pn.cum_tok *| 100 / ui.pn.ctx_limit;
-        if (pct < compact_threshold_pct) return false;
+        if (pct < compact_threshold_pct) return .skipped;
     }
 
     try ui.tr.infoText("[compacting...]");
@@ -6300,17 +6333,27 @@ fn autoCompactWith(
     var dir = try std.fs.cwd().openDir(session_dir_path.?, .{});
     defer dir.close();
     const now = std.time.milliTimestamp();
-    compact_fn(compact_ctx, alloc, dir, sid, now) catch |err| {
+    const res = compact_fn(compact_ctx, alloc, dir, sid, now) catch |err| {
         const detail = try report.inlineMsg(alloc, err);
         defer alloc.free(detail);
         const msg = try std.fmt.allocPrint(alloc, "[auto-compact failed: {s}]", .{detail});
         defer alloc.free(msg);
         try ui.tr.infoText(msg);
-        return false;
+        return .failed;
     };
-    ui.pn.noteCompaction();
-    try ui.tr.infoText("[session compacted]");
-    return true;
+    switch (res) {
+        .compacted => {
+            ui.pn.noteCompaction();
+            try ui.tr.infoText("[session compacted]");
+            return .compacted;
+        },
+        .stopped => |meta| {
+            const msg = try formatCompactStopAlloc(alloc, meta);
+            defer alloc.free(msg);
+            try ui.tr.infoText(msg);
+            return .stopped;
+        },
+    }
 }
 
 fn syncInputFooter(ui: *tui_harness.Ui, mode: tui_panels.InputMode, queued_len: usize) void {
@@ -13087,6 +13130,8 @@ test "shouldRetryOverflowState property: max_out forces retry in same model" {
 }
 
 test "autoCompact draws compacting notice before compactor runs" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -13108,12 +13153,12 @@ test "autoCompact draws compacting notice before compactor runs" {
         ui: *tui_harness.Ui,
         saw_notice: bool = false,
 
-        fn run(raw: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !void {
+        fn run(raw: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !CompactRun {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             for (self.ui.tr.blocks.items) |blk| {
                 if (std.mem.eql(u8, blk.buf.items, "[compacting...]")) {
                     self.saw_notice = true;
-                    return;
+                    return .compacted;
                 }
             }
             return error.TestUnexpectedResult;
@@ -13121,7 +13166,7 @@ test "autoCompact draws compacting notice before compactor runs" {
     };
 
     var ctx = Ctx{ .ui = &ui };
-    try std.testing.expect(try autoCompactWith(
+    try std.testing.expectEqual(AutoCompactOutcome.compacted, try autoCompactWith(
         alloc,
         &ui,
         out_fbs.writer().any(),
@@ -13133,5 +13178,83 @@ test "autoCompact draws compacting notice before compactor runs" {
         Ctx.run,
     ));
     try std.testing.expect(ctx.saw_notice);
+
+    var snap: std.ArrayListUnmanaged(u8) = .empty;
+    defer snap.deinit(alloc);
+    for (ui.tr.blocks.items, 0..) |blk, i| {
+        if (i != 0) try snap.append(alloc, '\n');
+        try snap.appendSlice(alloc, blk.buf.items);
+    }
+    const snap_txt = try snap.toOwnedSlice(alloc);
+    defer alloc.free(snap_txt);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[compacting...]
+        \\[session compacted]"
+    ).expectEqual(snap_txt);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "[compacting...]") != null);
+}
+
+test "autoCompact reports summary budget stop metadata" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.pn.ctx_limit = 100;
+    ui.pn.cum_tok = 90;
+    ui.pn.has_usage = true;
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const Ctx = struct {
+        fn run(_: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !CompactRun {
+            return .{ .stopped = .{
+                .outcome = .over_budget,
+                .input_bytes = 90210,
+                .input_tokens = 8192,
+                .max_bytes = 65536,
+                .max_input_tokens = 4096,
+                .kept_events = 3,
+                .dropped_events = 17,
+            } };
+        }
+    };
+
+    try std.testing.expectEqual(AutoCompactOutcome.stopped, try autoCompactWith(
+        alloc,
+        &ui,
+        out_fbs.writer().any(),
+        "sess-1",
+        sess_abs,
+        false,
+        false,
+        null,
+        Ctx.run,
+    ));
+
+    var snap: std.ArrayListUnmanaged(u8) = .empty;
+    defer snap.deinit(alloc);
+    for (ui.tr.blocks.items, 0..) |blk, i| {
+        if (i != 0) try snap.append(alloc, '\n');
+        try snap.appendSlice(alloc, blk.buf.items);
+    }
+    const snap_txt = try snap.toOwnedSlice(alloc);
+    defer alloc.free(snap_txt);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "[compacting...]
+        \\[auto-compact stopped: summary input over budget bytes=90210/65536 tokens=8192/4096 kept=3 dropped=17]"
+    ).expectEqual(snap_txt);
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "[compacting...]") != null);
 }
