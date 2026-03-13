@@ -216,24 +216,39 @@ fn releaseUriFor(port: u16) std.Uri {
 }
 
 test "parseVersion basic" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const v = parseVersion("0.1.0").?;
-    try testing.expectEqual(@as(u16, 0), v.major);
-    try testing.expectEqual(@as(u16, 1), v.minor);
-    try testing.expectEqual(@as(u16, 0), v.patch);
+    try oh.snap(@src(),
+        \\app.version.Ver
+        \\  .major: u16 = 0
+        \\  .minor: u16 = 1
+        \\  .patch: u16 = 0
+    ).expectEqual(v);
 }
 
 test "parseVersion strips v prefix" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const v = parseVersion("v1.2.3").?;
-    try testing.expectEqual(@as(u16, 1), v.major);
-    try testing.expectEqual(@as(u16, 2), v.minor);
-    try testing.expectEqual(@as(u16, 3), v.patch);
+    try oh.snap(@src(),
+        \\app.version.Ver
+        \\  .major: u16 = 1
+        \\  .minor: u16 = 2
+        \\  .patch: u16 = 3
+    ).expectEqual(v);
 }
 
 test "parseVersion strips suffix" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const v = parseVersion("0.1.0-rc1").?;
-    try testing.expectEqual(@as(u16, 0), v.major);
-    try testing.expectEqual(@as(u16, 1), v.minor);
-    try testing.expectEqual(@as(u16, 0), v.patch);
+    try oh.snap(@src(),
+        \\app.version.Ver
+        \\  .major: u16 = 0
+        \\  .minor: u16 = 1
+        \\  .patch: u16 = 0
+    ).expectEqual(v);
 }
 
 test "parseVersion bad input" {

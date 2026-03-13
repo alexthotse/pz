@@ -246,77 +246,103 @@ fn unwrapShC(alloc: Allocator, input: []const u8) Error![]const u8 {
 const testing = std.testing;
 const talloc = testing.allocator;
 
-fn expectToks(input: []const u8, expected: []const struct { sep: Sep, cmd: []const u8 }) !void {
+fn appendTokSnap(out: *std.ArrayList(u8), tok: Token) !void {
+    try out.writer(talloc).print("{s}|{s}\n", .{ @tagName(tok.sep), tok.cmd });
+}
+
+fn renderToks(alloc: std.mem.Allocator, toks: []const Token) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    for (toks) |tok| try appendTokSnap(&out, tok);
+    return out.toOwnedSlice(alloc);
+}
+
+fn expectToks(input: []const u8, comptime expected: []const u8) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const toks = try tokenize(talloc, input);
     defer free(talloc, toks);
-
-    try testing.expectEqual(expected.len, toks.len);
-    for (expected, toks) |exp, got| {
-        try testing.expectEqual(exp.sep, got.sep);
-        try testing.expectEqualStrings(exp.cmd, got.cmd);
-    }
+    const snap = try renderToks(talloc, toks);
+    defer talloc.free(snap);
+    try oh.snap(@src(), expected).expectEqual(snap);
 }
 
 test "simple command" {
-    try expectToks("ls -la", &.{
-        .{ .sep = .start, .cmd = "ls -la" },
-    });
+    try expectToks("ls -la",
+        \\[]u8
+        \\  "start|ls -la
+        \\"
+    );
 }
 
 test "chained and" {
-    try expectToks("cd /tmp && ls", &.{
-        .{ .sep = .start, .cmd = "cd /tmp" },
-        .{ .sep = .@"and", .cmd = "ls" },
-    });
+    try expectToks("cd /tmp && ls",
+        \\[]u8
+        \\  "start|cd /tmp
+        \\and|ls
+        \\"
+    );
 }
 
 test "piped" {
-    try expectToks("cat foo | grep bar", &.{
-        .{ .sep = .start, .cmd = "cat foo" },
-        .{ .sep = .pipe, .cmd = "grep bar" },
-    });
+    try expectToks("cat foo | grep bar",
+        \\[]u8
+        \\  "start|cat foo
+        \\pipe|grep bar
+        \\"
+    );
 }
 
 test "quoted preserves separators" {
     try expectToks(
         \\echo "hello && world"
-    , &.{
-        .{ .sep = .start, .cmd = "echo hello && world" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo hello && world
+        \\"
+    );
 }
 
 test "single quoted preserves separators" {
     try expectToks(
         \\echo 'hello || world'
-    , &.{
-        .{ .sep = .start, .cmd = "echo hello || world" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo hello || world
+        \\"
+    );
 }
 
 test "nested bash -c" {
     try expectToks(
         \\bash -c "echo hi && echo bye"
-    , &.{
-        .{ .sep = .start, .cmd = "echo hi && echo bye" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo hi && echo bye
+        \\"
+    );
 }
 
 test "nested sh -c single quotes" {
     try expectToks(
         \\sh -c 'echo hi; echo bye'
-    , &.{
-        .{ .sep = .start, .cmd = "echo hi; echo bye" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo hi; echo bye
+        \\"
+    );
 }
 
 test "mixed separators" {
-    try expectToks("a; b && c || d | e", &.{
-        .{ .sep = .start, .cmd = "a" },
-        .{ .sep = .seq, .cmd = "b" },
-        .{ .sep = .@"and", .cmd = "c" },
-        .{ .sep = .@"or", .cmd = "d" },
-        .{ .sep = .pipe, .cmd = "e" },
-    });
+    try expectToks("a; b && c || d | e",
+        \\[]u8
+        \\  "start|a
+        \\seq|b
+        \\and|c
+        \\or|d
+        \\pipe|e
+        \\"
+    );
 }
 
 test "empty input" {
@@ -325,31 +351,39 @@ test "empty input" {
 }
 
 test "trailing separator" {
-    try expectToks("ls;", &.{
-        .{ .sep = .start, .cmd = "ls" },
-    });
+    try expectToks("ls;",
+        \\[]u8
+        \\  "start|ls
+        \\"
+    );
 }
 
 test "consecutive separators" {
-    try expectToks("a;; b", &.{
-        .{ .sep = .start, .cmd = "a" },
-        .{ .sep = .seq, .cmd = "b" },
-    });
+    try expectToks("a;; b",
+        \\[]u8
+        \\  "start|a
+        \\seq|b
+        \\"
+    );
 }
 
 test "backslash escape" {
     try expectToks(
         \\echo hello\;world
-    , &.{
-        .{ .sep = .start, .cmd = "echo hello;world" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo hello;world
+        \\"
+    );
 }
 
 test "backtick" {
-    try expectToks("echo `date` && ls", &.{
-        .{ .sep = .start, .cmd = "echo date" },
-        .{ .sep = .@"and", .cmd = "ls" },
-    });
+    try expectToks("echo `date` && ls",
+        \\[]u8
+        \\  "start|echo date
+        \\and|ls
+        \\"
+    );
 }
 
 test "unterminated double quote" {
@@ -363,27 +397,33 @@ test "unterminated single quote" {
 test "double quote backslash escape" {
     try expectToks(
         \\echo "say \"hi\""
-    , &.{
-        .{ .sep = .start, .cmd = "echo say \"hi\"" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo say "hi"
+        \\"
+    );
 }
 
 test "multiple pipes" {
-    try expectToks("cat f | grep x | wc -l", &.{
-        .{ .sep = .start, .cmd = "cat f" },
-        .{ .sep = .pipe, .cmd = "grep x" },
-        .{ .sep = .pipe, .cmd = "wc -l" },
-    });
+    try expectToks("cat f | grep x | wc -l",
+        \\[]u8
+        \\  "start|cat f
+        \\pipe|grep x
+        \\pipe|wc -l
+        \\"
+    );
 }
 
 test "complex mixed" {
-    try expectToks("cd /tmp && cat f | grep x; echo done || fail", &.{
-        .{ .sep = .start, .cmd = "cd /tmp" },
-        .{ .sep = .@"and", .cmd = "cat f" },
-        .{ .sep = .pipe, .cmd = "grep x" },
-        .{ .sep = .seq, .cmd = "echo done" },
-        .{ .sep = .@"or", .cmd = "fail" },
-    });
+    try expectToks("cd /tmp && cat f | grep x; echo done || fail",
+        \\[]u8
+        \\  "start|cd /tmp
+        \\and|cat f
+        \\pipe|grep x
+        \\seq|echo done
+        \\or|fail
+        \\"
+    );
 }
 
 test "sep str roundtrip" {
@@ -395,10 +435,12 @@ test "sep str roundtrip" {
 }
 
 test "whitespace only between seps" {
-    try expectToks("a &&   b", &.{
-        .{ .sep = .start, .cmd = "a" },
-        .{ .sep = .@"and", .cmd = "b" },
-    });
+    try expectToks("a &&   b",
+        \\[]u8
+        \\  "start|a
+        \\and|b
+        \\"
+    );
 }
 
 test "ohsnap token snapshot" {
@@ -580,10 +622,12 @@ test "property: token count <= separator count + 1" {
 test "deeply nested quotes" {
     try expectToks(
         \\echo "it's \"fine\"" && ls
-    , &.{
-        .{ .sep = .start, .cmd = "echo it's \"fine\"" },
-        .{ .sep = .@"and", .cmd = "ls" },
-    });
+    ,
+        \\[]u8
+        \\  "start|echo it's "fine"
+        \\and|ls
+        \\"
+    );
 }
 
 test "only separators" {

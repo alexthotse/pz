@@ -381,6 +381,8 @@ pub fn formatFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?[
 }
 
 test "compaction rewrites stream and preserves semantic events" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -414,10 +416,16 @@ test "compaction rewrites stream and preserves semantic events" {
     defer freeJsonSlice(std.testing.allocator, before);
 
     const ck = try run(std.testing.allocator, tmp.dir, "s1", 777);
-    try std.testing.expectEqual(@as(u64, 5), ck.in_lines);
-    try std.testing.expectEqual(@as(u64, 3), ck.out_lines);
-    try std.testing.expectEqual(@as(i64, 777), ck.compacted_at_ms);
     try std.testing.expect(ck.in_bytes > ck.out_bytes);
+    try oh.snap(@src(),
+        \\core.session.compact.Checkpoint
+        \\  .version: u16 = 1
+        \\  .in_lines: u64 = 5
+        \\  .out_lines: u64 = 3
+        \\  .in_bytes: u64 = 252
+        \\  .out_bytes: u64 = 166
+        \\  .compacted_at_ms: i64 = 777
+    ).expectEqual(ck);
 
     const after = try collectSemanticJson(std.testing.allocator, tmp.dir, "s1");
     defer freeJsonSlice(std.testing.allocator, after);
@@ -427,8 +435,6 @@ test "compaction rewrites stream and preserves semantic events" {
         try std.testing.expectEqualStrings(lhs, rhs);
     }
 
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
     const loaded = (try loadCheckpoint(std.testing.allocator, tmp.dir, "s1")) orelse {
         return error.TestUnexpectedResult;
     };
@@ -732,6 +738,8 @@ test "multi-event roundtrip preserves all event types" {
 }
 
 test "double compact is idempotent" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -754,9 +762,16 @@ test "double compact is idempotent" {
     const after2 = try collectSemanticJson(std.testing.allocator, tmp.dir, "d1");
     defer freeJsonSlice(std.testing.allocator, after2);
 
-    try std.testing.expectEqual(@as(u64, 2), ck2.in_lines);
-    try std.testing.expectEqual(@as(u64, 2), ck2.out_lines);
     try std.testing.expectEqual(ck2.in_bytes, ck2.out_bytes);
+    try oh.snap(@src(),
+        \\core.session.compact.Checkpoint
+        \\  .version: u16 = 1
+        \\  .in_lines: u64 = 2
+        \\  .out_lines: u64 = 2
+        \\  .in_bytes: u64 = 108
+        \\  .out_bytes: u64 = 108
+        \\  .compacted_at_ms: i64 = 200
+    ).expectEqual(ck2);
 
     try std.testing.expectEqual(after1.len, after2.len);
     for (after1, after2) |lhs, rhs| {

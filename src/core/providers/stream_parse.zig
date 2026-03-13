@@ -212,14 +212,29 @@ test "parser normalizes chunked frames and preserves order" {
     defer out.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), out.evs.len);
-    const got = try eventsJson(std.testing.allocator, out.evs);
+    const got = try snapEvs(std.testing.allocator, out.evs);
     defer std.testing.allocator.free(got);
     try oh.snap(@src(),
-        \\[]u8
-        \\  "{\"text\":\"hello\"}"
-        \\  "{\"thinking\":\"plan\"}"
-        \\  "{\"tool_call\":{\"id\":\"id-1\",\"name\":\"read\",\"args\":\"{\\\"path\\\":\\\"a\\\"}\"}}"
-        \\  "{\"stop\":{\"reason\":\"done\"}}"
+        \\[]core.providers.stream_parse.SnapEv
+        \\  [0]: core.providers.stream_parse.SnapEv
+        \\    .text: []const u8
+        \\      "hello"
+        \\  [1]: core.providers.stream_parse.SnapEv
+        \\    .thinking: []const u8
+        \\      "plan"
+        \\  [2]: core.providers.stream_parse.SnapEv
+        \\    .tool_call: core.providers.stream_parse.SnapEv.ToolCall
+        \\      .id: []const u8
+        \\        "id-1"
+        \\      .name: []const u8
+        \\        "read"
+        \\      .args_path: ?[]const u8
+        \\        "a"
+        \\      .args_raw: ?[]const u8
+        \\        null
+        \\  [3]: core.providers.stream_parse.SnapEv
+        \\    .stop: core.providers.contract.StopReason
+        \\      .done
     ).expectEqual(got);
 }
 
@@ -234,14 +249,30 @@ test "parser handles tool_result usage and err frames" {
     defer out.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), out.evs.len);
-    const got = try eventsJson(std.testing.allocator, out.evs);
+    const got = try snapEvs(std.testing.allocator, out.evs);
     defer std.testing.allocator.free(got);
     try oh.snap(@src(),
-        \\[]u8
-        \\  "{\"tool_result\":{\"id\":\"call-7\",\"is_err\":true,\"out\":\"stderr\"}}"
-        \\  "{\"usage\":{\"in_tok\":3,\"out_tok\":5,\"tot_tok\":8}}"
-        \\  "{\"err\":\"oops\"}"
-        \\  "{\"stop\":{\"reason\":\"err\"}}"
+        \\[]core.providers.stream_parse.SnapEv
+        \\  [0]: core.providers.stream_parse.SnapEv
+        \\    .tool_result: core.providers.stream_parse.SnapEv.ToolResult
+        \\      .id: []const u8
+        \\        "call-7"
+        \\      .out: []const u8
+        \\        "stderr"
+        \\      .is_err: bool = true
+        \\  [1]: core.providers.stream_parse.SnapEv
+        \\    .usage: core.providers.contract.Usage
+        \\      .in_tok: u64 = 3
+        \\      .out_tok: u64 = 5
+        \\      .tot_tok: u64 = 8
+        \\      .cache_read: u64 = 0
+        \\      .cache_write: u64 = 0
+        \\  [2]: core.providers.stream_parse.SnapEv
+        \\    .err: []const u8
+        \\      "oops"
+        \\  [3]: core.providers.stream_parse.SnapEv
+        \\    .stop: core.providers.contract.StopReason
+        \\      .err
     ).expectEqual(got);
 }
 
@@ -287,6 +318,61 @@ fn eventsJson(alloc: std.mem.Allocator, evs: []const providers.Ev) ![]u8 {
         try out.appendSlice(alloc, raw);
     }
     return out.toOwnedSlice(alloc);
+}
+
+const SnapEv = union(enum) {
+    const ToolCall = struct {
+        id: []const u8,
+        name: []const u8,
+        args_path: ?[]const u8 = null,
+        args_raw: ?[]const u8 = null,
+    };
+
+    const ToolResult = struct {
+        id: []const u8,
+        out: []const u8,
+        is_err: bool,
+    };
+
+    text: []const u8,
+    thinking: []const u8,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+    usage: providers.Usage,
+    stop: providers.StopReason,
+    err: []const u8,
+};
+
+fn snapEvs(alloc: std.mem.Allocator, evs: []const providers.Ev) ![]SnapEv {
+    var out = std.ArrayList(SnapEv).empty;
+    defer out.deinit(alloc);
+    for (evs) |ev| switch (ev) {
+        .text => |text| try out.append(alloc, .{ .text = text }),
+        .thinking => |text| try out.append(alloc, .{ .thinking = text }),
+        .tool_call => |call| try out.append(alloc, .{ .tool_call = .{
+            .id = call.id,
+            .name = call.name,
+            .args_path = toolCallPath(call.args),
+            .args_raw = if (toolCallPath(call.args) == null) call.args else null,
+        } }),
+        .tool_result => |res| try out.append(alloc, .{ .tool_result = .{
+            .id = res.id,
+            .out = res.out,
+            .is_err = res.is_err,
+        } }),
+        .usage => |usage| try out.append(alloc, .{ .usage = usage }),
+        .stop => |stop| try out.append(alloc, .{ .stop = stop.reason }),
+        .err => |text| try out.append(alloc, .{ .err = text }),
+    };
+    return out.toOwnedSlice(alloc);
+}
+
+fn toolCallPath(raw: []const u8) ?[]const u8 {
+    const key = "\"path\":\"";
+    const start = std.mem.indexOf(u8, raw, key) orelse return null;
+    const val = raw[start + key.len ..];
+    const end = std.mem.indexOfScalar(u8, val, '"') orelse return null;
+    return val[0..end];
 }
 
 test "parser property random chunk boundaries preserve parsed stream" {
