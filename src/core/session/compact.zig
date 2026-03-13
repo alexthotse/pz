@@ -383,6 +383,10 @@ pub fn formatFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?[
 test "compaction rewrites stream and preserves semantic events" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
+    const SessionSnap = struct {
+        before: [][]u8,
+        after: [][]u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -430,10 +434,26 @@ test "compaction rewrites stream and preserves semantic events" {
     const after = try collectSemanticJson(std.testing.allocator, tmp.dir, "s1");
     defer freeJsonSlice(std.testing.allocator, after);
 
-    try std.testing.expectEqual(before.len, after.len);
-    for (before, after) |lhs, rhs| {
-        try std.testing.expectEqualStrings(lhs, rhs);
-    }
+    try oh.snap(@src(),
+        \\core.session.compact.test.compaction rewrites stream and preserves semantic events.SessionSnap
+        \\  .before: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"a"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"text":{"text":"b"}}}"
+        \\    [2]: []u8
+        \\      "{"version":1,"at_ms":5,"data":{"stop":{"reason":"done"}}}"
+        \\  .after: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"a"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"text":{"text":"b"}}}"
+        \\    [2]: []u8
+        \\      "{"version":1,"at_ms":5,"data":{"stop":{"reason":"done"}}}"
+    ).expectEqual(SessionSnap{
+        .before = before,
+        .after = after,
+    });
 
     const loaded = (try loadCheckpoint(std.testing.allocator, tmp.dir, "s1")) orelse {
         return error.TestUnexpectedResult;
@@ -667,6 +687,10 @@ test "formatFileOps sorts read and modified paths" {
 test "multi-event roundtrip preserves all event types" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
+    const SessionSnap = struct {
+        before: [][]u8,
+        after: [][]u8,
+    };
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -709,10 +733,46 @@ test "multi-event roundtrip preserves all event types" {
     const after = try collectSemanticJson(std.testing.allocator, tmp.dir, "m1");
     defer freeJsonSlice(std.testing.allocator, after);
 
-    try std.testing.expectEqual(before.len, after.len);
-    for (before, after) |lhs, rhs| {
-        try std.testing.expectEqualStrings(lhs, rhs);
-    }
+    try oh.snap(@src(),
+        \\core.session.compact.test.multi-event roundtrip preserves all event types.SessionSnap
+        \\  .before: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"hello"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":2,"data":{"text":{"text":"world"}}}"
+        \\    [2]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"thinking":{"text":"hmm"}}}"
+        \\    [3]: []u8
+        \\      "{"version":1,"at_ms":4,"data":{"tool_call":{"id":"c1","name":"bash","args":"{}"}}}"
+        \\    [4]: []u8
+        \\      "{"version":1,"at_ms":5,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}"
+        \\    [5]: []u8
+        \\      "{"version":1,"at_ms":6,"data":{"usage":{"in_tok":10,"out_tok":20,"tot_tok":30,"cache_read":5,"cache_write":2}}}"
+        \\    [6]: []u8
+        \\      "{"version":1,"at_ms":7,"data":{"stop":{"reason":"done"}}}"
+        \\    [7]: []u8
+        \\      "{"version":1,"at_ms":8,"data":{"err":{"text":"oops"}}}"
+        \\  .after: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"hello"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":2,"data":{"text":{"text":"world"}}}"
+        \\    [2]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"thinking":{"text":"hmm"}}}"
+        \\    [3]: []u8
+        \\      "{"version":1,"at_ms":4,"data":{"tool_call":{"id":"c1","name":"bash","args":"{}"}}}"
+        \\    [4]: []u8
+        \\      "{"version":1,"at_ms":5,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}"
+        \\    [5]: []u8
+        \\      "{"version":1,"at_ms":6,"data":{"usage":{"in_tok":10,"out_tok":20,"tot_tok":30,"cache_read":5,"cache_write":2}}}"
+        \\    [6]: []u8
+        \\      "{"version":1,"at_ms":7,"data":{"stop":{"reason":"done"}}}"
+        \\    [7]: []u8
+        \\      "{"version":1,"at_ms":8,"data":{"err":{"text":"oops"}}}"
+    ).expectEqual(SessionSnap{
+        .before = before,
+        .after = after,
+    });
 
     const TagSeq = struct { tags: [8]schema.Event.Tag };
     var tags: [8]schema.Event.Tag = undefined;
@@ -746,6 +806,10 @@ test "multi-event roundtrip preserves all event types" {
 test "double compact is idempotent" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
+    const SessionSnap = struct {
+        after1: [][]u8,
+        after2: [][]u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -779,10 +843,22 @@ test "double compact is idempotent" {
         \\  .compacted_at_ms: i64 = 200
     ).expectEqual(ck2);
 
-    try std.testing.expectEqual(after1.len, after2.len);
-    for (after1, after2) |lhs, rhs| {
-        try std.testing.expectEqualStrings(lhs, rhs);
-    }
+    try oh.snap(@src(),
+        \\core.session.compact.test.double compact is idempotent.SessionSnap
+        \\  .after1: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"x"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"text":{"text":"y"}}}"
+        \\  .after2: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"x"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"text":{"text":"y"}}}"
+    ).expectEqual(SessionSnap{
+        .after1 = after1,
+        .after2 = after2,
+    });
 }
 
 test "large event survives compaction" {

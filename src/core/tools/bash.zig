@@ -663,6 +663,13 @@ test "bash handler captures stdout and stderr with deterministic timestamps" {
 }
 
 test "bash handler applies explicit env variables" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        stream: tools.Output.Stream,
+        chunk: []const u8,
+        final: tools.Result.Final,
+    };
     const SinkImpl = struct {
         fn push(_: *@This(), _: tools.Event) !void {}
     };
@@ -695,11 +702,36 @@ test "bash handler applies explicit env variables" {
     defer handler.deinitResult(res);
 
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expectEqualStrings("ok", res.out[0].chunk);
+    try oh.snap(@src(),
+        \\core.tools.bash.test.bash handler applies explicit env variables.Snap
+        \\  .stream: core.tools.mod.Output.Stream
+        \\    .stdout
+        \\  .chunk: []const u8
+        \\    "ok"
+        \\  .final: core.tools.mod.Result.Final
+        \\    .ok: core.tools.mod.Result.Ok
+        \\      .code: i32 = 0
+    ).expectEqual(Snap{
+        .stream = res.out[0].stream,
+        .chunk = res.out[0].chunk,
+        .final = res.final,
+    });
 }
 
 test "bash handler installs sandbox before bash exec" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        arg0: []const u8,
+        arg1: []const u8,
+        profile_has_root: bool,
+        arg3: []const u8,
+        arg4: []const u8,
+        arg5: []const u8,
+        arg6: []const u8,
+        arg7: []const u8,
+        cwd_matches_sub: bool,
+    };
     const RunnerCtx = struct {
         alloc: std.mem.Allocator,
         argv: ?[][]const u8 = null,
@@ -778,15 +810,35 @@ test "bash handler installs sandbox before bash exec" {
 
     const argv = runner_ctx.argv orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 8), argv.len);
-    try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", argv[0]);
-    try std.testing.expectEqualStrings("-p", argv[1]);
-    try std.testing.expect(std.mem.indexOf(u8, argv[2], root) != null);
-    try std.testing.expectEqualStrings("/bin/bash", argv[3]);
-    try std.testing.expectEqualStrings("--noprofile", argv[4]);
-    try std.testing.expectEqualStrings("--norc", argv[5]);
-    try std.testing.expectEqualStrings("-lc", argv[6]);
-    try std.testing.expectEqualStrings("printf ok", argv[7]);
-    try std.testing.expectEqualStrings(sub, runner_ctx.cwd.?);
+    try oh.snap(@src(),
+        \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
+        \\  .arg0: []const u8
+        \\    "/usr/bin/sandbox-exec"
+        \\  .arg1: []const u8
+        \\    "-p"
+        \\  .profile_has_root: bool = true
+        \\  .arg3: []const u8
+        \\    "/bin/bash"
+        \\  .arg4: []const u8
+        \\    "--noprofile"
+        \\  .arg5: []const u8
+        \\    "--norc"
+        \\  .arg6: []const u8
+        \\    "-lc"
+        \\  .arg7: []const u8
+        \\    "printf ok"
+        \\  .cwd_matches_sub: bool = true
+    ).expectEqual(Snap{
+        .arg0 = argv[0],
+        .arg1 = argv[1],
+        .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
+        .arg3 = argv[3],
+        .arg4 = argv[4],
+        .arg5 = argv[5],
+        .arg6 = argv[6],
+        .arg7 = argv[7],
+        .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
+    });
 }
 
 test "bash handler returns failed final on non-zero exit" {
@@ -1051,7 +1103,9 @@ test "bash handler denies file reads outside workspace inside sandbox" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    const raw_snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(raw_snap);
+    const snap = try std.mem.replaceOwned(u8, std.testing.allocator, raw_snap, secret, "<repo>/README.md");
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
         \\[]u8
@@ -1059,7 +1113,7 @@ test "bash handler denies file reads outside workspace inside sandbox" {
         \\start=0
         \\end=0
         \\out=1
-        \\0=b-file-deny|0|stderr|false|cat: /Users/joel/Work/pz/README.md: Operation not permitted
+        \\0=b-file-deny|0|stderr|false|cat: <repo>/README.md: Operation not permitted
         \\
         \\final=failed|exec|bash exited non-zero|.{ 1 }
         \\"
@@ -1108,7 +1162,9 @@ test "bash handler denies process exec outside workspace inside sandbox" {
 
     const res = try handler.run(call, sink);
     defer handler.deinitResult(res);
-    const snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    const raw_snap = try tool_snap.resultAlloc(std.testing.allocator, res);
+    defer std.testing.allocator.free(raw_snap);
+    const snap = try std.mem.replaceOwned(u8, std.testing.allocator, raw_snap, script, "<repo>/.zig-cache/p30a-run.sh");
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
         \\[]u8
@@ -1116,7 +1172,7 @@ test "bash handler denies process exec outside workspace inside sandbox" {
         \\start=0
         \\end=0
         \\out=1
-        \\0=b-proc-deny|0|stderr|false|/bin/bash: /Users/joel/Work/pz/.zig-cache/p30a-run.sh: Operation not permitted
+        \\0=b-proc-deny|0|stderr|false|/bin/bash: <repo>/.zig-cache/p30a-run.sh: Operation not permitted
         \\
         \\final=failed|exec|bash exited non-zero|.{ 126 }
         \\"
@@ -1321,6 +1377,15 @@ test "bash handler returns kind mismatch for wrong call kind" {
 }
 
 test "bash handler cancels running child and reaps TERM-resistant process" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        stream: tools.Output.Stream,
+        pid_valid: bool,
+        saw_out: bool,
+        out_before_done: bool,
+        final: tools.Result.Final,
+    };
     const WaitGone = struct {
         fn run(pid: std.posix.pid_t) !void {
             var polls: usize = 0;
@@ -1416,15 +1481,25 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
     sink_impl.mu.unlock();
 
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
-    try std.testing.expect(res.out[0].stream == .stdout);
-    try std.testing.expect(saw_out);
-    try std.testing.expect(out_before_done);
     const bg_pid = try std.fmt.parseInt(std.posix.pid_t, res.out[0].chunk, 10);
     defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {};
     try WaitGone.run(bg_pid);
-
-    switch (res.final) {
-        .cancelled => |cancelled| try std.testing.expect(cancelled.reason == .user),
-        else => return error.TestUnexpectedResult,
-    }
+    try oh.snap(@src(),
+        \\core.tools.bash.test.bash handler cancels running child and reaps TERM-resistant process.Snap
+        \\  .stream: core.tools.mod.Output.Stream
+        \\    .stdout
+        \\  .pid_valid: bool = true
+        \\  .saw_out: bool = true
+        \\  .out_before_done: bool = true
+        \\  .final: core.tools.mod.Result.Final
+        \\    .cancelled: core.tools.mod.Result.Cancelled
+        \\      .reason: core.tools.mod.Result.CancelReason
+        \\        .user
+    ).expectEqual(Snap{
+        .stream = res.out[0].stream,
+        .pid_valid = bg_pid > 0,
+        .saw_out = saw_out,
+        .out_before_done = out_before_done,
+        .final = res.final,
+    });
 }

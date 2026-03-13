@@ -120,14 +120,19 @@ pub const ReplayReader = struct {
     }
 };
 
-fn expectSameEvent(expected: Event, actual: Event) !void {
-    const want = try schema.encodeAlloc(std.testing.allocator, expected);
-    defer std.testing.allocator.free(want);
+fn appendEventJson(
+    alloc: std.mem.Allocator,
+    rows: *std.ArrayListUnmanaged([]u8),
+    ev: Event,
+) !void {
+    const raw = try schema.encodeAlloc(alloc, ev);
+    errdefer alloc.free(raw);
+    try rows.append(alloc, raw);
+}
 
-    const got = try schema.encodeAlloc(std.testing.allocator, actual);
-    defer std.testing.allocator.free(got);
-
-    try std.testing.expectEqualStrings(want, got);
+fn freeJsonRows(alloc: std.mem.Allocator, rows: [][]u8) void {
+    for (rows) |row| alloc.free(row);
+    alloc.free(rows);
 }
 
 fn encodeLine(file: std.fs.File, ev: Event) !void {
@@ -152,6 +157,11 @@ fn allocFill(alloc: std.mem.Allocator, len: usize, byte: u8) ![]u8 {
 }
 
 test "jsonl replay preserves event stream exactly" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const ReplaySnap = struct {
+        rows: [][]u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -191,15 +201,35 @@ test "jsonl replay preserves event stream exactly" {
     var rdr = try ReplayReader.init(std.testing.allocator, tmp.dir, "s1", .{});
     defer rdr.deinit();
 
-    var idx: usize = 0;
-    while (try rdr.next()) |ev| : (idx += 1) {
-        if (idx >= events.len) return error.TestUnexpectedResult;
-        try expectSameEvent(events[idx], ev);
+    var rows: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (rows.items) |row| std.testing.allocator.free(row);
+        rows.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqual(@as(usize, events.len), idx);
+    while (try rdr.next()) |ev| {
+        try appendEventJson(std.testing.allocator, &rows, ev);
+    }
+
+    try oh.snap(@src(),
+        \\core.session.reader.test.jsonl replay preserves event stream exactly.ReplaySnap
+        \\  .rows: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"prompt":{"text":"alpha"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":2,"data":{"tool_call":{"id":"c1","name":"read","args":"{\"path\":\"a.txt\"}"}}}"
+        \\    [2]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"usage":{"in_tok":11,"out_tok":7,"tot_tok":18,"cache_read":0,"cache_write":0}}}"
+        \\    [3]: []u8
+        \\      "{"version":1,"at_ms":4,"data":{"stop":{"reason":"done"}}}"
+    ).expectEqual(ReplaySnap{ .rows = rows.items });
 }
 
 test "nextDup keeps prior event stable across later reads" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const ReplaySnap = struct {
+        rows: [][]u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -228,9 +258,25 @@ test "nextDup keeps prior event stable across later reads" {
     defer second.free(std.testing.allocator);
     const third = (try rdr.next()) orelse return error.TestUnexpectedResult;
 
-    try expectSameEvent(events[0], first);
-    try expectSameEvent(events[1], second);
-    try expectSameEvent(events[2], third);
+    var rows: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (rows.items) |row| std.testing.allocator.free(row);
+        rows.deinit(std.testing.allocator);
+    }
+    try appendEventJson(std.testing.allocator, &rows, first);
+    try appendEventJson(std.testing.allocator, &rows, second);
+    try appendEventJson(std.testing.allocator, &rows, third);
+
+    try oh.snap(@src(),
+        \\core.session.reader.test.nextDup keeps prior event stable across later reads.ReplaySnap
+        \\  .rows: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"text":{"text":"first borrowed payload"}}}"
+        \\    [1]: []u8
+        \\      "{"version":1,"at_ms":2,"data":{"text":{"text":"second borrowed payload"}}}"
+        \\    [2]: []u8
+        \\      "{"version":1,"at_ms":3,"data":{"tool_call":{"id":"tc-1","name":"bash","args":"{\"cmd\":\"echo hi\"}"}}}"
+    ).expectEqual(ReplaySnap{ .rows = rows.items });
 }
 
 fn expectMalformedReplay(dir: std.fs.Dir) !void {
@@ -336,6 +382,11 @@ test "jsonl replay rejects final line without trailing newline" {
 }
 
 test "jsonl replay keeps committed rows and rejects torn tail" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const ReplaySnap = struct {
+        rows: [][]u8,
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -358,7 +409,15 @@ test "jsonl replay keeps committed rows and rejects torn tail" {
     defer rdr.deinit();
 
     const first = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    try expectSameEvent(ev, first);
+    var rows = try std.testing.allocator.alloc([]u8, 1);
+    defer freeJsonRows(std.testing.allocator, rows);
+    rows[0] = try schema.encodeAlloc(std.testing.allocator, first);
+    try oh.snap(@src(),
+        \\core.session.reader.test.jsonl replay keeps committed rows and rejects torn tail.ReplaySnap
+        \\  .rows: [][]u8
+        \\    [0]: []u8
+        \\      "{"version":1,"at_ms":1,"data":{"text":{"text":"ok"}}}"
+    ).expectEqual(ReplaySnap{ .rows = rows });
     try std.testing.expectEqual(@as(usize, 1), rdr.line());
     try std.testing.expectError(error.TornReplayLine, rdr.next());
     try std.testing.expectEqual(@as(usize, 1), rdr.line());
