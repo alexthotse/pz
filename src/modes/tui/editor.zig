@@ -598,6 +598,21 @@ pub const Editor = struct {
     }
 };
 
+fn snapAlloc(alloc: std.mem.Allocator, ed: *const Editor) ![]u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "text={s}|cur={}|hist_len={}|hist_idx={?}|kr_len={}|jump={}",
+        .{
+            ed.text(),
+            ed.cur,
+            ed.hist.items.len,
+            ed.hist_idx,
+            ed.kr_len,
+            ed.jump_mode,
+        },
+    );
+}
+
 test "editor supports utf8 insert cursor movement and deletion" {
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
@@ -769,6 +784,8 @@ test "new keys produce correct actions" {
 }
 
 test "input history navigates with up/down" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -786,26 +803,43 @@ test "input history navigates with up/down" {
 
     // Up → "go" (most recent)
     _ = try ed.apply(.{ .up = {} });
-    try std.testing.expectEqualStrings("go", ed.text());
+    const s1 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s1);
 
     // Up → "hi" (older)
     _ = try ed.apply(.{ .up = {} });
-    try std.testing.expectEqualStrings("hi", ed.text());
+    const s2 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s2);
 
     // Up at oldest → stays "hi"
     _ = try ed.apply(.{ .up = {} });
-    try std.testing.expectEqualStrings("hi", ed.text());
+    const s3 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s3);
 
     // Down → "go"
     _ = try ed.apply(.{ .down = {} });
-    try std.testing.expectEqualStrings("go", ed.text());
+    const s4 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s4);
 
     // Down → back to empty (stashed input)
     _ = try ed.apply(.{ .down = {} });
-    try std.testing.expectEqualStrings("", ed.text());
+    const s5 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s5);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}\n{s}\n{s}\n{s}", .{ s1, s2, s3, s4, s5 });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "text=go|cur=2|hist_len=2|hist_idx=1|kr_len=0|jump=false
+        \\text=hi|cur=2|hist_len=2|hist_idx=0|kr_len=0|jump=false
+        \\text=hi|cur=2|hist_len=2|hist_idx=0|kr_len=0|jump=false
+        \\text=go|cur=2|hist_len=2|hist_idx=1|kr_len=0|jump=false
+        \\text=|cur=0|hist_len=2|hist_idx=null|kr_len=0|jump=false"
+    ).expectEqual(snap);
 }
 
 test "history stashes current input" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -817,11 +851,20 @@ test "history stashes current input" {
 
     // Up → stashes "xy", shows "prev"
     _ = try ed.apply(.{ .up = {} });
-    try std.testing.expectEqualStrings("prev", ed.text());
+    const s1 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s1);
 
     // Down → restores "xy"
     _ = try ed.apply(.{ .down = {} });
-    try std.testing.expectEqualStrings("xy", ed.text());
+    const s2 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s2);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}", .{ s1, s2 });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "text=prev|cur=4|hist_len=1|hist_idx=0|kr_len=0|jump=false
+        \\text=xy|cur=2|hist_len=1|hist_idx=null|kr_len=0|jump=false"
+    ).expectEqual(snap);
 }
 
 test "history deduplicates consecutive entries" {
@@ -864,18 +907,31 @@ test "ctrl-u kills whole line" {
 }
 
 test "ctrl-w kills word backward" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
     try ed.setText("hello world foo");
     _ = try ed.apply(.{ .ctrl_w = {} });
-    try std.testing.expectEqualStrings("hello world ", ed.text());
+    const s1 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s1);
 
     _ = try ed.apply(.{ .ctrl_w = {} });
-    try std.testing.expectEqualStrings("hello ", ed.text());
+    const s2 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s2);
 
     _ = try ed.apply(.{ .ctrl_w = {} });
-    try std.testing.expectEqualStrings("", ed.text());
+    const s3 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s3);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}\n{s}", .{ s1, s2, s3 });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "text=hello world |cur=12|hist_len=0|hist_idx=null|kr_len=1|jump=false
+        \\text=hello |cur=6|hist_len=0|hist_idx=null|kr_len=1|jump=false
+        \\text=|cur=0|hist_len=0|hist_idx=null|kr_len=1|jump=false"
+    ).expectEqual(snap);
 }
 
 test "alt-b and alt-f move by word" {
@@ -1023,6 +1079,8 @@ test "yank with empty kill ring is no-op" {
 }
 
 test "yank-pop cycles through kill ring" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -1035,11 +1093,20 @@ test "yank-pop cycles through kill ring" {
 
     // Yank most recent ("bbb")
     _ = try ed.apply(.{ .ctrl_y = {} });
-    try std.testing.expectEqualStrings("bbb", ed.text());
+    const s1 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s1);
 
     // Yank-pop to older ("aaa")
     _ = try ed.apply(.{ .alt_y = {} });
-    try std.testing.expectEqualStrings("aaa", ed.text());
+    const s2 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s2);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}", .{ s1, s2 });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "text=bbb|cur=3|hist_len=0|hist_idx=null|kr_len=2|jump=false
+        \\text=aaa|cur=3|hist_len=0|hist_idx=null|kr_len=2|jump=false"
+    ).expectEqual(snap);
 }
 
 test "yank-pop without prior yank is no-op" {
@@ -1105,6 +1172,8 @@ test "ctrl-] no match stays in place" {
 }
 
 test "ctrl-] cancel with non-char key" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -1112,8 +1181,12 @@ test "ctrl-] cancel with non-char key" {
     ed.cur = 0;
     _ = try ed.apply(.{ .ctrl_close_bracket = {} });
     _ = try ed.apply(.{ .esc = {} }); // cancel jump mode
-    try std.testing.expectEqual(@as(usize, 0), ed.cur);
-    try std.testing.expectEqualStrings("hello", ed.text()); // esc doesn't clear in jump cancel
+    const snap = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "text=hello|cur=0|hist_len=0|hist_idx=null|kr_len=0|jump=false"
+    ).expectEqual(snap);
 }
 
 test "undo restores previous state" {
@@ -1150,6 +1223,8 @@ test "undo groups consecutive inserts" {
 }
 
 test "redo after undo" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var ed = Editor.init(std.testing.allocator);
     defer ed.deinit();
 
@@ -1158,15 +1233,26 @@ test "redo after undo" {
 
     // Backspace creates new group (delete)
     _ = try ed.apply(.{ .backspace = {} });
-    try std.testing.expectEqualStrings("x", ed.text());
+    const s1 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s1);
 
     // Undo backspace
     _ = try ed.apply(.{ .ctrl_z = {} });
-    try std.testing.expectEqualStrings("xy", ed.text());
+    const s2 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s2);
 
     // Redo backspace
     _ = try ed.apply(.{ .ctrl_shift_z = {} });
-    try std.testing.expectEqualStrings("x", ed.text());
+    const s3 = try snapAlloc(std.testing.allocator, &ed);
+    defer std.testing.allocator.free(s3);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}\n{s}", .{ s1, s2, s3 });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "text=x|cur=1|hist_len=0|hist_idx=null|kr_len=0|jump=false
+        \\text=xy|cur=2|hist_len=0|hist_idx=null|kr_len=0|jump=false
+        \\text=x|cur=1|hist_len=0|hist_idx=null|kr_len=0|jump=false"
+    ).expectEqual(snap);
 }
 
 test "undo kill restores killed text" {

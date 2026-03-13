@@ -261,6 +261,18 @@ pub const CmdPreview = struct {
     }
 };
 
+fn snapAlloc(alloc: std.mem.Allocator, cp: CmdPreview) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(alloc);
+    try std.fmt.format(buf.writer(alloc), "n={} sel={} scroll={}", .{ cp.n, cp.sel, cp.scroll });
+    var i: usize = 0;
+    while (i < cp.n) : (i += 1) {
+        const name = if (cp.arg_src) |items| items[cp.matches[i]] else cmds[cp.matches[i]].name;
+        try std.fmt.format(buf.writer(alloc), "\n[{d}] {s}", .{ i, name });
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
 // -- Tests --
 
 test "update empty prefix returns all" {
@@ -270,17 +282,32 @@ test "update empty prefix returns all" {
 }
 
 test "update filters by prefix" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const cp = CmdPreview.update("co").?;
-    // compact, copy, cost
-    try std.testing.expectEqual(@as(u8, 3), cp.n);
-    try std.testing.expectEqualStrings("compact", cp.selected().name);
+    const snap = try snapAlloc(std.testing.allocator, cp);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "n=3 sel=0 scroll=0
+        \\[0] compact
+        \\[1] copy
+        \\[2] cost"
+    ).expectEqual(snap);
 }
 
 test "update ex matches exit and export" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const cp = CmdPreview.update("ex").?;
-    try std.testing.expectEqual(@as(u8, 2), cp.n);
-    try std.testing.expectEqualStrings("exit", cmds[cp.matches[0]].name);
-    try std.testing.expectEqualStrings("export", cmds[cp.matches[1]].name);
+    const snap = try snapAlloc(std.testing.allocator, cp);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "n=2 sel=0 scroll=0
+        \\[0] exit
+        \\[1] export"
+    ).expectEqual(snap);
 }
 
 test "update no match returns null" {
@@ -300,9 +327,16 @@ test "update fuzzy fallback" {
 }
 
 test "update exact match" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const cp = CmdPreview.update("help").?;
-    try std.testing.expectEqual(@as(u8, 1), cp.n);
-    try std.testing.expectEqualStrings("help", cp.selected().name);
+    const snap = try snapAlloc(std.testing.allocator, cp);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "n=1 sel=0 scroll=0
+        \\[0] help"
+    ).expectEqual(snap);
 }
 
 test "up wraps to bottom" {
@@ -336,10 +370,30 @@ test "up scrolls back" {
 }
 
 test "selected returns correct cmd" {
-    var cp = CmdPreview.update("").?;
-    try std.testing.expectEqualStrings("changelog", cp.selected().name);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var cp = CmdPreview.update("ex").?;
+    const snap0 = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "sel={}|scroll={}|pick={s}",
+        .{ cp.sel, cp.scroll, cp.selected().name },
+    );
+    defer std.testing.allocator.free(snap0);
     cp.down();
-    try std.testing.expectEqualStrings("clear", cp.selected().name);
+    const snap1 = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "sel={}|scroll={}|pick={s}",
+        .{ cp.sel, cp.scroll, cp.selected().name },
+    );
+    defer std.testing.allocator.free(snap1);
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}\n--\n{s}", .{ snap0, snap1 });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "sel=0|scroll=0|pick=exit
+        \\--
+        \\sel=1|scroll=0|pick=export"
+    ).expectEqual(snap);
 }
 
 test "renderDown selected row has arrow and bold" {
@@ -425,10 +479,17 @@ test "visRows accounts for scroll indicator" {
 }
 
 test "updateArgs filters by prefix" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const items = [_][]const u8{ "anthropic", "openai", "google" };
     const cp = CmdPreview.updateArgs(&items, "an").?;
-    try std.testing.expectEqual(@as(u8, 1), cp.n);
-    try std.testing.expectEqualStrings("anthropic", cp.selectedArg().?);
+    const snap = try snapAlloc(std.testing.allocator, cp);
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "n=1 sel=0 scroll=0
+        \\[0] anthropic"
+    ).expectEqual(snap);
 }
 
 test "updateArgs empty prefix returns all" {

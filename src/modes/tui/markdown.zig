@@ -154,6 +154,16 @@ pub const MdRenderer = struct {
     }
 };
 
+fn cellsSnapAlloc(alloc: std.mem.Allocator, n: usize, buf: []const []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    try std.fmt.format(out.writer(alloc), "n={}", .{n});
+    for (buf[0..n], 0..) |cell, i| {
+        try std.fmt.format(out.writer(alloc), "\n[{d}] {s}", .{ i, cell });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 // -- Table helpers --
 
 fn isTableLine(line: []const u8) bool {
@@ -878,18 +888,32 @@ test "isTableSep detects separator lines" {
 }
 
 test "splitCells parses pipe-delimited cells" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var buf: [64][]const u8 = undefined;
     const n = splitCells("| hello | world | 42 |", &buf);
-    try testing.expectEqual(@as(usize, 3), n);
-    try testing.expectEqualStrings("hello", buf[0]);
-    try testing.expectEqualStrings("world", buf[1]);
-    try testing.expectEqualStrings("42", buf[2]);
+    const snap = try cellsSnapAlloc(testing.allocator, n, buf[0..]);
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "n=3
+        \\[0] hello
+        \\[1] world
+        \\[2] 42"
+    ).expectEqual(snap);
 }
 
 test "splitCells handles no trailing pipe" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var buf: [64][]const u8 = undefined;
     const n = splitCells("| a | b", &buf);
-    try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("a", buf[0]);
-    try testing.expectEqualStrings("b", buf[1]);
+    const snap = try cellsSnapAlloc(testing.allocator, n, buf[0..]);
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "n=2
+        \\[0] a
+        \\[1] b"
+    ).expectEqual(snap);
 }
