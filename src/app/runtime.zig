@@ -7718,6 +7718,47 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
     ).expectEqual(snap);
 }
 
+test "restoreSessionIntoUi ignores empty blocks when rendering bottom row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+
+    const file = try tmp.dir.createFile("sess/100.jsonl", .{});
+    defer file.close();
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .text = .{ .text = "" } } },
+        .{ .at_ms = 2, .data = .{ .tool_call = .{ .id = "call-1", .name = "bash", .args = "{\"cmd\":\"printf ok\"}" } } },
+        .{ .at_ms = 3, .data = .{ .tool_result = .{ .id = "call-1", .out = "", .is_err = false } } },
+        .{ .at_ms = 4, .data = .{ .text = .{ .text = "tail line" } } },
+    };
+    for (events) |ev| {
+        const raw = try core.session.encodeEventAlloc(std.testing.allocator, ev);
+        defer std.testing.allocator.free(raw);
+        try file.writeAll(raw);
+        try file.writeAll("\n");
+    }
+
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 24, 4, "m", "p");
+    defer ui.deinit();
+
+    try restoreSessionIntoUi(std.testing.allocator, &ui, sess_abs, false, "100");
+
+    var frm = try tui_frame.Frame.init(std.testing.allocator, 24, 1);
+    defer frm.deinit(std.testing.allocator);
+    try ui.tr.render(&frm, .{ .x = 0, .y = 0, .w = 24, .h = 1 });
+
+    var raw: [24]u8 = undefined;
+    var x: usize = 0;
+    while (x < frm.w) : (x += 1) {
+        const c = try frm.cell(x, 0);
+        raw[x] = if (c.cp <= 0x7f) @intCast(c.cp) else '?';
+    }
+    try std.testing.expect(std.mem.indexOf(u8, raw[0..], "tail line") != null);
+}
+
 test "runtime tui non-tty /resume restores session without running provider turn" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

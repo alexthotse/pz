@@ -222,10 +222,12 @@ pub const Transcript = struct {
         var prev_vis: ?*Block = null;
         for (self.blocks.items) |*b| {
             if (!self.blockVisible(b)) continue;
+            const blk_rows = blockLineCount(b, count_w);
+            if (blk_rows == 0) continue;
             if (prev_vis) |prev| {
                 if (needsGap(prev, b)) total += 1;
             }
-            total += blockLineCount(b, count_w);
+            total += blk_rows;
             prev_vis = b;
         }
         if (total == 0) return;
@@ -254,6 +256,7 @@ pub const Transcript = struct {
             var prev_rendered: ?*Block = null;
             for (self.blocks.items) |*b| {
                 if (!self.blockVisible(b)) continue;
+                if (blockLineCount(b, text_w) == 0) continue;
 
                 // 1-line gap between blocks
                 if (!first_vis and (prev_rendered == null or needsGap(prev_rendered.?, b))) {
@@ -1150,16 +1153,16 @@ fn writeClippedUtf8Cols(
 
 pub fn countLines(text: []const u8, w: usize) usize {
     if (w == 0) return 0;
-    if (text.len == 0) return 1; // empty block = 1 display line
+    if (text.len == 0) return 0;
     var n: usize = 0;
     var it = wrapIter(text, w);
     while (it.next() != null) n += 1;
-    return if (n == 0) 1 else n;
+    return n;
 }
 
 fn countMdLines(text: []const u8, w: usize) usize {
     if (w == 0) return 0;
-    if (text.len == 0) return 1;
+    if (text.len == 0) return 0;
     var n: usize = 0;
     var it = mdWrapIter(text, w);
     var pending: ?[]const u8 = null;
@@ -1189,7 +1192,7 @@ fn countMdLines(text: []const u8, w: usize) usize {
 
         n += 1;
     }
-    return if (n == 0) 1 else n;
+    return n;
 }
 
 fn mdTableVisualRows(data_n: usize) usize {
@@ -1939,6 +1942,24 @@ test "transcript clamps viewport within rendered table rows" {
     try std.testing.expect(std.mem.indexOf(u8, r1, "r62") != null);
     const r2 = try rowAscii(&frm, 2, raw[0..]);
     try std.testing.expect(std.mem.trim(u8, r2, " ").len != 0);
+}
+
+test "transcript ignores empty blocks when auto-scrolling" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.append(.{ .text = "" });
+    try tr.append(.{ .tool_call = .{ .id = "empty", .name = "bash", .args = "{\"cmd\":\"printf ok\"}" } });
+    try tr.append(.{ .tool_result = .{ .id = "empty", .out = "", .is_err = false } });
+    try tr.append(.{ .text = "tail line" });
+
+    var frm = try frame.Frame.init(std.testing.allocator, 24, 1);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 24, .h = 1 });
+
+    var raw: [24]u8 = undefined;
+    const r0 = try rowAscii(&frm, 0, raw[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, r0, "tail line") != null);
 }
 
 test "text coalescing merges consecutive text events" {
