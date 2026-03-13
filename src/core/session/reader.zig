@@ -446,3 +446,51 @@ test "jsonl replay property rejects encoded lines above max bytes" {
         .seed = 0x0be7_f10a,
     });
 }
+
+test "jsonl replay property survives crap-and-mutate of valid rows" {
+    const zc = @import("zcheck");
+    const pbt = @import("../pbt.zig");
+
+    try zc.check(struct {
+        fn prop(args: struct { len: u16, seed: u64, slack: u8 }) bool {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+
+            const alloc = std.testing.allocator;
+            const text = allocFill(alloc, 16 + @as(usize, args.len % 128), 'x') catch return false;
+            defer alloc.free(text);
+
+            const raw = schema.encodeAlloc(alloc, textEvent(1, text)) catch return false;
+            defer alloc.free(raw);
+            const mut = pbt.Mut.crapOrMutateAlloc(alloc, raw, args.seed, raw.len + @as(usize, args.slack % 8)) catch return false;
+            defer alloc.free(mut);
+
+            {
+                const file = tmp.dir.createFile("mut.jsonl", .{}) catch return false;
+                defer file.close();
+                var buf = alloc.alloc(u8, mut.len + 1) catch return false;
+                defer alloc.free(buf);
+                for (mut, 0..) |b, i| buf[i] = if (b == '\n') '!' else b;
+                buf[mut.len] = '\n';
+                file.writeAll(buf) catch return false;
+            }
+
+            var rdr = ReplayReader.init(alloc, tmp.dir, "mut", .{}) catch return false;
+            defer rdr.deinit();
+
+            _ = rdr.next() catch |err| switch (err) {
+                error.MalformedReplayLine,
+                error.UnsupportedVersion,
+                error.ReplayLineTooLong,
+                error.EmptyReplayLine,
+                error.TornReplayLine,
+                => return true,
+                else => return false,
+            };
+            return true;
+        }
+    }.prop, .{
+        .iterations = 512,
+        .seed = 0x57e5_10c2,
+    });
+}
