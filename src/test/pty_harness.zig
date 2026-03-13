@@ -1,5 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const app_config = @import("../app/config.zig");
+const core = @import("../core/mod.zig");
 const vscreen = @import("../modes/tui/vscreen.zig");
 const ansi_ast = @import("ansi_ast.zig");
 const http_mock = @import("http_mock.zig");
@@ -26,6 +28,19 @@ const RunOut = struct {
 
 fn pzBinAlloc(alloc: std.mem.Allocator) ![]u8 {
     return try std.fs.cwd().realpathAlloc(alloc, build_options.pz_bin_path);
+}
+
+fn testPolicyKeyPair() !core.signing.KeyPair {
+    const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    return core.signing.KeyPair.fromSeed(seed);
+}
+
+fn writePolicy(dir: std.fs.Dir, doc: core.policy.Doc) !void {
+    try dir.makePath(".pz");
+    const kp = try testPolicyKeyPair();
+    const raw = try core.policy.encodeSignedDoc(std.testing.allocator, doc, kp);
+    defer std.testing.allocator.free(raw);
+    try dir.writeFile(.{ .sub_path = app_config.policy_rel_path, .data = raw });
 }
 
 fn baseEnv(alloc: std.mem.Allocator, home_abs: []const u8) !std.process.EnvMap {
@@ -632,6 +647,45 @@ test "real pz binary json mode rejects empty stdin without prompt" {
     try std.testing.expect(out.term == .Exited);
     try std.testing.expectEqual(@as(u8, 1), out.term.Exited);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "reason: EmptyPrompt") != null);
+}
+
+test "real pz binary upgrade honors verified policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try writePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/update", .effect = .deny, .tool = "web" },
+        },
+    });
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--upgrade",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "upgrade blocked by policy") != null);
 }
 
 test "real pz PTY renders slash help over the live terminal path" {
