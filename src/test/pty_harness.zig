@@ -480,6 +480,10 @@ test "real pz PTY startup survives live version check" {
     }
     try std.testing.expect(std.mem.indexOf(u8, stdout, "Segmentation fault") == null);
     try std.testing.expect(std.mem.indexOf(u8, stderr, "Segmentation fault") == null);
+    var waited_ms: u32 = 0;
+    while (server.requestCount() == 0 and waited_ms < 2000) : (waited_ms += 50) {
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
     try std.testing.expectEqual(@as(usize, 1), server.requestCount());
 
     var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
