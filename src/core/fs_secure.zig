@@ -12,12 +12,16 @@ pub fn ensureDirAt(dir: std.fs.Dir, sub_path: []const u8) !void {
 }
 
 pub fn ensureDirPath(path: []const u8) !void {
-    try std.fs.cwd().makePath(path);
     if (std.fs.path.isAbsolute(path)) {
+        if (builtin.os.tag == .windows) return error.Unsupported;
+        var root = try std.fs.openDirAbsolute("/", .{});
+        defer root.close();
+        try root.makePath(std.mem.trimLeft(u8, path, "/"));
         var dir = try std.fs.openDirAbsolute(path, .{ .iterate = true });
         defer dir.close();
         try dir.chmod(dir_mode);
     } else {
+        try std.fs.cwd().makePath(path);
         var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
         defer dir.close();
         try dir.chmod(dir_mode);
@@ -45,6 +49,24 @@ test "ensureDirAt locks directory mode to 0700" {
 
     try ensureDirAt(tmp.dir, "state");
     const st = try tmp.dir.statFile("state");
+    try std.testing.expectEqual(@as(std.fs.File.Mode, dir_mode), st.mode & 0o777);
+}
+
+test "ensureDirPath creates nested absolute directories" {
+    if (builtin.os.tag == .windows) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root, "a", "b", "c" });
+    defer std.testing.allocator.free(path);
+
+    try ensureDirPath(path);
+    var dir = try std.fs.openDirAbsolute(path, .{ .iterate = true });
+    defer dir.close();
+    const st = try dir.stat();
     try std.testing.expectEqual(@as(std.fs.File.Mode, dir_mode), st.mode & 0o777);
 }
 

@@ -28,10 +28,10 @@ pub fn resultAlloc(alloc: std.mem.Allocator, res: anytype) ![]u8 {
         .failed => |failed| try w.print("|{s}|{s}|{}\n", .{
             @tagName(failed.kind),
             failed.msg,
-            failed.code,
+            .{failed.code},
         }),
         .cancelled => |cancelled| try w.print("|{s}\n", .{@tagName(cancelled.reason)}),
         .timed_out => |timed_out| try w.print("|{d}\n", .{timed_out.limit_ms}),
     }
-    return buf.toOwnedSlice();
+    return buf.toOwnedSlice(alloc);
 }

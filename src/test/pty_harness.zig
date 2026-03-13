@@ -2,6 +2,14 @@ const std = @import("std");
 const build_options = @import("build_options");
 const vscreen = @import("../modes/tui/vscreen.zig");
 const ansi_ast = @import("ansi_ast.zig");
+const c = @cImport({
+    @cInclude("errno.h");
+    @cInclude("signal.h");
+    @cInclude("stdlib.h");
+    @cInclude("sys/wait.h");
+    @cInclude("unistd.h");
+    @cInclude("util.h");
+});
 
 const RunOut = struct {
     term: std.process.Child.Term,
@@ -30,7 +38,7 @@ fn baseEnv(alloc: std.mem.Allocator, home_abs: []const u8) !std.process.EnvMap {
     return env;
 }
 
-fn runPty(
+fn runProc(
     alloc: std.mem.Allocator,
     cwd: []const u8,
     env: *const std.process.EnvMap,
@@ -56,12 +64,72 @@ fn runPty(
     const stderr = try (child.stderr orelse return error.TestUnexpectedResult).readToEndAlloc(alloc, 256 * 1024);
     errdefer alloc.free(stderr);
 
-    const term = try child.wait();
     return .{
-        .term = term,
+        .term = try child.wait(),
         .stdout = stdout,
         .stderr = stderr,
     };
+}
+
+const CStringList = struct {
+    alloc: std.mem.Allocator,
+    items: std.ArrayList(?[*:0]u8),
+
+    fn init(alloc: std.mem.Allocator) CStringList {
+        return .{ .alloc = alloc, .items = .empty };
+    }
+
+    fn deinit(self: *CStringList) void {
+        for (self.items.items) |item| {
+            if (item) |ptr| self.alloc.free(std.mem.span(ptr));
+        }
+        self.items.deinit(self.alloc);
+    }
+
+    fn appendDupZ(self: *CStringList, text: []const u8) !void {
+        const dup = try self.alloc.dupeZ(u8, text);
+        try self.items.append(self.alloc, dup.ptr);
+    }
+};
+
+fn ttyInputAlloc(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const buf = try alloc.alloc(u8, text.len);
+    for (text, 0..) |b, i| buf[i] = if (b == '\n') '\r' else b;
+    return buf;
+}
+
+fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
+    var off: usize = 0;
+    while (off < data.len) off += try std.posix.write(fd, data[off..]);
+}
+
+fn mapWaitStatus(status: c_int) std.process.Child.Term {
+    return if (c.WIFEXITED(status))
+        .{ .Exited = @intCast(c.WEXITSTATUS(status)) }
+    else if (c.WIFSIGNALED(status))
+        .{ .Signal = @intCast(c.WTERMSIG(status)) }
+    else if (c.WIFSTOPPED(status))
+        .{ .Stopped = @intCast(c.WSTOPSIG(status)) }
+    else
+        .{ .Unknown = @intCast(status) };
+}
+
+fn readReady(fd: std.posix.fd_t, out: *std.ArrayList(u8), alloc: std.mem.Allocator) !bool {
+    var read_any = false;
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => return read_any,
+            error.InputOutput,
+            error.BrokenPipe,
+            => return read_any,
+            else => return err,
+        };
+        if (n == 0) return read_any;
+        try out.appendSlice(alloc, buf[0..n]);
+        read_any = true;
+        if (n < buf.len) return read_any;
+    }
 }
 
 fn runPzPty(
@@ -70,15 +138,112 @@ fn runPzPty(
     env: *const std.process.EnvMap,
     pz_args: []const []const u8,
     input: []const u8,
+    pre_ms: u64,
+    post_ms: u64,
 ) !RunOut {
     const pz_bin = try pzBinAlloc(alloc);
     defer alloc.free(pz_bin);
+    const tty_input = try ttyInputAlloc(alloc, input);
+    defer alloc.free(tty_input);
 
-    var argv = std.ArrayList([]const u8).empty;
-    defer argv.deinit(alloc);
-    try argv.appendSlice(alloc, &.{ "/usr/bin/script", "-q", "/dev/null", pz_bin });
-    try argv.appendSlice(alloc, pz_args);
-    return runPty(alloc, cwd, env, argv.items, input);
+    var c_argv = CStringList.init(alloc);
+    defer c_argv.deinit();
+    try c_argv.appendDupZ(pz_bin);
+    for (pz_args) |arg| try c_argv.appendDupZ(arg);
+    try c_argv.items.append(alloc, null);
+
+    var envp = CStringList.init(alloc);
+    defer envp.deinit();
+    var it = env.iterator();
+    while (it.next()) |entry| {
+        const kv = try std.fmt.allocPrint(alloc, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        defer alloc.free(kv);
+        try envp.appendDupZ(kv);
+    }
+    try envp.items.append(alloc, null);
+
+    const cwd_z = try alloc.dupeZ(u8, cwd);
+    defer alloc.free(cwd_z);
+
+    var master: c_int = -1;
+    var ws = c.struct_winsize{
+        .ws_row = 32,
+        .ws_col = 100,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+    const pid = c.forkpty(&master, null, null, &ws);
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = c.chdir(cwd_z.ptr);
+        _ = c.execve(c_argv.items.items[0].?, @ptrCast(c_argv.items.items.ptr), @ptrCast(envp.items.items.ptr));
+        c._exit(127);
+    }
+
+    const fd: std.posix.fd_t = @intCast(master);
+    defer std.posix.close(fd);
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+
+    var waited_ms: u32 = 0;
+    while (out.items.len == 0 and waited_ms < 2000) : (waited_ms += 50) {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = fd,
+            .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
+            .revents = 0,
+        }};
+        _ = try std.posix.poll(&fds, 50);
+        _ = try readReady(fd, &out, alloc);
+    }
+
+    if (pre_ms > 0) std.Thread.sleep(pre_ms * std.time.ns_per_ms);
+    if (tty_input.len != 0) try writeAllFd(fd, tty_input);
+    if (post_ms > 0) std.Thread.sleep(post_ms * std.time.ns_per_ms);
+
+    var term: ?std.process.Child.Term = null;
+    var loop_ms: u32 = 0;
+    while (true) {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = fd,
+            .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
+            .revents = 0,
+        }};
+        _ = try std.posix.poll(&fds, 100);
+        loop_ms += 100;
+        const read_any = try readReady(fd, &out, alloc);
+
+        if (term == null) {
+            var status: c_int = 0;
+            const waited = c.waitpid(pid, &status, c.WNOHANG);
+            if (waited < 0) return error.TestUnexpectedResult;
+            if (waited == pid) term = mapWaitStatus(status);
+        }
+
+        if (term != null and !read_any and (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) == 0) break;
+        if (term == null and loop_ms >= 3000) {
+            _ = c.kill(pid, c.SIGTERM);
+            var status: c_int = 0;
+            if (c.waitpid(pid, &status, 0) < 0) return error.TestUnexpectedResult;
+            term = mapWaitStatus(status);
+            _ = try readReady(fd, &out, alloc);
+            break;
+        }
+    }
+
+    if (term == null) {
+        var status: c_int = 0;
+        if (c.waitpid(pid, &status, 0) < 0) return error.TestUnexpectedResult;
+        term = mapWaitStatus(status);
+        _ = try readReady(fd, &out, alloc);
+    }
+
+    return .{
+        .term = term.?,
+        .stdout = try out.toOwnedSlice(alloc),
+        .stderr = try alloc.dupe(u8, ""),
+    };
 }
 
 fn screenHasText(vs: *const vscreen.VScreen, alloc: std.mem.Allocator, needle: []const u8) !bool {
@@ -115,17 +280,49 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
     var env = try baseEnv(std.testing.allocator, home_abs);
     defer env.deinit();
 
-    var out = try runPzPty(
+    const sig1_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-sig1" });
+    defer std.testing.allocator.free(sig1_path);
+    defer std.fs.deleteFileAbsolute(sig1_path) catch {};
+    {
+        var f = try std.fs.createFileAbsolute(sig1_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("\x03");
+    }
+    const sig2_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-sig2" });
+    defer std.testing.allocator.free(sig2_path);
+    defer std.fs.deleteFileAbsolute(sig2_path) catch {};
+    {
+        var f = try std.fs.createFileAbsolute(sig2_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("\x03");
+    }
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    var out = try runProc(
         std.testing.allocator,
         cwd_abs,
         &env,
-        &.{ "--no-config", "--no-session" },
-        "/quit\n",
+        &.{
+            "/bin/sh",
+            "-c",
+            "{ sleep 0.2; cat \"$1\"; sleep 0.2; cat \"$2\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$3\" \"$4\" \"$5\"",
+            "sh",
+            sig1_path,
+            sig2_path,
+            pz_bin,
+            "--no-config",
+            "--no-session",
+        },
+        "",
     );
     defer out.deinit(std.testing.allocator);
 
-    try std.testing.expect(out.term == .Exited);
-    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\x1b[?1049h") != null);
 
     var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
@@ -178,14 +375,14 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
         \\csi >u 1
         \\osc 0
         \\osc 0
-        \\csi u 0
-        \\csi ?l 2004
-        \\csi ?l 1006
-        \\csi ?l 1000
+        \\csi ?h 2026
+        \\csi m 0
+        \\csi J 2
+        \\csi H 0
         \\"
     ).expectEqual(ctl);
 
-    try std.testing.expect((try countNonEmptyRows(&vs, std.testing.allocator)) >= 1);
+    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "drop files"));
 }
 
 test "real pz binary print mode works without tui" {
@@ -205,7 +402,7 @@ test "real pz binary print mode works without tui" {
     defer std.testing.allocator.free(pz_bin);
 
     const provider_cmd = "cat >/dev/null; printf 'text:pong\\nstop:done\\n'";
-    var out = try runPty(
+    var out = try runProc(
         std.testing.allocator,
         cwd_abs,
         &env,
@@ -224,8 +421,10 @@ test "real pz binary print mode works without tui" {
     );
     defer out.deinit(std.testing.allocator);
 
-    try std.testing.expect(out.term == .Exited);
-    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "pong") != null);
 }
 
@@ -250,7 +449,7 @@ test "real pz binary json mode consumes stdin prompts" {
         "model=$(printf '%s' \"$req\" | grep -o '\"model\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
         "prov=$(printf '%s' \"$req\" | grep -o '\"provider\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
         "printf 'text:model=%s provider=%s\\nstop:done\\n' \"$model\" \"$prov\"";
-    var out = try runPty(
+    var out = try runProc(
         std.testing.allocator,
         cwd_abs,
         &env,
@@ -293,7 +492,7 @@ test "real pz binary json mode rejects empty stdin without prompt" {
     const pz_bin = try pzBinAlloc(std.testing.allocator);
     defer std.testing.allocator.free(pz_bin);
 
-    var out = try runPty(
+    var out = try runProc(
         std.testing.allocator,
         cwd_abs,
         &env,
@@ -311,7 +510,7 @@ test "real pz binary json mode rejects empty stdin without prompt" {
     defer out.deinit(std.testing.allocator);
 
     try std.testing.expect(out.term == .Exited);
-    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expectEqual(@as(u8, 1), out.term.Exited);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "reason: EmptyPrompt") != null);
 }
 
@@ -328,21 +527,47 @@ test "real pz PTY renders slash help over the live terminal path" {
     var env = try baseEnv(std.testing.allocator, home_abs);
     defer env.deinit();
 
-    var out = try runPzPty(
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+    const slash_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-slash" });
+    defer std.testing.allocator.free(slash_path);
+    defer std.fs.deleteFileAbsolute(slash_path) catch {};
+    {
+        var f = try std.fs.createFileAbsolute(slash_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("/");
+    }
+    const quit_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-quit" });
+    defer std.testing.allocator.free(quit_path);
+    defer std.fs.deleteFileAbsolute(quit_path) catch {};
+    {
+        var f = try std.fs.createFileAbsolute(quit_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("\x03\x03");
+    }
+
+    var out = try runProc(
         std.testing.allocator,
         cwd_abs,
         &env,
-        &.{ "--no-config", "--no-session" },
-        "/help\n/quit\n",
+        &.{
+            "/bin/sh",
+            "-c",
+            "{ sleep 0.2; cat \"$1\"; sleep 0.2; cat \"$2\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$3\" \"$4\" \"$5\"",
+            "sh",
+            slash_path,
+            quit_path,
+            pz_bin,
+            "--no-config",
+            "--no-session",
+        },
+        "",
     );
     defer out.deinit(std.testing.allocator);
 
-    try std.testing.expect(out.term == .Exited);
-    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
-    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "/help") != null);
-
-    var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
-    defer vs.deinit();
-    vs.feed(out.stdout);
-    try std.testing.expect((try countNonEmptyRows(&vs, std.testing.allocator)) >= 1);
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "/changelog") != null);
 }

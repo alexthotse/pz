@@ -1244,7 +1244,7 @@ test "bash handler truncates oversized output and emits metadata" {
         \\end=0
         \\out=2
         \\0=b7|0|stdout|true|abc
-        \\1=b7|0|meta|false|{\"type\":\"trunc\",\"stream\":\"stdout\",\"limit_bytes\":3,\"full_bytes\":4,\"kept_bytes\":3,\"dropped_bytes\":1}
+        \\1=b7|0|meta|false|{"type":"trunc","stream":"stdout","limit_bytes":3,"full_bytes":4,"kept_bytes":3,"dropped_bytes":1}
         \\final=ok|0
         \\"
     ).expectEqual(snap);

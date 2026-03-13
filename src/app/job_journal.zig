@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const fs_secure = @import("../core/fs_secure.zig");
 
 pub const Active = struct {
     id: u64,
@@ -41,10 +42,7 @@ pub const Journal = struct {
             try resolveStateDir(alloc);
         defer alloc.free(base_dir);
 
-        std.fs.makeDirAbsolute(base_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try fs_secure.ensureDirPath(base_dir);
 
         const pz_dir = try std.fs.path.join(alloc, &.{ base_dir, "pz" });
         defer alloc.free(pz_dir);
@@ -347,4 +345,22 @@ test "journal replay ignores malformed lines" {
     defer deinitActives(std.testing.allocator, active);
     try std.testing.expectEqual(@as(usize, 1), active.len);
     try std.testing.expectEqual(@as(u64, 11), active[0].id);
+}
+
+test "journal init creates nested absolute state dirs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+    const nested = try std.fs.path.join(std.testing.allocator, &.{ abs, "Library", "Application Support" });
+    defer std.testing.allocator.free(nested);
+
+    var j = try Journal.init(std.testing.allocator, .{
+        .state_dir = nested,
+        .enabled = true,
+    });
+    defer j.deinit();
+
+    try std.testing.expect(j.dir_path != null);
+    try std.testing.expect(std.mem.endsWith(u8, j.dir_path.?, "/pz/jobs"));
 }
