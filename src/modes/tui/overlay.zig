@@ -494,6 +494,20 @@ fn writeEllipsis(frm: *Frame, x: usize, x_end: usize, y: usize, text: []const u8
     }
 }
 
+fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
+        @typeName(@TypeOf(actual)),
+        body,
+    });
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
+test {
+    _ = @import("ohsnap");
+}
+
 test "overlay renders centered box" {
     const items = [_][]const u8{ "model-a", "model-b", "model-c" };
     const ov = Overlay.init(&items, 1);
@@ -575,7 +589,7 @@ test "overlay session kind renders without shortLabel" {
         }
     }
     try std.testing.expect(saw_sel);
-    try std.testing.expectEqualStrings("sess-abc-123", ov.selected().?);
+    try expectSnapText(@src(), "sess-abc-123", ov.selected().?);
 }
 
 test "settings overlay toggle and render" {
@@ -604,7 +618,11 @@ test "settings overlay toggle and render" {
 }
 
 test "shortLabel strips date suffix" {
-    try std.testing.expectEqualStrings("claude-opus-4-6", shortLabel("claude-opus-4-6-20250219"));
-    try std.testing.expectEqualStrings("my-model", shortLabel("my-model"));
-    try std.testing.expectEqualStrings("model-with-abc", shortLabel("model-with-abc"));
+    const got = try std.mem.join(std.testing.allocator, "\n", &.{
+        shortLabel("claude-opus-4-6-20250219"),
+        shortLabel("my-model"),
+        shortLabel("model-with-abc"),
+    });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "claude-opus-4-6\nmy-model\nmodel-with-abc", got);
 }

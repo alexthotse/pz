@@ -1652,6 +1652,67 @@ fn tableBorderCols(frm: *const frame.Frame, y: usize, out: []usize) !usize {
 // Tests
 // ============================================================
 
+fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
+        @typeName(@TypeOf(actual)),
+        body,
+    });
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
+test {
+    _ = @import("ohsnap");
+}
+
+fn collectLines(alloc: std.mem.Allocator, it_ptr: anytype) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var first = true;
+    while (it_ptr.next()) |line| {
+        if (!first) try out.append(alloc, '\n');
+        first = false;
+        try out.appendSlice(alloc, line);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn appendColor(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, c: frame.Color) !void {
+    switch (c) {
+        .default => try out.appendSlice(alloc, "default"),
+        .idx => |idx| try std.fmt.format(out.writer(alloc), "idx:{d}", .{idx}),
+        .rgb => |rgb| try std.fmt.format(out.writer(alloc), "rgb:{x:0>6}", .{rgb}),
+    }
+}
+
+fn styledTextSnap(alloc: std.mem.Allocator, text: []const u8, spans: []const Span) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try std.fmt.format(out.writer(alloc), "buf={s}", .{text});
+    if (spans.len == 0) {
+        try out.appendSlice(alloc, "\nspans=0");
+        return out.toOwnedSlice(alloc);
+    }
+
+    for (spans) |span| {
+        try std.fmt.format(out.writer(alloc), "\nspan {d}..{d} fg=", .{ span.start, span.end });
+        try appendColor(&out, alloc, span.st.fg);
+        try out.appendSlice(alloc, " bg=");
+        try appendColor(&out, alloc, span.st.bg);
+        try std.fmt.format(out.writer(alloc), " bold={d} dim={d} italic={d} underline={d} inverse={d}", .{
+            @intFromBool(span.st.bold),
+            @intFromBool(span.st.dim),
+            @intFromBool(span.st.italic),
+            @intFromBool(span.st.underline),
+            @intFromBool(span.st.inverse),
+        });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 test "transcript appends provider events and renders fixed-height tail" {
     var tr = Transcript.init(std.testing.allocator);
     defer tr.deinit();
@@ -1741,40 +1802,32 @@ test "transcript rejects invalid utf8 and out-of-bounds render" {
 
 test "word wrap breaks at word boundary" {
     var it = wrapIter("hello world foo", 8);
-    const l0 = it.next().?;
-    const l1 = it.next().?;
-    const l2 = it.next().?;
-    try std.testing.expectEqualStrings("hello", l0);
-    try std.testing.expectEqualStrings("world", l1);
-    try std.testing.expectEqualStrings("foo", l2);
-    try std.testing.expect(it.next() == null);
+    const got = try collectLines(std.testing.allocator, &it);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "hello\nworld\nfoo", got);
 }
 
 test "word wrap hard breaks long words" {
     var it = wrapIter("abcdefghij", 5);
-    const l0 = it.next().?;
-    const l1 = it.next().?;
-    try std.testing.expectEqualStrings("abcde", l0);
-    try std.testing.expectEqualStrings("fghij", l1);
-    try std.testing.expect(it.next() == null);
+    const got = try collectLines(std.testing.allocator, &it);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "abcde\nfghij", got);
 }
 
 test "word wrap wide char in narrow terminal does not hang" {
     // Wide CJK char (width=2) in width=1 terminal — must not infinite loop
     var it = wrapIter("中", 1);
-    const l0 = it.next().?;
-    try std.testing.expectEqualStrings("中", l0);
-    try std.testing.expect(it.next() == null);
+    const got = try collectLines(std.testing.allocator, &it);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "中", got);
 }
 
 test "word wrap tabs count as width 1" {
     // Tab is whitespace → acts as a break point and counts as 1 col
     var it = wrapIter("a\tb\tc", 3);
-    const l0 = it.next().?;
-    try std.testing.expectEqualStrings("a", l0); // breaks at tab
-    const l1 = it.next().?;
-    try std.testing.expectEqualStrings("b\tc", l1); // b + tab + c = 3 cols, fits
-    try std.testing.expect(it.next() == null);
+    const got = try collectLines(std.testing.allocator, &it);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "a\nb\tc", got);
 }
 
 test "markdown wrap keeps table rows intact" {
@@ -1782,13 +1835,13 @@ test "markdown wrap keeps table rows intact" {
         "| Name | Description |\n| --- | --- |\n| A | a very long description that should not wrap |",
         12,
     );
-    const l0 = it.next().?;
-    const l1 = it.next().?;
-    const l2 = it.next().?;
-    try std.testing.expectEqualStrings("| Name | Description |", l0);
-    try std.testing.expectEqualStrings("| --- | --- |", l1);
-    try std.testing.expectEqualStrings("| A | a very long description that should not wrap |", l2);
-    try std.testing.expect(it.next() == null);
+    const got = try collectLines(std.testing.allocator, &it);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(
+        @src(),
+        "| Name | Description |\n| --- | --- |\n| A | a very long description that should not wrap |",
+        got,
+    );
 }
 
 test "markdown table keeps aligned padded columns and full enclosure" {
@@ -1869,13 +1922,9 @@ test "markdown table keeps aligned padded columns and full enclosure" {
 
 test "markdown wrap still wraps non-table lines" {
     var it = mdWrapIter("alpha beta gamma", 8);
-    const l0 = it.next().?;
-    const l1 = it.next().?;
-    const l2 = it.next().?;
-    try std.testing.expectEqualStrings("alpha", l0);
-    try std.testing.expectEqualStrings("beta", l1);
-    try std.testing.expectEqualStrings("gamma", l2);
-    try std.testing.expect(it.next() == null);
+    const got = try collectLines(std.testing.allocator, &it);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "alpha\nbeta\ngamma", got);
 }
 
 test "transcript keeps markdown table state when top rows are skipped" {
@@ -1937,7 +1986,7 @@ test "text coalescing merges consecutive text events" {
     try tr.append(.{ .text = "a" });
     try tr.append(.{ .text = "b" });
     try std.testing.expectEqual(@as(usize, 1), tr.count());
-    try std.testing.expectEqualStrings("ab", tr.blocks.items[0].text());
+    try expectSnapText(@src(), "ab", tr.blocks.items[0].text());
 }
 
 test "userText prevents coalescing" {
@@ -1953,7 +2002,7 @@ test "stripAnsi removes CSI sequences" {
     const input = "\x1b[31mhello\x1b[0m";
     const result = try stripAnsi(std.testing.allocator, input);
     defer std.testing.allocator.free(result);
-    try std.testing.expectEqualStrings("hello", result);
+    try expectSnapText(@src(), "hello", result);
 }
 
 test "scroll indicator appears when content overflows" {
@@ -2003,12 +2052,9 @@ test "parseAnsi red foreground" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("hello world", res.buf.items);
-    try std.testing.expectEqual(@as(usize, 1), res.spans.items.len);
-    const s = res.spans.items[0];
-    try std.testing.expectEqual(@as(usize, 0), s.start);
-    try std.testing.expectEqual(@as(usize, 5), s.end);
-    try std.testing.expect(frame.Color.eql(s.st.fg, .{ .idx = 1 }));
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=hello world\nspan 0..5 fg=idx:1 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "parseAnsi bold" {
@@ -2018,9 +2064,9 @@ test "parseAnsi bold" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("boldnot", res.buf.items);
-    try std.testing.expectEqual(@as(usize, 1), res.spans.items.len);
-    try std.testing.expect(res.spans.items[0].st.bold);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=boldnot\nspan 0..4 fg=default bg=default bold=1 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "parseAnsi 256-color" {
@@ -2030,9 +2076,9 @@ test "parseAnsi 256-color" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("red", res.buf.items);
-    try std.testing.expectEqual(@as(usize, 1), res.spans.items.len);
-    try std.testing.expect(frame.Color.eql(res.spans.items[0].st.fg, .{ .idx = 196 }));
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=red\nspan 0..3 fg=idx:196 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "parseAnsi truecolor" {
@@ -2042,9 +2088,9 @@ test "parseAnsi truecolor" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("text", res.buf.items);
-    try std.testing.expectEqual(@as(usize, 1), res.spans.items.len);
-    try std.testing.expect(frame.Color.eql(res.spans.items[0].st.fg, .{ .rgb = 0xff8000 }));
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=text\nspan 0..4 fg=rgb:ff8000 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "parseAnsi reset mid-stream" {
@@ -2054,15 +2100,13 @@ test "parseAnsi reset mid-stream" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("ABC", res.buf.items);
-    // Two spans: A(red), C(green); B uses base
-    try std.testing.expectEqual(@as(usize, 2), res.spans.items.len);
-    try std.testing.expect(frame.Color.eql(res.spans.items[0].st.fg, .{ .idx = 1 }));
-    try std.testing.expect(frame.Color.eql(res.spans.items[1].st.fg, .{ .idx = 2 }));
-    try std.testing.expectEqual(@as(usize, 0), res.spans.items[0].start);
-    try std.testing.expectEqual(@as(usize, 1), res.spans.items[0].end);
-    try std.testing.expectEqual(@as(usize, 2), res.spans.items[1].start);
-    try std.testing.expectEqual(@as(usize, 3), res.spans.items[1].end);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(
+        @src(),
+        "buf=ABC\nspan 0..1 fg=idx:1 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0\nspan 2..3 fg=idx:2 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0",
+        got,
+    );
 }
 
 test "parseAnsi no escapes returns original text" {
@@ -2072,8 +2116,9 @@ test "parseAnsi no escapes returns original text" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("plain text", res.buf.items);
-    try std.testing.expectEqual(@as(usize, 0), res.spans.items.len);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=plain text\nspans=0", got);
 }
 
 test "parseAnsi nested attributes" {
@@ -2083,10 +2128,9 @@ test "parseAnsi nested attributes" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("boldred", res.buf.items);
-    try std.testing.expectEqual(@as(usize, 1), res.spans.items.len);
-    try std.testing.expect(res.spans.items[0].st.bold);
-    try std.testing.expect(frame.Color.eql(res.spans.items[0].st.fg, .{ .idx = 1 }));
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=boldred\nspan 0..7 fg=idx:1 bg=default bold=1 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "tool result preserves ANSI colors" {
@@ -2153,8 +2197,9 @@ test "parseAnsi bright colors" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("hi", res.buf.items);
-    try std.testing.expect(frame.Color.eql(res.spans.items[0].st.fg, .{ .idx = 9 }));
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=hi\nspan 0..2 fg=idx:9 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "parseAnsi bg color" {
@@ -2164,8 +2209,9 @@ test "parseAnsi bg color" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("green", res.buf.items);
-    try std.testing.expect(frame.Color.eql(res.spans.items[0].st.bg, .{ .idx = 2 }));
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=green\nspan 0..5 fg=default bg=idx:2 bold=0 dim=0 italic=0 underline=0 inverse=0", got);
 }
 
 test "parseAnsi strips OSC terminated by BEL" {
@@ -2175,7 +2221,9 @@ test "parseAnsi strips OSC terminated by BEL" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("hello", res.buf.items);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=hello\nspans=0", got);
 }
 
 test "parseAnsi strips OSC terminated by ST" {
@@ -2185,7 +2233,9 @@ test "parseAnsi strips OSC terminated by ST" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("world", res.buf.items);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=world\nspans=0", got);
 }
 
 test "parseAnsi multi-sgr: bold red then reset then green" {
@@ -2197,15 +2247,13 @@ test "parseAnsi multi-sgr: bold red then reset then green" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("hello world", res.buf.items);
-    // Should have two styled spans: "hello" (bold+red) and "world" (green)
-    try std.testing.expectEqual(@as(usize, 2), res.spans.items.len);
-    const s0 = res.spans.items[0];
-    try std.testing.expectEqualStrings("hello", res.buf.items[s0.start..s0.end]);
-    try std.testing.expect(s0.st.bold);
-    const s1 = res.spans.items[1];
-    try std.testing.expectEqualStrings("world", res.buf.items[s1.start..s1.end]);
-    try std.testing.expect(!s1.st.bold);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(
+        @src(),
+        "buf=hello world\nspan 0..5 fg=idx:1 bg=default bold=1 dim=0 italic=0 underline=0 inverse=0\nspan 6..11 fg=idx:2 bg=default bold=0 dim=0 italic=0 underline=0 inverse=0",
+        got,
+    );
 }
 
 test "parseAnsi trailing ESC at end of input" {
@@ -2216,7 +2264,9 @@ test "parseAnsi trailing ESC at end of input" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("abc", res.buf.items);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=abc\nspans=0", got);
 }
 
 test "parseAnsi CSI non-SGR sequence stripped" {
@@ -2227,7 +2277,9 @@ test "parseAnsi CSI non-SGR sequence stripped" {
         res.buf.deinit(std.testing.allocator);
         res.spans.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqualStrings("beforeafter", res.buf.items);
+    const got = try styledTextSnap(std.testing.allocator, res.buf.items, res.spans.items);
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "buf=beforeafter\nspans=0", got);
 }
 
 test "scrollUp and scrollDown adjust offset" {

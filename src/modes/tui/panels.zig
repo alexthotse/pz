@@ -755,6 +755,20 @@ fn expectPrefix(frm: *const frame.Frame, y: usize, prefix: []const u8) !void {
     }
 }
 
+fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
+        @typeName(@TypeOf(actual)),
+        body,
+    });
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
+test {
+    _ = @import("ohsnap");
+}
+
 test "panels track tool lifecycle and state transitions" {
     var ps = try Panels.init(std.testing.allocator, "gpt-4.1", "prov-a");
     defer ps.deinit();
@@ -762,8 +776,12 @@ test "panels track tool lifecycle and state transitions" {
     try std.testing.expect(ps.state() == .idle);
     try std.testing.expectEqual(@as(usize, 0), ps.count());
 
+    var snap: std.ArrayListUnmanaged(u8) = .empty;
+    defer snap.deinit(std.testing.allocator);
+
     try ps.append(.{ .text = "hello" });
     try std.testing.expect(ps.state() == .streaming);
+    try std.fmt.format(snap.writer(std.testing.allocator), "after_text state={s}", .{@tagName(ps.state())});
 
     try ps.append(.{ .tool_call = .{
         .id = "call-1",
@@ -773,9 +791,13 @@ test "panels track tool lifecycle and state transitions" {
     try std.testing.expect(ps.state() == .tool);
     try std.testing.expectEqual(@as(usize, 1), ps.count());
     try std.testing.expectEqual(@as(usize, 1), ps.runningCount());
-    try std.testing.expectEqualStrings("call-1", ps.tool(0).id);
-    try std.testing.expectEqualStrings("read", ps.tool(0).name);
     try std.testing.expect(ps.tool(0).state == .running);
+    try std.fmt.format(snap.writer(std.testing.allocator), "\nafter_call state={s} id={s} name={s} tool={s}", .{
+        @tagName(ps.state()),
+        ps.tool(0).id,
+        ps.tool(0).name,
+        @tagName(ps.tool(0).state),
+    });
 
     try ps.append(.{ .tool_result = .{
         .id = "call-1",
@@ -785,12 +807,22 @@ test "panels track tool lifecycle and state transitions" {
     try std.testing.expect(ps.state() == .streaming);
     try std.testing.expectEqual(@as(usize, 0), ps.runningCount());
     try std.testing.expect(ps.tool(0).state == .ok);
+    try std.fmt.format(snap.writer(std.testing.allocator), "\nafter_result state={s} tool={s}", .{
+        @tagName(ps.state()),
+        @tagName(ps.tool(0).state),
+    });
 
     try ps.append(.{ .stop = .{
         .reason = .done,
     } });
     try std.testing.expect(ps.state() == .done);
     try std.testing.expectEqual(@as(u32, 1), ps.turns);
+    try std.fmt.format(snap.writer(std.testing.allocator), "\nafter_stop state={s}", .{@tagName(ps.state())});
+    try expectSnapText(
+        @src(),
+        "after_text state=streaming\nafter_call state=tool id=call-1 name=read tool=running\nafter_result state=streaming tool=ok\nafter_stop state=done",
+        snap.items,
+    );
 }
 
 test "panels render 2-line footer with cwd and model" {
@@ -1048,13 +1080,15 @@ test "calcCost includes cache_write" {
 }
 
 test "fmtCost formats dollars" {
-    var buf: [16]u8 = undefined;
+    var buf1: [16]u8 = undefined;
     // 4_600 micents = $0.046
-    const r1 = try fmtCost(&buf, 4_600);
-    try std.testing.expectEqualStrings("0.046", r1);
+    const r1 = try fmtCost(&buf1, 4_600);
     // 3_000_000 micents = $30.000
-    const r2 = try fmtCost(&buf, 3_000_000);
-    try std.testing.expectEqualStrings("30.000", r2);
+    var buf2: [16]u8 = undefined;
+    const r2 = try fmtCost(&buf2, 3_000_000);
+    const got = try std.mem.join(std.testing.allocator, "\n", &.{ r1, r2 });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "0.046\n30.000", got);
 }
 
 test "panels footer shows cost and sub" {

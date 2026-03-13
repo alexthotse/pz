@@ -714,6 +714,20 @@ fn findAsciiSeqInFrame(frm: *const frame.Frame, needle: []const u8) ?struct { x:
     return null;
 }
 
+fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
+        @typeName(@TypeOf(actual)),
+        body,
+    });
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
+test {
+    _ = @import("ohsnap");
+}
+
 test "harness renders full-width transcript with footer" {
     var ui = try Ui.init(std.testing.allocator, 40, 8, "gpt-x", "prov-a");
     defer ui.deinit();
@@ -734,11 +748,15 @@ test "harness editor interaction returns submit and clears line" {
 
     try std.testing.expect((try ui.onKey(.{ .char = 'h' })) == .none);
     try std.testing.expect((try ui.onKey(.{ .char = 'i' })) == .none);
-    try std.testing.expectEqualStrings("hi", ui.editorText());
+    const before = try std.testing.allocator.dupe(u8, ui.editorText());
+    defer std.testing.allocator.free(before);
 
     try std.testing.expect((try ui.onKey(.{ .enter = {} })) == .submit);
-    try std.testing.expectEqualStrings("", ui.editorText());
+    const after = ui.editorText();
     try std.testing.expect(ui.tr.count() >= 1);
+    const got = try std.fmt.allocPrint(std.testing.allocator, "before={s}\nafter={s}", .{ before, after });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "before=hi\nafter=", got);
 }
 
 test "harness editor writes wide characters with wide-pad cell" {
@@ -976,14 +994,17 @@ test "updatePreview narrows cached path completion prefix" {
     try std.testing.expect(ui.path_items != null);
     const before_len = ui.path_items.?.len;
     try std.testing.expect(ui.path_prefix != null);
-    try std.testing.expectEqualStrings("src/", ui.path_prefix.?);
+    const first = try std.testing.allocator.dupe(u8, ui.path_prefix.?);
+    defer std.testing.allocator.free(first);
 
     try ui.ed.setText("@src/m");
     ui.updatePreview();
     try std.testing.expect(ui.path_items != null);
     try std.testing.expect(ui.path_items.?.len <= before_len);
     try std.testing.expect(ui.path_prefix != null);
-    try std.testing.expectEqualStrings("src/m", ui.path_prefix.?);
+    const got = try std.fmt.allocPrint(std.testing.allocator, "first={s}\nsecond={s}", .{ first, ui.path_prefix.? });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "first=src/\nsecond=src/m", got);
 }
 
 test "lastWordStart finds word boundary" {
