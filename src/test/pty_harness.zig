@@ -228,3 +228,35 @@ test "real pz binary print mode works without tui" {
     try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "pong") != null);
 }
+
+test "real pz PTY renders slash help over the live terminal path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPty(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{ "--no-config", "--no-session" },
+        "/help\n/quit\n",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "/help") != null);
+
+    var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
+    defer vs.deinit();
+    vs.feed(out.stdout);
+    try std.testing.expect((try countNonEmptyRows(&vs, std.testing.allocator)) >= 1);
+}
