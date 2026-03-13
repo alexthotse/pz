@@ -235,16 +235,10 @@ pub const Handler = struct {
 };
 
 pub fn deniesProtectedCmd(alloc: std.mem.Allocator, cmd: []const u8) Err!bool {
-    const toks = shell.tokenize(alloc, cmd) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return false,
+    return shell.touchesProtectedPath(alloc, cmd) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => false,
     };
-    defer shell.free(alloc, toks);
-
-    for (toks) |tok| {
-        if (cmdTouchesProtected(tok.cmd)) return true;
-    }
-    return false;
 }
 
 const Capture = struct {
@@ -507,25 +501,6 @@ fn satAdd(a: usize, b: usize) usize {
     const sum = @addWithOverflow(a, b);
     if (sum[1] == 0) return sum[0];
     return std.math.maxInt(usize);
-}
-
-fn cmdTouchesProtected(cmd: []const u8) bool {
-    var i: usize = 0;
-    while (i < cmd.len) {
-        while (i < cmd.len and isCmdDelim(cmd[i])) i += 1;
-        const start = i;
-        while (i < cmd.len and !isCmdDelim(cmd[i])) i += 1;
-        if (start == i) continue;
-        if (policy.isProtectedPath(cmd[start..i])) return true;
-    }
-    return false;
-}
-
-fn isCmdDelim(c: u8) bool {
-    return std.ascii.isWhitespace(c) or switch (c) {
-        '<', '>', '(', ')', '=', ',' => true,
-        else => false,
-    };
 }
 
 fn isValidEnv(key: []const u8, val: []const u8) bool {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const policy = @import("policy.zig");
 
 pub const Sep = enum {
     start,
@@ -80,6 +81,16 @@ pub fn tokenize(alloc: Allocator, input: []const u8) Error![]Token {
 pub fn free(alloc: Allocator, tokens: []Token) void {
     for (tokens) |t| alloc.free(t.cmd);
     alloc.free(tokens);
+}
+
+pub fn touchesProtectedPath(alloc: Allocator, input: []const u8) Error!bool {
+    const toks = try tokenize(alloc, input);
+    defer free(alloc, toks);
+
+    for (toks) |tok| {
+        if (try commandTouchesProtectedPath(alloc, tok.cmd, 0)) return true;
+    }
+    return false;
 }
 
 // --- internals ---
@@ -239,6 +250,118 @@ fn unwrapShC(alloc: Allocator, input: []const u8) Error![]const u8 {
     return input;
 }
 
+const WordList = struct {
+    words: []const []u8,
+
+    fn deinit(self: WordList, alloc: Allocator) void {
+        for (self.words) |word| alloc.free(word);
+        alloc.free(self.words);
+    }
+};
+
+fn splitWordsAlloc(alloc: Allocator, input: []const u8) Error!WordList {
+    var out: std.ArrayListUnmanaged([]u8) = .{};
+    errdefer {
+        for (out.items) |word| alloc.free(word);
+        out.deinit(alloc);
+    }
+
+    var it = std.mem.tokenizeAny(u8, input, " \t\r\n");
+    while (it.next()) |word| try out.append(alloc, try alloc.dupe(u8, word));
+
+    return .{ .words = try out.toOwnedSlice(alloc) };
+}
+
+fn commandTouchesProtectedPath(alloc: Allocator, cmd: []const u8, depth: usize) Error!bool {
+    if (depth >= 8) return false;
+
+    const words = try splitWordsAlloc(alloc, cmd);
+    defer words.deinit(alloc);
+    return wordsTouchProtectedPath(alloc, words.words, depth);
+}
+
+fn tailCmdTouchesProtectedPath(alloc: Allocator, words: []const []u8, start: usize, depth: usize) Error!bool {
+    if (start >= words.len) return false;
+    const tail = try std.mem.join(alloc, " ", words[start..]);
+    defer alloc.free(tail);
+    return commandTouchesProtectedPath(alloc, tail, depth);
+}
+
+fn wordsTouchProtectedPath(alloc: Allocator, words: []const []u8, depth: usize) Error!bool {
+    if (words.len == 0) return false;
+
+    var i: usize = 0;
+    while (i < words.len and isEnvAssign(words[i])) : (i += 1) {}
+    if (i >= words.len) return false;
+
+    if (std.mem.eql(u8, words[i], "env")) {
+        i += 1;
+        while (i < words.len) {
+            const word = words[i];
+            if (std.mem.eql(u8, word, "--")) {
+                i += 1;
+                break;
+            }
+            if (std.mem.eql(u8, word, "-u")) {
+                i += @intFromBool(i + 1 < words.len) + 1;
+                continue;
+            }
+            if (word.len != 0 and word[0] == '-') {
+                i += 1;
+                continue;
+            }
+            if (isEnvAssign(word)) {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        return wordsTouchProtectedPath(alloc, words[i..], depth + 1);
+    }
+
+    if (std.mem.eql(u8, words[i], "exec") or std.mem.eql(u8, words[i], "command")) {
+        return wordsTouchProtectedPath(alloc, words[i + 1 ..], depth + 1);
+    }
+
+    if (isShellName(words[i])) {
+        var j = i + 1;
+        while (j < words.len) : (j += 1) {
+            const word = words[j];
+            if (std.mem.eql(u8, word, "-c") or std.mem.eql(u8, word, "-lc") or std.mem.eql(u8, word, "--command")) {
+                if (j + 1 < words.len) return tailCmdTouchesProtectedPath(alloc, words, j + 1, depth + 1);
+                return false;
+            }
+        }
+    }
+
+    if (std.mem.eql(u8, words[i], "xargs")) {
+        var j = i + 1;
+        while (j < words.len) : (j += 1) {
+            if (isShellName(words[j]) and j + 2 < words.len) {
+                const flag = words[j + 1];
+                if (std.mem.eql(u8, flag, "-c") or std.mem.eql(u8, flag, "-lc") or std.mem.eql(u8, flag, "--command")) {
+                    return tailCmdTouchesProtectedPath(alloc, words, j + 2, depth + 1);
+                }
+            }
+        }
+    }
+
+    for (words[i..]) |word| {
+        if (policy.isProtectedPath(word)) return true;
+    }
+    return false;
+}
+
+fn isEnvAssign(word: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, word, '=') orelse return false;
+    return eq != 0;
+}
+
+fn isShellName(word: []const u8) bool {
+    if (std.mem.eql(u8, word, "sh") or std.mem.eql(u8, word, "bash")) return true;
+    return std.mem.endsWith(u8, word, "/sh") or std.mem.endsWith(u8, word, "/bash");
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -331,6 +454,18 @@ test "nested sh -c single quotes" {
         \\  "start|echo hi; echo bye
         \\"
     );
+}
+
+test "env wrapper preserves protected path detection" {
+    try testing.expect(try touchesProtectedPath(talloc, "env FOO=1 bash -c 'cat ~/.pz/settings.json'"));
+}
+
+test "exec wrapper preserves protected path detection" {
+    try testing.expect(try touchesProtectedPath(talloc, "exec cat AGENTS.md"));
+}
+
+test "xargs shell wrapper preserves protected path detection" {
+    try testing.expect(try touchesProtectedPath(talloc, "printf x | xargs sh -c 'cat ~/.pz/settings.json'"));
 }
 
 test "mixed separators" {

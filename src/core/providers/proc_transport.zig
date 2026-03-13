@@ -1,5 +1,6 @@
 const std = @import("std");
 const first = @import("first_provider.zig");
+const shell = @import("../shell.zig");
 
 pub const Transport = struct {
     alloc: std.mem.Allocator,
@@ -17,6 +18,7 @@ pub const Transport = struct {
     pub fn init(cfg: Init) !Transport {
         if (cfg.cmd.len == 0) return error.InvalidCommand;
         if (cfg.chunk_bytes == 0) return error.InvalidChunkSize;
+        if (try shell.touchesProtectedPath(cfg.alloc, cfg.cmd)) return error.InvalidCommand;
 
         return .{
             .alloc = cfg.alloc,
@@ -180,6 +182,13 @@ test "proc transport streams stdout frames and exits cleanly" {
     }
 
     try std.testing.expectEqualStrings("text:ok\nstop:done\n", out[0..at]);
+}
+
+test "proc transport rejects protected commands" {
+    try std.testing.expectError(error.InvalidCommand, Transport.init(.{
+        .alloc = std.testing.allocator,
+        .cmd = "env FOO=1 bash -c 'cat ~/.pz/settings.json'",
+    }));
 }
 
 test "proc transport reports bad gateway on non-zero exit" {

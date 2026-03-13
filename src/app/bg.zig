@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("../core/mod.zig");
 const journal_mod = @import("job_journal.zig");
+const shell = @import("../core/shell.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");
 
 pub const State = enum {
@@ -199,6 +200,17 @@ pub const Mgr = struct {
                 .attrs = &start_attrs,
             });
             return error.InvalidArgs;
+        }
+        if (try shell.touchesProtectedPath(self.alloc, cmd)) {
+            try self.emitControlAudit(.{
+                .op = "start",
+                .out = .fail,
+                .sev = .err,
+                .msg = .{ .text = "Denied", .vis = .mask },
+                .argv = .{ .text = cmd, .vis = .mask },
+                .attrs = &start_attrs,
+            });
+            return error.AccessDenied;
         }
 
         const id = blk: {
@@ -976,6 +988,12 @@ test "bg manager rejects empty command" {
     defer mgr.deinit();
     try std.testing.expectError(error.InvalidArgs, mgr.start("", null));
     try std.testing.expectError(error.InvalidArgs, mgr.start("   ", null));
+}
+
+test "bg manager rejects protected commands" {
+    var mgr = try Mgr.init(std.testing.allocator);
+    defer mgr.deinit();
+    try std.testing.expectError(error.AccessDenied, mgr.start("env FOO=1 bash -c 'cat ~/.pz/settings.json'", null));
 }
 
 test "bg manager captures stdout+stderr and reports completion" {
