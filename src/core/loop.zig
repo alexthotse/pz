@@ -772,9 +772,15 @@ fn emitCanceled(opts: Opts, append_ct: *u64, hist: *Hist) !void {
     try opts.mode.push(.{ .provider = pev });
 
     const sev = mapProviderEv(pev, nowMs(opts));
-    try opts.store.append(opts.sid, sev);
-    try onSessionAppend(opts, append_ct, hist, true);
-    try opts.mode.push(.{ .session = sev });
+    const stored = blk: {
+        opts.store.append(opts.sid, sev) catch |append_err| {
+            try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+            break :blk false;
+        };
+        break :blk true;
+    };
+    try onSessionAppend(opts, append_ct, hist, stored);
+    if (stored) try opts.mode.push(.{ .session = sev });
 }
 
 fn onSessionAppend(opts: Opts, append_ct: *u64, hist: *Hist, refresh_hist: bool) !void {
@@ -804,7 +810,10 @@ fn reportRuntimeErr(opts: Opts, stage: Stage, cause: anyerror) !void {
         .at_ms = nowMs(opts),
         .data = .{ .err = .{ .text = msg } },
     };
-    try opts.store.append(opts.sid, ev);
+    opts.store.append(opts.sid, ev) catch |append_err| {
+        try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+        return;
+    };
     try opts.mode.push(.{ .session = ev });
 }
 
@@ -3076,6 +3085,91 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     try std.testing.expect(std.mem.indexOf(u8, last, "runtime:provider_start:StartBoom") != null);
 }
 
+test "loop runtime error append failure preserves original error and reports session write error" {
+    const StartErr = error{StartBoom};
+
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+
+        fn append(_: *@This(), _: []const u8, ev: session.Event) !void {
+            if (ev.data == .err) return error.OutOfMemory;
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        fn start(_: *@This(), _: providers.Req) StartErr!providers.Stream {
+            return error.StartBoom;
+        }
+    };
+
+    const ModeImpl = struct {
+        session_write_err_ct: usize = 0,
+        last_write_err: ?[]const u8 = null,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .session_write_err => |name| {
+                    self.session_write_err_ct += 1;
+                    self.last_write_err = name;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var provider_impl = ProviderImpl{};
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    try std.testing.expectError(error.StartBoom, run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-err-write",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+    }));
+
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.session_write_err_ct);
+    try std.testing.expectEqualStrings("OutOfMemory", mode_impl.last_write_err orelse return error.TestUnexpectedResult);
+}
+
 test "mid-stream cancel delivers partial text then canceled stop" {
     const ReaderImpl = struct {
         fn next(_: *@This()) !?session.Event {
@@ -3233,6 +3327,153 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     try std.testing.expectEqual(@as(usize, 1), mode_impl.text_ct);
 
     // Session persists partial — turns is 0 because cancel happened mid-first-turn
+    try std.testing.expectEqual(@as(u16, 0), out.turns);
+    try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
+}
+
+test "loop cancel append failure still returns canceled turn and reports session write error" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        text_ct: usize = 0,
+        append_ct: usize = 0,
+        rdr: ReaderImpl = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            self.append_ct += 1;
+            if (ev.data == .stop and ev.data.stop.reason == .canceled) return error.OutOfMemory;
+            if (ev.data == .text) self.text_ct += 1;
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Ev,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Ev {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        text_ct: usize = 0,
+        canceled_ct: usize = 0,
+        session_ct: usize = 0,
+        session_write_err_ct: usize = 0,
+        last_write_err: ?[]const u8 = null,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .text => self.text_ct += 1,
+                    .stop => |s| {
+                        if (s.reason == .canceled) self.canceled_ct += 1;
+                    },
+                    else => {},
+                },
+                .session => self.session_ct += 1,
+                .session_write_err => |name| {
+                    self.session_write_err_ct += 1;
+                    self.last_write_err = name;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const CancelImpl = struct {
+        poll_ct: usize = 0,
+
+        fn isCanceled(self: *@This()) bool {
+            self.poll_ct += 1;
+            return self.poll_ct >= 3;
+        }
+    };
+
+    const evs = [_]providers.Ev{
+        .{ .text = "Hello" },
+        .{ .text = " world" },
+        .{ .stop = .{ .reason = .done } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var cancel_impl = CancelImpl{};
+    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-midcancel-write",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+        .cancel = cancel,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), store_impl.text_ct);
+    try std.testing.expectEqual(@as(usize, 3), store_impl.append_ct);
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.text_ct);
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.canceled_ct);
+    try std.testing.expectEqual(@as(usize, 2), mode_impl.session_ct);
+    try std.testing.expectEqual(@as(usize, 1), mode_impl.session_write_err_ct);
+    try std.testing.expectEqualStrings("OutOfMemory", mode_impl.last_write_err orelse return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(u16, 0), out.turns);
     try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
 }
