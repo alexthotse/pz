@@ -421,6 +421,7 @@ test "real pz PTY startup survives live version check" {
     }});
     defer server.deinit();
     const thr = try server.spawn();
+    defer server.join(thr) catch {};
     const version_url = try server.urlAlloc(std.testing.allocator, "/repos/joelreymont/pz/releases/latest");
     defer std.testing.allocator.free(version_url);
     try env.put("PZ_VERSION_URL", version_url);
@@ -444,7 +445,7 @@ test "real pz PTY startup survives live version check" {
         &.{
             "/bin/sh",
             "-c",
-            "{ sleep 0.6; cat \"$1\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$2\" \"$3\" \"$4\"",
+            "{ sleep 1.2; cat \"$1\"; sleep 0.2; } | /usr/bin/script -q /dev/null \"$2\" \"$3\" \"$4\"",
             "sh",
             sig_path,
             pz_bin,
@@ -454,7 +455,6 @@ test "real pz PTY startup survives live version check" {
         "",
     );
     defer out.deinit(std.testing.allocator);
-    try server.join(thr);
     switch (out.term) {
         .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         else => return error.TestUnexpectedResult,
