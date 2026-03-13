@@ -226,7 +226,7 @@ pub const CmdCache = struct {
     }
 
     fn dupKey(alloc: std.mem.Allocator, key: Key) !Key {
-        const cmd = try alloc.dupe(u8, trimCmd(key.cmd));
+        const cmd = try alloc.dupe(u8, key.cmd);
         errdefer alloc.free(cmd);
 
         const loc: Loc = switch (key.loc) {
@@ -276,7 +276,7 @@ pub const CmdCache = struct {
 
     fn eql(a: Key, b: Key) bool {
         if (a.tool != b.tool) return false;
-        if (!std.mem.eql(u8, trimCmd(a.cmd), trimCmd(b.cmd))) return false;
+        if (!std.mem.eql(u8, a.cmd, b.cmd)) return false;
         if (!eqlLoc(a.loc, b.loc)) return false;
         if (!a.policy.eql(b.policy)) return false;
         return eqlLife(a.life, b.life);
@@ -312,7 +312,7 @@ pub const CmdCache = struct {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(@tagName(key.tool));
         hasher.update("\x00");
-        hasher.update(trimCmd(key.cmd));
+        hasher.update(key.cmd);
         hasher.update("\x00");
         switch (key.loc) {
             .cwd => |cwd| {
@@ -353,9 +353,6 @@ pub const CmdCache = struct {
         return hasher.final();
     }
 
-    fn trimCmd(cmd: []const u8) []const u8 {
-        return std.mem.trimRight(u8, cmd, &std.ascii.whitespace);
-    }
 };
 
 pub const Opts = struct {
@@ -3687,7 +3684,7 @@ test "CmdCache approved command auto-approved on second check" {
     try std.testing.expect(cache.contains(key));
 }
 
-test "CmdCache approval key trims trailing whitespace for command" {
+test "CmdCache approval key binds full command text" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
 
@@ -3698,14 +3695,14 @@ test "CmdCache approval key trims trailing whitespace for command" {
         .policy = .{ .version = policy.ver_current },
         .life = .{ .session = "sess-a" },
     });
-    try std.testing.expect(cache.contains(.{
+    try std.testing.expect(!cache.contains(.{
         .tool = .bash,
         .cmd = "echo hi",
         .loc = .{ .cwd = "/tmp/pz" },
         .policy = .{ .version = policy.ver_current },
         .life = .{ .session = "sess-a" },
     }));
-    try std.testing.expect(cache.contains(.{
+    try std.testing.expect(!cache.contains(.{
         .tool = .bash,
         .cmd = "echo hi\t\n",
         .loc = .{ .cwd = "/tmp/pz" },
@@ -3799,7 +3796,7 @@ test "snapshot: CmdCache stores approval context" {
         \\  .tool: core.tools.mod.Kind
         \\    .bash
         \\  .cmd: []const u8
-        \\    "echo hi"
+        \\    "echo hi   "
         \\  .loc: core.loop.CmdCache.Loc
         \\    .repo_root: []const u8
         \\      "/work/pz"
