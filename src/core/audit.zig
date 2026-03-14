@@ -219,6 +219,29 @@ pub const Conn = struct {
     ctx: *anyopaque,
     vtable: *const ConnVTable,
 
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime send_fn: fn (ctx: *T, raw: []const u8) anyerror!void,
+        comptime deinit_fn: fn (ctx: *T) void,
+    ) Conn {
+        const Wrap = struct {
+            fn send(raw: *anyopaque, data: []const u8) anyerror!void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return send_fn(typed, data);
+            }
+            fn deinit(raw: *anyopaque) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                deinit_fn(typed);
+            }
+            const vt = ConnVTable{
+                .sendRaw = send,
+                .deinit = @This().deinit,
+            };
+        };
+        return .{ .ctx = ctx, .vtable = &Wrap.vt };
+    }
+
     pub fn sendRaw(self: Conn, raw: []const u8) !void {
         try self.vtable.sendRaw(self.ctx, raw);
     }
@@ -231,6 +254,20 @@ pub const Conn = struct {
 pub const Connector = struct {
     ctx: *anyopaque,
     connect: *const fn (ctx: *anyopaque) anyerror!Conn,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime connect_fn: fn (ctx: *T) anyerror!Conn,
+    ) Connector {
+        const Wrap = struct {
+            fn connect(raw: *anyopaque) anyerror!Conn {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return connect_fn(typed);
+            }
+        };
+        return .{ .ctx = ctx, .connect = Wrap.connect };
+    }
 };
 
 pub const ShipOpts = struct {
