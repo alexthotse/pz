@@ -1,7 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const app_config = @import("../app/config.zig");
-const core = @import("../core/mod.zig");
+const core = @import("../core.zig");
 const vscreen = @import("../modes/tui/vscreen.zig");
 const ansi_ast = @import("ansi_ast.zig");
 const http_mock = @import("http_mock.zig");
@@ -849,7 +849,7 @@ test "real pz PTY walkthrough opens command settings login and resume surfaces" 
         has_provider_set: bool,
     };
     try oh.snap(@src(),
-        \\src.test.pty_harness.test.real pz PTY walkthrough opens command settings login and resume surfaces.Snap
+        \\test.pty_harness.test.real pz PTY walkthrough opens command settings login and resume surfaces.Snap
         \\  .has_help: bool = true
         \\  .has_settings_title: bool = true
         \\  .has_settings_toggle: bool = true
@@ -934,7 +934,7 @@ test "real pz PTY walkthrough edits prompt and covers session bg and compaction"
         has_compacted: bool,
     };
     try oh.snap(@src(),
-        \\src.test.pty_harness.test.real pz PTY walkthrough edits prompt and covers session bg and compaction.Snap
+        \\test.pty_harness.test.real pz PTY walkthrough edits prompt and covers session bg and compaction.Snap
         \\  .has_edited_prompt: bool = true
         \\  .has_no_unedited_prompt: bool = true
         \\  .has_session_info: bool = true
@@ -1008,7 +1008,7 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
         has_session_disabled: bool,
     };
     try oh.snap(@src(),
-        \\src.test.pty_harness.test.real pz PTY failure walkthrough covers command provider bg compact and policy denial.Snap
+        \\test.pty_harness.test.real pz PTY failure walkthrough covers command provider bg compact and policy denial.Snap
         \\  .has_unknown_command: bool = true
         \\  .has_invalid_tools: bool = true
         \\  .has_unknown_provider: bool = true

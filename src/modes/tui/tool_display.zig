@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../../core/mod.zig");
+const core = @import("../../core.zig");
 
 pub fn makeAlloc(a: std.mem.Allocator, name: []const u8, args: []const u8, max_bytes: usize) ![]u8 {
     const raw = try rawAlloc(a, name, args);

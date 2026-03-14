@@ -1,6 +1,6 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
-const tools = @import("mod.zig");
+const tools = @import("../tools.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -129,17 +129,17 @@ test "write handler overwrites file with deterministic timestamps" {
     };
     try oh.snap(@src(),
         \\core.tools.write.test.write handler overwrites file with deterministic timestamps.Snap
-        \\  .res: core.tools.mod.Result
+        \\  .res: core.tools.Result
         \\    .call_id: []const u8
         \\      "w1"
         \\    .started_at_ms: i64 = 77
         \\    .ended_at_ms: i64 = 77
-        \\    .out: []const core.tools.mod.Output
+        \\    .out: []const core.tools.Output
         \\      (empty)
         \\    .out_owned: bool = false
         \\    .out_streamed: bool = false
-        \\    .final: core.tools.mod.Result.Final
-        \\      .ok: core.tools.mod.Result.Ok
+        \\    .final: core.tools.Result.Final
+        \\      .ok: core.tools.Result.Ok
         \\        .code: i32 = 0
         \\  .file: []const u8
         \\    "new"

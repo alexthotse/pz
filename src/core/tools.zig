@@ -1,18 +1,18 @@
 const std = @import("std");
-const runtime = @import("runtime.zig");
-pub const truncate = @import("truncate.zig");
-pub const builtin = @import("builtin.zig");
-pub const read = @import("read.zig");
-pub const write = @import("write.zig");
-pub const bash = @import("bash.zig");
-pub const edit = @import("edit.zig");
-pub const grep = @import("grep.zig");
-pub const find = @import("find.zig");
-pub const ls = @import("ls.zig");
-pub const agent = @import("agent.zig");
-pub const skill = @import("skill.zig");
-pub const web = @import("web.zig");
-pub const contract_test = @import("contract_test.zig");
+const runtime = @import("tools/runtime.zig");
+pub const truncate = @import("tools/truncate.zig");
+pub const builtin = @import("tools/builtin.zig");
+pub const read = @import("tools/read.zig");
+pub const write = @import("tools/write.zig");
+pub const bash = @import("tools/bash.zig");
+pub const edit = @import("tools/edit.zig");
+pub const grep = @import("tools/grep.zig");
+pub const find = @import("tools/find.zig");
+pub const ls = @import("tools/ls.zig");
+pub const agent = @import("tools/agent.zig");
+pub const skill = @import("tools/skill.zig");
+pub const web = @import("tools/web.zig");
+pub const contract_test = @import("tools/contract_test.zig");
 
 pub const Kind = enum {
     read,

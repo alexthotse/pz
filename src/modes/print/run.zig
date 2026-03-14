@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../../core/mod.zig");
+const core = @import("../../core.zig");
 const mode = @import("../mode.zig");
 const format = @import("format.zig");
 const run_err = @import("errors.zig");
@@ -58,7 +58,9 @@ fn execVerbose(run_ctx: mode.Ctx, out: std.Io.AnyWriter, verbose: bool) run_err.
 
     formatter.finish() catch return error.OutputFlush;
 
-    if (stop_reason) |reason| return .{ .stop = reason };
+    if (stop_reason) |reason| {
+        if (reason != .done) return .{ .stop = reason };
+    }
     return .ok;
 }
 

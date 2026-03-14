@@ -1,9 +1,9 @@
 const std = @import("std");
 const policy = @import("policy.zig");
-const providers = @import("providers/mod.zig");
+const providers = @import("providers.zig");
 const prov_contract = @import("providers/contract.zig");
-const session = @import("session/mod.zig");
-const tools = @import("tools/mod.zig");
+const session = @import("session.zig");
+const tools = @import("tools.zig");
 const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const time_mock = @import("../test/time_mock.zig");
@@ -2325,7 +2325,7 @@ test "runTool approval hook binds repo policy session and cache state" {
     try oh.snap(@src(),
         \\core.loop.test.runTool approval hook binds repo policy session and cache state.Snap
         \\  .cached: bool = false
-        \\  .tool: core.tools.mod.Kind
+        \\  .tool: core.tools.Kind
         \\    .write
         \\  .cmd: []const u8
         \\    "{"path":"a.txt","text":"hello"}"
@@ -4011,7 +4011,7 @@ test "snapshot: CmdCache stores approval context" {
 
     try oh.snap(@src(),
         \\core.loop.CmdCache.Key
-        \\  .tool: core.tools.mod.Kind
+        \\  .tool: core.tools.Kind
         \\    .bash
         \\  .cmd: []const u8
         \\    "echo hi   "

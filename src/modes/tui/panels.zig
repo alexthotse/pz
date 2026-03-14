@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../../core/mod.zig");
+const core = @import("../../core.zig");
 const frame = @import("frame.zig");
 const tool_display = @import("tool_display.zig");
 const theme = @import("theme.zig");

@@ -1,6 +1,6 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
-const tools = @import("mod.zig");
+const tools = @import("../tools.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 
 pub const Err = error{

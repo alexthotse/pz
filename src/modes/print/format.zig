@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../../core/mod.zig");
+const core = @import("../../core.zig");
 
 const ToolCallOut = struct {
     id: []const u8,

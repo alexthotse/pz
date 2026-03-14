@@ -3,7 +3,7 @@ const std = @import("std");
 const policy = @import("../policy.zig");
 const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
-const tools = @import("mod.zig");
+const tools = @import("../tools.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 
 pub const Err = error{
@@ -679,12 +679,12 @@ test "bash handler applies explicit env variables" {
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
     try oh.snap(@src(),
         \\core.tools.bash.test.bash handler applies explicit env variables.Snap
-        \\  .stream: core.tools.mod.Output.Stream
+        \\  .stream: core.tools.Output.Stream
         \\    .stdout
         \\  .chunk: []const u8
         \\    "ok"
-        \\  .final: core.tools.mod.Result.Final
-        \\    .ok: core.tools.mod.Result.Ok
+        \\  .final: core.tools.Result.Final
+        \\    .ok: core.tools.Result.Ok
         \\      .code: i32 = 0
     ).expectEqual(Snap{
         .stream = res.out[0].stream,
@@ -1461,14 +1461,14 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
     try WaitGone.run(bg_pid);
     try oh.snap(@src(),
         \\core.tools.bash.test.bash handler cancels running child and reaps TERM-resistant process.Snap
-        \\  .stream: core.tools.mod.Output.Stream
+        \\  .stream: core.tools.Output.Stream
         \\    .stdout
         \\  .pid_valid: bool = true
         \\  .saw_out: bool = true
         \\  .out_before_done: bool = true
-        \\  .final: core.tools.mod.Result.Final
-        \\    .cancelled: core.tools.mod.Result.Cancelled
-        \\      .reason: core.tools.mod.Result.CancelReason
+        \\  .final: core.tools.Result.Final
+        \\    .cancelled: core.tools.Result.Cancelled
+        \\      .reason: core.tools.Result.CancelReason
         \\        .user
     ).expectEqual(Snap{
         .stream = res.out[0].stream,

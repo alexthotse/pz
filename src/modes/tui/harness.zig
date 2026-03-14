@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../../core/mod.zig");
+const core = @import("../../core.zig");
 pub const editor = @import("editor.zig");
 const mouse = @import("mouse.zig");
 const transcript = @import("transcript.zig");

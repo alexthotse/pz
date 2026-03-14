@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../core/mod.zig");
+const core = @import("../core.zig");
 
 pub const Mode = enum {
     tui,

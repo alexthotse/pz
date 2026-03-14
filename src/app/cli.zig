@@ -15,7 +15,7 @@ pub const Run = struct {
     cfg: config.Config,
     session: Args.SessionSel = .auto,
     no_session: bool = false,
-    tool_mask: u16 = @import("../core/mod.zig").tools.builtin.mask_all,
+    tool_mask: u16 = @import("../core.zig").tools.builtin.mask_all,
     thinking: Args.ThinkingLevel = .adaptive,
     verbose: bool = false,
     system_prompt: ?[]const u8 = null,
@@ -228,8 +228,8 @@ test "cli propagates session and tool selections to run command" {
             try std.testing.expect(std.meta.activeTag(run.session) == .cont);
             try std.testing.expect(!run.no_session);
             try std.testing.expectEqual(
-                @import("../core/mod.zig").tools.builtin.mask_read |
-                    @import("../core/mod.zig").tools.builtin.mask_bash,
+                @import("../core.zig").tools.builtin.mask_read |
+                    @import("../core.zig").tools.builtin.mask_bash,
                 run.tool_mask,
             );
         },

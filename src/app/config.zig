@@ -1,6 +1,6 @@
 const std = @import("std");
 const args = @import("args.zig");
-const core = @import("../core/mod.zig");
+const core = @import("../core.zig");
 
 pub const model_default = "default";
 pub const provider_default = "default";

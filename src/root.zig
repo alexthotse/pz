@@ -1,3 +1,3 @@
-pub const core = @import("core/mod.zig");
-pub const modes = @import("modes/mod.zig");
-pub const app = @import("app/mod.zig");
+pub const core = @import("core.zig");
+pub const modes = @import("modes.zig");
+pub const app = @import("app.zig");

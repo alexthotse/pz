@@ -1,5 +1,5 @@
 const std = @import("std");
-const tools = @import("mod.zig");
+const tools = @import("../tools.zig");
 const read = @import("read.zig");
 const write = @import("write.zig");
 const bash = @import("bash.zig");
@@ -825,15 +825,15 @@ test "agent tool uses runtime hook output" {
         \\  .started_at_ms: i64 = 12
         \\  .ended_at_ms: i64 = 12
         \\  .final: core.tools.builtin.AskFinalSnap
-        \\    .tag: core.tools.mod.Result.Tag
+        \\    .tag: core.tools.Result.Tag
         \\      .ok
         \\    .code: ?i32
         \\      0
-        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\    .err_kind: ?core.tools.Result.ErrKind
         \\      null
         \\    .msg: ?[]const u8
         \\      null
-        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\    .reason: ?core.tools.Result.CancelReason
         \\      null
         \\    .limit_ms: ?u32
         \\      null
@@ -843,7 +843,7 @@ test "agent tool uses runtime hook output" {
         \\        "agent-hook"
         \\      .seq: u32 = 0
         \\      .at_ms: i64 = 12
-        \\      .stream: core.tools.mod.Output.Stream
+        \\      .stream: core.tools.Output.Stream
         \\        .stdout
         \\      .chunk: []const u8
         \\        "agent: critic
@@ -901,15 +901,15 @@ test "ask tool requires interactive hook" {
         \\  .started_at_ms: i64 = 1
         \\  .ended_at_ms: i64 = 1
         \\  .final: core.tools.builtin.AskFinalSnap
-        \\    .tag: core.tools.mod.Result.Tag
+        \\    .tag: core.tools.Result.Tag
         \\      .failed
         \\    .code: ?i32
         \\      null
-        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\    .err_kind: ?core.tools.Result.ErrKind
         \\      .invalid_args
         \\    .msg: ?[]const u8
         \\      "ask tool requires interactive TUI mode"
-        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\    .reason: ?core.tools.Result.CancelReason
         \\      null
         \\    .limit_ms: ?u32
         \\      null
@@ -951,15 +951,15 @@ test "ask tool rejects empty question list" {
         \\  .started_at_ms: i64 = 7
         \\  .ended_at_ms: i64 = 7
         \\  .final: core.tools.builtin.AskFinalSnap
-        \\    .tag: core.tools.mod.Result.Tag
+        \\    .tag: core.tools.Result.Tag
         \\      .failed
         \\    .code: ?i32
         \\      null
-        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\    .err_kind: ?core.tools.Result.ErrKind
         \\      .invalid_args
         \\    .msg: ?[]const u8
         \\      "ask tool requires at least one question"
-        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\    .reason: ?core.tools.Result.CancelReason
         \\      null
         \\    .limit_ms: ?u32
         \\      null
@@ -1026,15 +1026,15 @@ test "ask tool uses hook output" {
         \\  .started_at_ms: i64 = 2
         \\  .ended_at_ms: i64 = 2
         \\  .final: core.tools.builtin.AskFinalSnap
-        \\    .tag: core.tools.mod.Result.Tag
+        \\    .tag: core.tools.Result.Tag
         \\      .ok
         \\    .code: ?i32
         \\      0
-        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\    .err_kind: ?core.tools.Result.ErrKind
         \\      null
         \\    .msg: ?[]const u8
         \\      null
-        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\    .reason: ?core.tools.Result.CancelReason
         \\      null
         \\    .limit_ms: ?u32
         \\      null
@@ -1044,7 +1044,7 @@ test "ask tool uses hook output" {
         \\        "ask-2"
         \\      .seq: u32 = 0
         \\      .at_ms: i64 = 2
-        \\      .stream: core.tools.mod.Output.Stream
+        \\      .stream: core.tools.Output.Stream
         \\        .stdout
         \\      .chunk: []const u8
         \\        "{"cancelled":false,"answers":[{"id":"scope","answer":"A","index":0}]}"
@@ -1104,15 +1104,15 @@ test "ask tool reports hook failure" {
         \\  .started_at_ms: i64 = 8
         \\  .ended_at_ms: i64 = 8
         \\  .final: core.tools.builtin.AskFinalSnap
-        \\    .tag: core.tools.mod.Result.Tag
+        \\    .tag: core.tools.Result.Tag
         \\      .failed
         \\    .code: ?i32
         \\      null
-        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\    .err_kind: ?core.tools.Result.ErrKind
         \\      .io
         \\    .msg: ?[]const u8
         \\      "BadInput"
-        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\    .reason: ?core.tools.Result.CancelReason
         \\      null
         \\    .limit_ms: ?u32
         \\      null
@@ -1176,15 +1176,15 @@ test "ask tool maps cancelled hook output to cancelled final" {
         \\  .started_at_ms: i64 = 9
         \\  .ended_at_ms: i64 = 9
         \\  .final: core.tools.builtin.AskFinalSnap
-        \\    .tag: core.tools.mod.Result.Tag
+        \\    .tag: core.tools.Result.Tag
         \\      .cancelled
         \\    .code: ?i32
         \\      null
-        \\    .err_kind: ?core.tools.mod.Result.ErrKind
+        \\    .err_kind: ?core.tools.Result.ErrKind
         \\      null
         \\    .msg: ?[]const u8
         \\      null
-        \\    .reason: ?core.tools.mod.Result.CancelReason
+        \\    .reason: ?core.tools.Result.CancelReason
         \\      .user
         \\    .limit_ms: ?u32
         \\      null
@@ -1194,7 +1194,7 @@ test "ask tool maps cancelled hook output to cancelled final" {
         \\        "ask-cancel"
         \\      .seq: u32 = 0
         \\      .at_ms: i64 = 9
-        \\      .stream: core.tools.mod.Output.Stream
+        \\      .stream: core.tools.Output.Stream
         \\        .stdout
         \\      .chunk: []const u8
         \\        "{"cancelled":true,"answers":[{"id":"scope","answer":"A","index":0}]}"

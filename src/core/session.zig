@@ -1,17 +1,17 @@
 const std = @import("std");
-const schema = @import("schema.zig");
-pub const writer = @import("writer.zig");
-pub const reader = @import("reader.zig");
-pub const fs_store = @import("fs_store.zig");
-pub const null_store = @import("null_store.zig");
-pub const selector = @import("selector.zig");
-pub const path = @import("path.zig");
-pub const compact = @import("compact.zig");
-pub const @"export" = @import("export.zig");
-pub const retry_state = @import("retry_state.zig");
-pub const regress = @import("regress.zig");
-pub const golden = @import("golden.zig");
-pub const session_file = @import("session_file.zig");
+const schema = @import("session/schema.zig");
+pub const writer = @import("session/writer.zig");
+pub const reader = @import("session/reader.zig");
+pub const fs_store = @import("session/fs_store.zig");
+pub const null_store = @import("session/null_store.zig");
+pub const selector = @import("session/selector.zig");
+pub const path = @import("session/path.zig");
+pub const compact = @import("session/compact.zig");
+pub const @"export" = @import("session/export.zig");
+pub const retry_state = @import("session/retry_state.zig");
+pub const regress = @import("session/regress.zig");
+pub const golden = @import("session/golden.zig");
+pub const session_file = @import("session/session_file.zig");
 
 pub const SessionFile = session_file.SessionFile;
 pub const cleanOrphanTmpFiles = session_file.cleanOrphanTmpFiles;
@@ -209,7 +209,7 @@ test "session store contract dispatches through vtable" {
     const second_null = (try rdr.next()) == null;
     store.deinit();
     try oh.snap(@src(),
-        \\core.session.mod.test.session store contract dispatches through vtable.Snap
+        \\core.session.test.session store contract dispatches through vtable.Snap
         \\  .first: bool = true
         \\  .second_null: bool = true
         \\  .append_ct: usize = 1

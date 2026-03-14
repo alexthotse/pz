@@ -1,6 +1,6 @@
 const std = @import("std");
 const rpc = @import("../agent.zig");
-const tools = @import("mod.zig");
+const tools = @import("../tools.zig");
 
 pub const Err = error{
     KindMismatch,

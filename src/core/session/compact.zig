@@ -4,7 +4,7 @@ const schema = @import("schema.zig");
 const reader = @import("reader.zig");
 const sid_path = @import("path.zig");
 const session_file = @import("session_file.zig");
-const providers = @import("../providers/mod.zig");
+const providers = @import("../providers.zig");
 const prov_contract = @import("../providers/contract.zig");
 const fs_secure = @import("../fs_secure.zig");
 

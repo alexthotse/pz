@@ -1,7 +1,7 @@
 const std = @import("std");
 const OhSnap = @import("ohsnap");
 const path_guard = @import("path_guard.zig");
-const tools = @import("mod.zig");
+const tools = @import("../tools.zig");
 
 fn noopSink() tools.Sink {
     const SinkImpl = struct {
@@ -261,7 +261,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "r1"
         \\    .started_at_ms: i64 = 11
         \\    .ended_at_ms: i64 = 11
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      [0]: core.tools.contract_test.OutSnap
@@ -269,7 +269,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\          "r1"
         \\        .seq: u32 = 0
         \\        .at_ms: i64 = 11
-        \\        .stream: core.tools.mod.Output.Stream
+        \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
         \\  [1]: core.tools.contract_test.ResultSnap
@@ -277,7 +277,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "w1"
         \\    .started_at_ms: i64 = 22
         \\    .ended_at_ms: i64 = 22
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      (empty)
@@ -286,7 +286,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "e1"
         \\    .started_at_ms: i64 = 33
         \\    .ended_at_ms: i64 = 33
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      (empty)
@@ -295,7 +295,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "b1"
         \\    .started_at_ms: i64 = 44
         \\    .ended_at_ms: i64 = 44
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      [0]: core.tools.contract_test.OutSnap
@@ -303,7 +303,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\          "b1"
         \\        .seq: u32 = 0
         \\        .at_ms: i64 = 44
-        \\        .stream: core.tools.mod.Output.Stream
+        \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
         \\  [4]: core.tools.contract_test.ResultSnap
@@ -311,7 +311,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "l1"
         \\    .started_at_ms: i64 = 66
         \\    .ended_at_ms: i64 = 66
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      [0]: core.tools.contract_test.OutSnap
@@ -319,7 +319,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\          "l1"
         \\        .seq: u32 = 0
         \\        .at_ms: i64 = 66
-        \\        .stream: core.tools.mod.Output.Stream
+        \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
         \\  [5]: core.tools.contract_test.ResultSnap
@@ -327,7 +327,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "a1"
         \\    .started_at_ms: i64 = 70
         \\    .ended_at_ms: i64 = 70
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      [0]: core.tools.contract_test.OutSnap
@@ -335,7 +335,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\          "a1"
         \\        .seq: u32 = 0
         \\        .at_ms: i64 = 70
-        \\        .stream: core.tools.mod.Output.Stream
+        \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
         \\  [6]: core.tools.contract_test.ResultSnap
@@ -343,7 +343,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "f1"
         \\    .started_at_ms: i64 = 77
         \\    .ended_at_ms: i64 = 77
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      [0]: core.tools.contract_test.OutSnap
@@ -351,7 +351,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\          "f1"
         \\        .seq: u32 = 0
         \\        .at_ms: i64 = 77
-        \\        .stream: core.tools.mod.Output.Stream
+        \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
         \\  [7]: core.tools.contract_test.ResultSnap
@@ -359,7 +359,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\      "g1"
         \\    .started_at_ms: i64 = 88
         \\    .ended_at_ms: i64 = 88
-        \\    .final: core.tools.mod.Result.Tag
+        \\    .final: core.tools.Result.Tag
         \\      .ok
         \\    .out: []core.tools.contract_test.OutSnap
         \\      [0]: core.tools.contract_test.OutSnap
@@ -367,7 +367,7 @@ test "tool contract handlers emit deterministic envelopes" {
         \\          "g1"
         \\        .seq: u32 = 0
         \\        .at_ms: i64 = 88
-        \\        .stream: core.tools.mod.Output.Stream
+        \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
     ).expectEqual(snaps);
@@ -544,12 +544,12 @@ test "tool contract registry emits start output finish ordering" {
     defer wrap.h.deinitResult(res);
 
     try oh.snap(@src(),
-        \\[]@typeInfo(core.tools.mod.Event).@"union".tag_type.?
-        \\  [0]: @typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\[]@typeInfo(core.tools.Event).@"union".tag_type.?
+        \\  [0]: @typeInfo(core.tools.Event).@"union".tag_type.?
         \\    .start
-        \\  [1]: @typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\  [1]: @typeInfo(core.tools.Event).@"union".tag_type.?
         \\    .output
-        \\  [2]: @typeInfo(core.tools.mod.Event).@"union".tag_type.?
+        \\  [2]: @typeInfo(core.tools.Event).@"union".tag_type.?
         \\    .finish
     ).expectEqual(sink_impl.tags[0..sink_impl.ct]);
 }

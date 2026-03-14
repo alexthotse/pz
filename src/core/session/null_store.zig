@@ -1,5 +1,5 @@
 const std = @import("std");
-const session = @import("mod.zig");
+const session = @import("../session.zig");
 
 pub const Store = struct {
     pub fn init() Store {

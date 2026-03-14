@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("../core/mod.zig");
+const core = @import("../core.zig");
 const journal_mod = @import("job_journal.zig");
 const shell = @import("../core/shell.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");

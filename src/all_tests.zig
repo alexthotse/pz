@@ -5,8 +5,8 @@ comptime {
     _ = @import("app/version.zig");
     _ = @import("app/runtime.zig");
     _ = @import("core/loop.zig");
-    _ = @import("core/session/mod.zig");
-    _ = @import("core/tools/mod.zig");
+    _ = @import("core/session.zig");
+    _ = @import("core/tools.zig");
     _ = @import("core/tools/contract_test.zig");
     _ = @import("core/providers/client.zig");
     _ = @import("core/providers/openai.zig");

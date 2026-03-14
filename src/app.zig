@@ -1,11 +1,11 @@
 const std = @import("std");
 
-pub const args = @import("args.zig");
-pub const cli = @import("cli.zig");
-pub const config = @import("config.zig");
-pub const report = @import("report.zig");
-pub const runtime = @import("runtime.zig");
-pub const update = @import("update.zig");
+pub const args = @import("app/args.zig");
+pub const cli = @import("app/cli.zig");
+pub const config = @import("app/config.zig");
+pub const report = @import("app/report.zig");
+pub const runtime = @import("app/runtime.zig");
+pub const update = @import("app/update.zig");
 
 pub fn run() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

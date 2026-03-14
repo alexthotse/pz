@@ -1,5 +1,5 @@
 const std = @import("std");
-const session = @import("mod.zig");
+const session = @import("../session.zig");
 const writer = @import("writer.zig");
 const reader = @import("reader.zig");
 

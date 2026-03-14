@@ -1,5 +1,5 @@
 const std = @import("std");
-const providers = @import("../core/providers/mod.zig");
+const providers = @import("../core/providers.zig");
 
 pub const Step = union(enum) {
     ev: providers.Ev,
