@@ -937,23 +937,51 @@ test "spawned child rejects invalid policy hash" {
 }
 
 test "spawned child accepts inherited policy hash" {
+    const OhSnap = @import("ohsnap");
     const build_options = @import("build_options");
+    const oh = OhSnap{};
     const hash =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .echo, "agent-child", hash);
     defer child.deinit();
 
     const hello = try child.connect();
-    try testing.expectEqualStrings("agent-child", hello.agent_id);
-    try testing.expectEqualStrings(hash, hello.policy_hash);
-
     const res = try child.runReq(.{
         .id = "job-echo",
         .prompt = "inherit",
     });
-    const out = res.out orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("echo:inherit", out.text);
-    try testing.expect(res.done != null);
+    const Snap = struct {
+        hello: Hello,
+        out: ?Out,
+        done: ?Done,
+    };
+    try oh.snap(@src(),
+        \\core.agent.test.spawned child accepts inherited policy hash.Snap
+        \\  .hello: core.agent.Hello
+        \\    .role: core.agent.Role
+        \\      .child
+        \\    .agent_id: []const u8
+        \\      "agent-child"
+        \\    .policy_hash: []const u8
+        \\      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        \\  .out: ?core.agent.Out
+        \\    .id: []const u8
+        \\      "job-echo"
+        \\    .kind: core.agent.OutKind
+        \\      .info
+        \\    .text: []const u8
+        \\      "echo:inherit"
+        \\  .done: ?core.agent.Done
+        \\    .id: []const u8
+        \\      "job-echo"
+        \\    .stop: core.agent.Stop
+        \\      .done
+        \\    .truncated: bool = false
+    ).expectEqual(Snap{
+        .hello = hello,
+        .out = res.out,
+        .done = res.done,
+    });
 }
 
 test "spawned child inherits only stdio fds" {

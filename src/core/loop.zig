@@ -1665,25 +1665,67 @@ test "loop smoke composes replay provider tool and mode" {
         .time = TimeSrc.from(time_mock.FixedMs, &clock_impl, time_mock.FixedMs.nowMs),
     });
 
-    try std.testing.expectEqual(@as(u16, 2), out.turns);
-    try std.testing.expectEqual(@as(u32, 1), out.tool_calls);
-    try std.testing.expectEqual(@as(usize, 2), provider_impl.start_ct);
-    try std.testing.expectEqual(@as(usize, 2), provider_impl.stream.deinit_ct);
-    try std.testing.expectEqual(@as(usize, 1), dispatch_impl.run_ct);
-
-    try std.testing.expectEqual(@as(usize, 7), store_impl.append_ct);
-    try std.testing.expectEqualStrings("sid-1", store_impl.replay_sid);
-    try std.testing.expectEqualStrings("sid-1", store_impl.append_sid);
-    try std.testing.expectEqual(@as(usize, 1), store_impl.tool_result_ct);
-    try std.testing.expectEqualStrings("tool-ok", store_impl.tool_result_out[0..store_impl.tool_result_len]);
-
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.replay_ct);
-    try std.testing.expectEqual(@as(usize, 7), mode_impl.session_ct);
-    try std.testing.expectEqual(@as(usize, 6), mode_impl.provider_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.provider_tool_result_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.tool_start_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.tool_output_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.tool_finish_ct);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        provider_start_ct: usize,
+        provider_deinit_ct: usize,
+        dispatch_run_ct: usize,
+        store_append_ct: usize,
+        store_replay_sid: []const u8,
+        store_append_sid: []const u8,
+        store_tool_result_ct: usize,
+        store_tool_result_out: []const u8,
+        mode_replay_ct: usize,
+        mode_session_ct: usize,
+        mode_provider_ct: usize,
+        mode_provider_tool_result_ct: usize,
+        mode_tool_start_ct: usize,
+        mode_tool_output_ct: usize,
+        mode_tool_finish_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop smoke composes replay provider tool and mode.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 2
+        \\    .tool_calls: u32 = 1
+        \\  .provider_start_ct: usize = 2
+        \\  .provider_deinit_ct: usize = 2
+        \\  .dispatch_run_ct: usize = 1
+        \\  .store_append_ct: usize = 7
+        \\  .store_replay_sid: []const u8
+        \\    "sid-1"
+        \\  .store_append_sid: []const u8
+        \\    "sid-1"
+        \\  .store_tool_result_ct: usize = 1
+        \\  .store_tool_result_out: []const u8
+        \\    "tool-ok"
+        \\  .mode_replay_ct: usize = 1
+        \\  .mode_session_ct: usize = 7
+        \\  .mode_provider_ct: usize = 6
+        \\  .mode_provider_tool_result_ct: usize = 1
+        \\  .mode_tool_start_ct: usize = 1
+        \\  .mode_tool_output_ct: usize = 1
+        \\  .mode_tool_finish_ct: usize = 1
+    ).expectEqual(Snap{
+        .out = out,
+        .provider_start_ct = provider_impl.start_ct,
+        .provider_deinit_ct = provider_impl.stream.deinit_ct,
+        .dispatch_run_ct = dispatch_impl.run_ct,
+        .store_append_ct = store_impl.append_ct,
+        .store_replay_sid = store_impl.replay_sid,
+        .store_append_sid = store_impl.append_sid,
+        .store_tool_result_ct = store_impl.tool_result_ct,
+        .store_tool_result_out = store_impl.tool_result_out[0..store_impl.tool_result_len],
+        .mode_replay_ct = mode_impl.replay_ct,
+        .mode_session_ct = mode_impl.session_ct,
+        .mode_provider_ct = mode_impl.provider_ct,
+        .mode_provider_tool_result_ct = mode_impl.provider_tool_result_ct,
+        .mode_tool_start_ct = mode_impl.tool_start_ct,
+        .mode_tool_output_ct = mode_impl.tool_output_ct,
+        .mode_tool_finish_ct = mode_impl.tool_finish_ct,
+    });
 }
 
 test "loop smoke finishes single turn with no tools" {
@@ -1816,15 +1858,40 @@ test "loop smoke finishes single turn with no tools" {
         .mode = mode,
     });
 
-    try std.testing.expectEqual(@as(u16, 1), out.turns);
-    try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.start_ct);
-    try std.testing.expectEqual(@as(usize, 1), provider_impl.stream.deinit_ct);
-    try std.testing.expectEqual(@as(usize, 3), store_impl.append_ct);
-    try std.testing.expectEqual(@as(usize, 0), mode_impl.replay_ct);
-    try std.testing.expectEqual(@as(usize, 3), mode_impl.session_ct);
-    try std.testing.expectEqual(@as(usize, 2), mode_impl.provider_ct);
-    try std.testing.expectEqual(@as(usize, 0), mode_impl.tool_ct);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        provider_start_ct: usize,
+        provider_deinit_ct: usize,
+        store_append_ct: usize,
+        mode_replay_ct: usize,
+        mode_session_ct: usize,
+        mode_provider_ct: usize,
+        mode_tool_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop smoke finishes single turn with no tools.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 1
+        \\    .tool_calls: u32 = 0
+        \\  .provider_start_ct: usize = 1
+        \\  .provider_deinit_ct: usize = 1
+        \\  .store_append_ct: usize = 3
+        \\  .mode_replay_ct: usize = 0
+        \\  .mode_session_ct: usize = 3
+        \\  .mode_provider_ct: usize = 2
+        \\  .mode_tool_ct: usize = 0
+    ).expectEqual(Snap{
+        .out = out,
+        .provider_start_ct = provider_impl.start_ct,
+        .provider_deinit_ct = provider_impl.stream.deinit_ct,
+        .store_append_ct = store_impl.append_ct,
+        .mode_replay_ct = mode_impl.replay_ct,
+        .mode_session_ct = mode_impl.session_ct,
+        .mode_provider_ct = mode_impl.provider_ct,
+        .mode_tool_ct = mode_impl.tool_ct,
+    });
 }
 
 test "loop cancellation emits canceled stop and exits early" {
@@ -2095,10 +2162,25 @@ test "runTool forwards cancel source to dispatch" {
     defer std.testing.allocator.free(tr.id);
     defer std.testing.allocator.free(tr.out);
 
-    try std.testing.expectEqual(@as(usize, 1), dispatch_impl.run_ct);
-    try std.testing.expectEqualStrings("call-1", tr.id);
-    try std.testing.expectEqualStrings("tool-ok", tr.out);
-    try std.testing.expect(!tr.is_err);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        dispatch_run_ct: usize,
+        tr: @TypeOf(tr),
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.runTool forwards cancel source to dispatch.Snap
+        \\  .dispatch_run_ct: usize = 1
+        \\  .tr: core.providers.contract.ToolResult
+        \\    .id: []const u8
+        \\      "call-1"
+        \\    .out: []const u8
+        \\      "tool-ok"
+        \\    .is_err: bool = false
+    ).expectEqual(Snap{
+        .dispatch_run_ct = dispatch_impl.run_ct,
+        .tr = tr,
+    });
 }
 
 test "runTool approval hook binds repo policy session and cache state" {
@@ -2224,12 +2306,37 @@ test "runTool approval hook binds repo policy session and cache state" {
     defer std.testing.allocator.free(tr.id);
     defer std.testing.allocator.free(tr.out);
 
-    try std.testing.expect(!approver_impl.cached);
-    try std.testing.expectEqual(tools.Kind.write, approver_impl.tool);
-    try std.testing.expectEqualStrings("{\"path\":\"a.txt\",\"text\":\"hello\"}", approver_impl.cmd);
-    try std.testing.expectEqualStrings("/work/pz", approver_impl.repo_root);
-    try std.testing.expectEqualStrings("sid-approve", approver_impl.sid);
-    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", approver_impl.policy_hash);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        cached: bool,
+        tool: tools.Kind,
+        cmd: []const u8,
+        repo_root: []const u8,
+        sid: []const u8,
+        policy_hash: []const u8,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.runTool approval hook binds repo policy session and cache state.Snap
+        \\  .cached: bool = false
+        \\  .tool: core.tools.mod.Kind
+        \\    .write
+        \\  .cmd: []const u8
+        \\    "{"path":"a.txt","text":"hello"}"
+        \\  .repo_root: []const u8
+        \\    "/work/pz"
+        \\  .sid: []const u8
+        \\    "sid-approve"
+        \\  .policy_hash: []const u8
+        \\    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ).expectEqual(Snap{
+        .cached = approver_impl.cached,
+        .tool = approver_impl.tool,
+        .cmd = approver_impl.cmd,
+        .repo_root = approver_impl.repo_root,
+        .sid = approver_impl.sid,
+        .policy_hash = approver_impl.policy_hash,
+    });
 }
 
 test "loop requires approval before bash escalation from malicious comment replay" {
@@ -2692,9 +2799,26 @@ test "loop compaction trigger runs at configured append cadence" {
         .compact_every = 2,
     });
 
-    try std.testing.expectEqual(@as(u16, 1), out.turns);
-    try std.testing.expectEqual(@as(usize, 1), comp_impl.run_ct);
-    try std.testing.expectEqualStrings("sid-comp", comp_impl.sid);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        comp_run_ct: usize,
+        comp_sid: []const u8,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop compaction trigger runs at configured append cadence.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 1
+        \\    .tool_calls: u32 = 0
+        \\  .comp_run_ct: usize = 1
+        \\  .comp_sid: []const u8
+        \\    "sid-comp"
+    ).expectEqual(Snap{
+        .out = out,
+        .comp_run_ct = comp_impl.run_ct,
+        .comp_sid = comp_impl.sid,
+    });
 }
 
 test "buildReqMsgs HistClear resets request history to the last segment" {
@@ -3012,10 +3136,23 @@ test "loop reloads history from compacted replay across repeated compactions" {
         .compact_every = 1,
     });
 
-    try std.testing.expectEqual(@as(u16, 2), out.turns);
-    try std.testing.expectEqual(@as(u32, 1), out.tool_calls);
-    try std.testing.expectEqual(@as(usize, 3), comp_impl.run_ct);
-    try std.testing.expectEqual(@as(usize, 4), store_impl.replay_ct);
+    const CountSnap = struct {
+        out: @TypeOf(out),
+        comp_run_ct: usize,
+        store_replay_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop reloads history from compacted replay across repeated compactions.CountSnap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 2
+        \\    .tool_calls: u32 = 1
+        \\  .comp_run_ct: usize = 3
+        \\  .store_replay_ct: usize = 4
+    ).expectEqual(CountSnap{
+        .out = out,
+        .comp_run_ct = comp_impl.run_ct,
+        .store_replay_ct = store_impl.replay_ct,
+    });
 
     try oh.snap(@src(),
         \\[]u8
@@ -3205,8 +3342,21 @@ test "loop runtime error append failure preserves original error and reports ses
         .mode = mode,
     }));
 
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.session_write_err_ct);
-    try std.testing.expectEqualStrings("OutOfMemory", mode_impl.last_write_err orelse return error.TestUnexpectedResult);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        session_write_err_ct: usize,
+        last_write_err: []const u8,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop runtime error append failure preserves original error and reports session write error.Snap
+        \\  .session_write_err_ct: usize = 1
+        \\  .last_write_err: []const u8
+        \\    "OutOfMemory"
+    ).expectEqual(Snap{
+        .session_write_err_ct = mode_impl.session_write_err_ct,
+        .last_write_err = mode_impl.last_write_err orelse return error.TestUnexpectedResult,
+    });
 }
 
 test "mid-stream cancel delivers partial text then canceled stop" {
@@ -3354,20 +3504,35 @@ test "mid-stream cancel delivers partial text then canceled stop" {
         .cancel = cancel,
     });
 
-    // Partial text was delivered (only first chunk before cancel)
-    try std.testing.expectEqual(@as(usize, 1), store_impl.text_ct);
-    try std.testing.expectEqualStrings("Hello", store_impl.last_text[0..store_impl.last_text_len]);
-
-    // Cancel stop was emitted
-    try std.testing.expectEqual(@as(usize, 1), store_impl.canceled_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.canceled_ct);
-
-    // Mode also received the partial text
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.text_ct);
-
-    // Session persists partial — turns is 0 because cancel happened mid-first-turn
-    try std.testing.expectEqual(@as(u16, 0), out.turns);
-    try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        store_text_ct: usize,
+        store_last_text: []const u8,
+        store_canceled_ct: usize,
+        mode_canceled_ct: usize,
+        mode_text_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.mid-stream cancel delivers partial text then canceled stop.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 0
+        \\    .tool_calls: u32 = 0
+        \\  .store_text_ct: usize = 1
+        \\  .store_last_text: []const u8
+        \\    "Hello"
+        \\  .store_canceled_ct: usize = 1
+        \\  .mode_canceled_ct: usize = 1
+        \\  .mode_text_ct: usize = 1
+    ).expectEqual(Snap{
+        .out = out,
+        .store_text_ct = store_impl.text_ct,
+        .store_last_text = store_impl.last_text[0..store_impl.last_text_len],
+        .store_canceled_ct = store_impl.canceled_ct,
+        .mode_canceled_ct = mode_impl.canceled_ct,
+        .mode_text_ct = mode_impl.text_ct,
+    });
 }
 
 test "loop cancel append failure still returns canceled turn and reports session write error" {
@@ -3506,15 +3671,41 @@ test "loop cancel append failure still returns canceled turn and reports session
         .cancel = cancel,
     });
 
-    try std.testing.expectEqual(@as(usize, 1), store_impl.text_ct);
-    try std.testing.expectEqual(@as(usize, 3), store_impl.append_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.text_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.canceled_ct);
-    try std.testing.expectEqual(@as(usize, 2), mode_impl.session_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.session_write_err_ct);
-    try std.testing.expectEqualStrings("OutOfMemory", mode_impl.last_write_err orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqual(@as(u16, 0), out.turns);
-    try std.testing.expectEqual(@as(u32, 0), out.tool_calls);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        store_text_ct: usize,
+        store_append_ct: usize,
+        mode_text_ct: usize,
+        mode_canceled_ct: usize,
+        mode_session_ct: usize,
+        mode_session_write_err_ct: usize,
+        mode_last_write_err: []const u8,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop cancel append failure still returns canceled turn and reports session write error.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 0
+        \\    .tool_calls: u32 = 0
+        \\  .store_text_ct: usize = 1
+        \\  .store_append_ct: usize = 3
+        \\  .mode_text_ct: usize = 1
+        \\  .mode_canceled_ct: usize = 1
+        \\  .mode_session_ct: usize = 2
+        \\  .mode_session_write_err_ct: usize = 1
+        \\  .mode_last_write_err: []const u8
+        \\    "OutOfMemory"
+    ).expectEqual(Snap{
+        .out = out,
+        .store_text_ct = store_impl.text_ct,
+        .store_append_ct = store_impl.append_ct,
+        .mode_text_ct = mode_impl.text_ct,
+        .mode_canceled_ct = mode_impl.canceled_ct,
+        .mode_session_ct = mode_impl.session_ct,
+        .mode_session_write_err_ct = mode_impl.session_write_err_ct,
+        .mode_last_write_err = mode_impl.last_write_err orelse return error.TestUnexpectedResult,
+    });
 }
 
 test "abort slot cancels blocked provider stream quickly and preserves partial text" {
@@ -3633,11 +3824,32 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
     const elapsed_ms: i128 = @divTrunc(std.time.nanoTimestamp() - start_ns, std.time.ns_per_ms);
 
     try std.testing.expect(elapsed_ms < 200);
-    try std.testing.expectEqual(@as(usize, 1), store_impl.text_ct);
-    try std.testing.expectEqualStrings("Hello", store_impl.last_text[0..store_impl.last_text_len]);
-    try std.testing.expectEqual(@as(usize, 1), store_impl.canceled_ct);
-    try std.testing.expectEqual(@as(usize, 1), mode_impl.canceled_ct);
-    try std.testing.expectEqual(@as(u16, 0), out.turns);
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        store_text_ct: usize,
+        store_last_text: []const u8,
+        store_canceled_ct: usize,
+        mode_canceled_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.abort slot cancels blocked provider stream quickly and preserves partial text.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 0
+        \\    .tool_calls: u32 = 0
+        \\  .store_text_ct: usize = 1
+        \\  .store_last_text: []const u8
+        \\    "Hello"
+        \\  .store_canceled_ct: usize = 1
+        \\  .mode_canceled_ct: usize = 1
+    ).expectEqual(Snap{
+        .out = out,
+        .store_text_ct = store_impl.text_ct,
+        .store_last_text = store_impl.last_text[0..store_impl.last_text_len],
+        .store_canceled_ct = store_impl.canceled_ct,
+        .mode_canceled_ct = mode_impl.canceled_ct,
+    });
 }
 
 test "CmdCache approve echo hi does not approve echo rm -rf" {

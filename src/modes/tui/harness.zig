@@ -791,9 +791,9 @@ test "harness editor writes wide characters with wide-pad cell" {
     const c1 = try ui.frm.cell(1, 2);
     const c2 = try ui.frm.cell(2, 2);
     const c3 = try ui.frm.cell(3, 2);
-    try std.testing.expectEqual(@as(u21, 0x4E2D), c1.cp);
-    try std.testing.expectEqual(@as(u21, frame.Frame.wide_pad), c2.cp);
-    try std.testing.expectEqual(@as(u21, 'A'), c3.cp);
+    const got = try std.fmt.allocPrint(std.testing.allocator, "{x},{x},{x}", .{ c1.cp, c2.cp, c3.cp });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "4e2d,0,41", got);
 }
 
 test "harness renders tiny terminal without bounds errors" {
@@ -846,18 +846,20 @@ test "harness onMouse scrolls transcript" {
     try ui.tr.userText("line3");
     try ui.tr.userText("line4");
     try ui.tr.userText("line5");
-
-    try std.testing.expectEqual(@as(usize, 0), ui.tr.scroll_off);
+    var got: std.ArrayListUnmanaged(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try got.writer(std.testing.allocator).print("init={d}\n", .{ui.tr.scroll_off});
 
     ui.onMouse(.scroll_up);
-    try std.testing.expectEqual(@as(usize, 3), ui.tr.scroll_off);
+    try got.writer(std.testing.allocator).print("up={d}\n", .{ui.tr.scroll_off});
 
     ui.onMouse(.scroll_down);
-    try std.testing.expectEqual(@as(usize, 0), ui.tr.scroll_off);
+    try got.writer(std.testing.allocator).print("down={d}\n", .{ui.tr.scroll_off});
 
     // Extra scroll down doesn't underflow
     ui.onMouse(.scroll_down);
-    try std.testing.expectEqual(@as(usize, 0), ui.tr.scroll_off);
+    try got.writer(std.testing.allocator).print("down2={d}", .{ui.tr.scroll_off});
+    try expectSnapText(@src(), "init=0\nup=3\ndown=0\ndown2=0", got.items);
 }
 
 test "harness submit resets scroll" {
@@ -926,24 +928,24 @@ test "harness resize to same size is noop" {
 
 test "wrapInfo single line" {
     const wi = wrapInfo("hello", 5, 20);
-    try std.testing.expectEqual(@as(usize, 1), wi.rows);
-    try std.testing.expectEqual(@as(usize, 0), wi.cur_row);
-    try std.testing.expectEqual(@as(usize, 5), wi.cur_col);
+    const got = try std.fmt.allocPrint(std.testing.allocator, "rows={d}\nrow={d}\ncol={d}", .{ wi.rows, wi.cur_row, wi.cur_col });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "rows=1\nrow=0\ncol=5", got);
 }
 
 test "wrapInfo wraps at width" {
     // "abcde" with width 3 → wraps: "abc" + "de"
     const wi = wrapInfo("abcde", 4, 3);
-    try std.testing.expectEqual(@as(usize, 2), wi.rows);
-    try std.testing.expectEqual(@as(usize, 1), wi.cur_row); // 'd' on second row
-    try std.testing.expectEqual(@as(usize, 1), wi.cur_col);
+    const got = try std.fmt.allocPrint(std.testing.allocator, "rows={d}\nrow={d}\ncol={d}", .{ wi.rows, wi.cur_row, wi.cur_col });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "rows=2\nrow=1\ncol=1", got);
 }
 
 test "wrapInfo with newline" {
     const wi = wrapInfo("ab\ncd", 4, 10);
-    try std.testing.expectEqual(@as(usize, 2), wi.rows);
-    try std.testing.expectEqual(@as(usize, 1), wi.cur_row);
-    try std.testing.expectEqual(@as(usize, 1), wi.cur_col);
+    const got = try std.fmt.allocPrint(std.testing.allocator, "rows={d}\nrow={d}\ncol={d}", .{ wi.rows, wi.cur_row, wi.cur_col });
+    defer std.testing.allocator.free(got);
+    try expectSnapText(@src(), "rows=2\nrow=1\ncol=1", got);
 }
 
 test "wrapRowCol maps target position" {

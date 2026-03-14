@@ -614,10 +614,14 @@ test "overlay navigation wraps" {
     var ov = Overlay.init(&items, 0);
 
     ov.up();
-    try std.testing.expectEqual(@as(usize, 2), ov.sel);
+    const after_up = try std.fmt.allocPrint(std.testing.allocator, "sel={d} scroll={d}", .{ ov.sel, ov.scroll });
+    defer std.testing.allocator.free(after_up);
+    try expectSnapText(@src(), "sel=2 scroll=0", after_up);
 
     ov.down();
-    try std.testing.expectEqual(@as(usize, 0), ov.sel);
+    const after_down = try std.fmt.allocPrint(std.testing.allocator, "sel={d} scroll={d}", .{ ov.sel, ov.scroll });
+    defer std.testing.allocator.free(after_down);
+    try expectSnapText(@src(), "sel=0 scroll=0", after_down);
 }
 
 test "overlay scrolls with many items" {
@@ -626,11 +630,13 @@ test "overlay scrolls with many items" {
     var ov = Overlay.init(&items, 0);
     var i: usize = 0;
     while (i < Overlay.max_vis + 2) : (i += 1) ov.down();
-    try std.testing.expect(ov.scroll > 0);
-    try std.testing.expectEqual(Overlay.max_vis + 2, ov.sel);
+    const after_down = try std.fmt.allocPrint(std.testing.allocator, "sel={d} scroll={d}", .{ ov.sel, ov.scroll });
+    defer std.testing.allocator.free(after_down);
+    try expectSnapText(@src(), "sel=14 scroll=3", after_down);
     while (i > 0) : (i -= 1) ov.up();
-    try std.testing.expectEqual(@as(usize, 0), ov.sel);
-    try std.testing.expectEqual(@as(usize, 0), ov.scroll);
+    const after_up = try std.fmt.allocPrint(std.testing.allocator, "sel={d} scroll={d}", .{ ov.sel, ov.scroll });
+    defer std.testing.allocator.free(after_up);
+    try expectSnapText(@src(), "sel=0 scroll=0", after_up);
 }
 
 test "overlay session kind renders without shortLabel" {
@@ -682,8 +688,12 @@ test "settings overlay toggle and render" {
 
     // Toggle first item
     ov.toggle();
-    try std.testing.expectEqual(false, ov.getToggle(0).?);
-    try std.testing.expectEqual(true, ov.getToggle(1).?);
+    const toggles_snap = try std.fmt.allocPrint(std.testing.allocator, "0={any}\n1={any}", .{
+        ov.getToggle(0).?,
+        ov.getToggle(1).?,
+    });
+    defer std.testing.allocator.free(toggles_snap);
+    try expectSnapText(@src(), "0=false\n1=true", toggles_snap);
 
     // Render without crash
     var frm = try Frame.init(std.testing.allocator, 40, 10);

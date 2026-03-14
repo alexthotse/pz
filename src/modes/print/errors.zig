@@ -44,6 +44,16 @@ pub fn mapStop(reason: core.providers.StopReason) ?Err {
     };
 }
 
+fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
+        @typeName(@TypeOf(actual)),
+        body,
+    });
+    try oh.snap(src, snap).expectEqual(actual);
+}
+
 test "map provides stable exit codes and messages for each typed print error" {
     const Case = struct {
         err: Err,
@@ -64,10 +74,14 @@ test "map provides stable exit codes and messages for each typed print error" {
         .{ .err = error.StopErr, .code = 19, .msg = "print: provider reported terminal error" },
     };
 
-    for (cases, 0..) |case, i| {
+    inline for (cases, 0..) |case, i| {
         const got = map(case.err);
-        try std.testing.expectEqual(case.code, got.code);
-        try std.testing.expectEqualStrings(case.msg, got.msg);
+        const summary = try std.fmt.allocPrint(std.testing.allocator, "code={d}\nmsg={s}", .{ got.code, got.msg });
+        defer std.testing.allocator.free(summary);
+        try expectSnapText(@src(),
+            std.fmt.comptimePrint("code={d}\nmsg={s}", .{ case.code, case.msg }),
+            summary,
+        );
 
         var j: usize = i + 1;
         while (j < cases.len) : (j += 1) {
