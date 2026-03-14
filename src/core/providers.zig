@@ -28,3 +28,4 @@ pub const Provider = c.Provider;
 pub const Stream = c.Stream;
 pub const Aborter = c.Aborter;
 pub const AbortSlot = c.AbortSlot;
+pub const CancelPoll = c.CancelPoll;

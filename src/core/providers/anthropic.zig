@@ -66,7 +66,7 @@ pub const Client = struct {
         };
 
         var slp = hc.RealSleeper{};
-        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .anthropic, self.ca_file, ar, &slp, buildAuthHeaders);
+        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .anthropic, self.ca_file, ar, &slp, buildAuthHeaders, null);
 
         if (stream.response.head.status != .ok) {
             try hc.formatErrBody(stream, ar, extractApiErrMsg);

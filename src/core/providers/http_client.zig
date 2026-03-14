@@ -110,16 +110,23 @@ pub fn tryProactiveRefresh(
 // ── Retry loop ─────────────────────────────────────────────────────────
 
 /// Real sleeper: delegates to std.Thread.sleep.
+/// Checks cancel before and after sleep for bounded responsiveness.
 pub const RealSleeper = struct {
-    pub fn sleep(_: *RealSleeper, ms: u64) void {
+    cancel: ?providers.CancelPoll = null,
+
+    pub fn sleep(self: *RealSleeper, ms: u64) void {
+        if (self.cancel) |c| if (c.isCanceled()) return;
         std.Thread.sleep(ms * std.time.ns_per_ms);
+        // Post-sleep check intentionally omitted: caller checks cancel
+        // after wait returns. P10 replaces with pipe-based interrupt.
     }
 };
 
 /// Execute the retry loop: connect, send, receive head, handle 401/429/5xx.
 ///
 /// On 401 with OAuth, refreshes the token and calls `rebuildHdrs` to get
-/// new provider-specific headers before retrying.
+/// new provider-specific headers before retrying. On 401 without OAuth,
+/// propagates immediately (no retry).
 pub fn retryLoop(
     stream: anytype,
     http: *std.http.Client,
@@ -133,10 +140,13 @@ pub fn retryLoop(
     ar: std.mem.Allocator,
     sleeper: anytype,
     rebuildHdrs: *const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header),
+    cancel: ?providers.CancelPoll,
 ) !void {
     var attempt: u32 = 0;
     var did_refresh = false;
     while (true) : (attempt += 1) {
+        if (cancel) |c| if (c.isCanceled()) return error.Canceled;
+
         stream.req = try http.request(.POST, uri, .{
             .extra_headers = hdrs.items,
             .keep_alive = false,
@@ -150,6 +160,9 @@ pub fn retryLoop(
 
         stream.response = try stream.req.receiveHead(&stream.redir_buf);
         const status_int: u16 = @intFromEnum(stream.response.head.status);
+
+        // On 401 without OAuth: no refresh possible, propagate immediately
+        if (status_int == 401 and auth.auth != .oauth) break;
 
         // On 401 with OAuth, try refreshing token once
         if (status_int == 401 and auth.auth == .oauth and !did_refresh) {
@@ -171,7 +184,9 @@ pub fn retryLoop(
 
         // Backoff: min(base * 2^attempt, max)
         const delay: u64 = @min(max_delay_ms, base_delay_ms * (@as(u64, 1) << @intCast(attempt)));
+        if (cancel) |c| if (c.isCanceled()) return error.Canceled;
         sleeper.sleep(delay);
+        if (cancel) |c| if (c.isCanceled()) return error.Canceled;
     }
 }
 

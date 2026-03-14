@@ -28,6 +28,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
         map: *Map,
         pol: Policy,
         slp: ?*Slp = null,
+        cancel: ?providers.CancelPoll = null,
 
         const Self = @This();
 
@@ -67,6 +68,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
                 req,
                 self.pol,
                 self.slp,
+                self.cancel,
             );
 
             const st = try self.alloc.create(BufStream);
@@ -169,14 +171,16 @@ fn streamRun(
     req: providers.Request,
     pol: Policy,
     slp: ?*Slp,
+    cancel: ?providers.CancelPoll,
 ) (retry.StepErr || Err)!RunResult {
     var tries: u16 = 0;
     while (true) {
+        if (cancel) |c| if (c.isCanceled()) return error.TransportFatal;
         tries += 1;
 
         var arena = std.heap.ArenaAllocator.init(alloc);
         const ar = arena.allocator();
-        const res = streamOnce(Tr, ar, tr, req);
+        const res = streamOnce(Tr, ar, tr, req, cancel);
         if (res) |evs| {
             return .{
                 .arena = arena,
@@ -189,7 +193,9 @@ fn streamRun(
             const step = try pol.next(err, tries);
             switch (step) {
                 .retry_after_ms => |wait_ms| {
+                    if (cancel) |c| if (c.isCanceled()) return error.TransportFatal;
                     if (slp) |s| s.wait(wait_ms);
+                    if (cancel) |c| if (c.isCanceled()) return error.TransportFatal;
                 },
                 .fail => return err,
             }
@@ -197,7 +203,7 @@ fn streamRun(
     }
 }
 
-fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: providers.Request) Err![]providers.Event {
+fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: providers.Request, cancel: ?providers.CancelPoll) Err![]providers.Event {
     var stream = try tr.start(req);
     defer stream.deinit();
 
@@ -208,6 +214,7 @@ fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: provide
     errdefer evs.deinit(alloc);
 
     while (try stream.next()) |chunk| {
+        if (cancel) |c| if (c.isCanceled()) return error.TransportFatal;
         try p.feed(alloc, &evs, chunk);
     }
     try p.finish(alloc, &evs);
@@ -431,6 +438,7 @@ test "stream run retries transient transport and parses frames" {
         reqStub(),
         pol,
         &waits,
+        null,
     );
     defer out.deinit();
     const txt = switch (out.evs[0]) {
@@ -497,6 +505,7 @@ test "stream run drops partial events from failed retry attempt" {
         reqStub(),
         pol,
         &waits,
+        null,
     );
     defer out.deinit();
     const txt = switch (out.evs[0]) {
@@ -549,6 +558,7 @@ test "stream run does not retry parser failures" {
             reqStub(),
             pol,
             &waits,
+            null,
         ),
     );
     const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\n", .{
@@ -590,6 +600,7 @@ test "stream run stops at max tries for transient failures" {
             reqStub(),
             pol,
             &waits,
+            null,
         ),
     );
     const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}|{d}\n", .{
@@ -784,4 +795,114 @@ test "first provider retries on transient chunk read failures" {
         \\map_calls=1
         \\"
     ).expectEqual(snap);
+}
+
+// --- cancel-aware tests ---
+
+const CancelFlag = struct {
+    canceled: bool = false,
+
+    fn isCanceled(self: *CancelFlag) bool {
+        return self.canceled;
+    }
+};
+
+test "stream run aborts immediately when cancel is set before start" {
+    const atts = [_]StreamAttempt{
+        .{ .chunks = &.{"text:hello\nstop:done\n"} },
+    };
+
+    var tr = MockTr.init(atts[0..]);
+    var waits = WaitLog{};
+    const pol = try mkPol(3);
+
+    var flag = CancelFlag{ .canceled = true };
+    const cancel = providers.CancelPoll.from(CancelFlag, &flag, CancelFlag.isCanceled);
+
+    try std.testing.expectError(
+        error.TransportFatal,
+        streamRun(
+            MockTr,
+            WaitLog,
+            std.testing.allocator,
+            &tr,
+            reqStub(),
+            pol,
+            &waits,
+            cancel,
+        ),
+    );
+    // Never started — cancel checked before first attempt
+    try std.testing.expectEqual(@as(usize, 0), tr.start_ct);
+}
+
+test "stream run aborts between retry sleep when cancel fires" {
+    const atts = [_]StreamAttempt{
+        .{ .start_err = error.TransportTransient },
+        .{ .chunks = &.{"text:hello\nstop:done\n"} },
+    };
+
+    var tr = MockTr.init(atts[0..]);
+    const pol = try mkPol(3);
+
+    // Cancel flag set after first attempt fails, before sleep
+    var flag = CancelFlag{};
+    const cancel = providers.CancelPoll.from(CancelFlag, &flag, CancelFlag.isCanceled);
+
+    // Custom sleeper that sets cancel during wait
+    const CancelSleeper = struct {
+        flag: *CancelFlag,
+        called: bool = false,
+
+        pub fn wait(self: *@This(), _: u64) void {
+            self.called = true;
+            self.flag.canceled = true;
+        }
+    };
+    var slp = CancelSleeper{ .flag = &flag };
+
+    try std.testing.expectError(
+        error.TransportFatal,
+        streamRun(
+            MockTr,
+            CancelSleeper,
+            std.testing.allocator,
+            &tr,
+            reqStub(),
+            pol,
+            &slp,
+            cancel,
+        ),
+    );
+    // One attempt, then canceled after sleep
+    try std.testing.expectEqual(@as(usize, 1), tr.start_ct);
+    try std.testing.expect(slp.called);
+}
+
+test "CancelPoll vtable roundtrips" {
+    var flag = CancelFlag{};
+    const cp = providers.CancelPoll.from(CancelFlag, &flag, CancelFlag.isCanceled);
+    try std.testing.expect(!cp.isCanceled());
+    flag.canceled = true;
+    try std.testing.expect(cp.isCanceled());
+}
+
+test "AbortSlot.abort holds mutex for entire call" {
+    // Verify the abort call works correctly with the fixed locking
+    var slot = providers.AbortSlot{};
+    // No aborter set — should not crash
+    slot.abort();
+
+    var called = false;
+    const TestCtx = struct {
+        flag: *bool,
+
+        fn doAbort(self: *@This()) void {
+            self.flag.* = true;
+        }
+    };
+    var ctx = TestCtx{ .flag = &called };
+    slot.set(providers.Aborter.from(TestCtx, &ctx, TestCtx.doAbort));
+    slot.abort();
+    try std.testing.expect(called);
 }

@@ -95,9 +95,36 @@ pub const AbortSlot = struct {
 
     pub fn abort(self: *AbortSlot) void {
         self.mu.lock();
-        const aborter = self.cur;
-        self.mu.unlock();
-        if (aborter) |a| a.abort();
+        defer self.mu.unlock();
+        if (self.cur) |a| a.abort();
+    }
+};
+
+/// Lightweight cancel-poll vtable. Lives in api.zig to avoid
+/// circular imports from providers → loop.
+pub const CancelPoll = struct {
+    ctx: *anyopaque,
+    is_canceled_fn: *const fn (ctx: *anyopaque) bool,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime is_canceled_fn: fn (ctx: *T) bool,
+    ) CancelPoll {
+        const Wrap = struct {
+            fn isCanceled(raw: *anyopaque) bool {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return is_canceled_fn(typed);
+            }
+        };
+        return .{
+            .ctx = ctx,
+            .is_canceled_fn = Wrap.isCanceled,
+        };
+    }
+
+    pub fn isCanceled(self: CancelPoll) bool {
+        return self.is_canceled_fn(self.ctx);
     }
 };
 

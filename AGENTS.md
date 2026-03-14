@@ -59,6 +59,10 @@ If dots overlap in runtime/provider/session/core surfaces, serialize them unless
 
 Only include files changed by the current agent/task. No broad staging.
 
+## Agent Reporting Rule
+
+Agents must report what they CHANGED (files, lines, insertions/deletions), not claim things were "already done." If no changes needed, explain why with file:line evidence. Never declare victory without a diff.
+
 ## Testing Rule
 
 Run `zig build test` with a 60-second timeout: `timeout 60 zig build test 2>&1`. Tests must complete within 1 minute.
