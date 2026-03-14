@@ -2115,7 +2115,7 @@ fn runPrint(
         .alloc = alloc,
         .sid = sid,
         .prompt = prompt,
-        .model = run_cmd.cfg.model,
+        .model = resolveDefault(run_cmd.cfg.model),
         .provider_label = run_cmd.cfg.provider,
         .provider = provider,
         .store = store,

@@ -4330,3 +4330,485 @@ test "parseCallArgs parses skill args" {
         \\"
     ).expectEqual(snap);
 }
+
+test "loop text streaming append OOM reports session write error and continues" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+        text_ct: usize = 0,
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            if (ev.data == .text) {
+                self.text_ct += 1;
+                return error.OutOfMemory;
+            }
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        session_write_err_ct: usize = 0,
+        last_write_err: ?[]const u8 = null,
+        text_ct: usize = 0,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .text => self.text_ct += 1,
+                    else => {},
+                },
+                .session_write_err => |name| {
+                    self.session_write_err_ct += 1;
+                    self.last_write_err = name;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const evs = [_]providers.Event{
+        .{ .text = "Hello" },
+        .{ .stop = .{ .reason = .done } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-text-oom",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+    });
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        store_text_ct: usize,
+        mode_text_ct: usize,
+        session_write_err_ct: usize,
+        last_write_err: []const u8,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop text streaming append OOM reports session write error and continues.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 1
+        \\    .tool_calls: u32 = 0
+        \\  .store_text_ct: usize = 1
+        \\  .mode_text_ct: usize = 1
+        \\  .session_write_err_ct: usize = 1
+        \\  .last_write_err: []const u8
+        \\    "OutOfMemory"
+    ).expectEqual(Snap{
+        .out = out,
+        .store_text_ct = store_impl.text_ct,
+        .mode_text_ct = mode_impl.text_ct,
+        .session_write_err_ct = mode_impl.session_write_err_ct,
+        .last_write_err = mode_impl.last_write_err orelse return error.TestUnexpectedResult,
+    });
+}
+
+test "loop prompt append OOM reports session write error and continues" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+
+        fn append(_: *@This(), _: []const u8, ev: session.Event) !void {
+            if (ev.data == .prompt) return error.OutOfMemory;
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        session_write_err_ct: usize = 0,
+        last_write_err: ?[]const u8 = null,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .session_write_err => |name| {
+                    self.session_write_err_ct += 1;
+                    self.last_write_err = name;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const evs = [_]providers.Event{
+        .{ .text = "Hi" },
+        .{ .stop = .{ .reason = .done } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-prompt-oom",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+    });
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        session_write_err_ct: usize,
+        last_write_err: []const u8,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.loop prompt append OOM reports session write error and continues.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 1
+        \\    .tool_calls: u32 = 0
+        \\  .session_write_err_ct: usize = 1
+        \\  .last_write_err: []const u8
+        \\    "OutOfMemory"
+    ).expectEqual(Snap{
+        .out = out,
+        .session_write_err_ct = mode_impl.session_write_err_ct,
+        .last_write_err = mode_impl.last_write_err orelse return error.TestUnexpectedResult,
+    });
+}
+
+test "denied tool events appear in causal order: tool_call before denied tool_result" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+        events: std.ArrayListUnmanaged(session.Event) = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(self: *@This()) void {
+            for (self.events.items) |ev| ev.free(std.testing.allocator);
+            self.events.deinit(std.testing.allocator);
+        }
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        order: [8]u8 = [_]u8{0} ** 8,
+        len: usize = 0,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            const tag: u8 = switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .tool_call => 'C',
+                    .tool_result => 'R',
+                    else => return,
+                },
+                else => return,
+            };
+            if (self.len < self.order.len) {
+                self.order[self.len] = tag;
+                self.len += 1;
+            }
+        }
+    };
+
+    const BashDispatch = struct {
+        fn run(_: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    const ApproverImpl = struct {
+        fn check(_: *@This(), _: CmdCache.Key, _: bool) !void {
+            return error.ApprovalDenied;
+        }
+    };
+
+    const evs = [_]providers.Event{
+        .{
+            .tool_call = .{
+                .id = "call-1",
+                .name = "bash",
+                .args = "{\"cmd\":\"rm -rf /\"}",
+            },
+        },
+        .{ .stop = .{ .reason = .tool } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    defer store_impl.deinit();
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var bash_dispatch = BashDispatch{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "bash",
+            .kind = .bash,
+            .spec = .{
+                .kind = .bash,
+                .desc = "bash",
+                .params = &.{.{ .name = "cmd", .ty = .string, .required = true, .desc = "cmd" }},
+                .out = .{ .max_bytes = 1024, .stream = false },
+                .timeout_ms = 1000,
+                .destructive = true,
+            },
+            .dispatch = tools.Dispatch.from(BashDispatch, &bash_dispatch, BashDispatch.run),
+        },
+    };
+
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+    var approver_impl = ApproverImpl{};
+    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+
+    _ = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-deny-order",
+        .prompt = "do it",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .max_turns = 1,
+        .cmd_cache = &cache,
+        .approval = .{
+            .loc = .{ .cwd = "/tmp/pz" },
+            .policy = .{ .version = policy.ver_current },
+        },
+        .approver = approver,
+    });
+
+    // Mode events: tool_call ('C') must precede tool_result ('R')
+    const order = mode_impl.order[0..mode_impl.len];
+    try std.testing.expect(order.len >= 2);
+    try std.testing.expectEqual(@as(u8, 'C'), order[0]);
+    try std.testing.expectEqual(@as(u8, 'R'), order[1]);
+
+    // Store events: tool_call must appear before tool_result
+    var saw_call = false;
+    var saw_result_after_call = false;
+    for (store_impl.events.items) |ev| {
+        switch (ev.data) {
+            .tool_call => saw_call = true,
+            .tool_result => |tr| {
+                if (saw_call and tr.is_err) saw_result_after_call = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_call);
+    try std.testing.expect(saw_result_after_call);
+}
+
+test "CmdCache TTL checked on lookup rejects expired entries" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const key: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .expires_at_ms = 1000 },
+    };
+    try cache.add(key);
+
+    // Before expiry
+    try std.testing.expect(cache.containsAt(key, 999));
+    // At expiry boundary
+    try std.testing.expect(cache.containsAt(key, 1000));
+    // After expiry — must reject
+    try std.testing.expect(!cache.containsAt(key, 1001));
+    // Entry was removed
+    try std.testing.expectEqual(@as(usize, 0), cache.count());
+}
