@@ -1365,3 +1365,48 @@ test "SseStream error mode emits err then stop" {
     const ev3 = try stream.next();
     try testing.expect(ev3 == null);
 }
+
+test "SseStream pending delivery via next" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var stream = testStream();
+    defer stream.arena.deinit();
+
+    // Simulate message_delta setting pending stop
+    stream.done = true;
+    stream.pending = .{ .stop = .{ .reason = .tool } };
+
+    const ev = try stream.next();
+    const snap = try std.fmt.allocPrint(testing.allocator, "reason={s}\n", .{
+        @tagName(ev.?.stop.reason),
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "reason=tool
+        \\"
+    ).expectEqual(snap);
+
+    // After pending consumed, done=true returns null
+    try testing.expect((try stream.next()) == null);
+}
+
+test "SseStream done returns null" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    stream.done = true;
+    try testing.expect((try stream.next()) == null);
+}
+
+test "extractApiErrMsg extracts message from error JSON" {
+    const msg = extractApiErrMsg(
+        \\{"type":"error","error":{"type":"invalid_request","message":"bad input"}}
+    );
+    try testing.expect(msg != null);
+    try testing.expectEqualStrings("bad input", msg.?);
+}
+
+test "extractApiErrMsg returns null on non-error JSON" {
+    try testing.expect(extractApiErrMsg("{}") == null);
+    try testing.expect(extractApiErrMsg("plain text") == null);
+}

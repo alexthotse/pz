@@ -48,18 +48,23 @@ where `mask_all` is the union of bits 0-9 (10 known tools).
 
 **Lean model**:
 ```lean
--- Parameterized by N (number of masked tools). Currently N=10.
--- CI sync: extract popcount(mask_all) from builtin.zig, assert == N.
--- Known exclusion: tools.Kind.web has no mask bit (documented).
-def mask_all (N : Nat) : BitVec 16 := (1 <<< N) - 1
+-- Model mask_all as explicit OR of named bits (matches Zig source structure).
+-- Note: mask bit indices ≠ Kind enum ordinals (web=Kind.8 has no mask bit,
+-- ask uses bit 8, skill uses bit 9). The Lean model enumerates mask bits
+-- by name, not by Kind index.
+-- CI sync: assert mask_all value AND (Kind.count - unmaskable_count) == popcount(mask_all).
+def mask_all : BitVec 16 :=
+  (1 <<< 0) ||| (1 <<< 1) ||| (1 <<< 2) ||| (1 <<< 3) ||| (1 <<< 4) |||
+  (1 <<< 5) ||| (1 <<< 6) ||| (1 <<< 7) ||| (1 <<< 8) ||| (1 <<< 9)
+  -- read write bash edit grep find ls agent ask skill
 
-theorem sanitize_strips_unknown (N : Fin 16) (input : BitVec 16) :
-    (input &&& mask_all N) ≤ mask_all N := by
+theorem sanitize_strips_unknown (input : BitVec 16) :
+    (input &&& mask_all) ≤ mask_all := by
   bv_decide
 
-theorem sanitize_preserves_known (N : Fin 16) (input : BitVec 16) :
-    ∀ i : Fin N, input.getLsbD i = true →
-      (input &&& mask_all N).getLsbD i = true := by
+theorem sanitize_preserves_known (input : BitVec 16) (i : Fin 10) :
+    input.getLsbD i = true →
+      (input &&& mask_all).getLsbD i = true := by
   bv_decide
 ```
 
@@ -118,8 +123,8 @@ def verifyPolicy (key : Key) (raw : RawPolicy) (sig : Sig) : Bool :=
 ```
 
 **What it proves**: The signature covers the **canonical re-serialization** (`parseDoc → encodeDoc`), not raw JSON bytes. The proof models the three-step chain and proves:
-- Any modification to canonical content (including rule reordering — rules are an ordered list, not a set, because `evaluate` uses last-match-wins) fails verification
-- `parseDoc` is invariant to the presence/absence/content of the `signature` key in input JSON (the signature metadata is excluded from signed content by construction)
+- Any modification to canonical content (including rule reordering — rules are an ordered list, not a set, because `evaluate` uses first-match-wins) fails verification
+- `parseDoc` is invariant to the presence/absence/content of the `signature` key in input JSON — model this as an explicit `excludeField "signature"` step, not an implicit omission. CI sync: assert `parseDoc` never reads a key named `"signature"`
 - Extra JSON fields not parsed by `parseDoc` are silently dropped — proof covers canonical content integrity, not raw-byte integrity
 
 The `unforgeability` axiom is idealized (stronger than computational EUF-CMA) — sufficient for the enterprise deliverable but should not be cited as a game-based crypto proof.
@@ -153,7 +158,6 @@ f ∈ owned[t]
 inductive Op
   | dispatch (t : Fin n) (files : Finset File)  -- assign files to thread t
   | complete (t : Fin n)                         -- thread t finishes, releases files
-  | reassign (t : Fin n) (files : Finset File)  -- re-dispatch with new files
 
 def step (s : State n) : Op → Option (State n)
   | .dispatch t files =>
@@ -164,7 +168,6 @@ def step (s : State n) : Op → Option (State n)
     then some (s.activate t files)
     else none
   | .complete t => some (s.deactivate t)
-  | .reassign t files => step s (.dispatch t files)  -- same precondition
 
 -- The inductive invariant: disjointness holds in all reachable states
 theorem ownership_invariant :
@@ -189,7 +192,9 @@ theorem ownership_invariant :
 
 **Property**: Approved commands are scoped by (tool, command, location, policy hash, session lifetime). Expired approvals cannot match. Approvals cannot be replayed across policy changes.
 
-**Status**: CAN PROVE NOW — models existing code. Note: CmdCache TTL bypass found during review (dot created) — `expires_at_ms` is never checked in `contains()`.
+**Status**: PARTIALLY PROVABLE. Split into:
+- **4a** (key scoping — CAN PROVE NOW): composite key ensures approvals are scoped by tool/cmd/loc/policy
+- **4b** (TTL expiry — BLOCKED on code fix): `expires_at_ms` is compared for equality in `eqlLife` but never checked against wall clock in `contains()`. Dot created.
 
 **Zig code** (src/core/loop.zig:157-230):
 ```

@@ -1224,6 +1224,62 @@ test "parseSseData property randomized tool lifecycle preserves args and tool st
     }
 }
 
+test "SseStream error mode emits err then stop" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+
+    stream.err_mode = true;
+    stream.err_text = "429 rate limited";
+
+    const ev1 = try stream.next();
+    try testing.expect(ev1 != null);
+    try testing.expectEqualStrings("429 rate limited", ev1.?.err);
+
+    const ev2 = try stream.next();
+    try testing.expect(ev2 != null);
+    try testing.expectEqual(providers.StopReason.err, ev2.?.stop.reason);
+
+    const ev3 = try stream.next();
+    try testing.expect(ev3 == null);
+}
+
+test "SseStream pending delivery via next" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var stream = testStream();
+    defer stream.arena.deinit();
+
+    // Simulate completed event setting pending stop
+    stream.done = true;
+    stream.pending = .{ .stop = .{ .reason = .done } };
+
+    const ev = try stream.next();
+    const snap = try std.fmt.allocPrint(testing.allocator, "reason={s}\n", .{
+        @tagName(ev.?.stop.reason),
+    });
+    defer testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "reason=done
+        \\"
+    ).expectEqual(snap);
+
+    // After pending consumed, done=true returns null
+    try testing.expect((try stream.next()) == null);
+}
+
+test "parseSseData failed emits err and stop" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    const ev = try testParse(&stream,
+        \\{"type":"response.failed"}
+    );
+    try testing.expect(ev != null);
+    try testing.expectEqualStrings("response failed", ev.?.err);
+    try testing.expect(stream.pending != null);
+    try testing.expectEqual(providers.StopReason.err, stream.pending.?.stop.reason);
+}
+
 test "parseSseData fuzz random payloads do not crash parser state" {
     var stream = testStream();
     defer stream.arena.deinit();
