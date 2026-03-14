@@ -146,7 +146,9 @@ fn encodeLine(file: std.fs.File, ev: Event) !void {
 fn textEvent(at_ms: i64, text: []const u8) Event {
     return .{
         .at_ms = at_ms,
-        .data = .{ .text = .{ .text = text } },
+        .data = .{
+            .text = .{ .text = text },
+        },
     };
 }
 
@@ -168,27 +170,35 @@ test "jsonl replay preserves event stream exactly" {
     const events = [_]Event{
         .{
             .at_ms = 1,
-            .data = .{ .prompt = .{ .text = "alpha" } },
+            .data = .{
+                .prompt = .{ .text = "alpha" },
+            },
         },
         .{
             .at_ms = 2,
-            .data = .{ .tool_call = .{
-                .id = "c1",
-                .name = "read",
-                .args = "{\"path\":\"a.txt\"}",
-            } },
+            .data = .{
+                .tool_call = .{
+                    .id = "c1",
+                    .name = "read",
+                    .args = "{\"path\":\"a.txt\"}",
+                },
+            },
         },
         .{
             .at_ms = 3,
-            .data = .{ .usage = .{
-                .in_tok = 11,
-                .out_tok = 7,
-                .tot_tok = 18,
-            } },
+            .data = .{
+                .usage = .{
+                    .in_tok = 11,
+                    .out_tok = 7,
+                    .tot_tok = 18,
+                },
+            },
         },
         .{
             .at_ms = 4,
-            .data = .{ .stop = .{ .reason = .done } },
+            .data = .{
+                .stop = .{ .reason = .done },
+            },
         },
     };
 
@@ -234,13 +244,22 @@ test "nextDup keeps prior event stable across later reads" {
     defer tmp.cleanup();
 
     const events = [_]Event{
-        .{ .at_ms = 1, .data = .{ .text = .{ .text = "first borrowed payload" } } },
-        .{ .at_ms = 2, .data = .{ .text = .{ .text = "second borrowed payload" } } },
-        .{ .at_ms = 3, .data = .{ .tool_call = .{
-            .id = "tc-1",
-            .name = "bash",
-            .args = "{\"cmd\":\"echo hi\"}",
-        } } },
+        .{
+            .at_ms = 1,
+            .data = .{ .text = .{ .text = "first borrowed payload" } },
+        },
+        .{
+            .at_ms = 2,
+            .data = .{ .text = .{ .text = "second borrowed payload" } },
+        },
+        .{
+            .at_ms = 3,
+            .data = .{ .tool_call = .{
+                .id = "tc-1",
+                .name = "bash",
+                .args = "{\"cmd\":\"echo hi\"}",
+            } },
+        },
     };
 
     {
@@ -299,12 +318,16 @@ test "jsonl replay fails malformed line deterministically" {
 
         try encodeLine(file, .{
             .at_ms = 1,
-            .data = .{ .text = .{ .text = "ok" } },
+            .data = .{
+                .text = .{ .text = "ok" },
+            },
         });
         try file.writeAll("{\"version\":1,\"at_ms\":2,\"data\":{\"text\":{\"text\":\"oops\"}}\n");
         try encodeLine(file, .{
             .at_ms = 3,
-            .data = .{ .err = .{ .text = "never" } },
+            .data = .{
+                .err = .{ .text = "never" },
+            },
         });
     }
 
@@ -367,7 +390,9 @@ test "jsonl replay rejects final line without trailing newline" {
         defer file.close();
         const ev = Event{
             .at_ms = 1,
-            .data = .{ .text = .{ .text = "ok" } },
+            .data = .{
+                .text = .{ .text = "ok" },
+            },
         };
         const raw = try schema.encodeAlloc(std.testing.allocator, ev);
         defer std.testing.allocator.free(raw);
@@ -392,7 +417,9 @@ test "jsonl replay keeps committed rows and rejects torn tail" {
 
     const ev = Event{
         .at_ms = 1,
-        .data = .{ .text = .{ .text = "ok" } },
+        .data = .{
+            .text = .{ .text = "ok" },
+        },
     };
     const raw = try schema.encodeAlloc(std.testing.allocator, ev);
     defer std.testing.allocator.free(raw);

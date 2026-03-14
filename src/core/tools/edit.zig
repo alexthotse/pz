@@ -76,7 +76,9 @@ pub const Handler = struct {
             .started_at_ms = self.now_ms,
             .ended_at_ms = self.now_ms,
             .out = &.{},
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = .{
+                .ok = .{ .code = 0 },
+            },
         };
     }
 };
@@ -164,12 +166,14 @@ test "edit handler replaces first match with deterministic timestamps" {
     const call: tools.Call = .{
         .id = "e1",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = path,
-            .old = "x",
-            .new = "y",
-            .all = false,
-        } },
+        .args = .{
+            .edit = .{
+                .path = path,
+                .old = "x",
+                .new = "y",
+                .all = false,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -216,12 +220,14 @@ test "edit handler replaces all matches when all is true" {
     const call: tools.Call = .{
         .id = "e2",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = path,
-            .old = "ab",
-            .new = "cd",
-            .all = true,
-        } },
+        .args = .{
+            .edit = .{
+                .path = path,
+                .old = "ab",
+                .new = "cd",
+                .all = true,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -257,11 +263,13 @@ test "edit handler returns not found when old text is absent" {
     const call: tools.Call = .{
         .id = "e3",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = path,
-            .old = "zzz",
-            .new = "x",
-        } },
+        .args = .{
+            .edit = .{
+                .path = path,
+                .old = "zzz",
+                .new = "x",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -284,11 +292,13 @@ test "edit handler returns invalid args for empty old pattern" {
     const call: tools.Call = .{
         .id = "e4",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = "x",
-            .old = "",
-            .new = "y",
-        } },
+        .args = .{
+            .edit = .{
+                .path = "x",
+                .old = "",
+                .new = "y",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -311,11 +321,13 @@ test "edit handler returns not found for missing file path" {
     const call: tools.Call = .{
         .id = "e5",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = "this-file-should-not-exist-c8353af6.txt",
-            .old = "a",
-            .new = "b",
-        } },
+        .args = .{
+            .edit = .{
+                .path = "this-file-should-not-exist-c8353af6.txt",
+                .old = "a",
+                .new = "b",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -338,10 +350,12 @@ test "edit handler returns kind mismatch for wrong call kind" {
     const call: tools.Call = .{
         .id = "e6",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = "x",
-            .text = "y",
-        } },
+        .args = .{
+            .write = .{
+                .path = "x",
+                .text = "y",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -373,11 +387,13 @@ test "edit handler denies hardlinked file" {
     try std.testing.expectError(error.Denied, handler.run(.{
         .id = "e-link",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = "alias.txt",
-            .old = "alpha",
-            .new = "beta",
-        } },
+        .args = .{
+            .edit = .{
+                .path = "alias.txt",
+                .old = "alpha",
+                .new = "beta",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     }, sink));

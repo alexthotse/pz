@@ -90,7 +90,9 @@ pub const Handler = struct {
             .ended_at_ms = self.now_ms,
             .out = out,
             .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = .{
+                .ok = .{ .code = 0 },
+            },
         };
     }
 
@@ -232,11 +234,13 @@ test "read handler returns selected lines with deterministic timestamps" {
     const call: tools.Call = .{
         .id = "c1",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = path,
-            .from_line = 2,
-            .to_line = 3,
-        } },
+        .args = .{
+            .read = .{
+                .path = path,
+                .from_line = 2,
+                .to_line = 3,
+            },
+        },
         .src = .system,
         .at_ms = 5,
     };
@@ -274,11 +278,13 @@ test "read handler returns invalid args on reversed line range" {
     const call: tools.Call = .{
         .id = "c2",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = "ignored",
-            .from_line = 3,
-            .to_line = 2,
-        } },
+        .args = .{
+            .read = .{
+                .path = "ignored",
+                .from_line = 3,
+                .to_line = 2,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -301,9 +307,11 @@ test "read handler returns not found for missing file" {
     const call: tools.Call = .{
         .id = "c3",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = "this-file-should-not-exist-7b3908b0.txt",
-        } },
+        .args = .{
+            .read = .{
+                .path = "this-file-should-not-exist-7b3908b0.txt",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -326,10 +334,12 @@ test "read handler returns kind mismatch for wrong call kind" {
     const call: tools.Call = .{
         .id = "c4",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = "x",
-            .text = "y",
-        } },
+        .args = .{
+            .write = .{
+                .path = "x",
+                .text = "y",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -377,7 +387,9 @@ test "read handler truncates oversized output instead of failing TooLarge" {
     const call: tools.Call = .{
         .id = "c-big",
         .kind = .read,
-        .args = .{ .read = .{ .path = path } },
+        .args = .{
+            .read = .{ .path = path },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -440,11 +452,13 @@ test "read handler can target a line in very large file without TooLarge" {
     const call: tools.Call = .{
         .id = "c-huge",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = path,
-            .from_line = 9999,
-            .to_line = 9999,
-        } },
+        .args = .{
+            .read = .{
+                .path = path,
+                .from_line = 9999,
+                .to_line = 9999,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -490,7 +504,9 @@ test "read handler denies hardlinked file" {
     try std.testing.expectError(error.Denied, handler.run(.{
         .id = "c-link",
         .kind = .read,
-        .args = .{ .read = .{ .path = "alias.txt" } },
+        .args = .{
+            .read = .{ .path = "alias.txt" },
+        },
         .src = .model,
         .at_ms = 0,
     }, sink));

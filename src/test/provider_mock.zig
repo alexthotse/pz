@@ -108,4 +108,3 @@ test "scripted provider emits events then aborts blocked stream" {
     defer thr.join();
     try std.testing.expect((try stream.next()) == null);
 }
-

@@ -484,10 +484,12 @@ pub const Runtime = struct {
                 .started_at_ms = call.at_ms,
                 .ended_at_ms = call.at_ms,
                 .out = &.{},
-                .final = .{ .failed = .{
-                    .kind = .invalid_args,
-                    .msg = "ask tool requires at least one question",
-                } },
+                .final = .{
+                    .failed = .{
+                        .kind = .invalid_args,
+                        .msg = "ask tool requires at least one question",
+                    },
+                },
             };
         }
 
@@ -497,10 +499,12 @@ pub const Runtime = struct {
                 .started_at_ms = call.at_ms,
                 .ended_at_ms = call.at_ms,
                 .out = &.{},
-                .final = .{ .failed = .{
-                    .kind = .invalid_args,
-                    .msg = "ask tool requires interactive TUI mode",
-                } },
+                .final = .{
+                    .failed = .{
+                        .kind = .invalid_args,
+                        .msg = "ask tool requires interactive TUI mode",
+                    },
+                },
             };
         };
 
@@ -510,10 +514,12 @@ pub const Runtime = struct {
                 .started_at_ms = call.at_ms,
                 .ended_at_ms = call.at_ms,
                 .out = &.{},
-                .final = .{ .failed = .{
-                    .kind = .io,
-                    .msg = @errorName(err),
-                } },
+                .final = .{
+                    .failed = .{
+                        .kind = .io,
+                        .msg = @errorName(err),
+                    },
+                },
             };
         };
         errdefer self.alloc.free(out_text);
@@ -537,7 +543,9 @@ pub const Runtime = struct {
             .final = if (askResultCancelled(out_text))
                 .{ .cancelled = .{ .reason = .user } }
             else
-                .{ .ok = .{ .code = 0 } },
+                .{
+                    .ok = .{ .code = 0 },
+                },
         };
     }
 
@@ -710,9 +718,11 @@ test "builtin runtime uses call timestamp in result envelope" {
     const call: tools.Call = .{
         .id = "t1",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = path,
-        } },
+        .args = .{
+            .read = .{
+                .path = path,
+            },
+        },
         .src = .system,
         .at_ms = 12345,
     };
@@ -805,10 +815,12 @@ test "agent tool uses runtime hook output" {
     const call: tools.Call = .{
         .id = "agent-hook",
         .kind = .agent,
-        .args = .{ .agent = .{
-            .agent_id = "critic",
-            .prompt = "delegated to child agent",
-        } },
+        .args = .{
+            .agent = .{
+                .agent_id = "critic",
+                .prompt = "delegated to child agent",
+            },
+        },
         .src = .model,
         .at_ms = 12,
     };
@@ -885,7 +897,9 @@ test "ask tool requires interactive hook" {
     const call: tools.Call = .{
         .id = "ask-1",
         .kind = .ask,
-        .args = .{ .ask = .{ .questions = qs[0..] } },
+        .args = .{
+            .ask = .{ .questions = qs[0..] },
+        },
         .src = .model,
         .at_ms = 1,
     };
@@ -936,7 +950,9 @@ test "ask tool rejects empty question list" {
     const call: tools.Call = .{
         .id = "ask-empty",
         .kind = .ask,
-        .args = .{ .ask = .{ .questions = &.{} } },
+        .args = .{
+            .ask = .{ .questions = &.{} },
+        },
         .src = .model,
         .at_ms = 7,
     };
@@ -1009,7 +1025,9 @@ test "ask tool uses hook output" {
     const call: tools.Call = .{
         .id = "ask-2",
         .kind = .ask,
-        .args = .{ .ask = .{ .questions = qs[0..] } },
+        .args = .{
+            .ask = .{ .questions = qs[0..] },
+        },
         .src = .model,
         .at_ms = 2,
     };
@@ -1089,7 +1107,9 @@ test "ask tool reports hook failure" {
     const call: tools.Call = .{
         .id = "ask-fail",
         .kind = .ask,
-        .args = .{ .ask = .{ .questions = qs[0..] } },
+        .args = .{
+            .ask = .{ .questions = qs[0..] },
+        },
         .src = .model,
         .at_ms = 8,
     };
@@ -1160,7 +1180,9 @@ test "ask tool maps cancelled hook output to cancelled final" {
     const call: tools.Call = .{
         .id = "ask-cancel",
         .kind = .ask,
-        .args = .{ .ask = .{ .questions = qs[0..] } },
+        .args = .{
+            .ask = .{ .questions = qs[0..] },
+        },
         .src = .model,
         .at_ms = 9,
     };

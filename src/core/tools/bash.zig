@@ -389,10 +389,12 @@ fn runChild(
             .chunk = stderr_chunk,
             .full_bytes = stderr_full,
         },
-        .final = final orelse .{ .failed = .{
-            .kind = .internal,
-            .msg = "bash terminated without status",
-        } },
+        .final = final orelse .{
+            .failed = .{
+                .kind = .internal,
+                .msg = "bash terminated without status",
+            },
+        },
     };
 }
 
@@ -595,9 +597,11 @@ test "bash handler captures stdout and stderr with deterministic timestamps" {
     const call: tools.Call = .{
         .id = "b1",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf 'out'; printf 'err' 1>&2",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf 'out'; printf 'err' 1>&2",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -665,10 +669,12 @@ test "bash handler applies explicit env variables" {
     const call: tools.Call = .{
         .id = "b2",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf '%s' \"$PZ_BASH_ENV\"",
-            .env = env[0..],
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf '%s' \"$PZ_BASH_ENV\"",
+                .env = env[0..],
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -730,7 +736,9 @@ test "bash handler installs sandbox before bash exec" {
             return .{
                 .stdout = .{ .chunk = try handler.alloc.dupe(u8, "ok"), .full_bytes = 2 },
                 .stderr = .{ .chunk = try handler.alloc.dupe(u8, ""), .full_bytes = 0 },
-                .final = .{ .ok = .{ .code = 0 } },
+                .final = .{
+                    .ok = .{ .code = 0 },
+                },
             };
         }
 
@@ -767,10 +775,12 @@ test "bash handler installs sandbox before bash exec" {
     const call: tools.Call = .{
         .id = "b2-sandbox",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf ok",
-            .cwd = "sub",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf ok",
+                .cwd = "sub",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -833,9 +843,11 @@ test "bash handler returns failed final on non-zero exit" {
     const call: tools.Call = .{
         .id = "b3",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf 'fail' 1>&2; exit 7",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf 'fail' 1>&2; exit 7",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -881,9 +893,11 @@ test "bash handler returns failed final on signal exit" {
     const call: tools.Call = .{
         .id = "b3-signal",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "kill -TERM $$",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "kill -TERM $$",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -924,9 +938,11 @@ test "bash handler returns invalid args on empty command" {
     const call: tools.Call = .{
         .id = "b4",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -955,10 +971,12 @@ test "bash handler returns invalid args on bad env key" {
     const call: tools.Call = .{
         .id = "b5",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "true",
-            .env = env[0..],
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "true",
+                .env = env[0..],
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -981,10 +999,12 @@ test "bash handler returns not found for missing cwd" {
     const call: tools.Call = .{
         .id = "b6",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf x",
-            .cwd = "/tmp/this-dir-should-not-exist-79a1f55a",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf x",
+                .cwd = "/tmp/this-dir-should-not-exist-79a1f55a",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1007,9 +1027,11 @@ test "bash handler denies direct protected state access" {
     const call: tools.Call = .{
         .id = "b6-deny-direct",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "cat ./.pz/settings.json AGENTS.md",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "cat ./.pz/settings.json AGENTS.md",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1032,9 +1054,11 @@ test "bash handler denies wrapped protected state access" {
     const call: tools.Call = .{
         .id = "b6-deny-wrap",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "env FOO=1 bash -c 'cat ~/.pz/settings.json AGENTS.md'",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "env FOO=1 bash -c 'cat ~/.pz/settings.json AGENTS.md'",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1069,9 +1093,11 @@ test "bash handler denies file reads outside workspace inside sandbox" {
     const call: tools.Call = .{
         .id = "b-file-deny",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = cmd,
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = cmd,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1128,9 +1154,11 @@ test "bash handler denies process exec outside workspace inside sandbox" {
     const call: tools.Call = .{
         .id = "b-proc-deny",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = cmd,
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = cmd,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1218,9 +1246,11 @@ test "bash handler denies network connects inside sandbox" {
     const call: tools.Call = .{
         .id = "b-net-deny",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = cmd,
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = cmd,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1262,9 +1292,11 @@ test "bash handler allows workspace file actions inside sandbox" {
     const call: tools.Call = .{
         .id = "b-allow-workspace",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "mkdir -p sub; printf ok > sub/out.txt; cat sub/out.txt",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "mkdir -p sub; printf ok > sub/out.txt; cat sub/out.txt",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1302,9 +1334,11 @@ test "bash handler truncates oversized output and emits metadata" {
     const call: tools.Call = .{
         .id = "b7",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf 'abcd'",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf 'abcd'",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1341,9 +1375,11 @@ test "bash handler returns kind mismatch for wrong call kind" {
     const call: tools.Call = .{
         .id = "b8",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = "x",
-        } },
+        .args = .{
+            .read = .{
+                .path = "x",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -1427,9 +1463,11 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
     const call: tools.Call = .{
         .id = "b9",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & bg=$!; printf '%s' \"$bg\"; while :; do sleep 1; done",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & bg=$!; printf '%s' \"$bg\"; while :; do sleep 1; done",
+            },
+        },
         .src = .model,
         .at_ms = 0,
         .cancel = cancel,

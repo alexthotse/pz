@@ -11,24 +11,32 @@ test "session persistence regression covers compacted replay and retry restore" 
     defer tmp.cleanup();
 
     var wr = try writer.Writer.init(std.testing.allocator, tmp.dir, .{
-        .flush = .{ .always = {} },
+        .flush = .{
+            .always = {},
+        },
     });
 
     try wr.append("sid-1", .{
         .at_ms = 1,
-        .data = .{ .prompt = .{ .text = "ship" } },
+        .data = .{
+            .prompt = .{ .text = "ship" },
+        },
     });
     try wr.append("sid-1", .{
         .at_ms = 2,
-        .data = .{ .noop = {} },
+        .data = .{
+            .noop = {},
+        },
     });
     try wr.append("sid-1", .{
         .at_ms = 3,
-        .data = .{ .tool_result = .{
-            .id = "c1",
-            .out = "ok",
-            .is_err = false,
-        } },
+        .data = .{
+            .tool_result = .{
+                .id = "c1",
+                .out = "ok",
+                .is_err = false,
+            },
+        },
     });
 
     try retry_state.save(std.testing.allocator, tmp.dir, "sid-1", .{

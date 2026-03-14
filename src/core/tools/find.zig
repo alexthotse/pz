@@ -110,7 +110,9 @@ pub const Handler = struct {
             .ended_at_ms = self.now_ms,
             .out = out,
             .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = .{
+                .ok = .{ .code = 0 },
+            },
         };
     }
 
@@ -252,10 +254,12 @@ test "find handler lists matching paths in sorted order" {
     const call: tools.Call = .{
         .id = "f1",
         .kind = .find,
-        .args = .{ .find = .{
-            .path = root,
-            .name = ".zig",
-        } },
+        .args = .{
+            .find = .{
+                .path = root,
+                .name = ".zig",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -293,7 +297,9 @@ test "find handler validates args and handles missing roots" {
     const bad: tools.Call = .{
         .id = "f2",
         .kind = .find,
-        .args = .{ .find = .{ .path = ".", .name = "", .max_results = 1 } },
+        .args = .{
+            .find = .{ .path = ".", .name = "", .max_results = 1 },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -302,7 +308,9 @@ test "find handler validates args and handles missing roots" {
     const missing: tools.Call = .{
         .id = "f3",
         .kind = .find,
-        .args = .{ .find = .{ .path = "no-such-dir-8572", .name = "x" } },
+        .args = .{
+            .find = .{ .path = "no-such-dir-8572", .name = "x" },
+        },
         .src = .model,
         .at_ms = 0,
     };

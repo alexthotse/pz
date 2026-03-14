@@ -230,10 +230,12 @@ const PolicyToolDispatch = struct {
                 .started_at_ms = call.at_ms,
                 .ended_at_ms = call.at_ms,
                 .out = &.{},
-                .final = .{ .failed = .{
-                    .kind = .denied,
-                    .msg = policy_denied_msg,
-                } },
+                .final = .{
+                    .failed = .{
+                        .kind = .denied,
+                        .msg = policy_denied_msg,
+                    },
+                },
             };
         }
         return self.inner.run(call, sink);
@@ -385,7 +387,9 @@ const MissingProviderStream = struct {
 
         return switch (self.idx) {
             0 => .{ .err = self.msg },
-            1 => .{ .stop = .{ .reason = .err } },
+            1 => .{
+                .stop = .{ .reason = .err },
+            },
             else => null,
         };
     }
@@ -1823,7 +1827,11 @@ fn reloadContextWithAudit(
         sys_prompt_owned.* = new_ctx;
         sys_prompt.* = new_ctx;
         const attrs = [_]core.audit.Attr{
-            .{ .key = "loaded", .vis = .@"pub", .val = .{ .bool = true } },
+            .{
+                .key = "loaded",
+                .vis = .@"pub",
+                .val = .{ .bool = true },
+            },
         };
         try runtimeCtlSuccess(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &attrs);
         return .loaded;
@@ -1832,7 +1840,11 @@ fn reloadContextWithAudit(
     sys_prompt_owned.* = null;
     sys_prompt.* = null;
     const attrs = [_]core.audit.Attr{
-        .{ .key = "loaded", .vis = .@"pub", .val = .{ .bool = false } },
+        .{
+            .key = "loaded",
+            .vis = .@"pub",
+            .val = .{ .bool = false },
+        },
     };
     try runtimeCtlSuccess(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &attrs);
     return .empty;
@@ -1971,7 +1983,9 @@ fn execWithIoTuiHooks(
                 fs_store_impl = try core.session.fs_store.Store.init(.{
                     .alloc = alloc,
                     .dir = session_dir,
-                    .flush = .{ .always = {} },
+                    .flush = .{
+                        .always = {},
+                    },
                     .replay = .{},
                 });
                 store = fs_store_impl.asSessionStore();
@@ -2646,7 +2660,11 @@ fn runTui(
                                         try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
                                         try replaceOwnedText(alloc, &model, &model_owned, sel);
                                         const attrs = [_]core.audit.Attr{
-                                            .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider_label } },
+                                            .{
+                                                .key = "provider",
+                                                .vis = .@"pub",
+                                                .val = .{ .str = provider_label },
+                                            },
                                         };
                                         try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
                                         ui.panels.ctx_limit = modelCtxWindow(model);
@@ -3516,7 +3534,11 @@ fn runRpc(
                 const has_alias_provider = isSetModelAlias(raw_cmd) and req.provider != null and req.provider.?.len > 0;
                 if (has_alias_provider) {
                     const start_attrs = [_]core.audit.Attr{
-                        .{ .key = "provider", .vis = .@"pub", .val = .{ .str = req.provider.? } },
+                        .{
+                            .key = "provider",
+                            .vis = .@"pub",
+                            .val = .{ .str = req.provider.? },
+                        },
                     };
                     try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &start_attrs);
                 } else {
@@ -3546,7 +3568,11 @@ fn runRpc(
                 }
                 try replaceOwnedText(alloc, &model, &model_owned, next);
                 const done_attrs = [_]core.audit.Attr{
-                    .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider_label } },
+                    .{
+                        .key = "provider",
+                        .vis = .@"pub",
+                        .val = .{ .str = provider_label },
+                    },
                 };
                 try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &done_attrs);
                 try writeJsonLine(alloc, out, .{
@@ -3620,7 +3646,11 @@ fn runRpc(
                 if (raw.len != 0) {
                     const argv: core.audit.Str = .{ .text = raw, .vis = .@"pub" };
                     const attrs = [_]core.audit.Attr{
-                        .{ .key = "tools", .vis = .@"pub", .val = .{ .str = tool_csv } },
+                        .{
+                            .key = "tools",
+                            .vis = .@"pub",
+                            .val = .{ .str = tool_csv },
+                        },
                     };
                     try runtimeCtlSuccess(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &attrs);
                 }
@@ -3910,8 +3940,16 @@ fn runRpc(
                     return err;
                 };
                 const attrs = [_]core.audit.Attr{
-                    .{ .key = "in_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.in_lines) } },
-                    .{ .key = "out_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.out_lines) } },
+                    .{
+                        .key = "in_lines",
+                        .vis = .@"pub",
+                        .val = .{ .uint = @intCast(ck.in_lines) },
+                    },
+                    .{
+                        .key = "out_lines",
+                        .vis = .@"pub",
+                        .val = .{ .uint = @intCast(ck.out_lines) },
+                    },
                 };
                 try runtimeCtlSuccess(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &attrs);
                 try writeJsonLine(alloc, out, .{
@@ -4304,7 +4342,11 @@ fn handleSlashCommand(
             try runtimeCtlStart(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
             try replaceOwnedText(alloc, model, model_owned, arg);
             const attrs = [_]core.audit.Attr{
-                .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider.* } },
+                .{
+                    .key = "provider",
+                    .vis = .@"pub",
+                    .val = .{ .str = provider.* },
+                },
             };
             try runtimeCtlSuccess(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
             try writeTextLine(alloc, out, "model set to {s}\n", .{model.*});
@@ -4342,7 +4384,11 @@ fn handleSlashCommand(
                 const tool_csv = try toolMaskCsvAlloc(alloc, tools_rt.tool_mask);
                 defer alloc.free(tool_csv);
                 const attrs = [_]core.audit.Attr{
-                    .{ .key = "tools", .vis = .@"pub", .val = .{ .str = tool_csv } },
+                    .{
+                        .key = "tools",
+                        .vis = .@"pub",
+                        .val = .{ .str = tool_csv },
+                    },
                 };
                 try runtimeCtlSuccess(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &attrs);
                 try writeTextLine(alloc, out, "tools set to {s}\n", .{tool_csv});
@@ -4502,8 +4548,16 @@ fn handleSlashCommand(
                 return err;
             };
             const attrs = [_]core.audit.Attr{
-                .{ .key = "in_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.in_lines) } },
-                .{ .key = "out_lines", .vis = .@"pub", .val = .{ .uint = @intCast(ck.out_lines) } },
+                .{
+                    .key = "in_lines",
+                    .vis = .@"pub",
+                    .val = .{ .uint = @intCast(ck.in_lines) },
+                },
+                .{
+                    .key = "out_lines",
+                    .vis = .@"pub",
+                    .val = .{ .uint = @intCast(ck.out_lines) },
+                },
             };
             try runtimeCtlSuccess(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &attrs);
             try writeTextLine(alloc, out, "compacted in={d} out={d}\n", .{ ck.in_lines, ck.out_lines });
@@ -4549,7 +4603,11 @@ fn handleSlashCommand(
             };
             defer alloc.free(path);
             const attrs = [_]core.audit.Attr{
-                .{ .key = "path", .vis = .mask, .val = .{ .str = path } },
+                .{
+                    .key = "path",
+                    .vis = .mask,
+                    .val = .{ .str = path },
+                },
             };
             try runtimeCtlSuccess(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, &attrs);
             try writeTextLine(alloc, out, "exported to {s}\n", .{path});
@@ -4720,7 +4778,11 @@ fn handleSlashCommand(
             };
             defer alloc.free(gist_url);
             const attrs = [_]core.audit.Attr{
-                .{ .key = "url", .vis = .mask, .val = .{ .str = gist_url } },
+                .{
+                    .key = "url",
+                    .vis = .mask,
+                    .val = .{ .str = gist_url },
+                },
             };
             try runtimeCtlSuccess(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, &attrs);
             try writeTextLine(alloc, out, "shared: {s}\n", .{gist_url});
@@ -5851,7 +5913,10 @@ const bg_sub_map = std.StaticStringMap(BgSub).initComptime(.{
     .{ "stop", .stop },
 });
 const set_model_alias_map = std.StaticStringMap(void).initComptime(.{
-    .{ "set_model", {} },
+    .{
+        "set_model",
+        {},
+    },
 });
 
 const arg_src_kind_map = std.StaticStringMap(enum {
@@ -7643,14 +7708,26 @@ test "showResumeOverlay fixed-width snapshot aligns age and token columns" {
 
     const now = std.time.milliTimestamp();
     const long_events = [_]core.session.Event{
-        .{ .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s), .data = .{ .prompt = .{ .text = "A very long session title that should ellipsize before the right-aligned columns" } } },
-        .{ .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s), .data = .{ .usage = .{ .tot_tok = 1345 } } },
+        .{
+            .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s),
+            .data = .{ .prompt = .{ .text = "A very long session title that should ellipsize before the right-aligned columns" } },
+        },
+        .{
+            .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s),
+            .data = .{ .usage = .{ .tot_tok = 1345 } },
+        },
     };
     try writeSessionEventsFile(tmp, "sess/100.jsonl", &long_events);
 
     const short_events = [_]core.session.Event{
-        .{ .at_ms = now - (45 * 60 * std.time.ms_per_s), .data = .{ .prompt = .{ .text = "Short title" } } },
-        .{ .at_ms = now - (45 * 60 * std.time.ms_per_s), .data = .{ .usage = .{ .tot_tok = 46 } } },
+        .{
+            .at_ms = now - (45 * 60 * std.time.ms_per_s),
+            .data = .{ .prompt = .{ .text = "Short title" } },
+        },
+        .{
+            .at_ms = now - (45 * 60 * std.time.ms_per_s),
+            .data = .{ .usage = .{ .tot_tok = 46 } },
+        },
     };
     try writeSessionEventsFile(tmp, "sess/200.jsonl", &short_events);
 
@@ -7720,12 +7797,30 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
     const file = try tmp.dir.createFile("sess/100.jsonl", .{});
     defer file.close();
     const events = [_]core.session.Event{
-        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "old prompt" } } },
-        .{ .at_ms = 2, .data = .{ .text = .{ .text = "old answer" } } },
-        .{ .at_ms = 3, .data = .{ .tool_call = .{ .id = "call-1", .name = "read", .args = "{\"path\":\"a.txt\"}" } } },
-        .{ .at_ms = 4, .data = .{ .tool_result = .{ .id = "call-1", .out = "ok", .is_err = false } } },
-        .{ .at_ms = 5, .data = .{ .usage = .{ .in_tok = 12, .out_tok = 34, .tot_tok = 46, .cache_read = 1, .cache_write = 2 } } },
-        .{ .at_ms = 6, .data = .{ .stop = .{ .reason = .done } } },
+        .{
+            .at_ms = 1,
+            .data = .{ .prompt = .{ .text = "old prompt" } },
+        },
+        .{
+            .at_ms = 2,
+            .data = .{ .text = .{ .text = "old answer" } },
+        },
+        .{
+            .at_ms = 3,
+            .data = .{ .tool_call = .{ .id = "call-1", .name = "read", .args = "{\"path\":\"a.txt\"}" } },
+        },
+        .{
+            .at_ms = 4,
+            .data = .{ .tool_result = .{ .id = "call-1", .out = "ok", .is_err = false } },
+        },
+        .{
+            .at_ms = 5,
+            .data = .{ .usage = .{ .in_tok = 12, .out_tok = 34, .tot_tok = 46, .cache_read = 1, .cache_write = 2 } },
+        },
+        .{
+            .at_ms = 6,
+            .data = .{ .stop = .{ .reason = .done } },
+        },
     };
     for (events) |ev| {
         const raw = try core.session.encodeEventAlloc(std.testing.allocator, ev);
@@ -7790,10 +7885,22 @@ test "restoreSessionIntoUi ignores empty blocks when rendering bottom row" {
     const file = try tmp.dir.createFile("sess/100.jsonl", .{});
     defer file.close();
     const events = [_]core.session.Event{
-        .{ .at_ms = 1, .data = .{ .text = .{ .text = "" } } },
-        .{ .at_ms = 2, .data = .{ .tool_call = .{ .id = "call-1", .name = "bash", .args = "{\"cmd\":\"printf ok\"}" } } },
-        .{ .at_ms = 3, .data = .{ .tool_result = .{ .id = "call-1", .out = "", .is_err = false } } },
-        .{ .at_ms = 4, .data = .{ .text = .{ .text = "tail line" } } },
+        .{
+            .at_ms = 1,
+            .data = .{ .text = .{ .text = "" } },
+        },
+        .{
+            .at_ms = 2,
+            .data = .{ .tool_call = .{ .id = "call-1", .name = "bash", .args = "{\"cmd\":\"printf ok\"}" } },
+        },
+        .{
+            .at_ms = 3,
+            .data = .{ .tool_result = .{ .id = "call-1", .out = "", .is_err = false } },
+        },
+        .{
+            .at_ms = 4,
+            .data = .{ .text = .{ .text = "tail line" } },
+        },
     };
     for (events) |ev| {
         const raw = try core.session.encodeEventAlloc(std.testing.allocator, ev);
@@ -7831,9 +7938,18 @@ test "runtime tui non-tty /resume restores session without running provider turn
     const file = try tmp.dir.createFile("sess/100.jsonl", .{});
     defer file.close();
     const events = [_]core.session.Event{
-        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "old prompt" } } },
-        .{ .at_ms = 2, .data = .{ .text = .{ .text = "old answer" } } },
-        .{ .at_ms = 3, .data = .{ .stop = .{ .reason = .done } } },
+        .{
+            .at_ms = 1,
+            .data = .{ .prompt = .{ .text = "old prompt" } },
+        },
+        .{
+            .at_ms = 2,
+            .data = .{ .text = .{ .text = "old answer" } },
+        },
+        .{
+            .at_ms = 3,
+            .data = .{ .stop = .{ .reason = .done } },
+        },
     };
     for (events) |ev| {
         const raw = try core.session.encodeEventAlloc(std.testing.allocator, ev);
@@ -8620,11 +8736,15 @@ test "runtime tui overflow retries once with injected live stdin" {
         alloc: std.mem.Allocator,
         starts: u8 = 0,
         const first = [_]core.providers.Ev{
-            .{ .stop = .{ .reason = .max_out } },
+            .{
+                .stop = .{ .reason = .max_out },
+            },
         };
         const second = [_]core.providers.Ev{
             .{ .text = "retry-ok" },
-            .{ .stop = .{ .reason = .done } },
+            .{
+                .stop = .{ .reason = .done },
+            },
         };
 
         fn asProvider(self: *@This()) core.providers.Provider {
@@ -8653,7 +8773,9 @@ test "runtime tui overflow retries once with injected live stdin" {
     var fs_store = try core.session.fs_store.Store.init(.{
         .alloc = std.testing.allocator,
         .dir = dir,
-        .flush = .{ .always = {} },
+        .flush = .{
+            .always = {},
+        },
         .replay = .{},
     });
     defer fs_store.deinit();
@@ -8904,7 +9026,9 @@ fn expectLatestSessionReused(session_sel: anytype) !void {
         defer old_file.close();
         const old_ev = try core.session.encodeEventAlloc(std.testing.allocator, .{
             .at_ms = 1,
-            .data = .{ .prompt = .{ .text = "old-100" } },
+            .data = .{
+                .prompt = .{ .text = "old-100" },
+            },
         });
         defer std.testing.allocator.free(old_ev);
         try old_file.writeAll(old_ev);
@@ -8915,7 +9039,9 @@ fn expectLatestSessionReused(session_sel: anytype) !void {
         defer old_file.close();
         const old_ev = try core.session.encodeEventAlloc(std.testing.allocator, .{
             .at_ms = 1,
-            .data = .{ .prompt = .{ .text = "old-200" } },
+            .data = .{
+                .prompt = .{ .text = "old-200" },
+            },
         });
         defer std.testing.allocator.free(old_ev);
         try old_file.writeAll(old_ev);
@@ -8986,7 +9112,9 @@ test "runtime explicit session path resumes that session id" {
         defer old_file.close();
         const old_ev = try core.session.encodeEventAlloc(std.testing.allocator, .{
             .at_ms = 1,
-            .data = .{ .prompt = .{ .text = "old" } },
+            .data = .{
+                .prompt = .{ .text = "old" },
+            },
         });
         defer std.testing.allocator.free(old_ev);
         try old_file.writeAll(old_ev);
@@ -9652,12 +9780,16 @@ test "TurnCtx.run binds approval context for destructive tools" {
     defer std.testing.allocator.free(cwd);
 
     const steps = [_]provider_mock.Step{
-        .{ .ev = .{ .tool_call = .{
-            .id = "call-write",
-            .name = "write",
-            .args = "{\"path\":\"out.txt\",\"text\":\"hello\"}",
-        } } },
-        .{ .ev = .{ .stop = .{ .reason = .done } } },
+        .{
+            .ev = .{ .tool_call = .{
+                .id = "call-write",
+                .name = "write",
+                .args = "{\"path\":\"out.txt\",\"text\":\"hello\"}",
+            } },
+        },
+        .{
+            .ev = .{ .stop = .{ .reason = .done } },
+        },
     };
     var scripted = try provider_mock.ScriptedProvider.init(steps[0..]);
     defer scripted.deinit();
@@ -9832,9 +9964,18 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
 
     try tmp.dir.makePath("sess");
     const events = [_]core.session.Event{
-        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "authorization: bearer sk-live-secret" } } },
-        .{ .at_ms = 2, .data = .{ .text = .{ .text = "<script>alert(1)</script>" } } },
-        .{ .at_ms = 3, .data = .{ .stop = .{ .reason = .done } } },
+        .{
+            .at_ms = 1,
+            .data = .{ .prompt = .{ .text = "authorization: bearer sk-live-secret" } },
+        },
+        .{
+            .at_ms = 2,
+            .data = .{ .text = .{ .text = "<script>alert(1)</script>" } },
+        },
+        .{
+            .at_ms = 3,
+            .data = .{ .stop = .{ .reason = .done } },
+        },
     };
     try writeSessionEventsFile(tmp, "sess/100.jsonl", &events);
 
@@ -12423,9 +12564,18 @@ test "runtime rpc control commands emit audited redacted control records" {
     const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
     defer std.testing.allocator.free(sess_abs);
     const events = [_]core.session.Event{
-        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "old prompt" } } },
-        .{ .at_ms = 2, .data = .{ .text = .{ .text = "old answer" } } },
-        .{ .at_ms = 3, .data = .{ .stop = .{ .reason = .done } } },
+        .{
+            .at_ms = 1,
+            .data = .{ .prompt = .{ .text = "old prompt" } },
+        },
+        .{
+            .at_ms = 2,
+            .data = .{ .text = .{ .text = "old answer" } },
+        },
+        .{
+            .at_ms = 3,
+            .data = .{ .stop = .{ .reason = .done } },
+        },
     };
     try writeSessionEventsFile(tmp, "sess/100.jsonl", &events);
 

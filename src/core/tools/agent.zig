@@ -143,12 +143,18 @@ fn finalFor(run_res: rpc.ChildProc.RunRes) tools.Result.Final {
         .msg = "agent missing terminal frame",
     } };
     return switch (done.stop) {
-        .done => .{ .ok = .{ .code = 0 } },
-        .canceled => .{ .cancelled = .{ .reason = .user } },
-        .err => .{ .failed = .{
-            .kind = .exec,
-            .msg = "agent stopped with err",
-        } },
+        .done => .{
+            .ok = .{ .code = 0 },
+        },
+        .canceled => .{
+            .cancelled = .{ .reason = .user },
+        },
+        .err => .{
+            .failed = .{
+                .kind = .exec,
+                .msg = "agent stopped with err",
+            },
+        },
     };
 }
 
@@ -187,10 +193,12 @@ fn fail(call: tools.Call, kind: tools.Result.ErrKind, msg: []const u8) tools.Res
         .started_at_ms = call.at_ms,
         .ended_at_ms = call.at_ms,
         .out = &.{},
-        .final = .{ .failed = .{
-            .kind = kind,
-            .msg = msg,
-        } },
+        .final = .{
+            .failed = .{
+                .kind = kind,
+                .msg = msg,
+            },
+        },
     };
 }
 
@@ -232,10 +240,12 @@ test "agent handler renders info block and output" {
     const call: tools.Call = .{
         .id = "agent-1",
         .kind = .agent,
-        .args = .{ .agent = .{
-            .agent_id = "critic",
-            .prompt = "delegated to child agent",
-        } },
+        .args = .{
+            .agent = .{
+                .agent_id = "critic",
+                .prompt = "delegated to child agent",
+            },
+        },
         .src = .model,
         .at_ms = 44,
     };
@@ -292,10 +302,12 @@ test "agent handler truncates deterministically" {
     const call: tools.Call = .{
         .id = "agent-2",
         .kind = .agent,
-        .args = .{ .agent = .{
-            .agent_id = "scout",
-            .prompt = "ignored",
-        } },
+        .args = .{
+            .agent = .{
+                .agent_id = "scout",
+                .prompt = "ignored",
+            },
+        },
         .src = .model,
         .at_ms = 45,
     };
@@ -349,10 +361,12 @@ test "agent handler maps rpc error to failed final" {
     const call: tools.Call = .{
         .id = "agent-3",
         .kind = .agent,
-        .args = .{ .agent = .{
-            .agent_id = "reviewer",
-            .prompt = "bad",
-        } },
+        .args = .{
+            .agent = .{
+                .agent_id = "reviewer",
+                .prompt = "bad",
+            },
+        },
         .src = .model,
         .at_ms = 46,
     };

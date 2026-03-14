@@ -6,7 +6,9 @@ pub const version_current: u16 = 1;
 pub const Event = struct {
     version: u16 = version_current,
     at_ms: i64 = 0,
-    data: Data = .{ .noop = {} },
+    data: Data = .{
+        .noop = {},
+    },
 
     pub const Data = union(Tag) {
         noop: void,
@@ -85,10 +87,18 @@ pub const Event = struct {
 
     fn dupeData(alloc: std.mem.Allocator, data: Data) error{OutOfMemory}!Data {
         return switch (data) {
-            .noop => .{ .noop = {} },
-            .prompt => |t| .{ .prompt = .{ .text = try alloc.dupe(u8, t.text) } },
-            .text => |t| .{ .text = .{ .text = try alloc.dupe(u8, t.text) } },
-            .thinking => |t| .{ .thinking = .{ .text = try alloc.dupe(u8, t.text) } },
+            .noop => .{
+                .noop = {},
+            },
+            .prompt => |t| .{
+                .prompt = .{ .text = try alloc.dupe(u8, t.text) },
+            },
+            .text => |t| .{
+                .text = .{ .text = try alloc.dupe(u8, t.text) },
+            },
+            .thinking => |t| .{
+                .thinking = .{ .text = try alloc.dupe(u8, t.text) },
+            },
             .tool_call => |tc| blk: {
                 const id = try alloc.dupe(u8, tc.id);
                 errdefer alloc.free(id);
@@ -105,7 +115,9 @@ pub const Event = struct {
             },
             .usage => |u| .{ .usage = u },
             .stop => |s| .{ .stop = s },
-            .err => |t| .{ .err = .{ .text = try alloc.dupe(u8, t.text) } },
+            .err => |t| .{
+                .err = .{ .text = try alloc.dupe(u8, t.text) },
+            },
         };
     }
 
@@ -141,23 +153,37 @@ pub fn encodeAlloc(alloc: std.mem.Allocator, ev: Event) error{OutOfMemory}![]u8 
 
 fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!Event.Data {
     return switch (data) {
-        .noop => .{ .noop = {} },
-        .prompt => |t| .{ .prompt = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
-        .text => |t| .{ .text = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
-        .thinking => |t| .{ .thinking = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
-        .tool_call => |tc| .{ .tool_call = .{
-            .id = try utf8.sanitizeMaybeAlloc(alloc, tc.id),
-            .name = try utf8.sanitizeMaybeAlloc(alloc, tc.name),
-            .args = try utf8.sanitizeMaybeAlloc(alloc, tc.args),
-        } },
-        .tool_result => |tr| .{ .tool_result = .{
-            .id = try utf8.sanitizeMaybeAlloc(alloc, tr.id),
-            .out = try utf8.sanitizeMaybeAlloc(alloc, tr.out),
-            .is_err = tr.is_err,
-        } },
+        .noop => .{
+            .noop = {},
+        },
+        .prompt => |t| .{
+            .prompt = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
+        },
+        .text => |t| .{
+            .text = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
+        },
+        .thinking => |t| .{
+            .thinking = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
+        },
+        .tool_call => |tc| .{
+            .tool_call = .{
+                .id = try utf8.sanitizeMaybeAlloc(alloc, tc.id),
+                .name = try utf8.sanitizeMaybeAlloc(alloc, tc.name),
+                .args = try utf8.sanitizeMaybeAlloc(alloc, tc.args),
+            },
+        },
+        .tool_result => |tr| .{
+            .tool_result = .{
+                .id = try utf8.sanitizeMaybeAlloc(alloc, tr.id),
+                .out = try utf8.sanitizeMaybeAlloc(alloc, tr.out),
+                .is_err = tr.is_err,
+            },
+        },
         .usage => |u| .{ .usage = u },
         .stop => |s| .{ .stop = s },
-        .err => |t| .{ .err = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) } },
+        .err => |t| .{
+            .err = .{ .text = try utf8.sanitizeMaybeAlloc(alloc, t.text) },
+        },
     };
 }
 
@@ -178,11 +204,13 @@ test "session event json roundtrip" {
     const ev = Event{
         .version = 99,
         .at_ms = 42,
-        .data = .{ .tool_result = .{
-            .id = "call-1",
-            .out = "{\"ok\":true}",
-            .is_err = false,
-        } },
+        .data = .{
+            .tool_result = .{
+                .id = "call-1",
+                .out = "{\"ok\":true}",
+                .is_err = false,
+            },
+        },
     };
 
     const raw = try encodeAlloc(std.testing.allocator, ev);
@@ -209,11 +237,13 @@ test "session event json replaces invalid utf8 lossy" {
     const utf8_case = @import("../../test/utf8_case.zig");
     const ev = Event{
         .at_ms = 7,
-        .data = .{ .tool_result = .{
-            .id = "call-1",
-            .out = utf8_case.bad_tool_out[0..],
-            .is_err = false,
-        } },
+        .data = .{
+            .tool_result = .{
+                .id = "call-1",
+                .out = utf8_case.bad_tool_out[0..],
+                .is_err = false,
+            },
+        },
     };
 
     const raw = try encodeAlloc(std.testing.allocator, ev);
@@ -237,11 +267,13 @@ test "Event.dupe deep-copies tool_call strings" {
     const alloc = std.testing.allocator;
     const orig = Event{
         .at_ms = 42,
-        .data = .{ .tool_call = .{
-            .id = "call-1",
-            .name = "bash",
-            .args = "{\"cmd\":\"ls\"}",
-        } },
+        .data = .{
+            .tool_call = .{
+                .id = "call-1",
+                .name = "bash",
+                .args = "{\"cmd\":\"ls\"}",
+            },
+        },
     };
     const d = try orig.dupe(alloc);
     defer d.free(alloc);
@@ -273,11 +305,13 @@ test "Event.dupe deep-copies tool_result strings" {
     const alloc = std.testing.allocator;
     const orig = Event{
         .at_ms = 10,
-        .data = .{ .tool_result = .{
-            .id = "c2",
-            .out = "output-data",
-            .is_err = true,
-        } },
+        .data = .{
+            .tool_result = .{
+                .id = "c2",
+                .out = "output-data",
+                .is_err = true,
+            },
+        },
     };
     const d = try orig.dupe(alloc);
     defer d.free(alloc);
@@ -301,10 +335,18 @@ test "Event.dupe deep-copies tool_result strings" {
 test "Event.dupe copies text variants" {
     const alloc = std.testing.allocator;
     const cases = [_]Event{
-        .{ .data = .{ .text = .{ .text = "hello" } } },
-        .{ .data = .{ .prompt = .{ .text = "prompt" } } },
-        .{ .data = .{ .thinking = .{ .text = "think" } } },
-        .{ .data = .{ .err = .{ .text = "oops" } } },
+        .{
+            .data = .{ .text = .{ .text = "hello" } },
+        },
+        .{
+            .data = .{ .prompt = .{ .text = "prompt" } },
+        },
+        .{
+            .data = .{ .thinking = .{ .text = "think" } },
+        },
+        .{
+            .data = .{ .err = .{ .text = "oops" } },
+        },
     };
     for (cases) |ev| {
         const d = try ev.dupe(alloc);
@@ -343,7 +385,9 @@ test "schema property: text event roundtrip" {
             const alloc = std.testing.allocator;
             const ev = Event{
                 .at_ms = args.ts,
-                .data = .{ .text = .{ .text = args.text.slice() } },
+                .data = .{
+                    .text = .{ .text = args.text.slice() },
+                },
             };
             const raw = encodeAlloc(alloc, ev) catch return true;
             defer alloc.free(raw);
@@ -366,11 +410,13 @@ test "schema property: tool_call event roundtrip" {
             const alloc = std.testing.allocator;
             const ev = Event{
                 .at_ms = 100,
-                .data = .{ .tool_call = .{
-                    .id = args.id.slice(),
-                    .name = args.name.slice(),
-                    .args = args.a.slice(),
-                } },
+                .data = .{
+                    .tool_call = .{
+                        .id = args.id.slice(),
+                        .name = args.name.slice(),
+                        .args = args.a.slice(),
+                    },
+                },
             };
             const raw = encodeAlloc(alloc, ev) catch return true;
             defer alloc.free(raw);
@@ -394,11 +440,13 @@ test "schema property: dupe preserves tool_call encode" {
             const alloc = std.testing.allocator;
             const ev = Event{
                 .at_ms = 100,
-                .data = .{ .tool_call = .{
-                    .id = args.id.slice(),
-                    .name = args.name.slice(),
-                    .args = args.a.slice(),
-                } },
+                .data = .{
+                    .tool_call = .{
+                        .id = args.id.slice(),
+                        .name = args.name.slice(),
+                        .args = args.a.slice(),
+                    },
+                },
             };
             const d = ev.dupe(alloc) catch return true;
             defer d.free(alloc);
@@ -418,11 +466,13 @@ test "schema property: tool_result event roundtrip" {
             const alloc = std.testing.allocator;
             const ev = Event{
                 .at_ms = 100,
-                .data = .{ .tool_result = .{
-                    .id = args.id.slice(),
-                    .out = args.out.slice(),
-                    .is_err = args.is_err,
-                } },
+                .data = .{
+                    .tool_result = .{
+                        .id = args.id.slice(),
+                        .out = args.out.slice(),
+                        .is_err = args.is_err,
+                    },
+                },
             };
             const raw = encodeAlloc(alloc, ev) catch return true;
             defer alloc.free(raw);
@@ -445,11 +495,13 @@ test "schema property: dupe preserves tool_result encode" {
             const alloc = std.testing.allocator;
             const ev = Event{
                 .at_ms = 100,
-                .data = .{ .tool_result = .{
-                    .id = args.id.slice(),
-                    .out = args.out.slice(),
-                    .is_err = args.is_err,
-                } },
+                .data = .{
+                    .tool_result = .{
+                        .id = args.id.slice(),
+                        .out = args.out.slice(),
+                        .is_err = args.is_err,
+                    },
+                },
             };
             const dup = ev.dupe(alloc) catch return true;
             defer dup.free(alloc);
@@ -514,29 +566,47 @@ test "schema property: event encode/decode roundtrip across tags" {
             return .{
                 .at_ms = args.at_ms,
                 .data = switch (args.tag) {
-                    .noop => .{ .noop = {} },
-                    .prompt => .{ .prompt = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
-                    .text => .{ .text = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
-                    .thinking => .{ .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
-                    .tool_call => .{ .tool_call = .{
-                        .id = store.keepId(args.id),
-                        .name = store.keepName(args.name),
-                        .args = pbt.utf8Slice(args.text, &store.a),
-                    } },
-                    .tool_result => .{ .tool_result = .{
-                        .id = store.keepId(args.id),
-                        .out = pbt.utf8Slice(args.out, &store.a),
-                        .is_err = args.is_err,
-                    } },
-                    .usage => .{ .usage = .{
-                        .in_tok = args.in_tok,
-                        .out_tok = args.out_tok,
-                        .tot_tok = args.tot_tok,
-                        .cache_read = args.cache_read,
-                        .cache_write = args.cache_write,
-                    } },
-                    .stop => .{ .stop = .{ .reason = args.stop } },
-                    .err => .{ .err = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .noop => .{
+                        .noop = {},
+                    },
+                    .prompt => .{
+                        .prompt = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .text => .{
+                        .text = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .thinking => .{
+                        .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .tool_call => .{
+                        .tool_call = .{
+                            .id = store.keepId(args.id),
+                            .name = store.keepName(args.name),
+                            .args = pbt.utf8Slice(args.text, &store.a),
+                        },
+                    },
+                    .tool_result => .{
+                        .tool_result = .{
+                            .id = store.keepId(args.id),
+                            .out = pbt.utf8Slice(args.out, &store.a),
+                            .is_err = args.is_err,
+                        },
+                    },
+                    .usage => .{
+                        .usage = .{
+                            .in_tok = args.in_tok,
+                            .out_tok = args.out_tok,
+                            .tot_tok = args.tot_tok,
+                            .cache_read = args.cache_read,
+                            .cache_write = args.cache_write,
+                        },
+                    },
+                    .stop => .{
+                        .stop = .{ .reason = args.stop },
+                    },
+                    .err => .{
+                        .err = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
                 },
             };
         }
@@ -613,29 +683,47 @@ test "schema property: Event.dupe preserves encode across tags" {
             return .{
                 .at_ms = args.at_ms,
                 .data = switch (args.tag) {
-                    .noop => .{ .noop = {} },
-                    .prompt => .{ .prompt = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
-                    .text => .{ .text = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
-                    .thinking => .{ .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
-                    .tool_call => .{ .tool_call = .{
-                        .id = store.keepId(args.id),
-                        .name = store.keepName(args.name),
-                        .args = pbt.utf8Slice(args.text, &store.a),
-                    } },
-                    .tool_result => .{ .tool_result = .{
-                        .id = store.keepId(args.id),
-                        .out = pbt.utf8Slice(args.out, &store.a),
-                        .is_err = args.is_err,
-                    } },
-                    .usage => .{ .usage = .{
-                        .in_tok = args.in_tok,
-                        .out_tok = args.out_tok,
-                        .tot_tok = args.tot_tok,
-                        .cache_read = args.cache_read,
-                        .cache_write = args.cache_write,
-                    } },
-                    .stop => .{ .stop = .{ .reason = args.stop } },
-                    .err => .{ .err = .{ .text = pbt.utf8Slice(args.text, &store.a) } },
+                    .noop => .{
+                        .noop = {},
+                    },
+                    .prompt => .{
+                        .prompt = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .text => .{
+                        .text = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .thinking => .{
+                        .thinking = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
+                    .tool_call => .{
+                        .tool_call = .{
+                            .id = store.keepId(args.id),
+                            .name = store.keepName(args.name),
+                            .args = pbt.utf8Slice(args.text, &store.a),
+                        },
+                    },
+                    .tool_result => .{
+                        .tool_result = .{
+                            .id = store.keepId(args.id),
+                            .out = pbt.utf8Slice(args.out, &store.a),
+                            .is_err = args.is_err,
+                        },
+                    },
+                    .usage => .{
+                        .usage = .{
+                            .in_tok = args.in_tok,
+                            .out_tok = args.out_tok,
+                            .tot_tok = args.tot_tok,
+                            .cache_read = args.cache_read,
+                            .cache_write = args.cache_write,
+                        },
+                    },
+                    .stop => .{
+                        .stop = .{ .reason = args.stop },
+                    },
+                    .err => .{
+                        .err = .{ .text = pbt.utf8Slice(args.text, &store.a) },
+                    },
                 },
             };
         }

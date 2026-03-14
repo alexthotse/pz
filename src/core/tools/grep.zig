@@ -104,7 +104,9 @@ pub const Handler = struct {
             .ended_at_ms = self.now_ms,
             .out = out,
             .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = .{
+                .ok = .{ .code = 0 },
+            },
         };
     }
 
@@ -314,11 +316,13 @@ test "grep handler finds matching lines with file and line numbers" {
     const call: tools.Call = .{
         .id = "g1",
         .kind = .grep,
-        .args = .{ .grep = .{
-            .path = root,
-            .pattern = "beta",
-            .ignore_case = true,
-        } },
+        .args = .{
+            .grep = .{
+                .path = root,
+                .pattern = "beta",
+                .ignore_case = true,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -351,7 +355,9 @@ test "grep handler validates args and missing roots" {
     const bad: tools.Call = .{
         .id = "g2",
         .kind = .grep,
-        .args = .{ .grep = .{ .path = ".", .pattern = "", .max_results = 1 } },
+        .args = .{
+            .grep = .{ .path = ".", .pattern = "", .max_results = 1 },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -360,7 +366,9 @@ test "grep handler validates args and missing roots" {
     const missing: tools.Call = .{
         .id = "g3",
         .kind = .grep,
-        .args = .{ .grep = .{ .path = "no-such-dir-9477", .pattern = "x" } },
+        .args = .{
+            .grep = .{ .path = "no-such-dir-9477", .pattern = "x" },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -395,10 +403,12 @@ test "grep handler denies hardlinked leaf" {
     try std.testing.expectError(error.Denied, handler.run(.{
         .id = "g-link",
         .kind = .grep,
-        .args = .{ .grep = .{
-            .path = root,
-            .pattern = "secret",
-        } },
+        .args = .{
+            .grep = .{
+                .path = root,
+                .pattern = "secret",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     }, sink));
@@ -453,10 +463,12 @@ test "grep handler keeps trusted dir after ancestor swap" {
     const res = try handler.run(.{
         .id = "g-race",
         .kind = .grep,
-        .args = .{ .grep = .{
-            .path = root,
-            .pattern = "secret",
-        } },
+        .args = .{
+            .grep = .{
+                .path = root,
+                .pattern = "secret",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     }, sink);

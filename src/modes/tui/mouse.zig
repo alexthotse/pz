@@ -53,11 +53,13 @@ pub fn parse(buf: []const u8) ?Result {
             .x = if (x > 0) x - 1 else 0,
             .y = if (y > 0) y - 1 else 0,
             .btn = @intCast(btn & 0xff),
-        } } else .{ .release = .{
-            .x = if (x > 0) x - 1 else 0,
-            .y = if (y > 0) y - 1 else 0,
-            .btn = @intCast(btn & 0xff),
-        } },
+        } } else .{
+            .release = .{
+                .x = if (x > 0) x - 1 else 0,
+                .y = if (y > 0) y - 1 else 0,
+                .btn = @intCast(btn & 0xff),
+            },
+        },
     };
 
     return .{ .ev = ev, .len = i };

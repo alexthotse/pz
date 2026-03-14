@@ -22,7 +22,9 @@ fn execVerbose(run_ctx: mode.Ctx, out: std.Io.AnyWriter, verbose: bool) run_err.
 
     run_ctx.store.append(run_ctx.sid, .{
         .at_ms = std.time.milliTimestamp(),
-        .data = .{ .prompt = .{ .text = run_ctx.prompt } },
+        .data = .{
+            .prompt = .{ .text = run_ctx.prompt },
+        },
     }) catch return error.PromptWrite;
 
     const parts = [_]core.providers.Part{
@@ -68,33 +70,47 @@ fn mapEvent(ev: core.providers.Ev) core.session.Event {
     return .{
         .at_ms = std.time.milliTimestamp(),
         .data = switch (ev) {
-            .text => |text| .{ .text = .{ .text = text } },
-            .thinking => |text| .{ .thinking = .{ .text = text } },
-            .tool_call => |tc| .{ .tool_call = .{
-                .id = tc.id,
-                .name = tc.name,
-                .args = tc.args,
-            } },
-            .tool_result => |tr| .{ .tool_result = .{
-                .id = tr.id,
-                .out = tr.out,
-                .is_err = tr.is_err,
-            } },
-            .usage => |usage| .{ .usage = .{
-                .in_tok = usage.in_tok,
-                .out_tok = usage.out_tok,
-                .tot_tok = usage.tot_tok,
-            } },
-            .stop => |stop| .{ .stop = .{
-                .reason = switch (stop.reason) {
-                    .done => .done,
-                    .max_out => .max_out,
-                    .tool => .tool,
-                    .canceled => .canceled,
-                    .err => .err,
+            .text => |text| .{
+                .text = .{ .text = text },
+            },
+            .thinking => |text| .{
+                .thinking = .{ .text = text },
+            },
+            .tool_call => |tc| .{
+                .tool_call = .{
+                    .id = tc.id,
+                    .name = tc.name,
+                    .args = tc.args,
                 },
-            } },
-            .err => |text| .{ .err = .{ .text = text } },
+            },
+            .tool_result => |tr| .{
+                .tool_result = .{
+                    .id = tr.id,
+                    .out = tr.out,
+                    .is_err = tr.is_err,
+                },
+            },
+            .usage => |usage| .{
+                .usage = .{
+                    .in_tok = usage.in_tok,
+                    .out_tok = usage.out_tok,
+                    .tot_tok = usage.tot_tok,
+                },
+            },
+            .stop => |stop| .{
+                .stop = .{
+                    .reason = switch (stop.reason) {
+                        .done => .done,
+                        .max_out => .max_out,
+                        .tool => .tool,
+                        .canceled => .canceled,
+                        .err => .err,
+                    },
+                },
+            },
+            .err => |text| .{
+                .err = .{ .text = text },
+            },
         },
     };
 }
@@ -264,24 +280,32 @@ test "exec runs prompt path and persists mapped provider events" {
     const in_evs = [_]core.providers.Ev{
         .{ .text = "out-a" },
         .{ .thinking = "think-a" },
-        .{ .tool_call = .{
-            .id = "call-1",
-            .name = "read",
-            .args = "{\"path\":\"x\"}",
-        } },
-        .{ .tool_result = .{
-            .id = "call-1",
-            .out = "ok",
-            .is_err = false,
-        } },
-        .{ .usage = .{
-            .in_tok = 5,
-            .out_tok = 7,
-            .tot_tok = 12,
-        } },
-        .{ .stop = .{
-            .reason = .done,
-        } },
+        .{
+            .tool_call = .{
+                .id = "call-1",
+                .name = "read",
+                .args = "{\"path\":\"x\"}",
+            },
+        },
+        .{
+            .tool_result = .{
+                .id = "call-1",
+                .out = "ok",
+                .is_err = false,
+            },
+        },
+        .{
+            .usage = .{
+                .in_tok = 5,
+                .out_tok = 7,
+                .tot_tok = 12,
+            },
+        },
+        .{
+            .stop = .{
+                .reason = .done,
+            },
+        },
         .{ .err = "warn-a" },
     };
 
@@ -607,7 +631,9 @@ test "exec maps max_out stop reason to deterministic typed error" {
 
     const in_evs = [_]core.providers.Ev{
         .{ .text = "out-z" },
-        .{ .stop = .{ .reason = .max_out } },
+        .{
+            .stop = .{ .reason = .max_out },
+        },
     };
 
     var provider_impl = ProviderImpl{
@@ -658,4 +684,3 @@ test "exec maps max_out stop reason to deterministic typed error" {
         \\"
     ).expectEqual(snap);
 }
-

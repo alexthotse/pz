@@ -551,7 +551,7 @@ test "errors when print mode has no prompt" {
 }
 
 test "json mode accepts missing prompt for stdin-driven headless use" {
-    const out = try parse(&.{ "json" });
+    const out = try parse(&.{"json"});
     try std.testing.expect(out.mode == .json);
     try std.testing.expect(out.prompt == null);
 }

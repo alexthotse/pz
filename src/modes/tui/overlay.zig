@@ -599,12 +599,13 @@ test "overlay renders centered box" {
         (try rowAscii(&frm, y0 + 4, r4[0..]))[x0 .. x0 + 15],
     });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "??Select Model?\n" ++
-        "?   model-a    \n" ++
-        "? > model-b    \n" ++
-        "?   model-c    \n" ++
-        "???????????????",
+            "?   model-a    \n" ++
+            "? > model-b    \n" ++
+            "?   model-c    \n" ++
+            "???????????????",
         actual,
     );
 }
@@ -669,7 +670,8 @@ test "overlay session kind renders without shortLabel" {
     try ov.render(&frm);
     const actual = try trimmedBoxSegmentsAlloc(std.testing.allocator, &frm);
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @0:?????????Resume | @16:Session?????????\nrow1 @0:? | @2:> | @4:sess-abc-123 | @20:2h | @24:10 | @27:tok | @31:?\nrow2 @0:? | @4:sess-def-456 | @20:5m | @25:2 | @27:tok | @31:?\nrow3 @0:????????????????????????????????",
         actual,
     );
@@ -708,7 +710,8 @@ test "settings overlay toggle and render" {
     const row3 = it.next().?;
     const actual = try std.fmt.allocPrint(std.testing.allocator, "{s}\n{s}\n{s}", .{ row1, row2, row3 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row1 @0:? | @2:> | @4:Show | @9:tools | @18:? | @20:?\nrow2 @0:? | @4:Show | @9:thinking | @18:? | @20:?\nrow3 @0:? | @4:Auto-compact | @18:? | @20:?",
         actual,
     );

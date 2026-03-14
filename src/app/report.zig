@@ -6,114 +6,168 @@ const Rule = struct {
 };
 
 const rule_map = std.StaticStringMap(Rule).initComptime(.{
-    .{ "SessionDisabled", Rule{
-        .summary = "session persistence is disabled",
-        .next = "rerun without --no-session and ensure a writable session directory",
-    } },
-    .{ "SessionNotFound", Rule{
-        .summary = "session was not found",
-        .next = "run /tree (or rpc tree) to list sessions and retry with an exact id",
-    } },
-    .{ "AmbiguousSession", Rule{
-        .summary = "session id prefix matches multiple sessions",
-        .next = "use a longer id prefix or an exact session id",
-    } },
-    .{ "InvalidSessionPath", Rule{
-        .summary = "session path is invalid",
-        .next = "pass a .jsonl session file path or valid session id",
-    } },
-    .{ "FileNotFound", Rule{
-        .summary = "file or directory was not found",
-        .next = "verify the path exists and retry",
-    } },
-    .{ "AccessDenied", Rule{
-        .summary = "permission denied",
-        .next = "grant access to the target path and retry",
-    } },
-    .{ "ReadOnlyFileSystem", Rule{
-        .summary = "target filesystem is read-only",
-        .next = "choose a writable location or remount with write access",
-    } },
-    .{ "ConnectionRefused", Rule{
-        .summary = "remote endpoint refused the connection",
-        .next = "check network/proxy/firewall settings and retry",
-    } },
-    .{ "NetworkUnreachable", Rule{
-        .summary = "network is unreachable",
-        .next = "check internet connectivity and retry",
-    } },
-    .{ "HostUnreachable", Rule{
-        .summary = "host is unreachable",
-        .next = "check DNS/network reachability and retry",
-    } },
-    .{ "ConnectionTimedOut", Rule{
-        .summary = "network request timed out",
-        .next = "retry after network stabilizes",
-    } },
-    .{ "BrowserOpenFailed", Rule{
-        .summary = "failed to launch browser",
-        .next = "open the printed URL manually and retry",
-    } },
-    .{ "UnsupportedPlatform", Rule{
-        .summary = "automatic browser launch is unsupported on this platform",
-        .next = "open the printed URL manually and retry",
-    } },
-    .{ "InvalidOAuthInput", Rule{
-        .summary = "invalid OAuth callback payload",
-        .next = "rerun /login <provider> and paste the callback URL or code#state exactly",
-    } },
-    .{ "MissingOAuthState", Rule{
-        .summary = "OAuth state/verifier is missing",
-        .next = "rerun /login <provider> and paste full callback URL or code#state",
-    } },
-    .{ "TokenExchangeFailed", Rule{
-        .summary = "OAuth token exchange failed",
-        .next = "rerun /login <provider> and complete authorization again",
-    } },
-    .{ "OAuthCallbackTimeout", Rule{
-        .summary = "timed out waiting for OAuth callback",
-        .next = "rerun /login <provider> and complete browser authorization within the timeout",
-    } },
-    .{ "InvalidOAuthCallbackRequest", Rule{
-        .summary = "received invalid OAuth callback request",
-        .next = "rerun /login <provider> and complete authorization again",
-    } },
-    .{ "OAuthStateMismatch", Rule{
-        .summary = "OAuth callback state did not match the login request",
-        .next = "rerun /login <provider> and complete authorization in the same browser session",
-    } },
-    .{ "TemporaryNameServerFailure", Rule{
-        .summary = "DNS lookup failed",
-        .next = "check DNS settings and retry",
-    } },
-    .{ "UnknownArg", Rule{
-        .summary = "unknown command-line argument",
-        .next = "run pz --help and fix the command",
-    } },
-    .{ "MissingPrintPrompt", Rule{
-        .summary = "print mode requires a prompt",
-        .next = "pass text after --print or use --prompt <text>",
-    } },
-    .{ "MissingPromptValue", Rule{
-        .summary = "missing value for --prompt",
-        .next = "use --prompt <text>",
-    } },
-    .{ "MissingSessionValue", Rule{
-        .summary = "missing value for --session/--resume",
-        .next = "use --session <id|path> or plain -r for latest",
-    } },
-    .{ "MissingModeValue", Rule{
-        .summary = "missing value for --mode",
-        .next = "use --mode <tui|print|json|rpc>",
-    } },
-    .{ "InvalidMode", Rule{
-        .summary = "invalid mode value",
-        .next = "use one of: tui, print, json, rpc",
-    } },
-    .{ "InvalidTool", Rule{
-        .summary = "invalid tools list",
-        .next = "use --tools read,write,bash,edit,grep,find,ls,ask or --no-tools",
-    } },
+    .{
+        "SessionDisabled", Rule{
+            .summary = "session persistence is disabled",
+            .next = "rerun without --no-session and ensure a writable session directory",
+        },
+    },
+    .{
+        "SessionNotFound", Rule{
+            .summary = "session was not found",
+            .next = "run /tree (or rpc tree) to list sessions and retry with an exact id",
+        },
+    },
+    .{
+        "AmbiguousSession", Rule{
+            .summary = "session id prefix matches multiple sessions",
+            .next = "use a longer id prefix or an exact session id",
+        },
+    },
+    .{
+        "InvalidSessionPath", Rule{
+            .summary = "session path is invalid",
+            .next = "pass a .jsonl session file path or valid session id",
+        },
+    },
+    .{
+        "FileNotFound", Rule{
+            .summary = "file or directory was not found",
+            .next = "verify the path exists and retry",
+        },
+    },
+    .{
+        "AccessDenied", Rule{
+            .summary = "permission denied",
+            .next = "grant access to the target path and retry",
+        },
+    },
+    .{
+        "ReadOnlyFileSystem", Rule{
+            .summary = "target filesystem is read-only",
+            .next = "choose a writable location or remount with write access",
+        },
+    },
+    .{
+        "ConnectionRefused", Rule{
+            .summary = "remote endpoint refused the connection",
+            .next = "check network/proxy/firewall settings and retry",
+        },
+    },
+    .{
+        "NetworkUnreachable", Rule{
+            .summary = "network is unreachable",
+            .next = "check internet connectivity and retry",
+        },
+    },
+    .{
+        "HostUnreachable", Rule{
+            .summary = "host is unreachable",
+            .next = "check DNS/network reachability and retry",
+        },
+    },
+    .{
+        "ConnectionTimedOut", Rule{
+            .summary = "network request timed out",
+            .next = "retry after network stabilizes",
+        },
+    },
+    .{
+        "BrowserOpenFailed", Rule{
+            .summary = "failed to launch browser",
+            .next = "open the printed URL manually and retry",
+        },
+    },
+    .{
+        "UnsupportedPlatform", Rule{
+            .summary = "automatic browser launch is unsupported on this platform",
+            .next = "open the printed URL manually and retry",
+        },
+    },
+    .{
+        "InvalidOAuthInput", Rule{
+            .summary = "invalid OAuth callback payload",
+            .next = "rerun /login <provider> and paste the callback URL or code#state exactly",
+        },
+    },
+    .{
+        "MissingOAuthState", Rule{
+            .summary = "OAuth state/verifier is missing",
+            .next = "rerun /login <provider> and paste full callback URL or code#state",
+        },
+    },
+    .{
+        "TokenExchangeFailed", Rule{
+            .summary = "OAuth token exchange failed",
+            .next = "rerun /login <provider> and complete authorization again",
+        },
+    },
+    .{
+        "OAuthCallbackTimeout", Rule{
+            .summary = "timed out waiting for OAuth callback",
+            .next = "rerun /login <provider> and complete browser authorization within the timeout",
+        },
+    },
+    .{
+        "InvalidOAuthCallbackRequest", Rule{
+            .summary = "received invalid OAuth callback request",
+            .next = "rerun /login <provider> and complete authorization again",
+        },
+    },
+    .{
+        "OAuthStateMismatch", Rule{
+            .summary = "OAuth callback state did not match the login request",
+            .next = "rerun /login <provider> and complete authorization in the same browser session",
+        },
+    },
+    .{
+        "TemporaryNameServerFailure", Rule{
+            .summary = "DNS lookup failed",
+            .next = "check DNS settings and retry",
+        },
+    },
+    .{
+        "UnknownArg", Rule{
+            .summary = "unknown command-line argument",
+            .next = "run pz --help and fix the command",
+        },
+    },
+    .{
+        "MissingPrintPrompt", Rule{
+            .summary = "print mode requires a prompt",
+            .next = "pass text after --print or use --prompt <text>",
+        },
+    },
+    .{
+        "MissingPromptValue", Rule{
+            .summary = "missing value for --prompt",
+            .next = "use --prompt <text>",
+        },
+    },
+    .{
+        "MissingSessionValue", Rule{
+            .summary = "missing value for --session/--resume",
+            .next = "use --session <id|path> or plain -r for latest",
+        },
+    },
+    .{
+        "MissingModeValue", Rule{
+            .summary = "missing value for --mode",
+            .next = "use --mode <tui|print|json|rpc>",
+        },
+    },
+    .{
+        "InvalidMode", Rule{
+            .summary = "invalid mode value",
+            .next = "use one of: tui, print, json, rpc",
+        },
+    },
+    .{
+        "InvalidTool", Rule{
+            .summary = "invalid tools list",
+            .next = "use --tools read,write,bash,edit,grep,find,ls,ask or --no-tools",
+        },
+    },
 });
 
 fn lookup(err: anyerror) Rule {

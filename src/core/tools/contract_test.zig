@@ -93,9 +93,11 @@ test "tool contract handlers emit deterministic envelopes" {
     const rd_call: tools.Call = .{
         .id = "r1",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = in_path,
-        } },
+        .args = .{
+            .read = .{
+                .path = in_path,
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -108,11 +110,13 @@ test "tool contract handlers emit deterministic envelopes" {
     const wr_call: tools.Call = .{
         .id = "w1",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = out_path,
-            .text = "ok",
-            .append = false,
-        } },
+        .args = .{
+            .write = .{
+                .path = out_path,
+                .text = "ok",
+                .append = false,
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -126,12 +130,14 @@ test "tool contract handlers emit deterministic envelopes" {
     const ed_call: tools.Call = .{
         .id = "e1",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = edit_path,
-            .old = "abc",
-            .new = "z",
-            .all = false,
-        } },
+        .args = .{
+            .edit = .{
+                .path = edit_path,
+                .old = "abc",
+                .new = "z",
+                .all = false,
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -145,9 +151,11 @@ test "tool contract handlers emit deterministic envelopes" {
     const sh_call: tools.Call = .{
         .id = "b1",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf out",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf out",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -162,9 +170,11 @@ test "tool contract handlers emit deterministic envelopes" {
     const ls_call: tools.Call = .{
         .id = "l1",
         .kind = .ls,
-        .args = .{ .ls = .{
-            .path = path,
-        } },
+        .args = .{
+            .ls = .{
+                .path = path,
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -197,10 +207,12 @@ test "tool contract handlers emit deterministic envelopes" {
     const agent_call: tools.Call = .{
         .id = "a1",
         .kind = .agent,
-        .args = .{ .agent = .{
-            .agent_id = "critic",
-            .prompt = "delegated to child agent",
-        } },
+        .args = .{
+            .agent = .{
+                .agent_id = "critic",
+                .prompt = "delegated to child agent",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -215,10 +227,12 @@ test "tool contract handlers emit deterministic envelopes" {
     const find_call: tools.Call = .{
         .id = "f1",
         .kind = .find,
-        .args = .{ .find = .{
-            .path = path,
-            .name = "hit",
-        } },
+        .args = .{
+            .find = .{
+                .path = path,
+                .name = "hit",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -233,10 +247,12 @@ test "tool contract handlers emit deterministic envelopes" {
     const grep_call: tools.Call = .{
         .id = "g1",
         .kind = .grep,
-        .args = .{ .grep = .{
-            .path = path,
-            .pattern = "needle",
-        } },
+        .args = .{
+            .grep = .{
+                .path = path,
+                .pattern = "needle",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -405,7 +421,9 @@ test "tool contract handlers deny nested symlink escapes" {
     try std.testing.expectError(error.Denied, rd.run(.{
         .id = "r-deny",
         .kind = .read,
-        .args = .{ .read = .{ .path = escaped_file } },
+        .args = .{
+            .read = .{ .path = escaped_file },
+        },
         .src = .system,
         .at_ms = 0,
     }, sink));
@@ -414,10 +432,12 @@ test "tool contract handlers deny nested symlink escapes" {
     try std.testing.expectError(error.Denied, wr.run(.{
         .id = "w-deny",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = escaped_file,
-            .text = "overwrite",
-        } },
+        .args = .{
+            .write = .{
+                .path = escaped_file,
+                .text = "overwrite",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     }, sink));
@@ -429,11 +449,13 @@ test "tool contract handlers deny nested symlink escapes" {
     try std.testing.expectError(error.Denied, ed.run(.{
         .id = "e-deny",
         .kind = .edit,
-        .args = .{ .edit = .{
-            .path = escaped_file,
-            .old = "top",
-            .new = "low",
-        } },
+        .args = .{
+            .edit = .{
+                .path = escaped_file,
+                .old = "top",
+                .new = "low",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     }, sink));
@@ -445,7 +467,9 @@ test "tool contract handlers deny nested symlink escapes" {
     try std.testing.expectError(error.Denied, ls_h.run(.{
         .id = "l-deny",
         .kind = .ls,
-        .args = .{ .ls = .{ .path = escaped_dir } },
+        .args = .{
+            .ls = .{ .path = escaped_dir },
+        },
         .src = .system,
         .at_ms = 0,
     }, sink));
@@ -457,10 +481,12 @@ test "tool contract handlers deny nested symlink escapes" {
     try std.testing.expectError(error.Denied, find_h.run(.{
         .id = "f-deny",
         .kind = .find,
-        .args = .{ .find = .{
-            .path = escaped_dir,
-            .name = "secret",
-        } },
+        .args = .{
+            .find = .{
+                .path = escaped_dir,
+                .name = "secret",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     }, sink));
@@ -472,10 +498,12 @@ test "tool contract handlers deny nested symlink escapes" {
     try std.testing.expectError(error.Denied, grep_h.run(.{
         .id = "g-deny",
         .kind = .grep,
-        .args = .{ .grep = .{
-            .path = escaped_dir,
-            .pattern = "secret",
-        } },
+        .args = .{
+            .grep = .{
+                .path = escaped_dir,
+                .pattern = "secret",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     }, sink));
@@ -534,9 +562,11 @@ test "tool contract registry emits start output finish ordering" {
     const call: tools.Call = .{
         .id = "call-1",
         .kind = .bash,
-        .args = .{ .bash = .{
-            .cmd = "printf hi",
-        } },
+        .args = .{
+            .bash = .{
+                .cmd = "printf hi",
+            },
+        },
         .src = .model,
         .at_ms = 1,
     };

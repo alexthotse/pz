@@ -862,7 +862,8 @@ test "panels render 2-line footer with cwd and model" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @0:myproj | @7:(main) | @42:shift+drag: | @54:select\nrow1 @0:↓10 | @4:↑20 | @8:$0.000 | @15:90.0%/200k | @55:gpt-4",
         actual,
     );
@@ -889,7 +890,8 @@ test "panels render footer cwd only no branch" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @0:proj | @22:shift+drag: | @34:select\nrow1 @39:m",
         actual,
     );
@@ -905,7 +907,8 @@ test "panels footer keeps branch visible with long path" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 24, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 24, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @0:long/project/path | @18:(main)\nrow1 @23:m",
         actual,
     );
@@ -922,7 +925,8 @@ test "panels footer shows initial 0.0%" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @0:~/proj | @42:shift+drag: | @54:select\nrow1 @0:0.0%/200k | @54:claude",
         actual,
     );
@@ -945,7 +949,8 @@ test "panels footer uses pi style R/W cache labels" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 90, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 90, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @72:shift+drag: | @84:select\nrow1 @0:↓1.2k | @6:↑345 | @11:R5.5k | @17:W1.2k | @23:$0.014 | @73:claude-sonnet-4-6",
         actual,
     );
@@ -975,7 +980,8 @@ test "panels footer accumulates token totals across usage events" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 100, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 100, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @82:shift+drag: | @94:select\nrow1 @0:↓2.0k | @6:↑1.0k | @12:R1.0k | @18:W1.0k | @24:$0.025 | @83:claude-sonnet-4-6",
         actual,
     );
@@ -1083,7 +1089,8 @@ test "panels footer shows cost and sub" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @0:~/proj | @7:(main) | @62:shift+drag: | @74:select\nrow1 @0:↓1.0k | @6:↑200 | @11:$0.030 | @18:(sub) | @24:0.6%/200k | @65:claude-opus-4-6",
         actual,
     );
@@ -1099,7 +1106,8 @@ test "panels footer shows turn count" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 40, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @22:shift+drag: | @34:select\nrow1 @1:5 | @3:turns | @39:m",
         actual,
     );
@@ -1116,7 +1124,8 @@ test "panels footer hides input mode and queue count and starts with arrows+coun
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     const first = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     defer std.testing.allocator.free(first);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @42:shift+drag: | @54:select\nrow1 @0:↓12 | @4:↑3 | @7:$0.000 | @59:m",
         first,
     );
@@ -1125,7 +1134,8 @@ test "panels footer hides input mode and queue count and starts with arrows+coun
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     const second = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 });
     defer std.testing.allocator.free(second);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @42:shift+drag: | @54:select\nrow1 @0:↓12 | @4:↑3 | @7:$0.000 | @59:m",
         second,
     );
@@ -1141,7 +1151,8 @@ test "panels footer shows background job counts" {
     try ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
     const actual = try footerSegmentsAlloc(std.testing.allocator, &frm, .{ .x = 0, .y = 0, .w = 50, .h = 2 });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "row0 @32:shift+drag: | @44:select\nrow1 @1:bg | @4:L3 | @7:R1 | @10:D2 | @13:⠋ | @49:m",
         actual,
     );
@@ -1166,7 +1177,8 @@ test "panels footer animates background spinner while running" {
     defer std.testing.allocator.free(after);
     const actual = try std.fmt.allocPrint(std.testing.allocator, "before {s}\nafter {s}", .{ before, after });
     defer std.testing.allocator.free(actual);
-    try expectSnapText(@src(),
+    try expectSnapText(
+        @src(),
         "before row0 @32:shift+drag: | @44:select\nrow1 @1:bg | @4:L2 | @7:R1 | @10:D1 | @13:⠋ | @49:m\nafter row0 @32:shift+drag: | @44:select\nrow1 @1:bg | @4:L2 | @7:R1 | @10:D1 | @13:⠙ | @49:m",
         actual,
     );

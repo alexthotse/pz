@@ -115,7 +115,9 @@ pub const Handler = struct {
             .ended_at_ms = self.now_ms,
             .out = out,
             .out_owned = true,
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = .{
+                .ok = .{ .code = 0 },
+            },
         };
     }
 
@@ -215,9 +217,11 @@ test "ls handler lists entries in deterministic order and marks directories" {
     const call: tools.Call = .{
         .id = "l1",
         .kind = .ls,
-        .args = .{ .ls = .{
-            .path = root,
-        } },
+        .args = .{
+            .ls = .{
+                .path = root,
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -258,7 +262,9 @@ test "ls handler rejects missing path and wrong kind" {
     const bad_kind: tools.Call = .{
         .id = "l2",
         .kind = .read,
-        .args = .{ .read = .{ .path = "x" } },
+        .args = .{
+            .read = .{ .path = "x" },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -267,7 +273,9 @@ test "ls handler rejects missing path and wrong kind" {
     const missing: tools.Call = .{
         .id = "l3",
         .kind = .ls,
-        .args = .{ .ls = .{ .path = "no-such-dir-29341" } },
+        .args = .{
+            .ls = .{ .path = "no-such-dir-29341" },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -302,7 +310,9 @@ test "ls handler emits truncation metadata when output exceeds limit" {
     const call: tools.Call = .{
         .id = "l4",
         .kind = .ls,
-        .args = .{ .ls = .{ .path = root } },
+        .args = .{
+            .ls = .{ .path = root },
+        },
         .src = .model,
         .at_ms = 0,
     };

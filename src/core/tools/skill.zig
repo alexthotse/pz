@@ -130,7 +130,9 @@ fn okWithResult(self: Handler, call: tools.Call, result: []const u8) Err!tools.R
         .ended_at_ms = self.now_ms,
         .out = out,
         .out_owned = true,
-        .final = .{ .ok = .{ .code = 0 } },
+        .final = .{
+            .ok = .{ .code = 0 },
+        },
     };
 }
 
@@ -140,10 +142,12 @@ fn fail(call: tools.Call, kind: tools.Result.ErrKind, msg: []const u8) tools.Res
         .started_at_ms = call.at_ms,
         .ended_at_ms = call.at_ms,
         .out = &.{},
-        .final = .{ .failed = .{
-            .kind = kind,
-            .msg = msg,
-        } },
+        .final = .{
+            .failed = .{
+                .kind = kind,
+                .msg = msg,
+            },
+        },
     };
 }
 
@@ -193,10 +197,12 @@ test "skill handler returns cached body with appended args" {
     const call: tools.Call = .{
         .id = "skill-1",
         .kind = .skill,
-        .args = .{ .skill = .{
-            .name = "review-plan",
-            .args = "focus on policy",
-        } },
+        .args = .{
+            .skill = .{
+                .name = "review-plan",
+                .args = "focus on policy",
+            },
+        },
         .src = .model,
         .at_ms = 44,
     };
@@ -236,9 +242,11 @@ test "skill handler blocks model-disabled skills" {
     const call: tools.Call = .{
         .id = "skill-2",
         .kind = .skill,
-        .args = .{ .skill = .{
-            .name = "sec",
-        } },
+        .args = .{
+            .skill = .{
+                .name = "sec",
+            },
+        },
         .src = .model,
         .at_ms = 45,
     };

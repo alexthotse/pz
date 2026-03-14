@@ -52,7 +52,9 @@ pub const Handler = struct {
             .started_at_ms = self.now_ms,
             .ended_at_ms = self.now_ms,
             .out = &.{},
-            .final = .{ .ok = .{ .code = 0 } },
+            .final = .{
+                .ok = .{ .code = 0 },
+            },
         };
     }
 };
@@ -110,11 +112,13 @@ test "write handler overwrites file with deterministic timestamps" {
     const call: tools.Call = .{
         .id = "w1",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = path,
-            .text = "new",
-            .append = false,
-        } },
+        .args = .{
+            .write = .{
+                .path = path,
+                .text = "new",
+                .append = false,
+            },
+        },
         .src = .system,
         .at_ms = 1,
     };
@@ -167,11 +171,13 @@ test "write handler appends when append is true" {
     const call: tools.Call = .{
         .id = "w2",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = path,
-            .text = "b",
-            .append = true,
-        } },
+        .args = .{
+            .write = .{
+                .path = path,
+                .text = "b",
+                .append = true,
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -195,10 +201,12 @@ test "write handler returns invalid args for empty path" {
     const call: tools.Call = .{
         .id = "w3",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = "",
-            .text = "x",
-        } },
+        .args = .{
+            .write = .{
+                .path = "",
+                .text = "x",
+            },
+        },
         .src = .system,
         .at_ms = 0,
     };
@@ -233,10 +241,12 @@ test "write handler returns not found for missing parent" {
     const call: tools.Call = .{
         .id = "w4",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = path,
-            .text = "x",
-        } },
+        .args = .{
+            .write = .{
+                .path = path,
+                .text = "x",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -256,9 +266,11 @@ test "write handler returns kind mismatch for wrong call kind" {
     const call: tools.Call = .{
         .id = "w5",
         .kind = .read,
-        .args = .{ .read = .{
-            .path = "x",
-        } },
+        .args = .{
+            .read = .{
+                .path = "x",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     };
@@ -298,10 +310,12 @@ test "write handler denies replaced target before truncation" {
     try std.testing.expectError(error.Denied, handler.run(.{
         .id = "w-race",
         .kind = .write,
-        .args = .{ .write = .{
-            .path = "victim.txt",
-            .text = "overwrite\n",
-        } },
+        .args = .{
+            .write = .{
+                .path = "victim.txt",
+                .text = "overwrite\n",
+            },
+        },
         .src = .model,
         .at_ms = 0,
     }, sink));
