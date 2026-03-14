@@ -2,7 +2,6 @@
 pub const retry = @import("providers/retry.zig");
 pub const types = @import("providers/types.zig");
 pub const stream_parse = @import("providers/stream_parse.zig");
-pub const streaming = @import("providers/streaming.zig");
 pub const client = @import("providers/client.zig");
 pub const proc_transport = @import("providers/proc_transport.zig");
 pub const auth = @import("providers/auth.zig");

@@ -10,6 +10,7 @@ comptime {
     _ = @import("core/tools.zig");
     _ = @import("core/tools/test.zig");
     _ = @import("core/providers/client.zig");
+    _ = @import("core/providers/proc_transport.zig");
     _ = @import("core/providers/http_client.zig");
     _ = @import("core/providers/openai.zig");
     _ = @import("modes/mode.zig");

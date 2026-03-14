@@ -1,6 +1,10 @@
 //! Child-process transport: pipe-based provider for local models.
 const std = @import("std");
 const shell = @import("../shell.zig");
+const providers = @import("api.zig");
+const types = @import("types.zig");
+
+const Err = types.Err;
 
 pub const Transport = struct {
     alloc: std.mem.Allocator,
@@ -152,6 +156,146 @@ fn mapIoErr(err: anyerror) anyerror {
     };
 }
 
+// --- Request wire serialization ---
+
+pub fn buildReq(alloc: std.mem.Allocator, req: providers.Request) Err![]u8 {
+    var out: std.io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+
+    var js: std.json.Stringify = .{
+        .writer = &out.writer,
+        .options = .{},
+    };
+
+    writeReq(&js, req) catch return error.OutOfMemory;
+
+    return out.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+fn writeReq(js: *std.json.Stringify, req: providers.Request) anyerror!void {
+    try js.beginObject();
+
+    try js.objectField("model");
+    try js.write(req.model);
+
+    if (req.provider) |provider| {
+        try js.objectField("provider");
+        try js.write(provider);
+    }
+
+    try js.objectField("msgs");
+    try js.beginArray();
+    for (req.msgs) |msg| {
+        try js.beginObject();
+
+        try js.objectField("role");
+        try js.write(@tagName(msg.role));
+
+        try js.objectField("parts");
+        try js.beginArray();
+        for (msg.parts) |part| {
+            try writePart(js, part);
+        }
+        try js.endArray();
+
+        try js.endObject();
+    }
+    try js.endArray();
+
+    try js.objectField("tools");
+    try js.beginArray();
+    for (req.tools) |tool| {
+        try js.beginObject();
+        try js.objectField("name");
+        try js.write(tool.name);
+        try js.objectField("desc");
+        try js.write(tool.desc);
+        try js.objectField("schema");
+        try js.write(tool.schema);
+        try js.endObject();
+    }
+    try js.endArray();
+
+    try js.objectField("opts");
+    try js.beginObject();
+
+    if (req.opts.temp) |temp| {
+        try js.objectField("temp");
+        try js.write(temp);
+    }
+    if (req.opts.top_p) |top_p| {
+        try js.objectField("top_p");
+        try js.write(top_p);
+    }
+    if (req.opts.max_out) |max_out| {
+        try js.objectField("max_out");
+        try js.write(max_out);
+    }
+
+    try js.objectField("stop");
+    try js.beginArray();
+    for (req.opts.stop) |stop_tok| {
+        try js.write(stop_tok);
+    }
+    try js.endArray();
+
+    if (req.opts.thinking != .adaptive) {
+        try js.objectField("thinking");
+        try js.write(@tagName(req.opts.thinking));
+    }
+    if (req.opts.thinking_budget != 0) {
+        try js.objectField("thinking_budget");
+        try js.write(req.opts.thinking_budget);
+    }
+
+    try js.endObject();
+
+    try js.endObject();
+}
+
+fn writePart(js: *std.json.Stringify, part: providers.Part) anyerror!void {
+    try js.beginObject();
+
+    switch (part) {
+        .text => |txt| {
+            try js.objectField("type");
+            try js.write("text");
+            try js.objectField("text");
+            try js.write(txt);
+        },
+        .tool_call => |tc| {
+            try js.objectField("type");
+            try js.write("tool_call");
+            try js.objectField("id");
+            try js.write(tc.id);
+            try js.objectField("name");
+            try js.write(tc.name);
+            try js.objectField("args");
+            try js.write(tc.args);
+        },
+        .tool_result => |tr| {
+            try js.objectField("type");
+            try js.write("tool_result");
+            try js.objectField("id");
+            try js.write(tr.id);
+            try js.objectField("out");
+            try js.write(tr.output);
+            try js.objectField("is_err");
+            try js.write(tr.is_err);
+        },
+    }
+
+    try js.endObject();
+}
+
+fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    try oh.snap(src, want).expectEqual(got);
+}
+
+// --- Tests ---
+
 test "proc transport streams stdout frames and exits cleanly" {
     var tr = try Transport.init(.{
         .alloc = std.testing.allocator,
@@ -193,4 +337,113 @@ test "proc transport reports bad gateway on non-zero exit" {
 
     _ = (try raw.next()) orelse return error.TestUnexpectedResult;
     try std.testing.expectError(error.BadGateway, raw.next());
+}
+
+// --- buildReq tests ---
+
+test "buildReq emits request fixture JSON" {
+    const user_parts = [_]providers.Part{
+        .{ .text = "hello" },
+        .{ .tool_call = .{ .id = "c1", .name = "read", .args = "{\"path\":\"/tmp\"}" } },
+    };
+    const tool_parts = [_]providers.Part{
+        .{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } },
+    };
+    const msgs = [_]providers.Msg{
+        .{ .role = .user, .parts = user_parts[0..] },
+        .{ .role = .tool, .parts = tool_parts[0..] },
+    };
+    const tools = [_]providers.Tool{
+        .{ .name = "read", .desc = "Read file", .schema = "{}" },
+    };
+    const stops = [_][]const u8{ "DONE", "ERR" };
+
+    const req: providers.Request = .{
+        .model = "first-model",
+        .msgs = msgs[0..],
+        .tools = tools[0..],
+        .opts = .{
+            .temp = 0.25,
+            .top_p = 0.9,
+            .max_out = 128,
+            .stop = stops[0..],
+        },
+    };
+
+    const raw = try buildReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(raw);
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"first-model","msgs":[{"role":"user","parts":[{"type":"text","text":"hello"},{"type":"tool_call","id":"c1","name":"read","args":"{\"path\":\"/tmp\"}"}]},{"role":"tool","parts":[{"type":"tool_result","id":"c1","out":"ok","is_err":false}]}],"tools":[{"name":"read","desc":"Read file","schema":"{}"}],"opts":{"temp":0.25,"top_p":0.8999999761581421,"max_out":128,"stop":["DONE","ERR"]}}"
+    );
+}
+
+test "buildReq includes provider field when set" {
+    const msgs = [_]providers.Msg{
+        .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
+    };
+    const req: providers.Request = .{
+        .model = "m1",
+        .provider = "anthropic",
+        .msgs = msgs[0..],
+    };
+
+    const raw = try buildReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(raw);
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"m1","provider":"anthropic","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[]}}"
+    );
+}
+
+test "buildReq emits thinking budget mode" {
+    const req: providers.Request = .{
+        .model = "m1",
+        .msgs = &.{},
+        .opts = .{
+            .thinking = .budget,
+            .thinking_budget = 4096,
+        },
+    };
+
+    const raw = try buildReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(raw);
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"m1","msgs":[],"tools":[],"opts":{"stop":[],"thinking":"budget","thinking_budget":4096}}"
+    );
+}
+
+test "buildReq omits thinking when adaptive (default)" {
+    const req: providers.Request = .{
+        .model = "m1",
+        .msgs = &.{},
+        .opts = .{
+            .thinking = .adaptive,
+        },
+    };
+
+    const raw = try buildReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(raw);
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"m1","msgs":[],"tools":[],"opts":{"stop":[]}}"
+    );
+}
+
+test "buildReq emits thinking off mode" {
+    const req: providers.Request = .{
+        .model = "m1",
+        .msgs = &.{},
+        .opts = .{
+            .thinking = .off,
+        },
+    };
+
+    const raw = try buildReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(raw);
+    try expectSnap(@src(), raw,
+        \\[]u8
+        \\  "{"model":"m1","msgs":[],"tools":[],"opts":{"stop":[],"thinking":"off"}}"
+    );
 }

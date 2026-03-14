@@ -22,7 +22,8 @@ cd lean && ~/.elan/bin/lake build
 
 First build downloads mathlib (~10 min). Subsequent builds are incremental (~seconds).
 
-If `.lake/` is corrupt: `rm -rf .lake && lake build`.
+If `.lake/` is corrupt: `rm -rf .lake && lake update && lake build`.
+After adding a dependency to `lakefile.toml`: `lake update` before `lake build`.
 
 ## Project Structure
 

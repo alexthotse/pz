@@ -3,8 +3,9 @@
 const std = @import("std");
 const providers = @import("api.zig");
 const retry = @import("retry.zig");
-const streaming = @import("streaming.zig");
+const stream_parse = @import("stream_parse.zig");
 const types = @import("types.zig");
+const proc_wire = @import("proc_transport.zig");
 
 pub const Err = types.Err;
 pub const Policy = retry.Policy(Err);
@@ -49,7 +50,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
         }
 
         fn start(self: *Self, req: providers.Request) anyerror!providers.Stream {
-            const req_wire = try buildReq(self.alloc, req);
+            const req_wire = try proc_wire.buildReq(self.alloc, req);
             defer self.alloc.free(req_wire);
 
             var run_tr = RunTr{
@@ -58,7 +59,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
                 .req_wire = req_wire,
             };
 
-            const out = try streaming.run(
+            const out = try streamRun(
                 RunTr,
                 Slp,
                 self.alloc,
@@ -116,7 +117,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
 
         const BufStream = struct {
             alloc: std.mem.Allocator,
-            out: streaming.RunResult,
+            out: RunResult,
             idx: usize = 0,
 
             fn next(self: *BufStream) anyerror!?providers.Event {
@@ -148,126 +149,73 @@ fn RawChunkIterType(comptime RawTr: type) type {
     return @typeInfo(ReturnType).error_union.payload;
 }
 
-pub fn buildReq(alloc: std.mem.Allocator, req: providers.Request) Err![]u8 {
-    var out: std.io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
+// --- Streaming: retry loop with chunk reassembly (merged from streaming.zig) ---
 
-    var js: std.json.Stringify = .{
-        .writer = &out.writer,
-        .options = .{},
-    };
+const RunResult = struct {
+    arena: std.heap.ArenaAllocator,
+    evs: []providers.Event,
+    tries: u16,
 
-    writeReq(&js, req) catch return error.OutOfMemory;
-
-    return out.toOwnedSlice() catch return error.OutOfMemory;
-}
-
-fn writeReq(js: *std.json.Stringify, req: providers.Request) anyerror!void {
-    try js.beginObject();
-
-    try js.objectField("model");
-    try js.write(req.model);
-
-    if (req.provider) |provider| {
-        try js.objectField("provider");
-        try js.write(provider);
+    pub fn deinit(self: *RunResult) void {
+        self.arena.deinit();
     }
+};
 
-    try js.objectField("msgs");
-    try js.beginArray();
-    for (req.msgs) |msg| {
-        try js.beginObject();
+fn streamRun(
+    comptime Tr: type,
+    comptime Slp: type,
+    alloc: std.mem.Allocator,
+    tr: *Tr,
+    req: providers.Request,
+    pol: Policy,
+    slp: ?*Slp,
+) (retry.StepErr || Err)!RunResult {
+    var tries: u16 = 0;
+    while (true) {
+        tries += 1;
 
-        try js.objectField("role");
-        try js.write(@tagName(msg.role));
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        const ar = arena.allocator();
+        const res = streamOnce(Tr, ar, tr, req);
+        if (res) |evs| {
+            return .{
+                .arena = arena,
+                .evs = evs,
+                .tries = tries,
+            };
+        } else |err| {
+            arena.deinit();
 
-        try js.objectField("parts");
-        try js.beginArray();
-        for (msg.parts) |part| {
-            try writePart(js, part);
+            const step = try pol.next(err, tries);
+            switch (step) {
+                .retry_after_ms => |wait_ms| {
+                    if (slp) |s| s.wait(wait_ms);
+                },
+                .fail => return err,
+            }
         }
-        try js.endArray();
-
-        try js.endObject();
     }
-    try js.endArray();
-
-    try js.objectField("tools");
-    try js.beginArray();
-    for (req.tools) |tool| {
-        try js.beginObject();
-        try js.objectField("name");
-        try js.write(tool.name);
-        try js.objectField("desc");
-        try js.write(tool.desc);
-        try js.objectField("schema");
-        try js.write(tool.schema);
-        try js.endObject();
-    }
-    try js.endArray();
-
-    try js.objectField("opts");
-    try js.beginObject();
-
-    if (req.opts.temp) |temp| {
-        try js.objectField("temp");
-        try js.write(temp);
-    }
-    if (req.opts.top_p) |top_p| {
-        try js.objectField("top_p");
-        try js.write(top_p);
-    }
-    if (req.opts.max_out) |max_out| {
-        try js.objectField("max_out");
-        try js.write(max_out);
-    }
-
-    try js.objectField("stop");
-    try js.beginArray();
-    for (req.opts.stop) |stop_tok| {
-        try js.write(stop_tok);
-    }
-    try js.endArray();
-
-    try js.endObject();
-
-    try js.endObject();
 }
 
-fn writePart(js: *std.json.Stringify, part: providers.Part) anyerror!void {
-    try js.beginObject();
+fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: providers.Request) Err![]providers.Event {
+    var stream = try tr.start(req);
+    defer stream.deinit();
 
-    switch (part) {
-        .text => |txt| {
-            try js.objectField("type");
-            try js.write("text");
-            try js.objectField("text");
-            try js.write(txt);
-        },
-        .tool_call => |tc| {
-            try js.objectField("type");
-            try js.write("tool_call");
-            try js.objectField("id");
-            try js.write(tc.id);
-            try js.objectField("name");
-            try js.write(tc.name);
-            try js.objectField("args");
-            try js.write(tc.args);
-        },
-        .tool_result => |tr| {
-            try js.objectField("type");
-            try js.write("tool_result");
-            try js.objectField("id");
-            try js.write(tr.id);
-            try js.objectField("out");
-            try js.write(tr.output);
-            try js.objectField("is_err");
-            try js.write(tr.is_err);
-        },
+    var p = stream_parse.Parser{};
+    defer p.deinit(alloc);
+
+    var evs: std.ArrayListUnmanaged(providers.Event) = .{};
+    errdefer evs.deinit(alloc);
+
+    while (try stream.next()) |chunk| {
+        try p.feed(alloc, &evs, chunk);
     }
+    try p.finish(alloc, &evs);
 
-    try js.endObject();
+    return evs.toOwnedSlice(alloc);
 }
+
+// --- Tests ---
 
 const RawErr = error{
     Timeout,
@@ -386,88 +334,279 @@ fn mkPol(max_tries: u16) !Policy {
     });
 }
 
-fn expectString(v: std.json.Value, want: []const u8) !void {
-    switch (v) {
-        .string => |got| try std.testing.expectEqualStrings(want, got),
-        else => return error.TestUnexpectedResult,
+// --- streaming tests (merged from streaming.zig) ---
+
+const StreamAttempt = struct {
+    start_err: ?Err = null,
+    chunks: []const []const u8 = &.{},
+    fail_after: ?usize = null,
+    fail_err: Err = error.TransportTransient,
+};
+
+const MockChunk = struct {
+    at: ?*const StreamAttempt = null,
+    idx: usize = 0,
+    did_fail: bool = false,
+
+    pub fn next(self: *MockChunk) Err!?[]const u8 {
+        const at = self.at orelse return error.TransportFatal;
+
+        if (!self.did_fail) {
+            if (at.fail_after) |fail_after| {
+                if (self.idx == fail_after) {
+                    self.did_fail = true;
+                    return at.fail_err;
+                }
+            }
+        }
+
+        if (self.idx >= at.chunks.len) return null;
+        const out = at.chunks[self.idx];
+        self.idx += 1;
+        return out;
     }
+
+    pub fn deinit(_: *MockChunk) void {}
+};
+
+const MockTr = struct {
+    atts: []const StreamAttempt,
+    start_ct: usize = 0,
+    stream: MockChunk = .{},
+
+    fn init(atts: []const StreamAttempt) MockTr {
+        return .{
+            .atts = atts,
+        };
+    }
+
+    pub fn start(self: *MockTr, _: providers.Request) Err!MockChunk {
+        if (self.start_ct >= self.atts.len) return error.TransportFatal;
+        const idx = self.start_ct;
+        self.start_ct += 1;
+
+        const at = &self.atts[idx];
+        if (at.start_err) |err| return err;
+
+        self.stream = .{
+            .at = at,
+            .idx = 0,
+            .did_fail = false,
+        };
+        return self.stream;
+    }
+};
+
+fn reqStub() providers.Request {
+    return .{
+        .model = "stub",
+        .msgs = &.{},
+    };
 }
 
-fn expectInt(v: std.json.Value, want: i64) !void {
-    switch (v) {
-        .integer => |got| try std.testing.expectEqual(want, got),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-fn expectFloat(v: std.json.Value, want: f64) !void {
-    switch (v) {
-        .float => |got| try std.testing.expectApproxEqAbs(want, got, 0.0001),
-        .integer => |got| try std.testing.expectApproxEqAbs(want, @as(f64, @floatFromInt(got)), 0.0001),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
+test "stream run retries transient transport and parses frames" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    try oh.snap(src, want).expectEqual(got);
-}
-
-test "buildReq emits request fixture JSON" {
-    const user_parts = [_]providers.Part{
-        .{ .text = "hello" },
-        .{ .tool_call = .{ .id = "c1", .name = "read", .args = "{\"path\":\"/tmp\"}" } },
-    };
-    const tool_parts = [_]providers.Part{
-        .{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } },
-    };
-    const msgs = [_]providers.Msg{
-        .{ .role = .user, .parts = user_parts[0..] },
-        .{ .role = .tool, .parts = tool_parts[0..] },
-    };
-    const tools = [_]providers.Tool{
-        .{ .name = "read", .desc = "Read file", .schema = "{}" },
-    };
-    const stops = [_][]const u8{ "DONE", "ERR" };
-
-    const req: providers.Request = .{
-        .model = "first-model",
-        .msgs = msgs[0..],
-        .tools = tools[0..],
-        .opts = .{
-            .temp = 0.25,
-            .top_p = 0.9,
-            .max_out = 128,
-            .stop = stops[0..],
+    const atts = [_]StreamAttempt{
+        .{
+            .start_err = error.TransportTransient,
+        },
+        .{
+            .chunks = &.{
+                "text:he",
+                "llo\nusage:3,5,8\nstop:done\n",
+            },
         },
     };
 
-    const raw = try buildReq(std.testing.allocator, req);
-    defer std.testing.allocator.free(raw);
-    try expectSnap(@src(), raw,
-        \\[]u8
-        \\  "{"model":"first-model","msgs":[{"role":"user","parts":[{"type":"text","text":"hello"},{"type":"tool_call","id":"c1","name":"read","args":"{\"path\":\"/tmp\"}"}]},{"role":"tool","parts":[{"type":"tool_result","id":"c1","out":"ok","is_err":false}]}],"tools":[{"name":"read","desc":"Read file","schema":"{}"}],"opts":{"temp":0.25,"top_p":0.8999999761581421,"max_out":128,"stop":["DONE","ERR"]}}"
+    var tr = MockTr.init(atts[0..]);
+    var waits = WaitLog{};
+    const pol = try mkPol(3);
+
+    var out = try streamRun(
+        MockTr,
+        WaitLog,
+        std.testing.allocator,
+        &tr,
+        reqStub(),
+        pol,
+        &waits,
     );
+    defer out.deinit();
+    const txt = switch (out.evs[0]) {
+        .text => |ev| ev,
+        else => return error.TestUnexpectedResult,
+    };
+    const usage = switch (out.evs[1]) {
+        .usage => |ev| ev,
+        else => return error.TestUnexpectedResult,
+    };
+    const stop = switch (out.evs[2]) {
+        .stop => |ev| ev,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "tries={d}\nstarts={d}\nwaits={d}|{d}\nevs={d}\ntext={s}\nusage={d}|{d}|{d}\nstop={s}\n", .{
+        out.tries,
+        tr.start_ct,
+        waits.len,
+        waits.waits[0],
+        out.evs.len,
+        txt,
+        usage.in_tok,
+        usage.out_tok,
+        usage.tot_tok,
+        @tagName(stop.reason),
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "tries=2
+        \\starts=2
+        \\waits=1|10
+        \\evs=3
+        \\text=hello
+        \\usage=3|5|8
+        \\stop=done
+        \\"
+    ).expectEqual(snap);
 }
 
-test "buildReq includes provider field when set" {
-    const msgs = [_]providers.Msg{
-        .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
-    };
-    const req: providers.Request = .{
-        .model = "m1",
-        .provider = "anthropic",
-        .msgs = msgs[0..],
+test "stream run drops partial events from failed retry attempt" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const atts = [_]StreamAttempt{
+        .{
+            .chunks = &.{"text:bad\n"},
+            .fail_after = 1,
+            .fail_err = error.TransportTransient,
+        },
+        .{
+            .chunks = &.{"text:ok\nstop:done\n"},
+        },
     };
 
-    const raw = try buildReq(std.testing.allocator, req);
-    defer std.testing.allocator.free(raw);
-    try expectSnap(@src(), raw,
-        \\[]u8
-        \\  "{"model":"m1","provider":"anthropic","msgs":[{"role":"user","parts":[{"type":"text","text":"hi"}]}],"tools":[],"opts":{"stop":[]}}"
+    var tr = MockTr.init(atts[0..]);
+    var waits = WaitLog{};
+    const pol = try mkPol(3);
+
+    var out = try streamRun(
+        MockTr,
+        WaitLog,
+        std.testing.allocator,
+        &tr,
+        reqStub(),
+        pol,
+        &waits,
     );
+    defer out.deinit();
+    const txt = switch (out.evs[0]) {
+        .text => |ev| ev,
+        else => return error.TestUnexpectedResult,
+    };
+    const stop = switch (out.evs[1]) {
+        .stop => |ev| ev,
+        else => return error.TestUnexpectedResult,
+    };
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "tries={d}\nevs={d}\nwaits={d}\ntext={s}\nstop={s}\n", .{
+        out.tries,
+        out.evs.len,
+        waits.len,
+        txt,
+        @tagName(stop.reason),
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "tries=2
+        \\evs=2
+        \\waits=1
+        \\text=ok
+        \\stop=done
+        \\"
+    ).expectEqual(snap);
 }
+
+test "stream run does not retry parser failures" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const atts = [_]StreamAttempt{
+        .{
+            .chunks = &.{"bad\n"},
+        },
+    };
+
+    var tr = MockTr.init(atts[0..]);
+    var waits = WaitLog{};
+    const pol = try mkPol(3);
+
+    try std.testing.expectError(
+        error.BadFrame,
+        streamRun(
+            MockTr,
+            WaitLog,
+            std.testing.allocator,
+            &tr,
+            reqStub(),
+            pol,
+            &waits,
+        ),
+    );
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\n", .{
+        tr.start_ct,
+        waits.len,
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=1
+        \\waits=0
+        \\"
+    ).expectEqual(snap);
+}
+
+test "stream run stops at max tries for transient failures" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const atts = [_]StreamAttempt{
+        .{
+            .start_err = error.TransportTransient,
+        },
+        .{
+            .start_err = error.TransportTransient,
+        },
+    };
+
+    var tr = MockTr.init(atts[0..]);
+    var waits = WaitLog{};
+    const pol = try mkPol(2);
+
+    try std.testing.expectError(
+        error.TransportTransient,
+        streamRun(
+            MockTr,
+            WaitLog,
+            std.testing.allocator,
+            &tr,
+            reqStub(),
+            pol,
+            &waits,
+        ),
+    );
+    const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}|{d}\n", .{
+        tr.start_ct,
+        waits.len,
+        waits.waits[0],
+    });
+    defer std.testing.allocator.free(snap);
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "starts=2
+        \\waits=1|10
+        \\"
+    ).expectEqual(snap);
+}
+
+// --- integration tests ---
 
 test "first provider retries transient start and streams parsed events" {
     const OhSnap = @import("ohsnap");
