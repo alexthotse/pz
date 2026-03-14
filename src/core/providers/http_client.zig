@@ -109,23 +109,10 @@ pub fn tryProactiveRefresh(
 
 // ── Retry loop ─────────────────────────────────────────────────────────
 
-/// Sleeper interface for testability (avoids real Thread.sleep in tests).
-pub const Sleeper = struct {
-    ctx: *anyopaque,
-    sleep_fn: *const fn (ctx: *anyopaque, ms: u64) void,
-
-    pub fn sleep(self: Sleeper, ms: u64) void {
-        self.sleep_fn(self.ctx, ms);
-    }
-
-    pub fn real() Sleeper {
-        const S = struct {
-            var dummy: u8 = 0;
-            fn doSleep(_: *anyopaque, ms: u64) void {
-                std.Thread.sleep(ms * std.time.ns_per_ms);
-            }
-        };
-        return .{ .ctx = @ptrCast(&S.dummy), .sleep_fn = S.doSleep };
+/// Real sleeper: delegates to std.Thread.sleep.
+pub const RealSleeper = struct {
+    pub fn sleep(_: *RealSleeper, ms: u64) void {
+        std.Thread.sleep(ms * std.time.ns_per_ms);
     }
 };
 
@@ -144,7 +131,7 @@ pub fn retryLoop(
     tag: auth_mod.Provider,
     ca_file: ?[]const u8,
     ar: std.mem.Allocator,
-    sleeper: Sleeper,
+    sleeper: anytype,
     rebuildHdrs: *const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header),
 ) !void {
     var attempt: u32 = 0;

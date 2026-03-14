@@ -65,7 +65,8 @@ pub const Client = struct {
             .path = .{ .raw = api_path },
         };
 
-        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .anthropic, self.ca_file, ar, hc.Sleeper.real(), buildAuthHeaders);
+        var slp = hc.RealSleeper{};
+        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .anthropic, self.ca_file, ar, &slp, buildAuthHeaders);
 
         if (stream.response.head.status != .ok) {
             try hc.formatErrBody(stream, ar, extractApiErrMsg);

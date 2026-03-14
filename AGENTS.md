@@ -61,6 +61,7 @@ Only include files changed by the current agent/task. No broad staging.
 
 ## Testing Rule
 
+Run `zig build test` with a 60-second timeout: `timeout 60 zig build test 2>&1`. Tests must complete within 1 minute.
 Run relevant tests before and after each fix or feature.
 Every bug fix must add or strengthen a test.
 Use `ohsnap` snapshots for struct/multi-field outputs and serialized payload checks.
