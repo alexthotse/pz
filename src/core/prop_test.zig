@@ -1,3 +1,5 @@
+//! Property-based testing helpers wrapping zcheck.
+
 const std = @import("std");
 const zc = @import("zcheck");
 
@@ -753,7 +755,7 @@ test "pbt expectShrunk yields stable minimal counterexamples" {
         .shrunk = fail_a.shrunk.a,
     };
     try oh.snap(@src(),
-        \\core.pbt.test.pbt expectShrunk yields stable minimal counterexamples.Snap
+        \\core.prop_test.test.pbt expectShrunk yields stable minimal counterexamples.Snap
         \\  .seed: u64 = 12345
         \\  .iteration: usize = 0
         \\  .original: u8 = 160

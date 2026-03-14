@@ -1,3 +1,5 @@
+//! Tool output truncation and size management.
+
 const std = @import("std");
 
 pub const Stream = enum {
@@ -12,13 +14,13 @@ pub const TruncMeta = struct {
     dropped_bytes: usize,
 };
 
-pub const Slice = struct {
+pub const Truncated = struct {
     chunk: []const u8,
     truncated: bool,
     meta: ?TruncMeta,
 };
 
-pub fn apply(full: []const u8, limit_bytes: usize) Slice {
+pub fn apply(full: []const u8, limit_bytes: usize) Truncated {
     const kept_bytes = @min(full.len, limit_bytes);
     const dropped_bytes = full.len - kept_bytes;
     if (dropped_bytes == 0) {

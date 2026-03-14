@@ -1,6 +1,6 @@
 const std = @import("std");
 const frame = @import("frame.zig");
-const termcap = @import("termcap.zig");
+const color_detect = @import("color_detect.zig");
 
 /// DEC private mode IDs used for terminal control.
 const DecMode = enum(u16) {
@@ -10,7 +10,7 @@ const DecMode = enum(u16) {
     sync = 2026,
 };
 
-const Layer = termcap.Layer;
+const Layer = color_detect.Layer;
 
 fn decSeq(comptime mode: DecMode, comptime c: u8) *const [std.fmt.count("\x1b[?{d}" ++ [_]u8{c}, .{@intFromEnum(mode)})]u8 {
     return comptime std.fmt.comptimePrint("\x1b[?{d}" ++ [_]u8{c}, .{@intFromEnum(mode)});
@@ -27,7 +27,7 @@ fn decRst(comptime mode: DecMode) @TypeOf(decSeq(mode, 'l')) {
 pub const Renderer = struct {
     alloc: std.mem.Allocator,
     prev: frame.Frame,
-    cap: termcap.ColorCap,
+    cap: color_detect.ColorDepth,
     cold: bool = true,
 
     pub const InitError = frame.Frame.InitError;
@@ -37,7 +37,7 @@ pub const Renderer = struct {
         return initCap(alloc, w, h, .truecolor);
     }
 
-    pub fn initCap(alloc: std.mem.Allocator, w: usize, h: usize, cap: termcap.ColorCap) InitError!Renderer {
+    pub fn initCap(alloc: std.mem.Allocator, w: usize, h: usize, cap: color_detect.ColorDepth) InitError!Renderer {
         return .{
             .alloc = alloc,
             .prev = try frame.Frame.init(alloc, w, h),
@@ -138,7 +138,7 @@ fn writeFmt(out: anytype, comptime fmt: []const u8, args: anytype) !void {
     try out.writeAll(msg);
 }
 
-fn writeStyle(out: anytype, st: frame.Style, cap: termcap.ColorCap) !void {
+fn writeStyle(out: anytype, st: frame.Style, cap: color_detect.ColorDepth) !void {
     if (st.isDefault()) {
         try out.writeAll("\x1b[0m");
         return;
@@ -151,8 +151,8 @@ fn writeStyle(out: anytype, st: frame.Style, cap: termcap.ColorCap) !void {
     if (st.underline) try out.writeAll(";4");
     if (st.inverse) try out.writeAll(";7");
 
-    try termcap.writeColor(out, .fg, st.fg, cap);
-    try termcap.writeColor(out, .bg, st.bg, cap);
+    try color_detect.writeColor(out, .fg, st.fg, cap);
+    try color_detect.writeColor(out, .bg, st.bg, cap);
 
     try out.writeAll("m");
 }

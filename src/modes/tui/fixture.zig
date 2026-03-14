@@ -15,6 +15,7 @@ const FrameSnap = struct {
     row8: []const u8,
     row9: []const u8,
 };
+
 const TableSnap = struct {
     counts: [5]usize,
     top: [3]usize,

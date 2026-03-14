@@ -1143,7 +1143,7 @@ test "property: mutated run frames reject empty id or prompt" {
 
 test "property: decodeSlice survives crap-and-mutate hello frames" {
     const zc = @import("zcheck");
-    const pbt = @import("pbt.zig");
+    const pbt = @import("prop_test.zig");
 
     try zc.check(struct {
         fn prop(args: struct {

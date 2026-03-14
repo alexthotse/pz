@@ -1,18 +1,20 @@
+//! Terminal color depth detection from environment variables.
+
 const std = @import("std");
 const frame = @import("frame.zig");
 
-pub const ColorCap = enum {
+pub const ColorDepth = enum {
     none,
     basic,
     c256,
     truecolor,
 };
 
-pub fn detect() ColorCap {
+pub fn detect() ColorDepth {
     if (std.posix.getenv("NO_COLOR") != null) return .none;
 
     if (std.posix.getenv("COLORTERM")) |ct| {
-        const ct_map = std.StaticStringMap(ColorCap).initComptime(.{
+        const ct_map = std.StaticStringMap(ColorDepth).initComptime(.{
             .{ "truecolor", .truecolor },
             .{ "24bit", .truecolor },
         });
@@ -20,7 +22,7 @@ pub fn detect() ColorCap {
     }
 
     if (std.posix.getenv("TERM")) |term| {
-        const term_map = std.StaticStringMap(ColorCap).initComptime(.{
+        const term_map = std.StaticStringMap(ColorDepth).initComptime(.{
             .{ "dumb", .none },
             .{ "linux", .basic },
             .{ "vt100", .basic },
@@ -82,7 +84,7 @@ pub fn rgbToBasic(r: u8, g: u8, b: u8) u3 {
     return @as(u3, bb) << 2 | @as(u3, gb) << 1 | rb;
 }
 
-pub fn writeColor(out: anytype, layer: Layer, c: frame.Color, cap: ColorCap) !void {
+pub fn writeColor(out: anytype, layer: Layer, c: frame.Color, cap: ColorDepth) !void {
     const base = @intFromEnum(layer);
     switch (cap) {
         .none => {},

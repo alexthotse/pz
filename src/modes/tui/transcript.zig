@@ -13,10 +13,12 @@ pub const Rect = struct {
     h: usize,
 };
 
-const imgproto = @import("imgproto.zig");
+const image = @import("image.zig");
 
 const Kind = enum { text, user, thinking, tool, err, meta, image };
+
 const ToolPhase = enum { none, call, result };
+
 const LineMode = enum { wrap, ellipsis };
 
 const Span = struct {
@@ -271,7 +273,7 @@ pub const Transcript = struct {
 
                 // Image blocks: header line + reserved rows
                 if (b.kind == .image) {
-                    const blk_h = imgproto.img_rows;
+                    const blk_h = image.img_rows;
                     var img_skipped: usize = 0;
                     var ir: usize = 0;
                     while (ir < blk_h) : (ir += 1) {
@@ -551,7 +553,7 @@ pub const Transcript = struct {
     }
 
     fn blockLineCount(b: *const Block, w: usize) usize {
-        if (b.kind == .image) return imgproto.img_rows;
+        if (b.kind == .image) return image.img_rows;
         if (b.line_mode == .ellipsis) return if (w == 0) 0 else 1;
         if (b.kind == .text or b.kind == .user) return countMdLines(b.text(), w);
         return countLines(b.text(), w);

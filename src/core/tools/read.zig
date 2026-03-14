@@ -50,10 +50,10 @@ pub const Handler = struct {
         const selected = try readSelected(self, args.path, from_line, args.to_line);
         errdefer self.alloc.free(selected.chunk);
 
-        const meta = tools.output.metaFor(self.max_bytes, selected.full_bytes);
+        const meta = tools.truncate.metaFor(self.max_bytes, selected.full_bytes);
         var meta_chunk: ?[]u8 = null;
         if (meta) |m| {
-            meta_chunk = tools.output.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
+            meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
         }
         errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
 

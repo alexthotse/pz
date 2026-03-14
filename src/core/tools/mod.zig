@@ -1,6 +1,6 @@
 const std = @import("std");
 const runtime = @import("runtime.zig");
-pub const output = @import("output.zig");
+pub const truncate = @import("truncate.zig");
 pub const builtin = @import("builtin.zig");
 pub const read = @import("read.zig");
 pub const write = @import("write.zig");

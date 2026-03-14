@@ -1,5 +1,5 @@
 const std = @import("std");
-const first = @import("first_provider.zig");
+const first = @import("client.zig");
 const shell = @import("../shell.zig");
 
 pub const Transport = struct {

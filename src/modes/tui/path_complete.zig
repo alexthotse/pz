@@ -1,3 +1,5 @@
+//! Filesystem path completion for the editor.
+
 const std = @import("std");
 
 const max_results: usize = 32;

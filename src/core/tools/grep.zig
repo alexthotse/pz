@@ -64,10 +64,10 @@ pub const Handler = struct {
         const data = acc.takeOwned() catch return error.OutOfMemory;
         errdefer self.alloc.free(data);
 
-        const meta = tools.output.metaFor(self.max_bytes, acc.full_bytes);
+        const meta = tools.truncate.metaFor(self.max_bytes, acc.full_bytes);
         var meta_chunk: ?[]u8 = null;
         if (meta) |m| {
-            meta_chunk = tools.output.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
+            meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
         }
         errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
 

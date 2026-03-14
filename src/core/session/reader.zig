@@ -537,7 +537,7 @@ test "jsonl replay property rejects encoded lines above max bytes" {
 
 test "jsonl replay property survives crap-and-mutate of valid rows" {
     const zc = @import("zcheck");
-    const pbt = @import("../pbt.zig");
+    const pbt = @import("../prop_test.zig");
 
     try zc.check(struct {
         fn prop(args: struct { len: u16, seed: u64, slack: u8 }) bool {

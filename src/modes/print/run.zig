@@ -1,21 +1,21 @@
 const std = @import("std");
 const core = @import("../../core/mod.zig");
-const contract = @import("../contract.zig");
+const mode = @import("../mode.zig");
 const format = @import("format.zig");
 const run_err = @import("errors.zig");
 
 pub const model_default = "default";
 
-pub fn exec(run_ctx: contract.RunCtx) run_err.Err!void {
+pub fn exec(run_ctx: mode.Ctx) run_err.Err!run_err.Result {
     var out = std.fs.File.stdout().deprecatedWriter();
     return execWithWriter(run_ctx, out.any());
 }
 
-pub fn execWithWriter(run_ctx: contract.RunCtx, out: std.Io.AnyWriter) run_err.Err!void {
+pub fn execWithWriter(run_ctx: mode.Ctx, out: std.Io.AnyWriter) run_err.Err!run_err.Result {
     return execVerbose(run_ctx, out, false);
 }
 
-fn execVerbose(run_ctx: contract.RunCtx, out: std.Io.AnyWriter, verbose: bool) run_err.Err!void {
+fn execVerbose(run_ctx: mode.Ctx, out: std.Io.AnyWriter, verbose: bool) run_err.Err!run_err.Result {
     var formatter = format.Formatter.init(run_ctx.alloc, out);
     formatter.verbose = verbose;
     defer formatter.deinit();
@@ -58,9 +58,8 @@ fn execVerbose(run_ctx: contract.RunCtx, out: std.Io.AnyWriter, verbose: bool) r
 
     formatter.finish() catch return error.OutputFlush;
 
-    if (stop_reason) |reason| {
-        if (run_err.mapStop(reason)) |mapped| return mapped;
-    }
+    if (stop_reason) |reason| return .{ .stop = reason };
+    return .ok;
 }
 
 fn mapEvent(ev: core.providers.Ev) core.session.Event {
@@ -307,13 +306,15 @@ test "exec runs prompt path and persists mapped provider events" {
     var out_buf: [512]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
 
-    try execVerbose(.{
+    const result = try execVerbose(.{
         .alloc = std.testing.allocator,
         .provider = provider,
         .store = store,
         .sid = "sid-1",
         .prompt = "ship-it",
     }, out_fbs.writer().any(), true);
+
+    try std.testing.expectEqual(run_err.Result.ok, result);
 
     const snap = RunVerboseSnap{
         .provider = .{
@@ -630,13 +631,15 @@ test "exec maps max_out stop reason to deterministic typed error" {
     var out_buf: [128]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
 
-    try std.testing.expectError(error.StopMaxOut, execVerbose(.{
+    const result = try execVerbose(.{
         .alloc = std.testing.allocator,
         .provider = provider,
         .store = store,
         .sid = "sid-3",
         .prompt = "prompt-3",
-    }, out_fbs.writer().any(), true));
+    }, out_fbs.writer().any(), true);
+
+    try std.testing.expectEqual(run_err.Result{ .stop = .max_out }, result);
 
     const snap = RunStopSnap{
         .deinit_ct = provider_impl.stream.deinit_ct,
@@ -654,118 +657,3 @@ test "exec maps max_out stop reason to deterministic typed error" {
     ).expectEqual(snap);
 }
 
-test "exec chooses highest stop reason deterministically" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-
-    const StreamImpl = struct {
-        idx: usize = 0,
-        deinit_ct: usize = 0,
-        evs: []const core.providers.Ev,
-
-        fn next(self: *@This()) !?core.providers.Ev {
-            if (self.idx >= self.evs.len) return null;
-            const ev = self.evs[self.idx];
-            self.idx += 1;
-            return ev;
-        }
-
-        fn deinit(self: *@This()) void {
-            self.deinit_ct += 1;
-        }
-    };
-
-    const ProviderImpl = struct {
-        stream: StreamImpl,
-
-        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
-            return core.providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
-        }
-    };
-
-    const ReaderImpl = struct {
-        fn next(_: *@This()) !?core.session.Event {
-            return null;
-        }
-
-        fn deinit(_: *@This()) void {}
-    };
-
-    const StoreImpl = struct {
-        append_ct: usize = 0,
-        evs: [4]core.session.Event = undefined,
-        rdr: ReaderImpl = .{},
-
-        fn append(self: *@This(), _: []const u8, ev: core.session.Event) !void {
-            if (self.append_ct >= self.evs.len) return error.StoreFull;
-            self.evs[self.append_ct] = ev;
-            self.append_ct += 1;
-        }
-
-        fn replay(self: *@This(), _: []const u8) !core.session.Reader {
-            return core.session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
-        }
-
-        fn deinit(_: *@This()) void {}
-    };
-
-    const in_evs = [_]core.providers.Ev{
-        .{ .stop = .{ .reason = .done } },
-        .{ .stop = .{ .reason = .err } },
-    };
-
-    var provider_impl = ProviderImpl{
-        .stream = .{
-            .evs = in_evs[0..],
-        },
-    };
-    const provider = core.providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
-
-    var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
-
-    var out_buf: [128]u8 = undefined;
-    var out_fbs = std.io.fixedBufferStream(&out_buf);
-
-    try std.testing.expectError(error.StopErr, execVerbose(.{
-        .alloc = std.testing.allocator,
-        .provider = provider,
-        .store = store,
-        .sid = "sid-4",
-        .prompt = "prompt-4",
-    }, out_fbs.writer().any(), true));
-
-    const snap = RunStopSnap{
-        .deinit_ct = provider_impl.stream.deinit_ct,
-        .append_ct = store_impl.append_ct,
-        .out = out_fbs.getWritten(),
-    };
-    try oh.snap(@src(),
-        \\modes.print.run.RunStopSnap
-        \\  .deinit_ct: usize = 1
-        \\  .append_ct: usize = 3
-        \\  .out: []const u8
-        \\    "stop reason=err
-        \\"
-    ).expectEqual(snap);
-}

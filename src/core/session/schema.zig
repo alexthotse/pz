@@ -463,7 +463,7 @@ test "schema property: dupe preserves tool_result encode" {
 }
 
 test "schema property: event encode/decode roundtrip across tags" {
-    const pbt = @import("../pbt.zig");
+    const pbt = @import("../prop_test.zig");
     const Text = pbt.Utf8(24);
     const Tag = enum {
         noop,
@@ -562,7 +562,7 @@ test "schema property: event encode/decode roundtrip across tags" {
 }
 
 test "schema property: Event.dupe preserves encode across tags" {
-    const pbt = @import("../pbt.zig");
+    const pbt = @import("../prop_test.zig");
     const Text = pbt.Utf8(24);
     const Tag = enum {
         noop,

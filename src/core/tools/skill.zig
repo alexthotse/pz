@@ -87,14 +87,14 @@ fn render(alloc: std.mem.Allocator, skill: core_skill.SkillInfo, args: []const u
 }
 
 fn okWithResult(self: Handler, call: tools.Call, result: []const u8) Err!tools.Result {
-    const slice = tools.output.apply(result, self.max_bytes);
+    const slice = tools.truncate.apply(result, self.max_bytes);
 
     const data = self.alloc.dupe(u8, slice.chunk) catch return error.OutOfMemory;
     errdefer self.alloc.free(data);
 
     var meta_chunk: ?[]u8 = null;
     if (slice.meta) |meta| {
-        meta_chunk = tools.output.metaJsonAlloc(self.alloc, .stdout, meta) catch return error.OutOfMemory;
+        meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, meta) catch return error.OutOfMemory;
     }
     errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
 

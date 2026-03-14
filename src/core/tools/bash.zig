@@ -121,12 +121,12 @@ pub const Handler = struct {
         var stderr_chunk = run_res.stderr.chunk;
         errdefer self.alloc.free(stderr_chunk);
 
-        const stdout_meta = tools.output.metaFor(self.max_bytes, run_res.stdout.full_bytes);
-        const stderr_meta = tools.output.metaFor(self.max_bytes, run_res.stderr.full_bytes);
+        const stdout_meta = tools.truncate.metaFor(self.max_bytes, run_res.stdout.full_bytes);
+        const stderr_meta = tools.truncate.metaFor(self.max_bytes, run_res.stderr.full_bytes);
 
         var stdout_meta_chunk: ?[]u8 = null;
         if (stdout_meta) |meta| {
-            stdout_meta_chunk = tools.output.metaJsonAlloc(self.alloc, .stdout, meta) catch {
+            stdout_meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, meta) catch {
                 return error.OutOfMemory;
             };
         }
@@ -134,7 +134,7 @@ pub const Handler = struct {
 
         var stderr_meta_chunk: ?[]u8 = null;
         if (stderr_meta) |meta| {
-            stderr_meta_chunk = tools.output.metaJsonAlloc(self.alloc, .stderr, meta) catch {
+            stderr_meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stderr, meta) catch {
                 return error.OutOfMemory;
             };
         }

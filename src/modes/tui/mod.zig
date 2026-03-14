@@ -1,5 +1,3 @@
-const contract = @import("../contract.zig");
-
 pub const frame = @import("frame.zig");
 pub const render = @import("render.zig");
 pub const editor = @import("editor.zig");
@@ -13,19 +11,11 @@ pub const theme = @import("theme.zig");
 pub const wcwidth = @import("wcwidth.zig");
 pub const mouse = @import("mouse.zig");
 pub const overlay = @import("overlay.zig");
-pub const cmdprev = @import("cmdprev.zig");
+pub const cmdpicker = @import("cmdpicker.zig");
 pub const fuzzy = @import("fuzzy.zig");
-pub const pathcomp = @import("pathcomp.zig");
-pub const imgproto = @import("imgproto.zig");
-pub const termcap = @import("termcap.zig");
+pub const path_complete = @import("path_complete.zig");
+pub const image = @import("image.zig");
+pub const color_detect = @import("color_detect.zig");
 pub const term = @import("term.zig");
 pub const vscreen = @import("vscreen.zig");
 pub const fixture = @import("fixture.zig");
-
-pub const Mode = struct {
-    pub fn asMode(self: *Mode) contract.Mode {
-        return contract.Mode.from(Mode, self, run);
-    }
-
-    fn run(_: *Mode, _: contract.RunCtx) !void {}
-};

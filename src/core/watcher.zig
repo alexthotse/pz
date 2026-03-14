@@ -14,40 +14,20 @@ pub const Ev = struct {
     path: []const u8,
 };
 
-pub const Sink = struct {
-    ctx: *anyopaque,
-    vt: *const Vt,
-
-    pub const Vt = struct {
-        onEvent: *const fn (ctx: *anyopaque, ev: Ev) void,
-    };
-
-    pub fn from(
-        comptime T: type,
+/// Comptime-generic event sink for file watcher notifications.
+pub fn Sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Ev) void) type {
+    return struct {
         ctx: *T,
-        comptime on_event: fn (ctx: *T, ev: Ev) void,
-    ) Sink {
-        const Wrap = struct {
-            fn call(raw: *anyopaque, ev: Ev) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                on_event(typed, ev);
-            }
 
-            const vt = Vt{
-                .onEvent = call,
-            };
-        };
+        pub fn onEvent(self: @This(), ev: Ev) void {
+            on_event(self.ctx, ev);
+        }
+    };
+}
 
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn onEvent(self: Sink, ev: Ev) void {
-        self.vt.onEvent(self.ctx, ev);
-    }
-};
+pub fn sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Ev) void, ctx: *T) Sink(T, on_event) {
+    return .{ .ctx = ctx };
+}
 
 pub const InitError = std.fs.Dir.StatFileError || error{
     EmptyPathSet,
@@ -208,14 +188,14 @@ pub const Watcher = struct {
         };
     }
 
-    pub fn watchLoop(self: *Self, stop: *const std.atomic.Value(bool), sink: Sink) !void {
-        if (is_macos) return self.watchLoopKqueue(stop, sink);
+    pub fn watchLoop(self: *Self, stop: *const std.atomic.Value(bool), snk: anytype) !void {
+        if (is_macos) return self.watchLoopKqueue(stop, snk);
 
         while (!stop.load(.acquire)) {
             const now = std.time.nanoTimestamp();
             var i: usize = 0;
             while (i < self.paths.len) : (i += 1) {
-                try self.scanOne(i, now, sink);
+                try self.scanOne(i, now, snk);
             }
             std.Thread.sleep(self.poll_ns);
         }
@@ -229,14 +209,14 @@ pub const Watcher = struct {
         self.* = undefined;
     }
 
-    fn scanOne(self: *Self, idx: usize, now: i128, sink: Sink) !void {
+    fn scanOne(self: *Self, idx: usize, now: i128, snk: anytype) !void {
         const next = try snapPath(self.paths[idx]);
         if (changeKind(self.states[idx].snap, next)) |kind| self.queueKind(idx, now, kind);
         self.states[idx].snap = next;
-        self.flushOne(idx, now, sink);
+        self.flushOne(idx, now, snk);
     }
 
-    fn watchLoopKqueue(self: *Self, stop: *const std.atomic.Value(bool), sink: Sink) !void {
+    fn watchLoopKqueue(self: *Self, stop: *const std.atomic.Value(bool), snk: anytype) !void {
         var events: [16]std.posix.Kevent = undefined;
         const changes = [_]std.posix.Kevent{};
 
@@ -246,7 +226,7 @@ pub const Watcher = struct {
             var i: usize = 0;
             while (i < self.paths.len) : (i += 1) {
                 try self.refreshMacPath(i, pre_wait);
-                self.flushOne(i, pre_wait, sink);
+                self.flushOne(i, pre_wait, snk);
             }
 
             var timeout = nsToTimespec(self.poll_ns);
@@ -259,7 +239,7 @@ pub const Watcher = struct {
             }
 
             i = 0;
-            while (i < self.paths.len) : (i += 1) self.flushOne(i, now, sink);
+            while (i < self.paths.len) : (i += 1) self.flushOne(i, now, snk);
         }
     }
 
@@ -304,7 +284,7 @@ pub const Watcher = struct {
         state.last_dirty_at_ns = now;
     }
 
-    fn flushOne(self: *Self, idx: usize, now: i128, sink: Sink) void {
+    fn flushOne(self: *Self, idx: usize, now: i128, snk: anytype) void {
         var state = &self.states[idx];
         if (state.pending) |pending| {
             const first_dirty_at = state.first_dirty_at_ns orelse now;
@@ -312,7 +292,7 @@ pub const Watcher = struct {
             const quiet_ok = now - last_dirty_at >= self.quiet_ns;
             const max_ok = now - first_dirty_at >= self.max_ns;
             if (!quiet_ok and !max_ok) return;
-            sink.onEvent(.{
+            snk.onEvent(.{
                 .kind = pending,
                 .path = self.paths[idx],
             });
@@ -520,7 +500,7 @@ test "watchLoop emits debounced write event" {
     defer writer.join();
     defer deadline.join();
 
-    try watcher.watchLoop(&stop, Sink.from(Recorder, &rec, Recorder.onEvent));
+    try watcher.watchLoop(&stop, sink(Recorder, Recorder.onEvent, &rec));
 
     try testing.expect(write_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
@@ -574,7 +554,7 @@ test "watchLoop flushes write storm after max window" {
     defer writer.join();
     defer deadline.join();
 
-    try watcher.watchLoop(&stop, Sink.from(Recorder, &rec, Recorder.onEvent));
+    try watcher.watchLoop(&stop, sink(Recorder, Recorder.onEvent, &rec));
 
     try testing.expect(burst_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
@@ -626,7 +606,7 @@ test "watchLoop emits delete event" {
     defer deleter.join();
     defer deadline.join();
 
-    try watcher.watchLoop(&stop, Sink.from(Recorder, &rec, Recorder.onEvent));
+    try watcher.watchLoop(&stop, sink(Recorder, Recorder.onEvent, &rec));
 
     try testing.expect(delete_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
@@ -677,7 +657,7 @@ test "watchLoop emits write event when missing path appears" {
     defer writer.join();
     defer deadline.join();
 
-    try watcher.watchLoop(&stop, Sink.from(Recorder, &rec, Recorder.onEvent));
+    try watcher.watchLoop(&stop, sink(Recorder, Recorder.onEvent, &rec));
 
     try testing.expect(write_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);
@@ -732,7 +712,7 @@ test "watchLoop emits rename event on macOS" {
     defer renamer.join();
     defer deadline.join();
 
-    try watcher.watchLoop(&stop, Sink.from(Recorder, &rec, Recorder.onEvent));
+    try watcher.watchLoop(&stop, sink(Recorder, Recorder.onEvent, &rec));
 
     try testing.expect(rename_ctx.ok);
     try testing.expectEqual(@as(usize, 1), rec.count);

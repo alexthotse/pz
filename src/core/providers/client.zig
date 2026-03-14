@@ -1,3 +1,5 @@
+//! Generic provider client: retry, streaming, transport.
+
 const std = @import("std");
 const providers = @import("contract.zig");
 const retry = @import("retry.zig");

@@ -8,25 +8,25 @@ const frame = @import("frame.zig");
 const render = @import("render.zig");
 const theme = @import("theme.zig");
 const overlay_mod = @import("overlay.zig");
-const cmdprev_mod = @import("cmdprev.zig");
-const pathcomp_mod = @import("pathcomp.zig");
-const imgproto_mod = @import("imgproto.zig");
+const cmdpicker_mod = @import("cmdpicker.zig");
+const path_complete_mod = @import("path_complete.zig");
+const image_mod = @import("image.zig");
 const spinner = @import("spinner.zig");
 
 pub const Ui = struct {
     alloc: std.mem.Allocator,
     ed: editor.Editor,
     tr: transcript.Transcript,
-    pn: panels.Panels,
+    panels: panels.Panels,
     frm: frame.Frame,
-    rnd: render.Renderer,
+    renderer: render.Renderer,
     border_fg: frame.Color = .{ .rgb = 0x81a2be },
     ov: ?overlay_mod.Overlay = null,
-    cp: ?cmdprev_mod.CmdPreview = null,
+    picker: ?cmdpicker_mod.Picker = null,
     arg_src: ?[]const []const u8 = null, // runtime-provided arg completion source
     path_items: ?[][]u8 = null, // owned file path completion items
     path_prefix: ?[]u8 = null, // cached prefix for path_items
-    img_cap: imgproto_mod.ImageCap = .none,
+    img_cap: image_mod.Capture = .none,
     spin: u8 = 0,
 
     const BorderStatus = struct {
@@ -59,9 +59,9 @@ pub const Ui = struct {
             .alloc = alloc,
             .ed = editor.Editor.init(alloc),
             .tr = transcript.Transcript.init(alloc),
-            .pn = try panels.Panels.initFull(alloc, model, provider, cwd, branch),
+            .panels = try panels.Panels.initFull(alloc, model, provider, cwd, branch),
             .frm = try frame.Frame.init(alloc, w, h),
-            .rnd = try render.Renderer.init(alloc, w, h),
+            .renderer = try render.Renderer.init(alloc, w, h),
         };
     }
 
@@ -69,18 +69,18 @@ pub const Ui = struct {
         if (w == self.frm.w and h == self.frm.h) return;
         const new_frm = try frame.Frame.init(self.alloc, w, h);
         const new_rnd = try render.Renderer.init(self.alloc, w, h);
-        self.rnd.deinit();
+        self.renderer.deinit();
         self.frm.deinit(self.alloc);
         self.frm = new_frm;
-        self.rnd = new_rnd;
+        self.renderer = new_rnd;
     }
 
     pub fn deinit(self: *Ui) void {
         if (self.ov) |*ov| ov.deinit(self.alloc);
         self.clearPathItems();
-        self.rnd.deinit();
+        self.renderer.deinit();
         self.frm.deinit(self.alloc);
-        self.pn.deinit();
+        self.panels.deinit();
         self.tr.deinit();
         self.ed.deinit();
         self.* = undefined;
@@ -88,7 +88,7 @@ pub const Ui = struct {
 
     pub fn clearPathItems(self: *Ui) void {
         if (self.path_items) |items| {
-            pathcomp_mod.freeList(self.alloc, items);
+            path_complete_mod.freeList(self.alloc, items);
             self.path_items = null;
         }
         if (self.path_prefix) |p| {
@@ -103,7 +103,7 @@ pub const Ui = struct {
         } else {
             try self.tr.append(ev);
         }
-        try self.pn.append(ev);
+        try self.panels.append(ev);
         if (ev == .stop and ev.stop.reason == .max_out) {
             try self.tr.infoText("[max tokens reached]");
         }
@@ -187,7 +187,7 @@ pub const Ui = struct {
         }
 
         if (footer_h > 0) {
-            try self.pn.renderFooter(&self.frm, .{
+            try self.panels.renderFooter(&self.frm, .{
                 .x = 0,
                 .y = h - footer_h,
                 .w = w,
@@ -196,11 +196,11 @@ pub const Ui = struct {
         }
 
         // Command preview: render below editor, overlaying lower border/footer (like pi)
-        if (self.cp) |*cp| {
+        if (self.picker) |*pk| {
             const ed_y = tx_h + @min(border_h, 1);
             const below = ed_y + 1; // first row below editor
             if (below < h) {
-                try cp.renderDown(&self.frm, below, w, h);
+                try pk.renderDown(&self.frm, below, w, h);
             }
         }
 
@@ -208,14 +208,14 @@ pub const Ui = struct {
             try ov.render(&self.frm);
         }
 
-        try self.rnd.render(&self.frm, out);
+        try self.renderer.render(&self.frm, out);
 
         // Render inline images after frame (they overlay frame cells)
         if (self.img_cap != .none) {
             var i: u8 = 0;
             while (i < self.tr.img_ref_n) : (i += 1) {
                 const ref = self.tr.img_refs[i];
-                try imgproto_mod.writeImageAt(out, self.alloc, ref.path, 1, ref.y, ref.w, self.img_cap);
+                try image_mod.writeImageAt(out, self.alloc, ref.path, 1, ref.y, ref.w, self.img_cap);
             }
         }
 
@@ -240,11 +240,11 @@ pub const Ui = struct {
     }
 
     pub fn setModel(self: *Ui, model: []const u8) !void {
-        try self.pn.setModel(model);
+        try self.panels.setModel(model);
     }
 
     pub fn setProvider(self: *Ui, provider: []const u8) !void {
-        try self.pn.setProvider(provider);
+        try self.panels.setProvider(provider);
     }
 
     /// Try moving cursor up in wrapped text. Returns true if handled.
@@ -266,7 +266,7 @@ pub const Ui = struct {
     }
 
     pub fn updatePreview(self: *Ui) void {
-        self.cp = null;
+        self.picker = null;
 
         const text = self.ed.text();
         if (text.len > 0 and text[0] == '/') {
@@ -275,10 +275,10 @@ pub const Ui = struct {
             if (std.mem.indexOfScalar(u8, prefix, ' ')) |sp| {
                 if (self.arg_src) |src| {
                     const arg = std.mem.trim(u8, prefix[sp + 1 ..], " \t");
-                    self.cp = cmdprev_mod.CmdPreview.updateArgs(src, arg);
+                    self.picker = cmdpicker_mod.Picker.updateArgs(src, arg);
                 }
             } else {
-                self.cp = cmdprev_mod.CmdPreview.update(prefix);
+                self.picker = cmdpicker_mod.Picker.update(prefix);
             }
         } else if (text.len > 0) {
             // Check for @ mention in last word
@@ -336,8 +336,8 @@ pub const Ui = struct {
                 self.alloc.free(items[0..old_len]);
                 self.path_items = narrowed;
                 self.updatePathPrefix(pattern);
-                self.cp = cmdprev_mod.CmdPreview.updateArgs(
-                    pathcomp_mod.asConst(self.path_items.?),
+                self.picker = cmdpicker_mod.Picker.updateArgs(
+                    path_complete_mod.asConst(self.path_items.?),
                     pattern,
                 );
                 return;
@@ -346,11 +346,11 @@ pub const Ui = struct {
 
         // Cache miss — full directory scan
         self.clearPathItems();
-        if (pathcomp_mod.list(self.alloc, pattern)) |items| {
+        if (path_complete_mod.list(self.alloc, pattern)) |items| {
             self.path_items = items;
             self.updatePathPrefix(pattern);
-            self.cp = cmdprev_mod.CmdPreview.updateArgs(
-                pathcomp_mod.asConst(items),
+            self.picker = cmdpicker_mod.Picker.updateArgs(
+                path_complete_mod.asConst(items),
                 pattern,
             );
         }
@@ -435,16 +435,16 @@ pub const Ui = struct {
     fn drawBorderWithStatus(self: *Ui, y: usize) !void {
         const t = theme.get();
         const now_ms = std.time.milliTimestamp();
-        const compact_on = self.pn.compactionActive(now_ms);
-        const active = self.pn.run_state == .streaming or self.pn.run_state == .tool or compact_on;
+        const compact_on = self.panels.compactionActive(now_ms);
+        const active = self.panels.run_state == .streaming or self.panels.run_state == .tool or compact_on;
         if (active) self.spin +%= 1;
 
         var lbl_buf: [128]u8 = undefined;
-        const status: ?BorderStatus = switch (self.pn.run_state) {
+        const status: ?BorderStatus = switch (self.panels.run_state) {
             .streaming, .tool => blk: {
                 const sc = spinner.cp(self.spin);
-                const label = if (self.pn.run_state == .tool)
-                    std.fmt.bufPrint(&lbl_buf, " $ {s} {u} ", .{ self.pn.toolLabel(), sc }) catch " $ … "
+                const label = if (self.panels.run_state == .tool)
+                    std.fmt.bufPrint(&lbl_buf, " $ {s} {u} ", .{ self.panels.toolLabel(), sc }) catch " $ … "
                 else
                     std.fmt.bufPrint(&lbl_buf, " streaming {u} ", .{sc}) catch " streaming ";
                 break :blk .{ .label = label, .fg = t.accent };
@@ -757,7 +757,7 @@ test "harness tool footer shows redacted bash command" {
     try oh.snap(@src(),
         \\[]const u8
         \\  "curl '[secret:f46ae11f145e0f15]' [path:7bb914..."
-    ).expectEqual(ui.pn.toolLabel());
+    ).expectEqual(ui.panels.toolLabel());
 }
 
 test "harness editor interaction returns submit and clears line" {
@@ -825,7 +825,7 @@ test "harness resize reallocates frame and renderer" {
 test "harness border shows compaction indicator" {
     var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
     defer ui.deinit();
-    ui.pn.noteCompaction();
+    ui.panels.noteCompaction();
 
     var raw: [4096]u8 = undefined;
     var out = TestBuf.init(raw[0..]);
@@ -980,7 +980,7 @@ test "updatePreview shows file dropdown on @" {
     // Type "@src/" — should trigger file completion
     try ui.ed.setText("@src/");
     ui.updatePreview();
-    try std.testing.expect(ui.cp != null);
+    try std.testing.expect(ui.picker != null);
     try std.testing.expect(ui.path_items != null);
     try std.testing.expect(ui.path_items.?.len > 0);
 }
@@ -991,7 +991,7 @@ test "updatePreview clears on no @" {
 
     try ui.ed.setText("hello");
     ui.updatePreview();
-    try std.testing.expect(ui.cp == null);
+    try std.testing.expect(ui.picker == null);
     try std.testing.expect(ui.path_items == null);
 }
 
@@ -1001,7 +1001,7 @@ test "updatePreview slash overrides file mode" {
 
     try ui.ed.setText("/help");
     ui.updatePreview();
-    try std.testing.expect(ui.cp != null);
+    try std.testing.expect(ui.picker != null);
     try std.testing.expect(ui.path_items == null); // not file mode
 }
 

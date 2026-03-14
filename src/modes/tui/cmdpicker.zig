@@ -1,3 +1,5 @@
+//! Slash-command picker with prefix and fuzzy matching.
+
 const std = @import("std");
 const frame_mod = @import("frame.zig");
 const theme_mod = @import("theme.zig");
@@ -48,15 +50,15 @@ const desc_col: usize = 32;
 
 const max_match: u8 = 32;
 
-pub const CmdPreview = struct {
+pub const Picker = struct {
     matches: [max_match]u8,
     n: u8,
     sel: u8 = 0,
     scroll: u8 = 0,
     arg_src: ?[]const []const u8 = null, // non-null = arg mode
 
-    pub fn update(prefix: []const u8) ?CmdPreview {
-        var cp = CmdPreview{ .matches = undefined, .n = 0 };
+    pub fn update(prefix: []const u8) ?Picker {
+        var cp = Picker{ .matches = undefined, .n = 0 };
         // Try prefix matching first
         for (cmds, 0..) |cmd, i| {
             if (cp.n >= max_match) break;
@@ -94,8 +96,8 @@ pub const CmdPreview = struct {
     }
 
     /// Filter arg items by prefix match.
-    pub fn updateArgs(src: []const []const u8, prefix: []const u8) ?CmdPreview {
-        var cp = CmdPreview{ .matches = undefined, .n = 0, .arg_src = src };
+    pub fn updateArgs(src: []const []const u8, prefix: []const u8) ?Picker {
+        var cp = Picker{ .matches = undefined, .n = 0, .arg_src = src };
         for (src, 0..) |item, i| {
             if (cp.n >= max_match) break;
             if (prefix.len == 0 or (prefix.len <= item.len and std.mem.startsWith(u8, item, prefix))) {
@@ -117,7 +119,7 @@ pub const CmdPreview = struct {
     }
 
     /// Navigate up, wrapping to bottom (matches pi).
-    pub fn up(self: *CmdPreview) void {
+    pub fn up(self: *Picker) void {
         if (self.n == 0) return;
         if (self.sel > 0) {
             self.sel -= 1;
@@ -128,7 +130,7 @@ pub const CmdPreview = struct {
     }
 
     /// Navigate down, wrapping to top (matches pi).
-    pub fn down(self: *CmdPreview) void {
+    pub fn down(self: *Picker) void {
         if (self.n == 0) return;
         if (self.sel + 1 < self.n) {
             self.sel += 1;
@@ -138,7 +140,7 @@ pub const CmdPreview = struct {
         self.fixScroll();
     }
 
-    fn fixScroll(self: *CmdPreview) void {
+    fn fixScroll(self: *Picker) void {
         // Center selection in visible window (pi: selectedIndex - floor(maxVisible/2))
         const half = max_vis / 2;
         if (self.n <= max_vis) {
@@ -152,12 +154,12 @@ pub const CmdPreview = struct {
         }
     }
 
-    pub fn selected(self: *const CmdPreview) Cmd {
+    pub fn selected(self: *const Picker) Cmd {
         return cmds[self.matches[self.sel]];
     }
 
     /// Return the selected arg text (arg mode only).
-    pub fn selectedArg(self: *const CmdPreview) ?[]const u8 {
+    pub fn selectedArg(self: *const Picker) ?[]const u8 {
         const src = self.arg_src orelse return null;
         if (self.sel >= self.n) return null;
         const idx = self.matches[self.sel];
@@ -166,7 +168,7 @@ pub const CmdPreview = struct {
     }
 
     /// Returns total visible rows (items + optional scroll indicator).
-    pub fn visRows(self: *const CmdPreview) usize {
+    pub fn visRows(self: *const Picker) usize {
         const item_rows = @min(@as(usize, self.n) - self.scroll, max_vis);
         const has_scroll = self.scroll > 0 or self.scroll + max_vis < self.n;
         return item_rows + @as(usize, if (has_scroll) 1 else 0);
@@ -174,7 +176,7 @@ pub const CmdPreview = struct {
 
     /// Render the dropdown downward from y_start, matching pi's layout.
     /// Visual format: "→ /name" (selected) or "  /name" + description at col 32.
-    pub fn renderDown(self: *const CmdPreview, frm: *Frame, y_start: usize, w: usize, h: usize) !void {
+    pub fn renderDown(self: *const Picker, frm: *Frame, y_start: usize, w: usize, h: usize) !void {
         const avail = if (h > y_start) h - y_start else return;
         const t = theme_mod.get();
         const item_vis: usize = @min(@min(@as(usize, self.n) - self.scroll, max_vis), avail);
@@ -261,7 +263,7 @@ pub const CmdPreview = struct {
     }
 };
 
-fn snapAlloc(alloc: std.mem.Allocator, cp: CmdPreview) ![]u8 {
+fn snapAlloc(alloc: std.mem.Allocator, cp: Picker) ![]u8 {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(alloc);
     try std.fmt.format(buf.writer(alloc), "n={} sel={} scroll={}", .{ cp.n, cp.sel, cp.scroll });
@@ -278,13 +280,13 @@ fn snapAlloc(alloc: std.mem.Allocator, cp: CmdPreview) ![]u8 {
 test "update empty prefix returns all" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const cp = CmdPreview.update("").?;
+    const cp = Picker.update("").?;
     const Snap = struct {
         n: u8,
         sel: u8,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.update empty prefix returns all.Snap
+        \\modes.tui.cmdpicker.test.update empty prefix returns all.Snap
         \\  .n: u8 = 26
         \\  .sel: u8 = 0
     ).expectEqual(Snap{
@@ -296,7 +298,7 @@ test "update empty prefix returns all" {
 test "update filters by prefix" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const cp = CmdPreview.update("co").?;
+    const cp = Picker.update("co").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
@@ -311,7 +313,7 @@ test "update filters by prefix" {
 test "update ex matches exit and export" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const cp = CmdPreview.update("ex").?;
+    const cp = Picker.update("ex").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
@@ -323,12 +325,12 @@ test "update ex matches exit and export" {
 }
 
 test "update no match returns null" {
-    try std.testing.expect(CmdPreview.update("zzz") == null);
+    try std.testing.expect(Picker.update("zzz") == null);
 }
 
 test "update fuzzy fallback" {
     // "mdl" doesn't prefix-match any cmd, but fuzzy matches "model"
-    const cp = CmdPreview.update("mdl").?;
+    const cp = Picker.update("mdl").?;
     try std.testing.expect(cp.n > 0);
     // "model" should be in the results
     var found = false;
@@ -341,7 +343,7 @@ test "update fuzzy fallback" {
 test "update exact match" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const cp = CmdPreview.update("help").?;
+    const cp = Picker.update("help").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
@@ -354,14 +356,14 @@ test "update exact match" {
 test "up wraps to bottom" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var cp = CmdPreview.update("").?;
+    var cp = Picker.update("").?;
     cp.up();
     const Snap = struct {
         sel: usize,
         scroll: u8,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.up wraps to bottom.Snap
+        \\modes.tui.cmdpicker.test.up wraps to bottom.Snap
         \\  .sel: usize = 25
         \\  .scroll: u8 = 21
     ).expectEqual(Snap{
@@ -373,7 +375,7 @@ test "up wraps to bottom" {
 test "down wraps to top" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var cp = CmdPreview.update("ex").?; // 2 items
+    var cp = Picker.update("ex").?; // 2 items
     cp.down(); // sel=1
     cp.down(); // wrap to 0
     const Snap = struct {
@@ -381,7 +383,7 @@ test "down wraps to top" {
         scroll: u8,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.down wraps to top.Snap
+        \\modes.tui.cmdpicker.test.down wraps to top.Snap
         \\  .sel: u8 = 0
         \\  .scroll: u8 = 0
     ).expectEqual(Snap{
@@ -393,7 +395,7 @@ test "down wraps to top" {
 test "down scrolls window" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var cp = CmdPreview.update("").?; // 22 items, max_vis=5
+    var cp = Picker.update("").?; // 22 items, max_vis=5
     var i: u8 = 0;
     while (i < max_vis) : (i += 1) cp.down();
     const Snap = struct {
@@ -401,7 +403,7 @@ test "down scrolls window" {
         scroll: u8,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.down scrolls window.Snap
+        \\modes.tui.cmdpicker.test.down scrolls window.Snap
         \\  .sel: u8 = 5
         \\  .scroll: u8 = 3
     ).expectEqual(Snap{
@@ -413,7 +415,7 @@ test "down scrolls window" {
 test "up scrolls back" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var cp = CmdPreview.update("").?;
+    var cp = Picker.update("").?;
     var i: u8 = 0;
     while (i < max_vis + 2) : (i += 1) cp.down();
     while (i > 0) : (i -= 1) cp.up();
@@ -422,7 +424,7 @@ test "up scrolls back" {
         scroll: u8,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.up scrolls back.Snap
+        \\modes.tui.cmdpicker.test.up scrolls back.Snap
         \\  .sel: u8 = 0
         \\  .scroll: u8 = 0
     ).expectEqual(Snap{
@@ -434,7 +436,7 @@ test "up scrolls back" {
 test "selected returns correct cmd" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var cp = CmdPreview.update("ex").?;
+    var cp = Picker.update("ex").?;
     const snap0 = try std.fmt.allocPrint(
         std.testing.allocator,
         "sel={}|scroll={}|pick={s}",
@@ -464,7 +466,7 @@ test "renderDown selected row has arrow and bold" {
     var frm = try Frame.init(std.testing.allocator, 50, 10);
     defer frm.deinit(std.testing.allocator);
 
-    const cp = CmdPreview.update("co").?; // 3 items, sel=0
+    const cp = Picker.update("co").?; // 3 items, sel=0
     try cp.renderDown(&frm, 2, 50, 10);
 
     // First row (sel=0) at y=2: "→ /compact"
@@ -485,7 +487,7 @@ test "renderDown selected row has arrow and bold" {
         c2: u21,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.renderDown selected row has arrow and bold.Snap
+        \\modes.tui.cmdpicker.test.renderDown selected row has arrow and bold.Snap
         \\  .arrow: u21 = '→'
         \\  .slash: u21 = '/'
         \\  .sp: u21 = ' '
@@ -504,7 +506,7 @@ test "renderDown description at col 32 when wide" {
     var frm = try Frame.init(std.testing.allocator, 60, 10);
     defer frm.deinit(std.testing.allocator);
 
-    const cp = CmdPreview.update("help").?; // 1 item
+    const cp = Picker.update("help").?; // 1 item
     try cp.renderDown(&frm, 3, 60, 10);
 
     // desc "Show commands" at col 32, y=3
@@ -513,7 +515,7 @@ test "renderDown description at col 32 when wide" {
         c: u21,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.renderDown description at col 32 when wide.Snap
+        \\modes.tui.cmdpicker.test.renderDown description at col 32 when wide.Snap
         \\  .c: u21 = 'S'
     ).expectEqual(Snap{
         .c = c.cp,
@@ -526,7 +528,7 @@ test "renderDown no description when narrow" {
     var frm = try Frame.init(std.testing.allocator, 35, 10);
     defer frm.deinit(std.testing.allocator);
 
-    const cp = CmdPreview.update("help").?;
+    const cp = Picker.update("help").?;
     try cp.renderDown(&frm, 3, 35, 10);
 
     // At col 32 should be space (no desc rendered when w <= 40)
@@ -535,7 +537,7 @@ test "renderDown no description when narrow" {
         c: u21,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.renderDown no description when narrow.Snap
+        \\modes.tui.cmdpicker.test.renderDown no description when narrow.Snap
         \\  .c: u21 = ' '
     ).expectEqual(Snap{
         .c = c.cp,
@@ -548,7 +550,7 @@ test "renderDown with limited height" {
     var frm = try Frame.init(std.testing.allocator, 50, 4);
     defer frm.deinit(std.testing.allocator);
 
-    const cp = CmdPreview.update("").?; // 22 items, only 2 rows available (h=4, start=2)
+    const cp = Picker.update("").?; // 22 items, only 2 rows available (h=4, start=2)
     try cp.renderDown(&frm, 2, 50, 4);
 
     // Should render 2 rows at y=2,3
@@ -557,7 +559,7 @@ test "renderDown with limited height" {
         c: u21,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.renderDown with limited height.Snap
+        \\modes.tui.cmdpicker.test.renderDown with limited height.Snap
         \\  .c: u21 = '/'
     ).expectEqual(Snap{
         .c = c.cp,
@@ -570,7 +572,7 @@ test "renderDown scroll indicator shown" {
     var frm = try Frame.init(std.testing.allocator, 50, 10);
     defer frm.deinit(std.testing.allocator);
 
-    const cp = CmdPreview.update("").?; // 22 items > max_vis=5
+    const cp = Picker.update("").?; // 22 items > max_vis=5
     try cp.renderDown(&frm, 1, 50, 10);
 
     // 5 item rows at y=1..5, scroll indicator at y=6: "  (1/22)"
@@ -579,7 +581,7 @@ test "renderDown scroll indicator shown" {
         c0: u21,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.renderDown scroll indicator shown.Snap
+        \\modes.tui.cmdpicker.test.renderDown scroll indicator shown.Snap
         \\  .c0: u21 = '('
     ).expectEqual(Snap{
         .c0 = c0.cp,
@@ -589,14 +591,14 @@ test "renderDown scroll indicator shown" {
 test "visRows accounts for scroll indicator" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const cp = CmdPreview.update("").?; // 22 items
-    const cp2 = CmdPreview.update("ex").?;
+    const cp = Picker.update("").?; // 22 items
+    const cp2 = Picker.update("ex").?;
     const Snap = struct {
         all: usize,
         ex: usize,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.visRows accounts for scroll indicator.Snap
+        \\modes.tui.cmdpicker.test.visRows accounts for scroll indicator.Snap
         \\  .all: usize = 6
         \\  .ex: usize = 2
     ).expectEqual(Snap{
@@ -609,7 +611,7 @@ test "updateArgs filters by prefix" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const items = [_][]const u8{ "anthropic", "openai", "google" };
-    const cp = CmdPreview.updateArgs(&items, "an").?;
+    const cp = Picker.updateArgs(&items, "an").?;
     const snap = try snapAlloc(std.testing.allocator, cp);
     defer std.testing.allocator.free(snap);
     try oh.snap(@src(),
@@ -623,13 +625,13 @@ test "updateArgs empty prefix returns all" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const items = [_][]const u8{ "anthropic", "openai", "google" };
-    const cp = CmdPreview.updateArgs(&items, "").?;
+    const cp = Picker.updateArgs(&items, "").?;
     const Snap = struct {
         n: u8,
         sel: u8,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.updateArgs empty prefix returns all.Snap
+        \\modes.tui.cmdpicker.test.updateArgs empty prefix returns all.Snap
         \\  .n: u8 = 3
         \\  .sel: u8 = 0
     ).expectEqual(Snap{
@@ -640,14 +642,14 @@ test "updateArgs empty prefix returns all" {
 
 test "updateArgs no match returns null" {
     const items = [_][]const u8{ "anthropic", "openai", "google" };
-    try std.testing.expect(CmdPreview.updateArgs(&items, "zzz") == null);
+    try std.testing.expect(Picker.updateArgs(&items, "zzz") == null);
 }
 
 test "updateArgs renders without slash" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const items = [_][]const u8{ "all", "none", "read" };
-    const cp = CmdPreview.updateArgs(&items, "").?;
+    const cp = Picker.updateArgs(&items, "").?;
 
     var frm = try Frame.init(std.testing.allocator, 40, 10);
     defer frm.deinit(std.testing.allocator);
@@ -662,7 +664,7 @@ test "updateArgs renders without slash" {
         a: u21,
     };
     try oh.snap(@src(),
-        \\modes.tui.cmdprev.test.updateArgs renders without slash.Snap
+        \\modes.tui.cmdpicker.test.updateArgs renders without slash.Snap
         \\  .arrow: u21 = '→'
         \\  .a: u21 = 'a'
     ).expectEqual(Snap{

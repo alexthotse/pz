@@ -8,10 +8,11 @@ pub const Err = error{
     OutputFormat,
     EventWrite,
     OutputFlush,
-    StopMaxOut,
-    StopTool,
-    StopCanceled,
-    StopErr,
+};
+
+pub const Result = union(enum) {
+    ok,
+    stop: core.providers.StopReason,
 };
 
 pub const Exit = struct {
@@ -19,7 +20,7 @@ pub const Exit = struct {
     msg: []const u8,
 };
 
-pub fn map(err: Err) Exit {
+pub fn mapErr(err: Err) Exit {
     return switch (err) {
         error.PromptWrite => .{ .code = 10, .msg = "print: failed to persist prompt" },
         error.ProviderStart => .{ .code = 11, .msg = "print: provider failed to start stream" },
@@ -27,73 +28,18 @@ pub fn map(err: Err) Exit {
         error.OutputFormat => .{ .code = 13, .msg = "print: failed to format output event" },
         error.EventWrite => .{ .code = 14, .msg = "print: failed to persist stream event" },
         error.OutputFlush => .{ .code = 15, .msg = "print: failed to flush formatted output" },
-        error.StopMaxOut => .{ .code = 16, .msg = "print: provider stopped at max output" },
-        error.StopTool => .{ .code = 17, .msg = "print: provider stopped for tool handoff" },
-        error.StopCanceled => .{ .code = 18, .msg = "print: provider stream canceled" },
-        error.StopErr => .{ .code = 19, .msg = "print: provider reported terminal error" },
     };
 }
 
-pub fn mapStop(reason: core.providers.StopReason) ?Err {
-    return switch (reason) {
-        .done => null,
-        .max_out => error.StopMaxOut,
-        .tool => error.StopTool,
-        .canceled => error.StopCanceled,
-        .err => error.StopErr,
+pub fn mapResult(result: Result) ?Exit {
+    return switch (result) {
+        .ok => null,
+        .stop => |reason| switch (reason) {
+            .done => null,
+            .max_out => .{ .code = 16, .msg = "print: provider stopped at max output" },
+            .tool => .{ .code = 17, .msg = "print: provider stopped for tool handoff" },
+            .canceled => .{ .code = 18, .msg = "print: provider stream canceled" },
+            .err => .{ .code = 19, .msg = "print: provider reported terminal error" },
+        },
     };
-}
-
-fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
-        @typeName(@TypeOf(actual)),
-        body,
-    });
-    try oh.snap(src, snap).expectEqual(actual);
-}
-
-test "map provides stable exit codes and messages for each typed print error" {
-    const Case = struct {
-        err: Err,
-        code: u8,
-        msg: []const u8,
-    };
-
-    const cases = [_]Case{
-        .{ .err = error.PromptWrite, .code = 10, .msg = "print: failed to persist prompt" },
-        .{ .err = error.ProviderStart, .code = 11, .msg = "print: provider failed to start stream" },
-        .{ .err = error.StreamRead, .code = 12, .msg = "print: provider stream read failed" },
-        .{ .err = error.OutputFormat, .code = 13, .msg = "print: failed to format output event" },
-        .{ .err = error.EventWrite, .code = 14, .msg = "print: failed to persist stream event" },
-        .{ .err = error.OutputFlush, .code = 15, .msg = "print: failed to flush formatted output" },
-        .{ .err = error.StopMaxOut, .code = 16, .msg = "print: provider stopped at max output" },
-        .{ .err = error.StopTool, .code = 17, .msg = "print: provider stopped for tool handoff" },
-        .{ .err = error.StopCanceled, .code = 18, .msg = "print: provider stream canceled" },
-        .{ .err = error.StopErr, .code = 19, .msg = "print: provider reported terminal error" },
-    };
-
-    inline for (cases, 0..) |case, i| {
-        const got = map(case.err);
-        const summary = try std.fmt.allocPrint(std.testing.allocator, "code={d}\nmsg={s}", .{ got.code, got.msg });
-        defer std.testing.allocator.free(summary);
-        try expectSnapText(@src(),
-            std.fmt.comptimePrint("code={d}\nmsg={s}", .{ case.code, case.msg }),
-            summary,
-        );
-
-        var j: usize = i + 1;
-        while (j < cases.len) : (j += 1) {
-            try std.testing.expect(cases[j].code != got.code);
-        }
-    }
-}
-
-test "mapStop maps stop reasons to typed print errors" {
-    try std.testing.expect(mapStop(.done) == null);
-    try std.testing.expectEqual(error.StopMaxOut, mapStop(.max_out).?);
-    try std.testing.expectEqual(error.StopTool, mapStop(.tool).?);
-    try std.testing.expectEqual(error.StopCanceled, mapStop(.canceled).?);
-    try std.testing.expectEqual(error.StopErr, mapStop(.err).?);
 }

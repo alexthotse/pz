@@ -86,13 +86,13 @@ fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.Ch
     const full = try renderAlloc(self.alloc, agent_id, run_res);
     defer self.alloc.free(full);
 
-    const slice = tools.output.apply(full, self.max_bytes);
+    const slice = tools.truncate.apply(full, self.max_bytes);
     const body = self.alloc.dupe(u8, slice.chunk) catch return error.OutOfMemory;
     errdefer self.alloc.free(body);
 
     var meta_chunk: ?[]u8 = null;
     if (slice.meta) |meta| {
-        meta_chunk = tools.output.metaJsonAlloc(self.alloc, .stdout, meta) catch return error.OutOfMemory;
+        meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, meta) catch return error.OutOfMemory;
     }
     errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
 

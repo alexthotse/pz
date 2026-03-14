@@ -44,14 +44,10 @@ Default shape:
 2. Launch only `2-3` worker lanes by default.
 3. Expand past `3` workers only if the next dots are truly disjoint in files and dependencies.
 
-1. Create workspace per agent:
-   - `jj workspace add ../pz-<agent>`
+1. Create workspaces under `.jj-ws/` (see jj skill for commands).
 2. Assign file ownership per workspace.
 3. Do not edit files owned by another workspace.
 4. Reconcile by rebasing/squashing after each track stabilizes.
-5. Clean up:
-   - `jj workspace forget <name>`
-   - Remove workspace directory.
 
 ## File Ownership Rule
 

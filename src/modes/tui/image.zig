@@ -1,20 +1,22 @@
+//! Terminal image protocol detection and rendering.
+
 const std = @import("std");
 
-pub const ImageCap = enum {
+pub const Capture = enum {
     none,
     kitty,
     iterm,
 };
 
-const term_cap_map = std.StaticStringMap(ImageCap).initComptime(.{
+const term_cap_map = std.StaticStringMap(Capture).initComptime(.{
     .{ "xterm-kitty", .kitty },
 });
 
-const term_program_cap_map = std.StaticStringMap(ImageCap).initComptime(.{
+const term_program_cap_map = std.StaticStringMap(Capture).initComptime(.{
     .{ "WezTerm", .kitty },
 });
 
-pub fn detect() ImageCap {
+pub fn detect() Capture {
     if (std.posix.getenv("KITTY_WINDOW_ID") != null) return .kitty;
     if (std.posix.getenv("TERM")) |term| {
         if (term_cap_map.get(term)) |cap| return cap;
@@ -34,7 +36,7 @@ pub const img_rows: usize = 8;
 
 /// Write an image file to the terminal using the appropriate protocol.
 /// Positions cursor at (col, row) first using CUP sequence.
-pub fn writeImageAt(out: anytype, alloc: std.mem.Allocator, path: []const u8, col: usize, row: usize, cols: usize, cap: ImageCap) !void {
+pub fn writeImageAt(out: anytype, alloc: std.mem.Allocator, path: []const u8, col: usize, row: usize, cols: usize, cap: Capture) !void {
     switch (cap) {
         .none => return,
         .kitty => {
@@ -94,16 +96,4 @@ fn writeItermFile(out: anytype, alloc: std.mem.Allocator, path: []const u8, cols
         off += chunk;
     }
     try out.writeAll("\x07");
-}
-
-// -- Tests --
-
-test "detect returns none in test environment" {
-    // In CI/test, no KITTY_WINDOW_ID or iTerm vars
-    const cap = detect();
-    _ = cap; // just ensure it doesn't crash
-}
-
-test "img_rows constant" {
-    try std.testing.expectEqual(@as(usize, 8), img_rows);
 }

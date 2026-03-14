@@ -22,7 +22,7 @@ const tui_frame = @import("../modes/tui/frame.zig");
 const tui_theme = @import("../modes/tui/theme.zig");
 const tui_overlay = @import("../modes/tui/overlay.zig");
 const tui_panels = @import("../modes/tui/panels.zig");
-const tui_pathcomp = @import("../modes/tui/pathcomp.zig");
+const tui_path_complete = @import("../modes/tui/path_complete.zig");
 const args_mod = @import("args.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
 const audit_e2e = @import("../test/audit_e2e.zig");
@@ -48,8 +48,8 @@ const ProviderRuntime = struct {
     tr: core.providers.proc_transport.Transport,
     map_ctx: map_ctx_t = .{},
     map: core.providers.types.Adapter = undefined,
-    pol: core.providers.first_provider.Pol = undefined,
-    client: core.providers.first_provider.Client = undefined,
+    pol: core.providers.client.Pol = undefined,
+    client: core.providers.client.Client = undefined,
 
     fn init(self: *ProviderRuntime, alloc: std.mem.Allocator, provider_cmd: []const u8) !void {
         self.tr = try core.providers.proc_transport.Transport.init(.{
@@ -58,7 +58,7 @@ const ProviderRuntime = struct {
         });
         self.map_ctx = .{};
         self.map = core.providers.types.Adapter.from(map_ctx_t, &self.map_ctx, map_ctx_t.map);
-        self.pol = try core.providers.first_provider.Pol.init(.{
+        self.pol = try core.providers.client.Pol.init(.{
             .max_tries = 4,
             .backoff = .{
                 .base_ms = 2000,
@@ -67,7 +67,7 @@ const ProviderRuntime = struct {
             },
             .retryable = core.providers.types.retryable,
         });
-        self.client = core.providers.first_provider.Client.init(
+        self.client = core.providers.client.Client.init(
             alloc,
             self.tr.asRawTransport(),
             self.map,
@@ -2119,7 +2119,7 @@ fn runPrint(
 
     try sink_impl.fmt.finish();
     if (sink_impl.stop_reason) |reason| {
-        if (print_err.mapStop(reason)) |mapped| return mapped;
+        if (print_err.mapResult(.{ .stop = reason })) |_| return error.ProviderStopped;
     }
 }
 
@@ -2340,9 +2340,9 @@ fn runTui(
     const tsz = tui_term.size(std.posix.STDOUT_FILENO) orelse tui_term.Size{ .w = 80, .h = 24 };
     var ui = try tui_harness.Ui.initFull(alloc, tsz.w, tsz.h, model, provider_label, cwd_path, branch, run_cmd.cfg.theme);
     defer ui.deinit();
-    ui.img_cap = @import("../modes/tui/imgproto.zig").detect();
-    ui.pn.ctx_limit = modelCtxWindow(model);
-    ui.pn.is_sub = is_sub;
+    ui.img_cap = @import("../modes/tui/image.zig").detect();
+    ui.panels.ctx_limit = modelCtxWindow(model);
+    ui.panels.is_sub = is_sub;
 
     _ = tui_term.installSigwinch();
     try tui_render.Renderer.setup(out);
@@ -2425,7 +2425,7 @@ fn runTui(
     var thinking = run_cmd.thinking;
     var popts = thinking.toProviderOpts();
     var auto_compact_on: bool = true;
-    ui.pn.thinking_label = thinkingLabel(thinking);
+    ui.panels.thinking_label = thinkingLabel(thinking);
     ui.border_fg = thinkingBorderFg(thinking);
 
     // Background version check (TUI only, skip for dev builds)
@@ -2529,7 +2529,7 @@ fn runTui(
             }
         }
         if (cmd == .compacted) {
-            ui.pn.noteCompaction();
+            ui.panels.noteCompaction();
         }
         if (cmd == .handled or cmd == .compacted or cmd == .resumed or cmd == .clear or cmd == .copy or cmd == .cost or cmd == .reload or cmd == .select_model or cmd == .select_session or cmd == .select_settings or cmd == .select_fork) {
             const cmd_text = init_cmd_fbs.getWritten();
@@ -2556,7 +2556,7 @@ fn runTui(
                 .system_prompt = sys_prompt,
             });
             if (is_tty and watcher.isCanceled()) try ui.tr.infoText("[canceled]");
-            ui.pn.run_state = .idle;
+            ui.panels.run_state = .idle;
         } else {
             try ui.setModel(model);
             try ui.setProvider(provider_label);
@@ -2649,7 +2649,7 @@ fn runTui(
                                             .{ .key = "provider", .vis = .@"pub", .val = .{ .str = provider_label } },
                                         };
                                         try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
-                                        ui.pn.ctx_limit = modelCtxWindow(model);
+                                        ui.panels.ctx_limit = modelCtxWindow(model);
                                         try ui.setModel(model);
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
@@ -2729,7 +2729,7 @@ fn runTui(
                     }
 
                     // Command preview intercept
-                    if (ui.cp) |*cp| {
+                    if (ui.picker) |*cp| {
                         switch (key) {
                             .up => {
                                 cp.up();
@@ -2778,14 +2778,14 @@ fn runTui(
                                     try ui.ed.buf.appendSlice(ui.ed.alloc, " ");
                                     ui.ed.cur = ui.ed.buf.items.len;
                                 }
-                                ui.cp = null;
+                                ui.picker = null;
                                 ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
                                 ui.updatePreview();
                                 try ui.draw(out);
                                 continue;
                             },
                             .esc => {
-                                ui.cp = null;
+                                ui.picker = null;
                                 ui.clearPathItems();
                                 try ui.draw(out);
                                 continue;
@@ -2912,7 +2912,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .handled or cmd == .compacted or cmd == .resumed) {
-                                if (cmd == .compacted) ui.pn.noteCompaction();
+                                if (cmd == .compacted) ui.panels.noteCompaction();
                                 const cmd_text = cmd_fbs.getWritten();
                                 if (cmd_text.len > 0) {
                                     try infoTextSafe(alloc, &ui, cmd_text);
@@ -2969,14 +2969,14 @@ fn runTui(
                             if (pre) |p| alloc.free(p);
                             thinking = cycleThinking(thinking);
                             popts = thinking.toProviderOpts();
-                            ui.pn.thinking_label = thinkingLabel(thinking);
+                            ui.panels.thinking_label = thinkingLabel(thinking);
                             ui.border_fg = thinkingBorderFg(thinking);
                             try ui.draw(out);
                         },
                         .cycle_model => {
                             if (pre) |p| alloc.free(p);
                             model = try cycleModel(alloc, model, &model_owned, models_list);
-                            ui.pn.ctx_limit = modelCtxWindow(model);
+                            ui.panels.ctx_limit = modelCtxWindow(model);
                             try ui.setModel(model);
                             try ui.draw(out);
                         },
@@ -3072,7 +3072,7 @@ fn runTui(
                         .reverse_cycle_model => {
                             if (pre) |p| alloc.free(p);
                             model = try reverseCycleModel(alloc, model, &model_owned, models_list);
-                            ui.pn.ctx_limit = modelCtxWindow(model);
+                            ui.panels.ctx_limit = modelCtxWindow(model);
                             try ui.setModel(model);
                             try ui.draw(out);
                         },
@@ -3146,7 +3146,7 @@ fn runTui(
                                     const msg = try std.fmt.allocPrint(alloc, "[retry start failed: {s}]", .{detail});
                                     defer alloc.free(msg);
                                     try ui.tr.infoText(msg);
-                                    ui.pn.run_state = .idle;
+                                    ui.panels.run_state = .idle;
                                     retried_overflow = false;
                                     try flushBgDone(alloc, &ui, &bg_mgr);
                                     try syncBgFooter(alloc, &ui, &bg_mgr);
@@ -3154,7 +3154,7 @@ fn runTui(
                                     continue;
                                 };
                                 retried_overflow = true;
-                                ui.pn.run_state = .streaming;
+                                ui.panels.run_state = .streaming;
                                 try flushBgDone(alloc, &ui, &bg_mgr);
                                 try syncBgFooter(alloc, &ui, &bg_mgr);
                                 try ui.draw(out);
@@ -3189,17 +3189,17 @@ fn runTui(
                                 const msg = try std.fmt.allocPrint(alloc, "[queue start failed: {s}]", .{detail});
                                 defer alloc.free(msg);
                                 try ui.tr.infoText(msg);
-                                ui.pn.run_state = .idle;
+                                ui.panels.run_state = .idle;
                                 try flushBgDone(alloc, &ui, &bg_mgr);
                                 try syncBgFooter(alloc, &ui, &bg_mgr);
                                 try ui.draw(out);
                                 continue;
                             };
                             retried_overflow = false;
-                            ui.pn.run_state = .streaming;
+                            ui.panels.run_state = .streaming;
                             try ui.tr.infoText(if (next_turn.kind == .steering) "(sending queued steering message)" else "(sending queued follow-up message)");
                         } else {
-                            ui.pn.run_state = .idle;
+                            ui.panels.run_state = .idle;
                         }
                         if (stop_after_completions) |n| {
                             const next_n = n - 1;
@@ -3235,8 +3235,8 @@ fn runTui(
                     }
                 },
                 .none => {
-                    if (ui.pn.bg_running > 0) {
-                        ui.pn.tickBgSpinner();
+                    if (ui.panels.bg_running > 0) {
+                        ui.panels.tickBgSpinner();
                         try ui.draw(out);
                     }
                 },
@@ -3314,7 +3314,7 @@ fn runTui(
                 _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
             }
             if (cmd == .handled or cmd == .compacted or cmd == .resumed) {
-                if (cmd == .compacted) ui.pn.noteCompaction();
+                if (cmd == .compacted) ui.panels.noteCompaction();
                 try syncBgFooter(alloc, &ui, &bg_mgr);
                 try ui.setModel(model);
                 try ui.setProvider(provider_label);
@@ -4852,7 +4852,7 @@ fn syncBgFooter(alloc: std.mem.Allocator, ui: *tui_harness.Ui, bg_mgr: *bg.Mgr) 
         if (job.state == .running) running +%= 1;
     }
     const done: u32 = launched -| running;
-    ui.pn.setBgStatus(launched, running, done);
+    ui.panels.setBgStatus(launched, running, done);
 }
 
 fn maybeShowVersionUpdate(
@@ -4996,7 +4996,7 @@ fn startLiveTurnWithPrompt(
         .system_prompt = sys_prompt,
     });
     retried_overflow.* = false;
-    ui.pn.run_state = .streaming;
+    ui.panels.run_state = .streaming;
 }
 
 fn normalizeRpcCmd(raw: []const u8) []const u8 {
@@ -5129,7 +5129,7 @@ fn parseCmdToolMask(raw: []const u8) !u16 {
     return mask;
 }
 
-const tui_cmdprev = @import("../modes/tui/cmdprev.zig");
+const tui_cmdpicker = @import("../modes/tui/cmdpicker.zig");
 
 fn completeSlashCmd(ed: *tui_harness.editor.Editor) void {
     const text = ed.text();
@@ -5137,7 +5137,7 @@ fn completeSlashCmd(ed: *tui_harness.editor.Editor) void {
     const prefix = text[1..];
     var match: ?[]const u8 = null;
     var count: usize = 0;
-    for (tui_cmdprev.cmds) |cmd| {
+    for (tui_cmdpicker.cmds) |cmd| {
         if (prefix.len <= cmd.name.len and std.mem.startsWith(u8, cmd.name, prefix)) {
             if (match == null) match = cmd.name;
             count += 1;
@@ -5181,13 +5181,13 @@ fn completeFilePath(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     const has_at = word[0] == '@';
     const prefix = if (has_at) word[1..] else word;
 
-    const items = tui_pathcomp.list(alloc, prefix) orelse return;
-    defer tui_pathcomp.freeList(alloc, items);
+    const items = tui_path_complete.list(alloc, prefix) orelse return;
+    defer tui_path_complete.freeList(alloc, items);
 
     const repl: []const u8 = if (items.len == 1)
         items[0]
     else blk: {
-        const cp = tui_pathcomp.commonPrefix(tui_pathcomp.asConst(items));
+        const cp = tui_path_complete.commonPrefix(tui_path_complete.asConst(items));
         if (cp.len <= prefix.len) return; // no progress
         break :blk cp;
     };
@@ -5305,7 +5305,7 @@ fn restoreSessionIntoUi(
     defer rdr.deinit();
 
     ui.clearTranscript();
-    ui.pn.resetSessionView();
+    ui.panels.resetSessionView();
 
     while (try rdr.next()) |ev| {
         switch (ev.data) {
@@ -5337,7 +5337,7 @@ fn restoreSessionIntoUi(
         }
     }
 
-    ui.pn.run_state = .idle;
+    ui.panels.run_state = .idle;
     ui.tr.scrollToBottom();
 }
 
@@ -6168,8 +6168,8 @@ fn sanitizeUtf8LossyAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
 }
 
 fn showCost(_: std.mem.Allocator, ui: *tui_harness.Ui) !void {
-    const u = ui.pn.usage;
-    const mc = ui.pn.cost_micents;
+    const u = ui.panels.usage;
+    const mc = ui.panels.cost_micents;
 
     // Format cost as $N.NNN
     var cost_buf: [24]u8 = undefined;
@@ -6321,9 +6321,9 @@ fn autoCompactWith(
 ) !AutoCompactOutcome {
     if (no_session or session_dir_path == null) return .skipped;
     if (!force) {
-        if (ui.pn.ctx_limit == 0) return .skipped;
-        if (!ui.pn.has_usage) return .skipped;
-        const pct = ui.pn.cum_tok *| 100 / ui.pn.ctx_limit;
+        if (ui.panels.ctx_limit == 0) return .skipped;
+        if (!ui.panels.has_usage) return .skipped;
+        const pct = ui.panels.cum_tok *| 100 / ui.panels.ctx_limit;
         if (pct < compact_threshold_pct) return .skipped;
     }
 
@@ -6343,7 +6343,7 @@ fn autoCompactWith(
     };
     switch (res) {
         .compacted => {
-            ui.pn.noteCompaction();
+            ui.panels.noteCompaction();
             try ui.tr.infoText("[session compacted]");
             return .compacted;
         },
@@ -6359,7 +6359,7 @@ fn autoCompactWith(
 fn syncInputFooter(ui: *tui_harness.Ui, mode: tui_panels.InputMode, queued_len: usize) void {
     const max_u32 = std.math.maxInt(u32);
     const queued: u32 = if (queued_len > max_u32) max_u32 else @intCast(queued_len);
-    ui.pn.setInputStatus(mode, queued);
+    ui.panels.setInputStatus(mode, queued);
 }
 
 const PendingKind = enum {
@@ -7742,9 +7742,9 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
 
     try ui.tr.infoText("stale");
     try ui.onProvider(.{ .tool_call = .{ .id = "stale-1", .name = "ls", .args = "{}" } });
-    ui.pn.cum_tok = 999;
-    ui.pn.has_usage = true;
-    ui.pn.run_state = .failed;
+    ui.panels.cum_tok = 999;
+    ui.panels.has_usage = true;
+    ui.panels.run_state = .failed;
 
     try restoreSessionIntoUi(std.testing.allocator, &ui, sess_abs, false, "100");
 
@@ -7758,7 +7758,7 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
     }
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const row = ui.pn.tool(0);
+    const row = ui.panels.tool(0);
     const snap = try std.fmt.allocPrint(
         std.testing.allocator,
         "stale={} prompt={} answer={} usage={} tok={} state={s} count={} row={s}|{s}|{s}",
@@ -7766,10 +7766,10 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
             saw_stale,
             saw_prompt,
             saw_answer,
-            ui.pn.has_usage,
-            ui.pn.cum_tok,
-            @tagName(ui.pn.state()),
-            ui.pn.count(),
+            ui.panels.has_usage,
+            ui.panels.cum_tok,
+            @tagName(ui.panels.state()),
+            ui.panels.count(),
             row.id,
             row.name,
             @tagName(row.state),
@@ -7900,12 +7900,12 @@ test "syncInputFooter tracks mode and clamps queue size" {
     defer ui.deinit();
 
     syncInputFooter(&ui, .queue, 12);
-    try std.testing.expect(ui.pn.input_mode == .queue);
-    try std.testing.expectEqual(@as(u32, 12), ui.pn.queued_msgs);
+    try std.testing.expect(ui.panels.input_mode == .queue);
+    try std.testing.expectEqual(@as(u32, 12), ui.panels.queued_msgs);
 
     syncInputFooter(&ui, .steering, @as(usize, std.math.maxInt(u32)) + 10);
-    try std.testing.expect(ui.pn.input_mode == .steering);
-    try std.testing.expectEqual(std.math.maxInt(u32), ui.pn.queued_msgs);
+    try std.testing.expect(ui.panels.input_mode == .steering);
+    try std.testing.expectEqual(std.math.maxInt(u32), ui.panels.queued_msgs);
 }
 
 test "needsAskHint detects ask-question prompts" {
@@ -7940,12 +7940,12 @@ test "sanitizeUtf8LossyAlloc truncates incomplete multibyte suffix lossy" {
 }
 
 test "sanitizeUtf8LossyAlloc property: output is valid utf8" {
-    const pbt = @import("../core/pbt.zig");
+    const pbt = @import("../core/prop_test.zig");
     try pbt.expectSanValid(sanitizeUtf8LossyAlloc, 64, .{ .iterations = 200 });
 }
 
 test "sanitizeUtf8LossyAlloc property: valid utf8 is preserved" {
-    const pbt = @import("../core/pbt.zig");
+    const pbt = @import("../core/prop_test.zig");
     try pbt.expectSanPreserves(sanitizeUtf8LossyAlloc, 24, .{ .iterations = 200 });
 }
 
@@ -8786,7 +8786,7 @@ test "runtime print reports unsupported native provider without provider_cmd" {
     var out_fbs = std.io.fixedBufferStream(&out_buf);
 
     try std.testing.expectError(
-        error.StopErr,
+        error.ProviderStopped,
         execWithIo(std.testing.allocator, cfg, eofReader(), out_fbs.writer().any()),
     );
 
@@ -13142,9 +13142,9 @@ test "autoCompact draws compacting notice before compactor runs" {
 
     var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
     defer ui.deinit();
-    ui.pn.ctx_limit = 100;
-    ui.pn.cum_tok = 90;
-    ui.pn.has_usage = true;
+    ui.panels.ctx_limit = 100;
+    ui.panels.cum_tok = 90;
+    ui.panels.has_usage = true;
 
     var out_buf: [16384]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
@@ -13209,9 +13209,9 @@ test "autoCompact reports summary budget stop metadata" {
 
     var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
     defer ui.deinit();
-    ui.pn.ctx_limit = 100;
-    ui.pn.cum_tok = 90;
-    ui.pn.has_usage = true;
+    ui.panels.ctx_limit = 100;
+    ui.panels.cum_tok = 90;
+    ui.panels.has_usage = true;
 
     var out_buf: [16384]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
