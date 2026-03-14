@@ -276,9 +276,21 @@ fn snapAlloc(alloc: std.mem.Allocator, cp: CmdPreview) ![]u8 {
 // -- Tests --
 
 test "update empty prefix returns all" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const cp = CmdPreview.update("").?;
-    try std.testing.expectEqual(@as(u8, cmds.len), cp.n);
-    try std.testing.expectEqual(@as(u8, 0), cp.sel);
+    const Snap = struct {
+        n: u8,
+        sel: u8,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.update empty prefix returns all.Snap
+        \\  .n: u8 = 26
+        \\  .sel: u8 = 0
+    ).expectEqual(Snap{
+        .n = cp.n,
+        .sel = cp.sel,
+    });
 }
 
 test "update filters by prefix" {
@@ -340,33 +352,83 @@ test "update exact match" {
 }
 
 test "up wraps to bottom" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var cp = CmdPreview.update("").?;
     cp.up();
-    try std.testing.expectEqual(cmds.len - 1, @as(usize, cp.sel));
+    const Snap = struct {
+        sel: usize,
+        scroll: u8,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.up wraps to bottom.Snap
+        \\  .sel: usize = 25
+        \\  .scroll: u8 = 21
+    ).expectEqual(Snap{
+        .sel = cp.sel,
+        .scroll = cp.scroll,
+    });
 }
 
 test "down wraps to top" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var cp = CmdPreview.update("ex").?; // 2 items
     cp.down(); // sel=1
     cp.down(); // wrap to 0
-    try std.testing.expectEqual(@as(u8, 0), cp.sel);
+    const Snap = struct {
+        sel: u8,
+        scroll: u8,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.down wraps to top.Snap
+        \\  .sel: u8 = 0
+        \\  .scroll: u8 = 0
+    ).expectEqual(Snap{
+        .sel = cp.sel,
+        .scroll = cp.scroll,
+    });
 }
 
 test "down scrolls window" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var cp = CmdPreview.update("").?; // 22 items, max_vis=5
     var i: u8 = 0;
     while (i < max_vis) : (i += 1) cp.down();
-    try std.testing.expectEqual(max_vis, cp.sel);
-    try std.testing.expect(cp.scroll > 0);
+    const Snap = struct {
+        sel: u8,
+        scroll: u8,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.down scrolls window.Snap
+        \\  .sel: u8 = 5
+        \\  .scroll: u8 = 3
+    ).expectEqual(Snap{
+        .sel = cp.sel,
+        .scroll = cp.scroll,
+    });
 }
 
 test "up scrolls back" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var cp = CmdPreview.update("").?;
     var i: u8 = 0;
     while (i < max_vis + 2) : (i += 1) cp.down();
     while (i > 0) : (i -= 1) cp.up();
-    try std.testing.expectEqual(@as(u8, 0), cp.sel);
-    try std.testing.expectEqual(@as(u8, 0), cp.scroll);
+    const Snap = struct {
+        sel: u8,
+        scroll: u8,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.up scrolls back.Snap
+        \\  .sel: u8 = 0
+        \\  .scroll: u8 = 0
+    ).expectEqual(Snap{
+        .sel = cp.sel,
+        .scroll = cp.scroll,
+    });
 }
 
 test "selected returns correct cmd" {
@@ -397,6 +459,8 @@ test "selected returns correct cmd" {
 }
 
 test "renderDown selected row has arrow and bold" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var frm = try Frame.init(std.testing.allocator, 50, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -405,22 +469,38 @@ test "renderDown selected row has arrow and bold" {
 
     // First row (sel=0) at y=2: "→ /compact"
     const arrow = try frm.cell(0, 2);
-    try std.testing.expectEqual(@as(u21, 0x2192), arrow.cp); // →
     try std.testing.expect(arrow.style.bold);
 
     const slash = try frm.cell(2, 2);
-    try std.testing.expectEqual(@as(u21, '/'), slash.cp);
     try std.testing.expect(slash.style.bold);
 
     // Second row (unselected) at y=3: "  /copy"
     const sp = try frm.cell(0, 3);
-    try std.testing.expectEqual(@as(u21, ' '), sp.cp);
     const c2 = try frm.cell(3, 3);
-    try std.testing.expectEqual(@as(u21, 'c'), c2.cp);
     try std.testing.expect(!c2.style.bold);
+    const Snap = struct {
+        arrow: u21,
+        slash: u21,
+        sp: u21,
+        c2: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.renderDown selected row has arrow and bold.Snap
+        \\  .arrow: u21 = '→'
+        \\  .slash: u21 = '/'
+        \\  .sp: u21 = ' '
+        \\  .c2: u21 = 'c'
+    ).expectEqual(Snap{
+        .arrow = arrow.cp,
+        .slash = slash.cp,
+        .sp = sp.cp,
+        .c2 = c2.cp,
+    });
 }
 
 test "renderDown description at col 32 when wide" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var frm = try Frame.init(std.testing.allocator, 60, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -429,10 +509,20 @@ test "renderDown description at col 32 when wide" {
 
     // desc "Show commands" at col 32, y=3
     const c = try frm.cell(32, 3);
-    try std.testing.expectEqual(@as(u21, 'S'), c.cp);
+    const Snap = struct {
+        c: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.renderDown description at col 32 when wide.Snap
+        \\  .c: u21 = 'S'
+    ).expectEqual(Snap{
+        .c = c.cp,
+    });
 }
 
 test "renderDown no description when narrow" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var frm = try Frame.init(std.testing.allocator, 35, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -441,10 +531,20 @@ test "renderDown no description when narrow" {
 
     // At col 32 should be space (no desc rendered when w <= 40)
     const c = try frm.cell(32, 3);
-    try std.testing.expectEqual(@as(u21, ' '), c.cp);
+    const Snap = struct {
+        c: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.renderDown no description when narrow.Snap
+        \\  .c: u21 = ' '
+    ).expectEqual(Snap{
+        .c = c.cp,
+    });
 }
 
 test "renderDown with limited height" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var frm = try Frame.init(std.testing.allocator, 50, 4);
     defer frm.deinit(std.testing.allocator);
 
@@ -453,10 +553,20 @@ test "renderDown with limited height" {
 
     // Should render 2 rows at y=2,3
     const c = try frm.cell(2, 2);
-    try std.testing.expectEqual(@as(u21, '/'), c.cp);
+    const Snap = struct {
+        c: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.renderDown with limited height.Snap
+        \\  .c: u21 = '/'
+    ).expectEqual(Snap{
+        .c = c.cp,
+    });
 }
 
 test "renderDown scroll indicator shown" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var frm = try Frame.init(std.testing.allocator, 50, 10);
     defer frm.deinit(std.testing.allocator);
 
@@ -465,17 +575,34 @@ test "renderDown scroll indicator shown" {
 
     // 5 item rows at y=1..5, scroll indicator at y=6: "  (1/22)"
     const c0 = try frm.cell(2, 6);
-    try std.testing.expectEqual(@as(u21, '('), c0.cp);
+    const Snap = struct {
+        c0: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.renderDown scroll indicator shown.Snap
+        \\  .c0: u21 = '('
+    ).expectEqual(Snap{
+        .c0 = c0.cp,
+    });
 }
 
 test "visRows accounts for scroll indicator" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const cp = CmdPreview.update("").?; // 22 items
-    // 5 visible + 1 scroll indicator = 6
-    try std.testing.expectEqual(@as(usize, 6), cp.visRows());
-
-    // 2 items, no scroll indicator
     const cp2 = CmdPreview.update("ex").?;
-    try std.testing.expectEqual(@as(usize, 2), cp2.visRows());
+    const Snap = struct {
+        all: usize,
+        ex: usize,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.visRows accounts for scroll indicator.Snap
+        \\  .all: usize = 6
+        \\  .ex: usize = 2
+    ).expectEqual(Snap{
+        .all = cp.visRows(),
+        .ex = cp2.visRows(),
+    });
 }
 
 test "updateArgs filters by prefix" {
@@ -493,9 +620,22 @@ test "updateArgs filters by prefix" {
 }
 
 test "updateArgs empty prefix returns all" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const items = [_][]const u8{ "anthropic", "openai", "google" };
     const cp = CmdPreview.updateArgs(&items, "").?;
-    try std.testing.expectEqual(@as(u8, 3), cp.n);
+    const Snap = struct {
+        n: u8,
+        sel: u8,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.updateArgs empty prefix returns all.Snap
+        \\  .n: u8 = 3
+        \\  .sel: u8 = 0
+    ).expectEqual(Snap{
+        .n = cp.n,
+        .sel = cp.sel,
+    });
 }
 
 test "updateArgs no match returns null" {
@@ -504,6 +644,8 @@ test "updateArgs no match returns null" {
 }
 
 test "updateArgs renders without slash" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     const items = [_][]const u8{ "all", "none", "read" };
     const cp = CmdPreview.updateArgs(&items, "").?;
 
@@ -513,8 +655,18 @@ test "updateArgs renders without slash" {
 
     // First row at y=1: "→ all" (no slash)
     const arrow = try frm.cell(0, 1);
-    try std.testing.expectEqual(@as(u21, 0x2192), arrow.cp);
     // 'a' at col 2 (no slash)
     const a = try frm.cell(2, 1);
-    try std.testing.expectEqual(@as(u21, 'a'), a.cp);
+    const Snap = struct {
+        arrow: u21,
+        a: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.cmdprev.test.updateArgs renders without slash.Snap
+        \\  .arrow: u21 = '→'
+        \\  .a: u21 = 'a'
+    ).expectEqual(Snap{
+        .arrow = arrow.cp,
+        .a = a.cp,
+    });
 }

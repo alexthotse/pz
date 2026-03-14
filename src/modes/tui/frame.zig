@@ -153,6 +153,8 @@ pub const Frame = struct {
 };
 
 test "frame write clips utf8 input at row width" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var f = try Frame.init(std.testing.allocator, 4, 2);
     defer f.deinit(std.testing.allocator);
 
@@ -168,13 +170,27 @@ test "frame write clips utf8 input at row width" {
     const c1 = try f.cell(1, 0);
     const c2 = try f.cell(2, 0);
     const c3 = try f.cell(3, 0);
-
-    try std.testing.expectEqual(@as(u21, 'A'), c1.cp);
-    try std.testing.expectEqual(@as(u21, 0x03b2), c2.cp);
-    try std.testing.expectEqual(@as(u21, 'Z'), c3.cp);
     try std.testing.expect(Style.eql(st, c1.style));
     try std.testing.expect(Style.eql(st, c2.style));
     try std.testing.expect(Style.eql(st, c3.style));
+    const Snap = struct {
+        wrote: usize,
+        c1: u21,
+        c2: u21,
+        c3: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.frame.test.frame write clips utf8 input at row width.Snap
+        \\  .wrote: usize = 3
+        \\  .c1: u21 = 'A'
+        \\  .c2: u21 = 'β'
+        \\  .c3: u21 = 'Z'
+    ).expectEqual(Snap{
+        .wrote = wrote,
+        .c1 = c1.cp,
+        .c2 = c2.cp,
+        .c3 = c3.cp,
+    });
 }
 
 test "frame write validates bounds and utf8" {
@@ -205,30 +221,62 @@ test "frame copy requires matching size" {
 }
 
 test "frame write wide CJK characters" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     // 6-col frame: write "A中B" → A(1) + 中(2) + B(1) = 4 cols used
     var f = try Frame.init(std.testing.allocator, 6, 1);
     defer f.deinit(std.testing.allocator);
 
     const wrote = try f.write(0, 0, "A中B", .{});
-    try std.testing.expectEqual(@as(usize, 4), wrote); // A(1) + 中(2) + B(1) = 4 display cols
-
-    try std.testing.expectEqual(@as(u21, 'A'), (try f.cell(0, 0)).cp);
-    try std.testing.expectEqual(@as(u21, 0x4E2D), (try f.cell(1, 0)).cp); // '中'
-    try std.testing.expectEqual(@as(u21, Frame.wide_pad), (try f.cell(2, 0)).cp); // pad
-    try std.testing.expectEqual(@as(u21, 'B'), (try f.cell(3, 0)).cp);
+    const Snap = struct {
+        wrote: usize,
+        c0: u21,
+        c1: u21,
+        c2: u21,
+        c3: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.frame.test.frame write wide CJK characters.Snap
+        \\  .wrote: usize = 4
+        \\  .c0: u21 = 'A'
+        \\  .c1: u21 = '中'
+        \\  .c2: u21 = '\u{00}'
+        \\  .c3: u21 = 'B'
+    ).expectEqual(Snap{
+        .wrote = wrote,
+        .c0 = (try f.cell(0, 0)).cp,
+        .c1 = (try f.cell(1, 0)).cp,
+        .c2 = (try f.cell(2, 0)).cp,
+        .c3 = (try f.cell(3, 0)).cp,
+    });
 }
 
 test "frame write wide char clipped at boundary" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     // 3-col frame: write "A中" → A fills col 0, 中 needs cols 1-2 → fits
     var f = try Frame.init(std.testing.allocator, 3, 1);
     defer f.deinit(std.testing.allocator);
 
     const wrote = try f.write(0, 0, "A中X", .{});
-    try std.testing.expectEqual(@as(usize, 3), wrote); // A(1col) + 中(2cols) = 3 cols, no room for X
-
-    try std.testing.expectEqual(@as(u21, 'A'), (try f.cell(0, 0)).cp);
-    try std.testing.expectEqual(@as(u21, 0x4E2D), (try f.cell(1, 0)).cp);
-    try std.testing.expectEqual(@as(u21, Frame.wide_pad), (try f.cell(2, 0)).cp);
+    const Snap = struct {
+        wrote: usize,
+        c0: u21,
+        c1: u21,
+        c2: u21,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.frame.test.frame write wide char clipped at boundary.Snap
+        \\  .wrote: usize = 3
+        \\  .c0: u21 = 'A'
+        \\  .c1: u21 = '中'
+        \\  .c2: u21 = '\u{00}'
+    ).expectEqual(Snap{
+        .wrote = wrote,
+        .c0 = (try f.cell(0, 0)).cp,
+        .c1 = (try f.cell(1, 0)).cp,
+        .c2 = (try f.cell(2, 0)).cp,
+    });
 }
 
 test "frame write wide char dropped when only 1 col left" {

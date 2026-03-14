@@ -382,13 +382,25 @@ fn parseExtColor(params: []const u16, i: *usize) Color {
 // ── Tests ──
 
 test "vscreen basic text rendering" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
     var vs = try VScreen.init(std.testing.allocator, 20, 3);
     defer vs.deinit();
 
     vs.feed("hello");
     try vs.expectText(0, 0, "hello");
-    try std.testing.expectEqual(@as(usize, 0), vs.row);
-    try std.testing.expectEqual(@as(usize, 5), vs.col);
+    const Snap = struct {
+        row: usize,
+        col: usize,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.vscreen.test.vscreen basic text rendering.Snap
+        \\  .row: usize = 0
+        \\  .col: usize = 5
+    ).expectEqual(Snap{
+        .row = vs.row,
+        .col = vs.col,
+    });
 }
 
 test "vscreen cursor positioning" {
