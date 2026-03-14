@@ -192,10 +192,16 @@ pub const CmdCache = struct {
         self.entries.deinit(self.alloc);
     }
 
-    pub fn contains(self: *const CmdCache, key: Key) bool {
+    pub fn contains(self: *CmdCache, key: Key) bool {
         const key_hash = hash(key);
-        for (self.entries.items) |item| {
-            if (item.hash == key_hash and eql(item.key, key)) return true;
+        for (self.entries.items, 0..) |item, i| {
+            if (item.hash != key_hash or !eql(item.key, key)) continue;
+            if (i + 1 < self.entries.items.len) {
+                const hit = item;
+                std.mem.copyForwards(Entry, self.entries.items[i .. self.entries.items.len - 1], self.entries.items[i + 1 ..]);
+                self.entries.items[self.entries.items.len - 1] = hit;
+            }
+            return true;
         }
         return false;
     }
@@ -4062,6 +4068,54 @@ test "CmdCache respects max_commands limit" {
         .life = .{ .session = "sess-a" },
     }));
     try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "cmd-1",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
+}
+
+test "CmdCache hit refreshes recency before eviction" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    for (0..CmdCache.max_cmds) |i| {
+        var buf: [32]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&buf, "cmd-{d}", .{i});
+        try cache.add(.{
+            .tool = .bash,
+            .cmd = cmd,
+            .loc = .{ .cwd = "/tmp/pz" },
+            .policy = .{ .version = policy.ver_current },
+            .life = .{ .session = "sess-a" },
+        });
+    }
+
+    try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "cmd-0",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
+
+    try cache.add(.{
+        .tool = .bash,
+        .cmd = "overflow",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    });
+
+    try std.testing.expect(cache.contains(.{
+        .tool = .bash,
+        .cmd = "cmd-0",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    }));
+    try std.testing.expect(!cache.contains(.{
         .tool = .bash,
         .cmd = "cmd-1",
         .loc = .{ .cwd = "/tmp/pz" },
