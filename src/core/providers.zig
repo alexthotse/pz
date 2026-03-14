@@ -7,6 +7,7 @@ pub const client = @import("providers/client.zig");
 pub const proc_transport = @import("providers/proc_transport.zig");
 pub const auth = @import("providers/auth.zig");
 pub const oauth_callback = @import("providers/oauth_callback.zig");
+pub const http_client = @import("providers/http_client.zig");
 pub const anthropic = @import("providers/anthropic.zig");
 pub const openai = @import("providers/openai.zig");
 

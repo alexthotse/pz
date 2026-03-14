@@ -4,6 +4,7 @@ const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
 const utf8 = @import("../utf8.zig");
+const hc = @import("http_client.zig");
 
 const api_version = "2023-06-01";
 const api_host = "api.anthropic.com";
@@ -43,78 +44,6 @@ pub const Client = struct {
         return providers.Provider.from(Client, self, Client.start);
     }
 
-    const max_retries = 3;
-    const base_delay_ms = 2000;
-    const max_delay_ms = 60000;
-
-    /// Proactive pre-request refresh: if token looks expired, try refreshing.
-    /// Failure is non-fatal — the 401 retry handler will surface real errors.
-    fn tryProactiveRefresh(self: *Client, ar: std.mem.Allocator) void {
-        if (self.auth.auth != .oauth) return;
-        const now = std.time.milliTimestamp();
-        if (now < self.auth.auth.oauth.expires) return;
-        if (self.refreshAuth(ar)) |_| {} else |err| {
-            std.debug.print("warning: proactive token refresh failed: {s}\n", .{@errorName(err)});
-        }
-    }
-
-    /// Refresh OAuth token. Tries refresh endpoint first, then reloads from
-    /// disk (another process may have refreshed).
-    fn refreshAuth(self: *Client, ar: std.mem.Allocator) !void {
-        const old = self.auth.auth.oauth;
-
-        // Try refresh endpoint
-        if (auth_mod.refreshOAuthForProviderWithHooks(ar, .anthropic, old, .{ .ca_file = self.ca_file })) |new_oauth| {
-            const auth_ar = self.auth.arena.allocator();
-            const new_access = try auth_ar.dupe(u8, new_oauth.access);
-            const new_refresh = try auth_ar.dupe(u8, new_oauth.refresh);
-            ar.free(new_oauth.access);
-            ar.free(new_oauth.refresh);
-            self.auth.auth = .{ .oauth = .{
-                .access = new_access,
-                .refresh = new_refresh,
-                .expires = new_oauth.expires,
-            } };
-            return;
-        } else |_| {}
-
-        // Refresh failed — reload from disk (another instance may have refreshed)
-        var reloaded = auth_mod.loadForProvider(self.alloc, .anthropic) catch return error.RefreshFailed;
-        switch (reloaded.auth) {
-            .oauth => |oauth| {
-                const now = std.time.milliTimestamp();
-                if (now < oauth.expires) {
-                    // Disk has a valid token — swap
-                    self.auth.deinit();
-                    self.auth = reloaded;
-                    return;
-                }
-            },
-            else => {},
-        }
-        reloaded.deinit();
-        return error.RefreshFailed;
-    }
-
-    fn buildAuthHeaders(self: *Client, ar: std.mem.Allocator) !std.ArrayListUnmanaged(std.http.Header) {
-        var hdrs = std.ArrayListUnmanaged(std.http.Header){};
-        try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
-        try hdrs.append(ar, .{ .name = "anthropic-version", .value = api_version });
-
-        switch (self.auth.auth) {
-            .oauth => |oauth| {
-                const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
-                try hdrs.append(ar, .{ .name = "anthropic-beta", .value = "oauth-2025-04-20" });
-                try hdrs.append(ar, .{ .name = "anthropic-dangerous-direct-browser-access", .value = "true" });
-                try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
-            },
-            .api_key => |key| {
-                try hdrs.append(ar, .{ .name = "x-api-key", .value = key });
-            },
-        }
-        return hdrs;
-    }
-
     fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
         const stream = try self.alloc.create(SseStream);
         stream.* = SseStream.initFields(self.alloc);
@@ -125,14 +54,10 @@ pub const Client = struct {
 
         const ar = stream.arena.allocator();
 
-        // Proactively refresh expired OAuth tokens (best-effort: 401 handler retries)
-        self.tryProactiveRefresh(ar);
+        hc.tryProactiveRefresh(self.alloc, &self.auth, .anthropic, self.ca_file, ar);
 
-        // Build request body
         const body = try buildBody(ar, req);
-
-        // Auth headers
-        var hdrs = try self.buildAuthHeaders(ar);
+        var hdrs = try buildAuthHeaders(&self.auth, ar);
 
         const uri = std.Uri{
             .scheme = "https",
@@ -140,77 +65,10 @@ pub const Client = struct {
             .path = .{ .raw = api_path },
         };
 
-        var attempt: u32 = 0;
-        var did_refresh = false;
-        while (true) : (attempt += 1) {
-            stream.req = try self.http.request(.POST, uri, .{
-                .extra_headers = hdrs.items,
-                .keep_alive = false,
-            });
-
-            // Send body
-            stream.req.transfer_encoding = .{ .content_length = body.len };
-            var bw = try stream.req.sendBodyUnflushed(&stream.send_buf);
-            try bw.writer.writeAll(body);
-            try bw.end();
-            try stream.req.connection.?.flush();
-
-            // Receive response head
-            stream.response = try stream.req.receiveHead(&stream.redir_buf);
-
-            const status_int: u16 = @intFromEnum(stream.response.head.status);
-
-            // On 401 with OAuth, try refreshing token once
-            if (status_int == 401 and self.auth.auth == .oauth and !did_refresh) {
-                did_refresh = true;
-                const refreshed = if (self.refreshAuth(ar)) true else |_| false;
-                if (refreshed) {
-                    // Drain old response before retry (read failure is non-fatal: deinit closes connection)
-                    const rdr = stream.response.reader(&stream.transfer_buf);
-                    _ = rdr.allocRemaining(ar, .limited(16384)) catch |err| {
-                        std.debug.print("warning: drain failed: {s}\n", .{@errorName(err)});
-                    };
-                    stream.req.deinit();
-                    hdrs = try self.buildAuthHeaders(ar);
-                    continue;
-                }
-                // Refresh failed — fall through to show the 401 error
-            }
-
-            const retryable = status_int == 429 or (status_int >= 500 and status_int < 600);
-
-            if (!retryable or attempt >= max_retries) break;
-
-            // Drain response body before retry (read failure is non-fatal: deinit closes connection)
-            const rdr = stream.response.reader(&stream.transfer_buf);
-            _ = rdr.allocRemaining(ar, .limited(16384)) catch |err| {
-                std.debug.print("warning: drain failed: {s}\n", .{@errorName(err)});
-            };
-            stream.req.deinit();
-
-            // Backoff: min(base * 2^attempt, max)
-            const delay: u64 = @min(max_delay_ms, base_delay_ms * (@as(u64, 1) << @intCast(attempt)));
-            std.Thread.sleep(delay * std.time.ns_per_ms);
-        }
+        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .anthropic, self.ca_file, ar, hc.Sleeper.real(), buildAuthHeaders);
 
         if (stream.response.head.status != .ok) {
-            stream.err_mode = true;
-            var decomp: std.http.Decompress = undefined;
-            var decomp_buf: [std.compress.flate.max_window_len]u8 = undefined;
-            const rdr = stream.response.readerDecompressing(
-                &stream.transfer_buf,
-                &decomp,
-                &decomp_buf,
-            );
-            const err_body = rdr.allocRemaining(ar, .limited(16384)) catch
-                try ar.dupe(u8, "unknown error");
-            const status_int: u16 = @intFromEnum(stream.response.head.status);
-            // Sanitize: response body may not be valid UTF-8
-            const safe_body = sanitizeUtf8(ar, err_body) catch "unknown error";
-            // Extract human-readable message from API JSON error body
-            const msg = extractApiErrMsg(safe_body) orelse safe_body;
-            const redacted = audit.redactTextAlloc(ar, msg, .@"pub") catch "unknown error";
-            stream.err_text = try std.fmt.allocPrint(ar, "{d} {s}", .{ status_int, redacted });
+            try hc.formatErrBody(stream, ar, extractApiErrMsg);
         } else {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
         }
@@ -218,6 +76,25 @@ pub const Client = struct {
         return providers.Stream.fromAbortable(SseStream, stream, SseStream.next, SseStream.deinit, SseStream.abort);
     }
 };
+
+fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
+    var hdrs = std.ArrayListUnmanaged(std.http.Header){};
+    try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
+    try hdrs.append(ar, .{ .name = "anthropic-version", .value = api_version });
+
+    switch (auth.auth) {
+        .oauth => |oauth| {
+            const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
+            try hdrs.append(ar, .{ .name = "anthropic-beta", .value = "oauth-2025-04-20" });
+            try hdrs.append(ar, .{ .name = "anthropic-dangerous-direct-browser-access", .value = "true" });
+            try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+        },
+        .api_key => |key| {
+            try hdrs.append(ar, .{ .name = "x-api-key", .value = key });
+        },
+    }
+    return hdrs;
+}
 
 const SseStream = struct {
     alloc: std.mem.Allocator,
@@ -269,56 +146,10 @@ const SseStream = struct {
     }
 
     fn next(self: *SseStream) anyerror!?providers.Event {
-        if (self.pending) |ev| {
-            self.pending = null;
-            return ev;
-        }
-
-        if (self.done) return null;
-
-        if (self.err_mode) {
-            self.err_mode = false;
-            self.done = true;
-            self.pending = .{ .stop = .{ .reason = .err } };
-            return .{ .err = self.err_text orelse "unknown error" };
-        }
-
-        // Reset per-frame arena: previous event strings already consumed by caller.
-        _ = self.arena.reset(.retain_capacity);
-
-        while (true) {
-            const rdr = self.body_rdr orelse {
-                self.done = true;
-                return null;
-            };
-            const line = rdr.takeDelimiter('\n') catch |err| switch (err) {
-                error.ReadFailed => {
-                    self.done = true;
-                    return null;
-                },
-                error.StreamTooLong => continue,
-            };
-
-            const raw_line = line orelse {
-                self.done = true;
-                return null;
-            };
-
-            const raw = std.mem.trimRight(u8, raw_line, "\r");
-            if (!std.mem.startsWith(u8, raw, "data: ")) continue;
-            const data = raw["data: ".len..];
-            if (std.mem.eql(u8, data, "[DONE]")) continue;
-
-            // Copy data before parsing (takeDelimiter buffer is reused)
-            const ar = self.arena.allocator();
-            const data_copy = try ar.dupe(u8, data);
-
-            const ev = self.parseSseData(data_copy) catch continue;
-            if (ev) |e| return e;
-        }
+        return hc.sseNext(self);
     }
 
-    fn parseSseData(self: *SseStream, data: []const u8) !?providers.Event {
+    pub fn parseSseData(self: *SseStream, data: []const u8) !?providers.Event {
         const ar = self.arena.allocator();
 
         var parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
@@ -450,21 +281,8 @@ const SseStream = struct {
     }
 };
 
-fn objGet(map: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
-    const val = map.get(key) orelse return null;
-    return switch (val) {
-        .object => |obj| obj,
-        else => null,
-    };
-}
-
-fn strGet(map: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const val = map.get(key) orelse return null;
-    return switch (val) {
-        .string => |s| s,
-        else => null,
-    };
-}
+const objGet = hc.objGet;
+const strGet = hc.strGet;
 
 fn supportsThinking(model: []const u8) bool {
     // Models that support extended thinking
@@ -472,9 +290,7 @@ fn supportsThinking(model: []const u8) bool {
         std.mem.indexOf(u8, model, "sonnet-4") != null;
 }
 
-fn sanitizeUtf8(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
-    return utf8.sanitizeMaybeAlloc(alloc, raw);
-}
+const sanitizeUtf8 = hc.sanitizeUtf8;
 
 /// Extract "message" from Anthropic JSON error: {"type":"error","error":{"message":"..."}}
 /// Returns a slice into the input body (the JSON string value is unescaped in-place by the parser,
@@ -499,14 +315,7 @@ fn mapStopReason(reason: []const u8) providers.StopReason {
     return map.get(reason) orelse .done;
 }
 
-fn jsonU64(val: ?std.json.Value) u64 {
-    const v = val orelse return 0;
-    return switch (v) {
-        .integer => |i| if (i >= 0) @intCast(i) else 0,
-        .float => |f| if (f >= 0) @intFromFloat(f) else 0,
-        else => 0,
-    };
-}
+const jsonU64 = hc.jsonU64;
 
 fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -613,9 +422,7 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeJsonLossy(alloc: std.mem.Allocator, js: *std.json.Stringify, raw: []const u8) !void {
-    try js.write(try utf8.sanitizeMaybeAlloc(alloc, raw));
-}
+const writeJsonLossy = hc.writeJsonLossy;
 
 fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     // Count total system text parts for cache_control on last one
@@ -757,16 +564,7 @@ fn testParse(stream: *SseStream, data: []const u8) !?providers.Event {
     return stream.parseSseData(copy);
 }
 
-fn randSafeToken(rnd: std.Random, buf: []u8) []const u8 {
-    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_-";
-    const n = rnd.intRangeAtMost(usize, 1, buf.len);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const idx = rnd.intRangeLessThan(usize, 0, alphabet.len);
-        buf[i] = alphabet[idx];
-    }
-    return buf[0..n];
-}
+const randSafeToken = hc.randSafeToken;
 
 fn resetParserState(stream: *SseStream) void {
     _ = stream.arena.reset(.retain_capacity);
@@ -800,39 +598,6 @@ test "mapStopReason known values" {
 
 test "mapStopReason unknown falls back to done" {
     try testing.expectEqual(providers.StopReason.done, mapStopReason("unknown_xyz"));
-}
-
-test "jsonU64 integer" {
-    try testing.expectEqual(@as(u64, 42), jsonU64(.{ .integer = 42 }));
-}
-
-test "jsonU64 negative clamps to zero" {
-    try testing.expectEqual(@as(u64, 0), jsonU64(.{ .integer = -5 }));
-}
-
-test "jsonU64 float" {
-    try testing.expectEqual(@as(u64, 3), jsonU64(.{ .float = 3.7 }));
-}
-
-test "jsonU64 null" {
-    try testing.expectEqual(@as(u64, 0), jsonU64(null));
-}
-
-test "jsonU64 non-numeric" {
-    try testing.expectEqual(@as(u64, 0), jsonU64(.{ .bool = true }));
-}
-
-test "sanitizeUtf8 valid passes through" {
-    const input = "hello world";
-    const result = try sanitizeUtf8(testing.allocator, input);
-    try testing.expectEqualStrings("hello world", result);
-}
-
-test "sanitizeUtf8 invalid bytes replaced" {
-    const input = "ab\xfe\xffcd";
-    const result = try sanitizeUtf8(testing.allocator, input);
-    defer testing.allocator.free(result);
-    try testing.expectEqualStrings("ab??cd", result);
 }
 
 test "sanitizeUtf8 property: output is valid utf8" {

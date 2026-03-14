@@ -102,7 +102,11 @@ RPC hash comparison (src/core/agent.zig:226):
 ```
 if (!std.mem.eql(u8, msg.policy_hash, self.policy_hash)) return error.PolicyMismatch;
 ```
-NOTE: `std.mem.eql` is NOT constant-time — timing side-channel. Fix in code (dot created).
+NOTE: `std.mem.eql` is NOT constant-time — timing side-channel at 3 locations:
+- `agent.zig:226` (policy hash comparison)
+- `policy.zig:54` (ApprovalBind hash comparison)
+- `policy.zig:391` (public key comparison — highest priority, leaks signing key info)
+Fix all in code (dot created).
 
 **Lean model**: Model the parse→canonicalize→verify pipeline, not just the signature scheme:
 ```lean
@@ -123,7 +127,7 @@ def verifyPolicy (key : Key) (raw : RawPolicy) (sig : Sig) : Bool :=
 ```
 
 **What it proves**: The signature covers the **canonical re-serialization** (`parseDoc → encodeDoc`), not raw JSON bytes. The proof models the three-step chain and proves:
-- Any modification to canonical content (including rule reordering — rules are an ordered list, not a set, because `evaluate` uses first-match-wins) fails verification
+- Any modification to canonical content (including rule reordering — rules are an ordered list, not a set, because `evaluate` uses first-match-wins for path rules; note: `evalEnv` uses last-match-wins for env rules — different semantics, same `Rule` type) fails verification
 - `parseDoc` is invariant to the presence/absence/content of the `signature` key in input JSON — model this as an explicit `excludeField "signature"` step, not an implicit omission. CI sync: assert `parseDoc` never reads a key named `"signature"`
 - Extra JSON fields not parsed by `parseDoc` are silently dropped — proof covers canonical content integrity, not raw-byte integrity
 
@@ -196,7 +200,7 @@ theorem ownership_invariant :
 - **4a** (key scoping — CAN PROVE NOW): composite key ensures approvals are scoped by tool/cmd/loc/policy
 - **4b** (TTL expiry — BLOCKED on code fix): `expires_at_ms` is compared for equality in `eqlLife` but never checked against wall clock in `contains()`. Dot created.
 
-**Zig code** (src/core/loop.zig:157-230):
+**Zig code** (src/core/loop.zig:158-208 struct+contains, 284-316 eql+eqlLife):
 ```
 Key = { tool, cmd, loc: Loc, policy: ApprovalBind, life: Life }
 Life = { session | expires_at_ms: i64 }
