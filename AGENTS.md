@@ -4,14 +4,6 @@
 
 Build `pz`: a Zig CLI harness with TUI. Do not optimize for compatibility with pi.
 
-## Feature Fidelity (BLOCKING)
-
-- Port all user-visible harness features faithfully.
-- Redesign implementation for Zig, but keep capability parity.
-- No feature drops, scope cuts, or behavior removals without explicit user approval.
-- For each migrated feature, add or update a parity test/spec entry.
-- If parity is unclear, stop and resolve the gap before continuing.
-
 ## Core Constraints
 
 - Correctness over speed.
