@@ -1,6 +1,6 @@
 //! Streaming response reader with retry and chunk reassembly.
 const std = @import("std");
-const providers = @import("contract.zig");
+const providers = @import("api.zig");
 const retry = @import("retry.zig");
 const stream_parse = @import("stream_parse.zig");
 const types = @import("types.zig");
@@ -67,16 +67,16 @@ pub const Transport = struct {
     vt: *const Vt,
 
     pub const Vt = struct {
-        start: *const fn (ctx: *anyopaque, req: providers.Req) Err!ChunkStream,
+        start: *const fn (ctx: *anyopaque, req: providers.Request) Err!ChunkStream,
     };
 
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime start_fn: fn (ctx: *T, req: providers.Req) Err!ChunkStream,
+        comptime start_fn: fn (ctx: *T, req: providers.Request) Err!ChunkStream,
     ) Transport {
         const Wrap = struct {
-            fn start(raw: *anyopaque, req: providers.Req) Err!ChunkStream {
+            fn start(raw: *anyopaque, req: providers.Request) Err!ChunkStream {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 return start_fn(typed, req);
             }
@@ -92,7 +92,7 @@ pub const Transport = struct {
         };
     }
 
-    pub fn start(self: Transport, req: providers.Req) Err!ChunkStream {
+    pub fn start(self: Transport, req: providers.Request) Err!ChunkStream {
         return self.vt.start(self.ctx, req);
     }
 };
@@ -126,7 +126,7 @@ pub const Sleeper = struct {
 
 pub const RunRes = struct {
     arena: std.heap.ArenaAllocator,
-    evs: []providers.Ev,
+    evs: []providers.Event,
     tries: u16,
 
     pub fn deinit(self: *RunRes) void {
@@ -137,7 +137,7 @@ pub const RunRes = struct {
 pub fn run(
     alloc: std.mem.Allocator,
     tr: Transport,
-    req: providers.Req,
+    req: providers.Request,
     pol: Policy,
     slp: ?Sleeper,
 ) (retry.StepErr || Err)!RunRes {
@@ -168,14 +168,14 @@ pub fn run(
     }
 }
 
-fn runOnce(alloc: std.mem.Allocator, tr: Transport, req: providers.Req) Err![]providers.Ev {
+fn runOnce(alloc: std.mem.Allocator, tr: Transport, req: providers.Request) Err![]providers.Event {
     var stream = try tr.start(req);
     defer stream.deinit();
 
     var p = stream_parse.Parser{};
     defer p.deinit(alloc);
 
-    var evs: std.ArrayListUnmanaged(providers.Ev) = .{};
+    var evs: std.ArrayListUnmanaged(providers.Event) = .{};
     errdefer evs.deinit(alloc);
 
     while (try stream.next()) |chunk| {
@@ -234,7 +234,7 @@ const MockTr = struct {
         return Transport.from(MockTr, self, MockTr.start);
     }
 
-    fn start(self: *MockTr, _: providers.Req) Err!ChunkStream {
+    fn start(self: *MockTr, _: providers.Request) Err!ChunkStream {
         if (self.start_ct >= self.atts.len) return error.TransportFatal;
         const idx = self.start_ct;
         self.start_ct += 1;
@@ -265,7 +265,7 @@ const WaitLog = struct {
     }
 };
 
-fn reqStub() providers.Req {
+fn reqStub() providers.Request {
     return .{
         .model = "stub",
         .msgs = &.{},

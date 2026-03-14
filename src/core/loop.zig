@@ -2,7 +2,7 @@
 const std = @import("std");
 const policy = @import("policy.zig");
 const providers = @import("providers.zig");
-const prov_contract = @import("providers/contract.zig");
+const prov_api = @import("providers/api.zig");
 const session = @import("session.zig");
 const tools = @import("tools.zig");
 const cancel_mock = @import("../test/cancel_mock.zig");
@@ -23,7 +23,7 @@ pub const Err = error{
 pub const ModeEv = union(enum) {
     replay: session.Event,
     session: session.Event,
-    provider: providers.Ev,
+    provider: providers.Event,
     tool: tools.Event,
     session_write_err: []const u8,
 };
@@ -563,7 +563,7 @@ const Hist = struct {
         }
     }
 
-    fn appendFromProvider(self: *Hist, ev: providers.Ev) !void {
+    fn appendFromProvider(self: *Hist, ev: providers.Event) !void {
         switch (ev) {
             .text => |text| try self.pushTextDup(.assistant, text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, tc),
@@ -716,7 +716,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
                         return failWithReport(opts, .tool_run, hist_err);
                     };
 
-                    const tr_ev: providers.Ev = .{
+                    const tr_ev: providers.Event = .{
                         .tool_result = tr,
                     };
                     opts.mode.push(.{ .provider = tr_ev }) catch |mode_err| {
@@ -773,7 +773,7 @@ fn isCanceled(opts: Opts) bool {
 }
 
 fn emitCanceled(opts: Opts, append_ct: *u64, hist: *Hist) !void {
-    const pev: providers.Ev = .{
+    const pev: providers.Event = .{
         .stop = .{
             .reason = .canceled,
         },
@@ -868,7 +868,7 @@ fn buildReqMsgs(
     const msgs = try alloc.alloc(providers.Msg, live_len + sys_msg_ct);
     const parts = try alloc.alloc(providers.Part, live_len + sys_part_ct);
 
-    parts[0] = .{ .text = prov_contract.prompt_guard };
+    parts[0] = .{ .text = prov_api.prompt_guard };
     if (system_prompt) |sp| {
         parts[1] = .{ .text = sp };
     }
@@ -913,7 +913,7 @@ fn cloneReqPart(
         .tool_result => |tr| .{
             .tool_result = .{
                 .id = try alloc.dupe(u8, tr.id),
-                .out = try prov_contract.wrapUntrustedNamed(alloc, "tool-result", tr.id, tr.out),
+                .out = try prov_api.wrapUntrustedNamed(alloc, "tool-result", tr.id, tr.out),
                 .is_err = tr.is_err,
             },
         },
@@ -926,7 +926,7 @@ fn cloneReqText(
     text: []const u8,
 ) ![]const u8 {
     return switch (role) {
-        .user => try prov_contract.wrapUntrusted(alloc, "user-prompt", text),
+        .user => try prov_api.wrapUntrusted(alloc, "user-prompt", text),
         else => try alloc.dupe(u8, text),
     };
 }
@@ -1289,7 +1289,7 @@ fn parseArgs(
     };
 }
 
-fn mapProviderEv(ev: providers.Ev, at_ms: i64) session.Event {
+fn mapProviderEv(ev: providers.Event, at_ms: i64) session.Event {
     return .{
         .at_ms = at_ms,
         .data = switch (ev) {
@@ -1353,7 +1353,7 @@ fn expectGuardMsg(msg: providers.Msg, extra_text: ?[]const u8) !void {
     try std.testing.expect(msg.role == .system);
     try std.testing.expectEqual(@as(usize, 1 + (if (extra_text != null) @as(usize, 1) else 0)), msg.parts.len);
     switch (msg.parts[0]) {
-        .text => |got| try std.testing.expectEqualStrings(prov_contract.prompt_guard, got),
+        .text => |got| try std.testing.expectEqualStrings(prov_api.prompt_guard, got),
         else => return error.TestUnexpectedResult,
     }
     if (extra_text) |want| {
@@ -1364,7 +1364,7 @@ fn expectGuardMsg(msg: providers.Msg, extra_text: ?[]const u8) !void {
     }
 }
 
-fn hasToolResult(req: providers.Req, id: []const u8, out: []const u8) bool {
+fn hasToolResult(req: providers.Request, id: []const u8, out: []const u8) bool {
     for (req.msgs) |msg| {
         for (msg.parts) |part| {
             switch (part) {
@@ -1491,11 +1491,11 @@ test "loop smoke composes replay provider tool and mode" {
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev = &.{},
+        evs: []const providers.Event = &.{},
         idx: usize = 0,
         deinit_ct: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -1509,11 +1509,11 @@ test "loop smoke composes replay provider tool and mode" {
 
     const ProviderImpl = struct {
         start_ct: usize = 0,
-        turn1: []const providers.Ev,
-        turn2: []const providers.Ev,
+        turn1: []const providers.Event,
+        turn2: []const providers.Event,
         stream: StreamImpl = .{},
 
-        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !providers.Stream {
             self.start_ct += 1;
             try std.testing.expectEqual(@as(usize, 1), req.tools.len);
             try std.testing.expectEqualStrings("read", req.tools[0].name);
@@ -1620,7 +1620,7 @@ test "loop smoke composes replay provider tool and mode" {
         },
     };
 
-    const turn1 = [_]providers.Ev{
+    const turn1 = [_]providers.Event{
         .{ .text = "draft" },
         .{
             .tool_call = .{
@@ -1635,7 +1635,7 @@ test "loop smoke composes replay provider tool and mode" {
             },
         },
     };
-    const turn2 = [_]providers.Ev{
+    const turn2 = [_]providers.Event{
         .{ .text = "final" },
         .{
             .stop = .{
@@ -1805,10 +1805,10 @@ test "loop smoke finishes single turn with no tools" {
 
     const StreamImpl = struct {
         idx: usize = 0,
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         deinit_ct: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -1824,7 +1824,7 @@ test "loop smoke finishes single turn with no tools" {
         start_ct: usize = 0,
         stream: StreamImpl,
 
-        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !providers.Stream {
             self.start_ct += 1;
             try std.testing.expectEqual(@as(usize, 2), req.msgs.len);
             try expectGuardMsg(req.msgs[0], null);
@@ -1858,7 +1858,7 @@ test "loop smoke finishes single turn with no tools" {
         }
     };
 
-    const evs = [_]providers.Ev{
+    const evs = [_]providers.Event{
         .{ .text = "done" },
         .{
             .stop = .{
@@ -1974,10 +1974,10 @@ test "loop cancellation emits canceled stop and exits early" {
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -1990,7 +1990,7 @@ test "loop cancellation emits canceled stop and exits early" {
     const ProviderImpl = struct {
         stream: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
             self.stream.idx = 0;
             return providers.Stream.from(
                 StreamImpl,
@@ -2020,7 +2020,7 @@ test "loop cancellation emits canceled stop and exits early" {
         }
     };
 
-    const evs = [_]providers.Ev{
+    const evs = [_]providers.Event{
         .{ .text = "ignored" },
         .{
             .stop = .{ .reason = .done },
@@ -2120,7 +2120,7 @@ test "runTool forwards cancel source to dispatch" {
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Req) !providers.Stream {
+        fn start(_: *@This(), _: providers.Request) !providers.Stream {
             return error.Unused;
         }
     };
@@ -2223,7 +2223,7 @@ test "runTool forwards cancel source to dispatch" {
     try oh.snap(@src(),
         \\core.loop.test.runTool forwards cancel source to dispatch.Snap
         \\  .dispatch_run_ct: usize = 1
-        \\  .tr: core.providers.contract.ToolResult
+        \\  .tr: core.providers.api.ToolResult
         \\    .id: []const u8
         \\      "call-1"
         \\    .out: []const u8
@@ -2255,7 +2255,7 @@ test "runTool approval hook binds repo policy session and cache state" {
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Req) !providers.Stream {
+        fn start(_: *@This(), _: providers.Request) !providers.Stream {
             return error.Unused;
         }
     };
@@ -2428,10 +2428,10 @@ test "loop requires approval before bash escalation from malicious comment repla
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -2447,7 +2447,7 @@ test "loop requires approval before bash escalation from malicious comment repla
             .evs = &.{},
         },
 
-        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !providers.Stream {
             self.req_snap = try fmtReqMsgs(std.testing.allocator, req.msgs);
             self.stream = .{
                 .evs = &.{
@@ -2609,10 +2609,10 @@ test "loop requires approval before web post escalation from malicious page repl
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -2628,7 +2628,7 @@ test "loop requires approval before web post escalation from malicious page repl
             .evs = &.{},
         },
 
-        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !providers.Stream {
             self.req_snap = try fmtReqMsgs(std.testing.allocator, req.msgs);
             self.stream = .{
                 .evs = &.{
@@ -2785,10 +2785,10 @@ test "loop compaction trigger runs at configured append cadence" {
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -2801,7 +2801,7 @@ test "loop compaction trigger runs at configured append cadence" {
     const ProviderImpl = struct {
         stream: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
             self.stream.idx = 0;
             return providers.Stream.from(
                 StreamImpl,
@@ -2826,7 +2826,7 @@ test "loop compaction trigger runs at configured append cadence" {
         }
     };
 
-    const evs = [_]providers.Ev{
+    const evs = [_]providers.Event{
         .{ .text = "a" },
         .{
             .stop = .{ .reason = .done },
@@ -3024,10 +3024,10 @@ test "loop reloads history from compacted replay across repeated compactions" {
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev = &.{},
+        evs: []const providers.Event = &.{},
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -3038,13 +3038,13 @@ test "loop reloads history from compacted replay across repeated compactions" {
     };
 
     const ProviderImpl = struct {
-        turn1: []const providers.Ev,
-        turn2: []const providers.Ev,
+        turn1: []const providers.Event,
+        turn2: []const providers.Event,
         stream: StreamImpl = .{},
         start_ct: usize = 0,
         req_snap: [2]?[]u8 = .{ null, null },
 
-        fn start(self: *@This(), req: providers.Req) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !providers.Stream {
             const slot = self.start_ct;
             if (slot >= self.req_snap.len) return error.TestUnexpectedResult;
             self.req_snap[slot] = try fmtReqMsgs(std.testing.allocator, req.msgs);
@@ -3134,7 +3134,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
             } },
         },
     };
-    const turn1 = [_]providers.Ev{
+    const turn1 = [_]providers.Event{
         .{
             .tool_call = .{
                 .id = "call-1",
@@ -3143,7 +3143,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
             },
         },
     };
-    const turn2 = [_]providers.Ev{};
+    const turn2 = [_]providers.Event{};
 
     const ModeImpl = struct {
         fn push(_: *@This(), _: ModeEv) !void {}
@@ -3317,7 +3317,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Req) StartErr!providers.Stream {
+        fn start(_: *@This(), _: providers.Request) StartErr!providers.Stream {
             return error.StartBoom;
         }
     };
@@ -3392,7 +3392,7 @@ test "loop runtime error append failure preserves original error and reports ses
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Req) StartErr!providers.Stream {
+        fn start(_: *@This(), _: providers.Request) StartErr!providers.Stream {
             return error.StartBoom;
         }
     };
@@ -3503,10 +3503,10 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -3519,7 +3519,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     const ProviderImpl = struct {
         stream: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
             self.stream.idx = 0;
             return providers.Stream.from(
                 StreamImpl,
@@ -3563,7 +3563,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
         }
     };
 
-    const evs = [_]providers.Ev{
+    const evs = [_]providers.Event{
         .{ .text = "Hello" },
         .{ .text = " world" },
         .{
@@ -3670,10 +3670,10 @@ test "loop cancel append failure still returns canceled turn and reports session
     };
 
     const StreamImpl = struct {
-        evs: []const providers.Ev,
+        evs: []const providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?providers.Ev {
+        fn next(self: *@This()) !?providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -3686,7 +3686,7 @@ test "loop cancel append failure still returns canceled turn and reports session
     const ProviderImpl = struct {
         stream: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Req) !providers.Stream {
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
             self.stream.idx = 0;
             return providers.Stream.from(
                 StreamImpl,
@@ -3732,7 +3732,7 @@ test "loop cancel append failure still returns canceled turn and reports session
         }
     };
 
-    const evs = [_]providers.Ev{
+    const evs = [_]providers.Event{
         .{ .text = "Hello" },
         .{ .text = " world" },
         .{

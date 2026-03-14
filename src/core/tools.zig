@@ -13,7 +13,7 @@ pub const ls = @import("tools/ls.zig");
 pub const agent = @import("tools/agent.zig");
 pub const skill = @import("tools/skill.zig");
 pub const web = @import("tools/web.zig");
-pub const contract_test = @import("tools/contract_test.zig");
+pub const contract_test = @import("tools/test.zig");
 
 pub const Kind = enum {
     read,

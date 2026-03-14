@@ -110,11 +110,11 @@ pub const Transcript = struct {
         return self.blocks.items.len;
     }
 
-    pub fn append(self: *Transcript, ev: core.providers.Ev) AppendError!void {
+    pub fn append(self: *Transcript, ev: core.providers.Event) AppendError!void {
         return self.appendSeq(self.takeSeq(), ev);
     }
 
-    pub fn appendSeq(self: *Transcript, seq: u64, ev: core.providers.Ev) AppendError!void {
+    pub fn appendSeq(self: *Transcript, seq: u64, ev: core.providers.Event) AppendError!void {
         switch (ev) {
             .text => |t| {
                 // Coalesce consecutive text events

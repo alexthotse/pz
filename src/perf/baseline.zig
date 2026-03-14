@@ -1,7 +1,7 @@
 //! Performance baseline: parser hot-path timing gate.
 const std = @import("std");
 const stream_parse = @import("../core/providers/stream_parse.zig");
-const providers = @import("../core/providers/contract.zig");
+const providers = @import("../core/providers/api.zig");
 
 const parse_gate_ns: i128 = 10 * std.time.ns_per_s;
 
@@ -23,7 +23,7 @@ test "performance baseline parser hot path stays under gate" {
         var parser = stream_parse.Parser{};
         defer parser.deinit(ar);
 
-        var evs: std.ArrayListUnmanaged(providers.Ev) = .{};
+        var evs: std.ArrayListUnmanaged(providers.Event) = .{};
         defer evs.deinit(ar);
 
         for (chunks) |chunk| {

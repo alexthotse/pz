@@ -1,7 +1,7 @@
 //! Mouse event types: scroll, press, release.
 const std = @import("std");
 
-pub const Ev = union(enum) {
+pub const Event = union(enum) {
     scroll_up,
     scroll_down,
     press: Pos,
@@ -15,7 +15,7 @@ pub const Ev = union(enum) {
 };
 
 pub const Result = struct {
-    ev: Ev,
+    ev: Event,
     len: usize,
 };
 
@@ -47,7 +47,7 @@ pub fn parse(buf: []const u8) ?Result {
     i += 1;
 
     const is_press = final == 'M';
-    const ev: Ev = switch (btn) {
+    const ev: Event = switch (btn) {
         64 => .scroll_up,
         65 => .scroll_down,
         else => if (is_press) .{ .press = .{
@@ -97,29 +97,29 @@ test "parse snapshots are stable" {
     try oh.snap(@src(),
         \\modes.tui.mouse.ParseSnap
         \\  .scroll_up: modes.tui.mouse.Result
-        \\    .ev: modes.tui.mouse.Ev
+        \\    .ev: modes.tui.mouse.Event
         \\      .scroll_up: void = void
         \\    .len: usize = 11
         \\  .scroll_down: modes.tui.mouse.Result
-        \\    .ev: modes.tui.mouse.Ev
+        \\    .ev: modes.tui.mouse.Event
         \\      .scroll_down: void = void
         \\    .len: usize = 10
         \\  .press: modes.tui.mouse.Result
-        \\    .ev: modes.tui.mouse.Ev
-        \\      .press: modes.tui.mouse.Ev.Pos
+        \\    .ev: modes.tui.mouse.Event
+        \\      .press: modes.tui.mouse.Event.Pos
         \\        .x: usize = 4
         \\        .y: usize = 9
         \\        .btn: u8 = 0
         \\    .len: usize = 10
         \\  .release: modes.tui.mouse.Result
-        \\    .ev: modes.tui.mouse.Ev
-        \\      .release: modes.tui.mouse.Ev.Pos
+        \\    .ev: modes.tui.mouse.Event
+        \\      .release: modes.tui.mouse.Event.Pos
         \\        .x: usize = 2
         \\        .y: usize = 6
         \\        .btn: u8 = 0
         \\    .len: usize = 9
         \\  .consumed_len: modes.tui.mouse.Result
-        \\    .ev: modes.tui.mouse.Ev
+        \\    .ev: modes.tui.mouse.Event
         \\      .scroll_up: void = void
         \\    .len: usize = 10
     ).expectEqual(snap);

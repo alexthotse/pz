@@ -55,7 +55,7 @@ pub const Formatter = struct {
         self.errs.deinit(self.alloc);
     }
 
-    pub fn push(self: *Formatter, ev: core.providers.Ev) !void {
+    pub fn push(self: *Formatter, ev: core.providers.Event) !void {
         switch (ev) {
             .text => |text| try self.pushText(text),
             .thinking => |text| try self.pushThinking(text),
@@ -284,7 +284,7 @@ fn hexNibble(n: u8) u8 {
     return "0123456789abcdef"[n];
 }
 
-fn expectFormatted(evs: []const core.providers.Ev, want: []const u8) !void {
+fn expectFormatted(evs: []const core.providers.Event, want: []const u8) !void {
     var buf: [2048]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var formatter = Formatter.init(std.testing.allocator, fbs.writer().any());
@@ -298,7 +298,7 @@ fn expectFormatted(evs: []const core.providers.Ev, want: []const u8) !void {
 }
 
 test "formatter emits deterministic canonical output" {
-    const evs_a = [_]core.providers.Ev{
+    const evs_a = [_]core.providers.Event{
         .{ .text = "out-a" },
         .{ .thinking = "z-think" },
         .{ .tool_result = .{ .id = "call-2", .out = "res-z", .is_err = true } },
@@ -314,7 +314,7 @@ test "formatter emits deterministic canonical output" {
         .{ .stop = .{ .reason = .err } },
     };
 
-    const evs_b = [_]core.providers.Ev{
+    const evs_b = [_]core.providers.Event{
         .{ .err = "a-err" },
         .{ .stop = .{ .reason = .err } },
         .{ .tool_result = .{ .id = "call-1", .out = "res-a", .is_err = false } },
@@ -348,7 +348,7 @@ test "formatter emits deterministic canonical output" {
 }
 
 test "formatter preserves plain text output when metadata is absent" {
-    const evs = [_]core.providers.Ev{
+    const evs = [_]core.providers.Event{
         .{ .text = "out-" },
         .{ .text = "a" },
     };
@@ -356,7 +356,7 @@ test "formatter preserves plain text output when metadata is absent" {
 }
 
 test "formatter escapes control characters in quoted fields" {
-    const evs = [_]core.providers.Ev{
+    const evs = [_]core.providers.Event{
         .{ .err = "a\tb\n\"c\"\\d\x01" },
     };
 

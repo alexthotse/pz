@@ -252,21 +252,4 @@ test "writeColor basic bg idx" {
     try std.testing.expectEqualStrings(";41", out.view());
 }
 
-const TestBuf = struct {
-    buf: []u8,
-    len: usize = 0,
-
-    fn init(buf: []u8) TestBuf {
-        return .{ .buf = buf };
-    }
-
-    fn writeAll(self: *TestBuf, bytes: []const u8) !void {
-        if (self.len + bytes.len > self.buf.len) return error.NoSpaceLeft;
-        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    fn view(self: *const TestBuf) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+const TestBuf = @import("test_buf.zig").TestBuf;

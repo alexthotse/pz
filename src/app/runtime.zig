@@ -10,7 +10,7 @@ const version_check = @import("version.zig");
 const config = @import("config.zig");
 const core = @import("../core.zig");
 const core_skill = @import("../core/skill.zig");
-const prov_contract = @import("../core/providers/contract.zig");
+const prov_api = @import("../core/providers/api.zig");
 const print_fmt = @import("../modes/print/format.zig");
 const print_err = @import("../modes/print/errors.zig");
 const tui_harness = @import("../modes/tui/harness.zig");
@@ -363,7 +363,7 @@ const MissingProvider = struct {
         return core.providers.Provider.from(MissingProvider, self, MissingProvider.start);
     }
 
-    fn start(self: *MissingProvider, _: core.providers.Req) !core.providers.Stream {
+    fn start(self: *MissingProvider, _: core.providers.Request) !core.providers.Stream {
         const stream = try self.alloc.create(MissingProviderStream);
         stream.* = .{
             .alloc = self.alloc,
@@ -383,7 +383,7 @@ const MissingProviderStream = struct {
     msg: []const u8,
     idx: u8 = 0,
 
-    fn next(self: *MissingProviderStream) !?core.providers.Ev {
+    fn next(self: *MissingProviderStream) !?core.providers.Event {
         defer self.idx +|= 1;
 
         return switch (self.idx) {
@@ -1060,7 +1060,7 @@ const LiveTurn = struct {
 
     const SeqProviderEv = struct {
         seq: u64,
-        ev: core.providers.Ev,
+        ev: core.providers.Event,
     };
 
     fn init(alloc: std.mem.Allocator) !LiveTurn {
@@ -1174,7 +1174,7 @@ const LiveTurn = struct {
         }
     }
 
-    fn enqueueProvider(self: *LiveTurn, ev: core.providers.Ev) !void {
+    fn enqueueProvider(self: *LiveTurn, ev: core.providers.Event) !void {
         const dup = try dupProviderEv(self.alloc, ev);
         errdefer freeProviderEv(self.alloc, dup);
 
@@ -1471,7 +1471,7 @@ fn dupAskArgs(alloc: std.mem.Allocator, args: core.tools.Call.AskArgs) !OwnedAsk
     return .{ .questions = qs };
 }
 
-fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Ev) !core.providers.Ev {
+fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) !core.providers.Event {
     return switch (ev) {
         .text => |txt| .{ .text = try alloc.dupe(u8, txt) },
         .thinking => |txt| .{ .thinking = try alloc.dupe(u8, txt) },
@@ -1507,7 +1507,7 @@ fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Ev) !core.provider
     };
 }
 
-fn freeProviderEv(alloc: std.mem.Allocator, ev: core.providers.Ev) void {
+fn freeProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) void {
     switch (ev) {
         .text => |txt| alloc.free(txt),
         .thinking => |txt| alloc.free(txt),
@@ -6318,7 +6318,7 @@ fn shouldRetryOverflowState(
 
 const CompactRun = union(enum) {
     compacted,
-    stopped: prov_contract.SummaryMeta,
+    stopped: prov_api.SummaryMeta,
 };
 
 const AutoCompactOutcome = enum {
@@ -6347,7 +6347,7 @@ fn compactNow(
     return .compacted;
 }
 
-fn formatCompactStopAlloc(alloc: std.mem.Allocator, meta: prov_contract.SummaryMeta) ![]u8 {
+fn formatCompactStopAlloc(alloc: std.mem.Allocator, meta: prov_api.SummaryMeta) ![]u8 {
     return std.fmt.allocPrint(
         alloc,
         "[auto-compact stopped: summary input over budget bytes={d}/{d} tokens={d}/{d} kept={d} dropped={d}]",
@@ -8718,10 +8718,10 @@ test "runtime tui overflow retries once with injected live stdin" {
 
     const RetryStream = struct {
         alloc: std.mem.Allocator,
-        evs: []const core.providers.Ev,
+        evs: []const core.providers.Event,
         idx: usize = 0,
 
-        fn next(self: *@This()) !?core.providers.Ev {
+        fn next(self: *@This()) !?core.providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -8736,12 +8736,12 @@ test "runtime tui overflow retries once with injected live stdin" {
     const RetryProvider = struct {
         alloc: std.mem.Allocator,
         starts: u8 = 0,
-        const first = [_]core.providers.Ev{
+        const first = [_]core.providers.Event{
             .{
                 .stop = .{ .reason = .max_out },
             },
         };
-        const second = [_]core.providers.Ev{
+        const second = [_]core.providers.Event{
             .{ .text = "retry-ok" },
             .{
                 .stop = .{ .reason = .done },
@@ -8752,7 +8752,7 @@ test "runtime tui overflow retries once with injected live stdin" {
             return core.providers.Provider.from(@This(), self, start);
         }
 
-        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
+        fn start(self: *@This(), _: core.providers.Request) !core.providers.Stream {
             self.starts += 1;
             const stream = try self.alloc.create(RetryStream);
             stream.* = .{

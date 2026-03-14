@@ -8,14 +8,14 @@ comptime {
     _ = @import("core/loop.zig");
     _ = @import("core/session.zig");
     _ = @import("core/tools.zig");
-    _ = @import("core/tools/contract_test.zig");
+    _ = @import("core/tools/test.zig");
     _ = @import("core/providers/client.zig");
     _ = @import("core/providers/openai.zig");
     _ = @import("modes/mode.zig");
     _ = @import("modes/print/run.zig");
     _ = @import("modes/tui/harness.zig");
     _ = @import("modes/tui/vscreen.zig");
-    _ = @import("modes/tui/fixture.zig");
+    _ = @import("modes/tui/test.zig");
     _ = @import("perf/baseline.zig");
     _ = @import("core/skill.zig");
     _ = @import("core/policy.zig");

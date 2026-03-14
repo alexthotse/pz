@@ -1,6 +1,6 @@
 //! Line-oriented stream parser for provider SSE responses.
 const std = @import("std");
-const providers = @import("contract.zig");
+const providers = @import("api.zig");
 const types = @import("types.zig");
 
 pub const Err = types.Err;
@@ -16,7 +16,7 @@ pub const Parser = struct {
     pub fn feed(
         self: *Parser,
         alloc: std.mem.Allocator,
-        evs: *std.ArrayListUnmanaged(providers.Ev),
+        evs: *std.ArrayListUnmanaged(providers.Event),
         chunk: []const u8,
     ) Err!void {
         self.buf.appendSlice(alloc, chunk) catch return error.OutOfMemory;
@@ -39,7 +39,7 @@ pub const Parser = struct {
     pub fn finish(
         self: *Parser,
         alloc: std.mem.Allocator,
-        evs: *std.ArrayListUnmanaged(providers.Ev),
+        evs: *std.ArrayListUnmanaged(providers.Event),
     ) Err!void {
         if (self.buf.items.len > 0) {
             const line = trimCr(self.buf.items);
@@ -60,7 +60,7 @@ fn trimCr(raw: []const u8) []const u8 {
 
 fn parseLine(
     alloc: std.mem.Allocator,
-    evs: *std.ArrayListUnmanaged(providers.Ev),
+    evs: *std.ArrayListUnmanaged(providers.Event),
     line: []const u8,
     saw_stop: *bool,
 ) Err!void {
@@ -80,7 +80,7 @@ fn parseLine(
     });
 
     const resolved = tag_map.get(tag) orelse return error.UnknownTag;
-    const ev: providers.Ev = switch (resolved) {
+    const ev: providers.Event = switch (resolved) {
         .text => .{ .text = try dup(alloc, val) },
         .thinking => .{ .thinking = try dup(alloc, val) },
         .tool_call => blk: {
@@ -111,8 +111,8 @@ fn parseLine(
 
 fn appendEv(
     alloc: std.mem.Allocator,
-    evs: *std.ArrayListUnmanaged(providers.Ev),
-    ev: providers.Ev,
+    evs: *std.ArrayListUnmanaged(providers.Event),
+    ev: providers.Event,
 ) Err!void {
     evs.append(alloc, ev) catch return error.OutOfMemory;
 }
@@ -169,7 +169,7 @@ fn dup(alloc: std.mem.Allocator, raw: []const u8) Err![]const u8 {
 
 const ParseRes = struct {
     arena: std.heap.ArenaAllocator,
-    evs: []providers.Ev,
+    evs: []providers.Event,
 
     fn deinit(self: *ParseRes) void {
         self.arena.deinit();
@@ -185,7 +185,7 @@ fn parseChunks(alloc: std.mem.Allocator, chunks: []const []const u8) Err!ParseRe
     var p = Parser{};
     defer p.deinit(ar);
 
-    var evs: std.ArrayListUnmanaged(providers.Ev) = .{};
+    var evs: std.ArrayListUnmanaged(providers.Event) = .{};
     errdefer evs.deinit(ar);
 
     for (chunks) |chunk| {
@@ -234,7 +234,7 @@ test "parser normalizes chunked frames and preserves order" {
         \\      .args_raw: ?[]const u8
         \\        null
         \\  [3]: core.providers.stream_parse.SnapEv
-        \\    .stop: core.providers.contract.StopReason
+        \\    .stop: core.providers.api.StopReason
         \\      .done
     ).expectEqual(got);
 }
@@ -262,7 +262,7 @@ test "parser handles tool_result usage and err frames" {
         \\        "stderr"
         \\      .is_err: bool = true
         \\  [1]: core.providers.stream_parse.SnapEv
-        \\    .usage: core.providers.contract.Usage
+        \\    .usage: core.providers.api.Usage
         \\      .in_tok: u64 = 3
         \\      .out_tok: u64 = 5
         \\      .tot_tok: u64 = 8
@@ -272,7 +272,7 @@ test "parser handles tool_result usage and err frames" {
         \\    .err: []const u8
         \\      "oops"
         \\  [3]: core.providers.stream_parse.SnapEv
-        \\    .stop: core.providers.contract.StopReason
+        \\    .stop: core.providers.api.StopReason
         \\      .err
     ).expectEqual(got);
 }
@@ -305,11 +305,11 @@ fn splitWithSeed(alloc: std.mem.Allocator, raw: []const u8, seed: u64) ![][]cons
     return try out.toOwnedSlice(alloc);
 }
 
-fn eventJson(alloc: std.mem.Allocator, ev: providers.Ev) ![]u8 {
+fn eventJson(alloc: std.mem.Allocator, ev: providers.Event) ![]u8 {
     return std.json.Stringify.valueAlloc(alloc, ev, .{});
 }
 
-fn eventsJson(alloc: std.mem.Allocator, evs: []const providers.Ev) ![]u8 {
+fn eventsJson(alloc: std.mem.Allocator, evs: []const providers.Event) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     for (evs, 0..) |ev, i| {
@@ -344,7 +344,7 @@ const SnapEv = union(enum) {
     err: []const u8,
 };
 
-fn snapEvs(alloc: std.mem.Allocator, evs: []const providers.Ev) ![]SnapEv {
+fn snapEvs(alloc: std.mem.Allocator, evs: []const providers.Event) ![]SnapEv {
     var out = std.ArrayList(SnapEv).empty;
     defer out.deinit(alloc);
     for (evs) |ev| switch (ev) {

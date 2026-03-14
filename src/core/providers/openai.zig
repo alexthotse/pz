@@ -1,6 +1,6 @@
 //! OpenAI Responses API client.
 const std = @import("std");
-const providers = @import("contract.zig");
+const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
 const utf8 = @import("../utf8.zig");
@@ -104,7 +104,7 @@ pub const Client = struct {
         return hdrs;
     }
 
-    fn start(self: *Client, req: providers.Req) anyerror!providers.Stream {
+    fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
         const stream = try self.alloc.create(SseStream);
         stream.* = SseStream.initFields(self.alloc);
         errdefer {
@@ -212,7 +212,7 @@ const SseStream = struct {
     done: bool,
     err_mode: bool,
     err_text: ?[]const u8,
-    pending: ?providers.Ev,
+    pending: ?providers.Event,
 
     fn initFields(alloc: std.mem.Allocator) SseStream {
         return .{
@@ -239,7 +239,7 @@ const SseStream = struct {
         };
     }
 
-    fn next(self: *SseStream) anyerror!?providers.Ev {
+    fn next(self: *SseStream) anyerror!?providers.Event {
         if (self.pending) |ev| {
             self.pending = null;
             return ev;
@@ -293,7 +293,7 @@ const SseStream = struct {
         }
     }
 
-    fn parseSseData(self: *SseStream, data: []const u8) !?providers.Ev {
+    fn parseSseData(self: *SseStream, data: []const u8) !?providers.Event {
         const ar = self.arena.allocator();
         var parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
             .allocate = .alloc_always,
@@ -346,7 +346,7 @@ const SseStream = struct {
         };
     }
 
-    fn onOutputItemAdded(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onOutputItemAdded(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const item = objGet(root, "item") orelse return null;
         const item_type = strGet(item, "type") orelse return null;
         if (!std.mem.eql(u8, item_type, "function_call")) return null;
@@ -362,14 +362,14 @@ const SseStream = struct {
         return null;
     }
 
-    fn onToolArgsDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onToolArgsDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         if (!self.in_tool) return null;
         const delta = strGet(root, "delta") orelse return null;
         try self.tool_args.appendSlice(self.alloc, delta);
         return null;
     }
 
-    fn onToolArgsDone(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onToolArgsDone(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         if (!self.in_tool) return null;
         const args = strGet(root, "arguments") orelse return null;
         self.tool_args.clearRetainingCapacity();
@@ -377,7 +377,7 @@ const SseStream = struct {
         return null;
     }
 
-    fn onOutputItemDone(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onOutputItemDone(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const item = objGet(root, "item") orelse return null;
         const item_type = strGet(item, "type") orelse return null;
         if (!std.mem.eql(u8, item_type, "function_call")) return null;
@@ -412,17 +412,17 @@ const SseStream = struct {
         } };
     }
 
-    fn onTextDelta(_: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onTextDelta(_: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const delta = strGet(root, "delta") orelse return null;
         return .{ .text = delta };
     }
 
-    fn onReasoningDelta(_: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onReasoningDelta(_: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const delta = strGet(root, "delta") orelse return null;
         return .{ .thinking = delta };
     }
 
-    fn onCompleted(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onCompleted(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const response = objGet(root, "response") orelse return null;
         const usage = objGet(response, "usage");
 
@@ -444,7 +444,7 @@ const SseStream = struct {
         self.pending = .{ .stop = .{ .reason = stop_reason } };
         self.done = true;
 
-        const usage_ev: providers.Ev = .{ .usage = .{
+        const usage_ev: providers.Event = .{ .usage = .{
             .in_tok = in_tok,
             .out_tok = out_tok,
             .tot_tok = if (total_tok > 0) total_tok else in_tok + out_tok + cache_read,
@@ -454,13 +454,13 @@ const SseStream = struct {
         return usage_ev;
     }
 
-    fn onFailed(self: *SseStream) !?providers.Ev {
+    fn onFailed(self: *SseStream) !?providers.Event {
         self.done = true;
         self.pending = .{ .stop = .{ .reason = .err } };
         return .{ .err = "response failed" };
     }
 
-    fn onError(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onError(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const err_obj = objGet(root, "error");
         const msg = if (strGet(root, "message")) |m|
             m
@@ -551,7 +551,7 @@ fn reasoningEffort(opts: providers.Opts) ?[]const u8 {
     };
 }
 
-fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
+fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -776,7 +776,7 @@ fn testStream() SseStream {
     return SseStream.initFields(testing.allocator);
 }
 
-fn testParse(stream: *SseStream, data: []const u8) !?providers.Ev {
+fn testParse(stream: *SseStream, data: []const u8) !?providers.Event {
     const ar = stream.arena.allocator();
     const copy = try ar.dupe(u8, data);
     return stream.parseSseData(copy);

@@ -1,7 +1,7 @@
 //! AGENTS.md context discovery and loading.
 const std = @import("std");
 const policy = @import("policy.zig");
-const prov_contract = @import("providers/contract.zig");
+const prov_api = @import("providers/api.zig");
 const path_guard = @import("tools/path_guard.zig");
 
 /// Discover and load AGENTS.md context files.
@@ -130,7 +130,7 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) ?[]u8 {
         return null;
     }
 
-    const wrapped = prov_contract.wrapUntrustedNamed(alloc, "context-file", path, content) catch {
+    const wrapped = prov_api.wrapUntrustedNamed(alloc, "context-file", path, content) catch {
         alloc.free(content);
         return null;
     };

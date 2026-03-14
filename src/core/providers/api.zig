@@ -1,4 +1,4 @@
-//! Provider contract: shared types for messages, tools, and events.
+//! Provider API: request, event, and stream types.
 const std = @import("std");
 const testing = std.testing;
 
@@ -9,7 +9,7 @@ pub const Role = enum {
     tool,
 };
 
-pub const Req = struct {
+pub const Request = struct {
     model: []const u8,
     provider: ?[]const u8 = null,
     msgs: []const Msg,
@@ -101,7 +101,7 @@ pub const AbortSlot = struct {
     }
 };
 
-pub const Ev = union(enum) {
+pub const Event = union(enum) {
     text: []const u8,
     thinking: []const u8,
     tool_call: ToolCall,
@@ -285,16 +285,16 @@ pub const Provider = struct {
     vt: *const Vt,
 
     pub const Vt = struct {
-        start: *const fn (ctx: *anyopaque, req: Req) anyerror!Stream,
+        start: *const fn (ctx: *anyopaque, req: Request) anyerror!Stream,
     };
 
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime start_fn: fn (ctx: *T, req: Req) anyerror!Stream,
+        comptime start_fn: fn (ctx: *T, req: Request) anyerror!Stream,
     ) Provider {
         const Wrap = struct {
-            fn start(raw: *anyopaque, req: Req) anyerror!Stream {
+            fn start(raw: *anyopaque, req: Request) anyerror!Stream {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 return start_fn(typed, req);
             }
@@ -310,7 +310,7 @@ pub const Provider = struct {
         };
     }
 
-    pub fn start(self: Provider, req: Req) !Stream {
+    pub fn start(self: Provider, req: Request) !Stream {
         return self.vt.start(self.ctx, req);
     }
 };
@@ -320,7 +320,7 @@ pub const Stream = struct {
     vt: *const Vt,
 
     pub const Vt = struct {
-        next: *const fn (ctx: *anyopaque) anyerror!?Ev,
+        next: *const fn (ctx: *anyopaque) anyerror!?Event,
         deinit: *const fn (ctx: *anyopaque) void,
         abort: ?*const fn (ctx: *anyopaque) void = null,
     };
@@ -328,11 +328,11 @@ pub const Stream = struct {
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime next_fn: fn (ctx: *T) anyerror!?Ev,
+        comptime next_fn: fn (ctx: *T) anyerror!?Event,
         comptime deinit_fn: fn (ctx: *T) void,
     ) Stream {
         const Wrap = struct {
-            fn next(raw: *anyopaque) anyerror!?Ev {
+            fn next(raw: *anyopaque) anyerror!?Event {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 return next_fn(typed);
             }
@@ -354,7 +354,7 @@ pub const Stream = struct {
         };
     }
 
-    pub fn next(self: *Stream) !?Ev {
+    pub fn next(self: *Stream) !?Event {
         return self.vt.next(self.ctx);
     }
 
@@ -365,12 +365,12 @@ pub const Stream = struct {
     pub fn fromAbortable(
         comptime T: type,
         ctx: *T,
-        comptime next_fn: fn (ctx: *T) anyerror!?Ev,
+        comptime next_fn: fn (ctx: *T) anyerror!?Event,
         comptime deinit_fn: fn (ctx: *T) void,
         comptime abort_fn: fn (ctx: *T) void,
     ) Stream {
         const Wrap = struct {
-            fn next(raw: *anyopaque) anyerror!?Ev {
+            fn next(raw: *anyopaque) anyerror!?Event {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 return next_fn(typed);
             }

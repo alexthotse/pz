@@ -19,4 +19,4 @@ pub const image = @import("tui/image.zig");
 pub const color_detect = @import("tui/color_detect.zig");
 pub const term = @import("tui/term.zig");
 pub const vscreen = @import("tui/vscreen.zig");
-pub const fixture = @import("tui/fixture.zig");
+pub const tui_test = @import("tui/test.zig");

@@ -1,52 +1,11 @@
 //! Virtual screen: off-screen cell buffer for snapshot testing.
 const std = @import("std");
 const wc = @import("wcwidth.zig");
+const frame = @import("frame.zig");
 
-/// Terminal color — default, 256-index, or 24-bit RGB.
-pub const Color = union(enum) {
-    default,
-    idx: u8,
-    rgb: u24,
-
-    pub fn eql(a: Color, b: Color) bool {
-        return switch (a) {
-            .default => b == .default,
-            .idx => |ai| switch (b) {
-                .idx => |bi| ai == bi,
-                else => false,
-            },
-            .rgb => |ar| switch (b) {
-                .rgb => |br| ar == br,
-                else => false,
-            },
-        };
-    }
-};
-
-pub const Style = struct {
-    fg: Color = .default,
-    bg: Color = .default,
-    bold: bool = false,
-    dim: bool = false,
-    italic: bool = false,
-    underline: bool = false,
-    inverse: bool = false,
-
-    pub fn eql(a: Style, b: Style) bool {
-        return Color.eql(a.fg, b.fg) and
-            Color.eql(a.bg, b.bg) and
-            a.bold == b.bold and
-            a.dim == b.dim and
-            a.italic == b.italic and
-            a.underline == b.underline and
-            a.inverse == b.inverse;
-    }
-};
-
-pub const Cell = struct {
-    cp: u21 = ' ',
-    style: Style = .{},
-};
+pub const Color = frame.Color;
+pub const Style = frame.Style;
+pub const Cell = frame.Cell;
 
 /// Virtual terminal screen for testing. Feed it ANSI output, then query cells.
 pub const VScreen = struct {

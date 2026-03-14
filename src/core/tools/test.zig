@@ -272,16 +272,16 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     defer for (snaps) |snap| std.testing.allocator.free(snap.out);
     try oh.snap(@src(),
-        \\[8]core.tools.contract_test.ResultSnap
-        \\  [0]: core.tools.contract_test.ResultSnap
+        \\[8]core.tools.test.ResultSnap
+        \\  [0]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "r1"
         \\    .started_at_ms: i64 = 11
         \\    .ended_at_ms: i64 = 11
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
-        \\      [0]: core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
+        \\      [0]: core.tools.test.OutSnap
         \\        .call_id: []const u8
         \\          "r1"
         \\        .seq: u32 = 0
@@ -289,33 +289,33 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
-        \\  [1]: core.tools.contract_test.ResultSnap
+        \\  [1]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "w1"
         \\    .started_at_ms: i64 = 22
         \\    .ended_at_ms: i64 = 22
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
         \\      (empty)
-        \\  [2]: core.tools.contract_test.ResultSnap
+        \\  [2]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "e1"
         \\    .started_at_ms: i64 = 33
         \\    .ended_at_ms: i64 = 33
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
         \\      (empty)
-        \\  [3]: core.tools.contract_test.ResultSnap
+        \\  [3]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "b1"
         \\    .started_at_ms: i64 = 44
         \\    .ended_at_ms: i64 = 44
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
-        \\      [0]: core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
+        \\      [0]: core.tools.test.OutSnap
         \\        .call_id: []const u8
         \\          "b1"
         \\        .seq: u32 = 0
@@ -323,15 +323,15 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
-        \\  [4]: core.tools.contract_test.ResultSnap
+        \\  [4]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "l1"
         \\    .started_at_ms: i64 = 66
         \\    .ended_at_ms: i64 = 66
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
-        \\      [0]: core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
+        \\      [0]: core.tools.test.OutSnap
         \\        .call_id: []const u8
         \\          "l1"
         \\        .seq: u32 = 0
@@ -339,15 +339,15 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
-        \\  [5]: core.tools.contract_test.ResultSnap
+        \\  [5]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "a1"
         \\    .started_at_ms: i64 = 70
         \\    .ended_at_ms: i64 = 70
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
-        \\      [0]: core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
+        \\      [0]: core.tools.test.OutSnap
         \\        .call_id: []const u8
         \\          "a1"
         \\        .seq: u32 = 0
@@ -355,15 +355,15 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
-        \\  [6]: core.tools.contract_test.ResultSnap
+        \\  [6]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "f1"
         \\    .started_at_ms: i64 = 77
         \\    .ended_at_ms: i64 = 77
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
-        \\      [0]: core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
+        \\      [0]: core.tools.test.OutSnap
         \\        .call_id: []const u8
         \\          "f1"
         \\        .seq: u32 = 0
@@ -371,15 +371,15 @@ test "tool contract handlers emit deterministic envelopes" {
         \\        .stream: core.tools.Output.Stream
         \\          .stdout
         \\        .truncated: bool = false
-        \\  [7]: core.tools.contract_test.ResultSnap
+        \\  [7]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
         \\      "g1"
         \\    .started_at_ms: i64 = 88
         \\    .ended_at_ms: i64 = 88
         \\    .final: core.tools.Result.Tag
         \\      .ok
-        \\    .out: []core.tools.contract_test.OutSnap
-        \\      [0]: core.tools.contract_test.OutSnap
+        \\    .out: []core.tools.test.OutSnap
+        \\      [0]: core.tools.test.OutSnap
         \\        .call_id: []const u8
         \\          "g1"
         \\        .seq: u32 = 0

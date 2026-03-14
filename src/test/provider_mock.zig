@@ -3,7 +3,7 @@ const std = @import("std");
 const providers = @import("../core/providers.zig");
 
 pub const Step = union(enum) {
-    ev: providers.Ev,
+    ev: providers.Event,
     block: void,
 };
 
@@ -39,7 +39,7 @@ pub const ScriptedProvider = struct {
         );
     }
 
-    fn start(self: *ScriptedProvider, _: providers.Req) !providers.Stream {
+    fn start(self: *ScriptedProvider, _: providers.Request) !providers.Stream {
         self.reset();
         return providers.Stream.fromAbortable(
             ScriptedProvider,
@@ -50,7 +50,7 @@ pub const ScriptedProvider = struct {
         );
     }
 
-    fn next(self: *ScriptedProvider) !?providers.Ev {
+    fn next(self: *ScriptedProvider) !?providers.Event {
         if (self.idx >= self.steps.len) return null;
         const step = self.steps[self.idx];
         self.idx += 1;

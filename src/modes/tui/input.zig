@@ -3,9 +3,9 @@ const std = @import("std");
 const editor = @import("editor.zig");
 const mouse = @import("mouse.zig");
 
-pub const Ev = union(enum) {
+pub const Event = union(enum) {
     key: editor.Key,
-    mouse: mouse.Ev,
+    mouse: mouse.Event,
     paste: []const u8, // bracketed paste content
     resize: void, // SIGWINCH detected
     notify: void, // external wake-up (background jobs, etc.)
@@ -53,7 +53,7 @@ pub const Reader = struct {
     }
 
     /// Read next input event. May block up to VTIME (100ms).
-    pub fn next(self: *Reader) Ev {
+    pub fn next(self: *Reader) Event {
         // Bracketed paste accumulation mode
         if (self.in_paste) return self.accumulatePaste();
 
@@ -156,7 +156,7 @@ pub const Reader = struct {
         }
     }
 
-    fn accumulatePaste(self: *Reader) Ev {
+    fn accumulatePaste(self: *Reader) Event {
         // Accumulate paste content until \x1b[201~ (paste end)
         while (true) {
             // Process remaining buffer bytes
@@ -207,7 +207,7 @@ pub const Reader = struct {
         self.pos = 0;
     }
 
-    fn parseOne(self: *Reader) ?Ev {
+    fn parseOne(self: *Reader) ?Event {
         const data = self.buf[self.pos..self.len];
         if (data.len == 0) return null;
 
@@ -330,18 +330,18 @@ pub const Reader = struct {
             0x00, 0x02, 0x06, 0x0e, 0x11...0x13, 0x18, 0x1c, 0x1e, 0x1f => {
                 // Other control chars — ignore
                 self.pos += 1;
-                break :sw @as(?Ev, .none);
+                break :sw @as(?Event, .none);
             },
             else => |b| {
                 // UTF-8 character
                 const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
                     self.pos += 1;
-                    break :sw @as(?Ev, .none);
+                    break :sw @as(?Event, .none);
                 };
                 if (data.len < seq_len) break :sw null; // incomplete
                 const cp = std.unicode.utf8Decode(data[0..seq_len]) catch {
                     self.pos += 1;
-                    break :sw @as(?Ev, .none);
+                    break :sw @as(?Event, .none);
                 };
                 self.pos += seq_len;
                 break :sw .{ .key = .{ .char = cp } };
@@ -349,7 +349,7 @@ pub const Reader = struct {
         };
     }
 
-    fn parseCsi(self: *Reader, data: []const u8) ?Ev {
+    fn parseCsi(self: *Reader, data: []const u8) ?Event {
         if (data.len < 3) return null; // need at least ESC [ X
 
         return sw: switch (data[2]) {
@@ -361,7 +361,7 @@ pub const Reader = struct {
                 }
                 if (data.len < 9) break :sw null; // incomplete
                 self.pos += 2;
-                break :sw @as(?Ev, .none); // malformed
+                break :sw @as(?Event, .none); // malformed
             },
             'A' => {
                 self.pos += 3;
@@ -415,14 +415,14 @@ pub const Reader = struct {
             else => {
                 // Unknown CSI final byte
                 self.pos += 3;
-                break :sw @as(?Ev, .none);
+                break :sw @as(?Event, .none);
             },
         };
     }
 
-    fn parseSS3(self: *Reader, data: []const u8) ?Ev {
+    fn parseSS3(self: *Reader, data: []const u8) ?Event {
         if (data.len < 3) return null;
-        const ev: Ev = switch (data[2]) {
+        const ev: Event = switch (data[2]) {
             'A' => .{ .key = .up },
             'B' => .{ .key = .down },
             'C' => .{ .key = .right },
@@ -436,7 +436,7 @@ pub const Reader = struct {
     }
 };
 
-fn mapCsiParam(seq: []const u8) Ev {
+fn mapCsiParam(seq: []const u8) Event {
     // "3~" = delete, "1~"/"7~" = home, "4~"/"8~" = end, "5~"/"6~" = page up/down
     if (seq.len == 2 and seq[1] == '~') {
         return switch (seq[0]) {
@@ -566,7 +566,7 @@ test "parse plain ASCII char" {
     }
 }
 
-fn expectKey(ev: Ev, expected: editor.Key) !void {
+fn expectKey(ev: Event, expected: editor.Key) !void {
     switch (ev) {
         .key => |k| try std.testing.expectEqual(expected, k),
         else => return error.TestUnexpectedResult,

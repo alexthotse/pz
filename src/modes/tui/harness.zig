@@ -98,7 +98,7 @@ pub const Ui = struct {
         }
     }
 
-    fn onProviderInner(self: *Ui, seq: ?u64, ev: core.providers.Ev) !void {
+    fn onProviderInner(self: *Ui, seq: ?u64, ev: core.providers.Event) !void {
         if (seq) |n| {
             try self.tr.appendSeq(n, ev);
         } else {
@@ -110,11 +110,11 @@ pub const Ui = struct {
         }
     }
 
-    pub fn onProvider(self: *Ui, ev: core.providers.Ev) !void {
+    pub fn onProvider(self: *Ui, ev: core.providers.Event) !void {
         try self.onProviderInner(null, ev);
     }
 
-    pub fn onProviderSeq(self: *Ui, seq: u64, ev: core.providers.Ev) !void {
+    pub fn onProviderSeq(self: *Ui, seq: u64, ev: core.providers.Event) !void {
         try self.onProviderInner(seq, ev);
     }
 
@@ -667,28 +667,7 @@ fn clipCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
     return text[0..i];
 }
 
-const TestBuf = struct {
-    buf: []u8,
-    len: usize = 0,
-
-    fn init(buf: []u8) TestBuf {
-        return .{ .buf = buf };
-    }
-
-    fn clear(self: *TestBuf) void {
-        self.len = 0;
-    }
-
-    pub fn writeAll(self: *TestBuf, bytes: []const u8) !void {
-        if (self.len + bytes.len > self.buf.len) return error.NoSpaceLeft;
-        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    fn view(self: *const TestBuf) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+const TestBuf = @import("test_buf.zig").TestBuf;
 
 fn findAsciiSeqX(frm: *const frame.Frame, y: usize, needle: []const u8) ?usize {
     if (needle.len == 0) return 0;

@@ -1,7 +1,7 @@
 //! Generic provider client: retry, streaming, transport.
 
 const std = @import("std");
-const providers = @import("contract.zig");
+const providers = @import("api.zig");
 const retry = @import("retry.zig");
 const streaming = @import("streaming.zig");
 const types = @import("types.zig");
@@ -118,7 +118,7 @@ pub const Client = struct {
         return providers.Provider.from(Client, self, Client.start);
     }
 
-    fn start(self: *Client, req: providers.Req) anyerror!providers.Stream {
+    fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
         const req_wire = try buildReq(self.alloc, req);
         defer self.alloc.free(req_wire);
 
@@ -174,7 +174,7 @@ const RunTr = struct {
         return streaming.Transport.from(RunTr, self, RunTr.start);
     }
 
-    fn start(self: *RunTr, _: providers.Req) Err!streaming.ChunkStream {
+    fn start(self: *RunTr, _: providers.Request) Err!streaming.ChunkStream {
         const raw = self.tr.start(self.req_wire) catch |err| return self.map.map(err);
 
         self.chunk = .{
@@ -192,7 +192,7 @@ const BufStream = struct {
     out: streaming.RunRes,
     idx: usize = 0,
 
-    fn next(self: *BufStream) anyerror!?providers.Ev {
+    fn next(self: *BufStream) anyerror!?providers.Event {
         if (self.idx >= self.out.evs.len) return null;
 
         const ev = self.out.evs[self.idx];
@@ -206,7 +206,7 @@ const BufStream = struct {
     }
 };
 
-pub fn buildReq(alloc: std.mem.Allocator, req: providers.Req) Err![]u8 {
+pub fn buildReq(alloc: std.mem.Allocator, req: providers.Request) Err![]u8 {
     var out: std.io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
 
@@ -220,7 +220,7 @@ pub fn buildReq(alloc: std.mem.Allocator, req: providers.Req) Err![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeReq(js: *std.json.Stringify, req: providers.Req) anyerror!void {
+fn writeReq(js: *std.json.Stringify, req: providers.Request) anyerror!void {
     try js.beginObject();
 
     try js.objectField("model");
@@ -497,7 +497,7 @@ test "buildReq emits request fixture JSON" {
     };
     const stops = [_][]const u8{ "DONE", "ERR" };
 
-    const req: providers.Req = .{
+    const req: providers.Request = .{
         .model = "first-model",
         .msgs = msgs[0..],
         .tools = tools[0..],
@@ -521,7 +521,7 @@ test "buildReq includes provider field when set" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const req: providers.Req = .{
+    const req: providers.Request = .{
         .model = "m1",
         .provider = "anthropic",
         .msgs = msgs[0..],
@@ -558,7 +558,7 @@ test "first provider retries transient start and streams parsed events" {
         waits.asSleeper(),
     );
 
-    const req: providers.Req = .{
+    const req: providers.Request = .{
         .model = "first-model",
         .msgs = &.{},
     };
@@ -623,7 +623,7 @@ test "first provider maps fatal transport errors without retry" {
         waits.asSleeper(),
     );
 
-    const req: providers.Req = .{
+    const req: providers.Request = .{
         .model = "m",
         .msgs = &.{},
     };
@@ -673,7 +673,7 @@ test "first provider retries on transient chunk read failures" {
         waits.asSleeper(),
     );
 
-    const req: providers.Req = .{
+    const req: providers.Request = .{
         .model = "m",
         .msgs = &.{},
     };

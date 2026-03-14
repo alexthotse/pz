@@ -67,7 +67,7 @@ fn execVerbose(run_ctx: mode.Ctx, out: std.Io.AnyWriter, verbose: bool) run_err.
     return .ok;
 }
 
-fn mapEvent(ev: core.providers.Ev) core.session.Event {
+fn mapEvent(ev: core.providers.Event) core.session.Event {
     return .{
         .at_ms = std.time.milliTimestamp(),
         .data = switch (ev) {
@@ -189,9 +189,9 @@ test "exec runs prompt path and persists mapped provider events" {
     const StreamImpl = struct {
         idx: usize = 0,
         deinit_ct: usize = 0,
-        evs: []const core.providers.Ev,
+        evs: []const core.providers.Event,
 
-        fn next(self: *@This()) !?core.providers.Ev {
+        fn next(self: *@This()) !?core.providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -212,7 +212,7 @@ test "exec runs prompt path and persists mapped provider events" {
         prompt: []const u8 = "",
         stream: StreamImpl,
 
-        fn start(self: *@This(), req: core.providers.Req) !core.providers.Stream {
+        fn start(self: *@This(), req: core.providers.Request) !core.providers.Stream {
             self.start_ct += 1;
             self.model = req.model;
             self.msg_ct = req.msgs.len;
@@ -278,7 +278,7 @@ test "exec runs prompt path and persists mapped provider events" {
         }
     };
 
-    const in_evs = [_]core.providers.Ev{
+    const in_evs = [_]core.providers.Event{
         .{ .text = "out-a" },
         .{ .thinking = "think-a" },
         .{
@@ -403,7 +403,7 @@ test "exec runs prompt path and persists mapped provider events" {
         \\      "default"
         \\    .msg_ct: usize = 1
         \\    .part_ct: usize = 1
-        \\    .role: core.providers.contract.Role
+        \\    .role: core.providers.api.Role
         \\      .user
         \\    .prompt: []const u8
         \\      "ship-it"
@@ -463,7 +463,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
         fail_at: usize = 0,
         deinit_ct: usize = 0,
 
-        fn next(self: *@This()) !?core.providers.Ev {
+        fn next(self: *@This()) !?core.providers.Event {
             if (self.idx == self.fail_at) return error.StreamFail;
             self.idx += 1;
             return .{ .text = "nope" };
@@ -477,7 +477,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     const ProviderImpl = struct {
         stream: StreamImpl = .{},
 
-        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
+        fn start(self: *@This(), _: core.providers.Request) !core.providers.Stream {
             return core.providers.Stream.from(
                 StreamImpl,
                 &self.stream,
@@ -572,9 +572,9 @@ test "exec maps max_out stop reason to deterministic typed error" {
     const StreamImpl = struct {
         idx: usize = 0,
         deinit_ct: usize = 0,
-        evs: []const core.providers.Ev,
+        evs: []const core.providers.Event,
 
-        fn next(self: *@This()) !?core.providers.Ev {
+        fn next(self: *@This()) !?core.providers.Event {
             if (self.idx >= self.evs.len) return null;
             const ev = self.evs[self.idx];
             self.idx += 1;
@@ -589,7 +589,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     const ProviderImpl = struct {
         stream: StreamImpl,
 
-        fn start(self: *@This(), _: core.providers.Req) !core.providers.Stream {
+        fn start(self: *@This(), _: core.providers.Request) !core.providers.Stream {
             return core.providers.Stream.from(
                 StreamImpl,
                 &self.stream,
@@ -630,7 +630,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
         fn deinit(_: *@This()) void {}
     };
 
-    const in_evs = [_]core.providers.Ev{
+    const in_evs = [_]core.providers.Event{
         .{ .text = "out-z" },
         .{
             .stop = .{ .reason = .max_out },

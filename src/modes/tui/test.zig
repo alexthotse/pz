@@ -7,7 +7,7 @@ const render = @import("render.zig");
 const theme = @import("theme.zig");
 const vscreen = @import("vscreen.zig");
 
-const Ev = core.providers.Ev;
+const Event = core.providers.Event;
 const VScreen = vscreen.VScreen;
 const Ui = harness.Ui;
 const FrameSnap = struct {
@@ -37,24 +37,7 @@ fn renderToVs(ui: *Ui, vs: *VScreen) !void {
     vs.feed(out.view());
 }
 
-const BufWriter = struct {
-    buf: []u8,
-    len: usize = 0,
-
-    fn init(buf: []u8) BufWriter {
-        return .{ .buf = buf };
-    }
-
-    pub fn writeAll(self: *BufWriter, bytes: []const u8) !void {
-        if (self.len + bytes.len > self.buf.len) return error.NoSpaceLeft;
-        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    fn view(self: *const BufWriter) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+const BufWriter = @import("test_buf.zig").TestBuf;
 
 // Layout helper: reserved = 5 (border + editor + border + 2 footer)
 // tx_h = h - 5 for h >= 6
@@ -326,7 +309,7 @@ test "e2e markdown table draws aligned separators" {
         },
     };
     try oh.snap(@src(),
-        \\modes.tui.fixture.TableSnap
+        \\modes.tui.test.TableSnap
         \\  .counts: [5]usize
         \\    [0]: usize = 3
         \\    [1]: usize = 3
@@ -434,7 +417,7 @@ test "golden snapshot deterministic frame text" {
         .row9 = norm.run(r9_full, n9[0..]),
     };
     try oh.snap(@src(),
-        \\modes.tui.fixture.FrameSnap
+        \\modes.tui.test.FrameSnap
         \\  .row0: []const u8
         \\    "hello world"
         \\  .row1: []const u8

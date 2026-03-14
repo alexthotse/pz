@@ -220,7 +220,7 @@ pub const Panels = struct {
         };
     }
 
-    pub fn append(self: *Panels, ev: core.providers.Ev) EventError!void {
+    pub fn append(self: *Panels, ev: core.providers.Event) EventError!void {
         switch (ev) {
             .text, .thinking => {
                 if (!isTerminal(self.run_state)) self.run_state = .streaming;

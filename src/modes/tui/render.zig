@@ -164,28 +164,7 @@ fn writeCodepoint(out: anytype, cp: u21) !void {
     try out.writeAll(buf[0..n]);
 }
 
-const TestBuf = struct {
-    buf: []u8,
-    len: usize = 0,
-
-    fn init(buf: []u8) TestBuf {
-        return .{ .buf = buf };
-    }
-
-    fn clear(self: *TestBuf) void {
-        self.len = 0;
-    }
-
-    pub fn writeAll(self: *TestBuf, bytes: []const u8) !void {
-        if (self.len + bytes.len > self.buf.len) return error.NoSpaceLeft;
-        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    fn view(self: *const TestBuf) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+const TestBuf = @import("test_buf.zig").TestBuf;
 
 test "renderer first frame clears and paints dirty runs" {
     var rnd = try Renderer.init(std.testing.allocator, 6, 2);

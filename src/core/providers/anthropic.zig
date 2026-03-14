@@ -1,6 +1,6 @@
 //! Anthropic Messages API client.
 const std = @import("std");
-const providers = @import("contract.zig");
+const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
 const utf8 = @import("../utf8.zig");
@@ -115,7 +115,7 @@ pub const Client = struct {
         return hdrs;
     }
 
-    fn start(self: *Client, req: providers.Req) anyerror!providers.Stream {
+    fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
         const stream = try self.alloc.create(SseStream);
         stream.* = SseStream.initFields(self.alloc);
         errdefer {
@@ -241,7 +241,7 @@ const SseStream = struct {
     done: bool,
     err_mode: bool,
     err_text: ?[]const u8,
-    pending: ?providers.Ev,
+    pending: ?providers.Event,
 
     fn initFields(alloc: std.mem.Allocator) SseStream {
         return .{
@@ -268,7 +268,7 @@ const SseStream = struct {
         };
     }
 
-    fn next(self: *SseStream) anyerror!?providers.Ev {
+    fn next(self: *SseStream) anyerror!?providers.Event {
         if (self.pending) |ev| {
             self.pending = null;
             return ev;
@@ -318,7 +318,7 @@ const SseStream = struct {
         }
     }
 
-    fn parseSseData(self: *SseStream, data: []const u8) !?providers.Ev {
+    fn parseSseData(self: *SseStream, data: []const u8) !?providers.Event {
         const ar = self.arena.allocator();
 
         var parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
@@ -355,7 +355,7 @@ const SseStream = struct {
         };
     }
 
-    fn onMessageStart(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onMessageStart(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const msg = objGet(root, "message") orelse return null;
         const usage = objGet(msg, "usage") orelse return null;
         self.in_tok = jsonU64(usage.get("input_tokens"));
@@ -364,7 +364,7 @@ const SseStream = struct {
         return null;
     }
 
-    fn onBlockStart(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onBlockStart(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const cb = objGet(root, "content_block") orelse return null;
         const cb_type = strGet(cb, "type") orelse return null;
 
@@ -380,7 +380,7 @@ const SseStream = struct {
         return null;
     }
 
-    fn onBlockDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onBlockDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         const delta = objGet(root, "delta") orelse return null;
         const delta_type = strGet(delta, "type") orelse return null;
 
@@ -403,7 +403,7 @@ const SseStream = struct {
         return null;
     }
 
-    fn onBlockStop(self: *SseStream) !?providers.Ev {
+    fn onBlockStop(self: *SseStream) !?providers.Event {
         if (!self.in_tool) return null;
         self.in_tool = false;
         const ar = self.arena.allocator();
@@ -414,14 +414,14 @@ const SseStream = struct {
         } };
     }
 
-    fn onMessageDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Ev {
+    fn onMessageDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
         if (objGet(root, "usage")) |usage| {
             self.out_tok = jsonU64(usage.get("output_tokens"));
         }
         const delta = objGet(root, "delta") orelse return null;
         const reason_str = strGet(delta, "stop_reason") orelse return null;
 
-        const usage_ev: providers.Ev = .{ .usage = .{
+        const usage_ev: providers.Event = .{ .usage = .{
             .in_tok = self.in_tok,
             .out_tok = self.out_tok,
             .tot_tok = self.in_tok + self.out_tok,
@@ -508,7 +508,7 @@ fn jsonU64(val: ?std.json.Value) u64 {
     };
 }
 
-fn buildBody(alloc: std.mem.Allocator, req: providers.Req) ![]u8 {
+fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -751,7 +751,7 @@ fn testStream() SseStream {
     return SseStream.initFields(testing.allocator);
 }
 
-fn testParse(stream: *SseStream, data: []const u8) !?providers.Ev {
+fn testParse(stream: *SseStream, data: []const u8) !?providers.Event {
     const ar = stream.arena.allocator();
     const copy = try ar.dupe(u8, data);
     return stream.parseSseData(copy);

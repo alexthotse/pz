@@ -2,7 +2,7 @@
 const std = @import("std");
 const policy = @import("../core/policy.zig");
 const stream_parse = @import("../core/providers/stream_parse.zig");
-const providers = @import("../core/providers/contract.zig");
+const providers = @import("../core/providers/api.zig");
 
 test "perf fuzz policy evaluate sustains ten million ops" {
     const rules = [_]policy.Rule{
@@ -63,7 +63,7 @@ test "perf fuzz stream parser malformed frames stay typed" {
 
         var parser = stream_parse.Parser{};
         defer parser.deinit(ar);
-        var evs: std.ArrayListUnmanaged(providers.Ev) = .empty;
+        var evs: std.ArrayListUnmanaged(providers.Event) = .empty;
         defer evs.deinit(ar);
 
         const n = rnd.intRangeAtMost(usize, 1, 48);

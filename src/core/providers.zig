@@ -10,17 +10,17 @@ pub const oauth_callback = @import("providers/oauth_callback.zig");
 pub const anthropic = @import("providers/anthropic.zig");
 pub const openai = @import("providers/openai.zig");
 
-const c = @import("providers/contract.zig");
+const c = @import("providers/api.zig");
 
 pub const Role = c.Role;
-pub const Req = c.Req;
+pub const Request = c.Request;
 pub const Msg = c.Msg;
 pub const Part = c.Part;
 pub const Tool = c.Tool;
 pub const ToolCall = c.ToolCall;
 pub const ToolResult = c.ToolResult;
 pub const Opts = c.Opts;
-pub const Ev = c.Ev;
+pub const Event = c.Event;
 pub const Usage = c.Usage;
 pub const Stop = c.Stop;
 pub const StopReason = c.StopReason;
