@@ -37,28 +37,29 @@ pub const Err = error{
     TerminalSetupFailed,
 };
 
-const map_ctx_t = struct {
-    fn map(_: *@This(), err: anyerror) core.providers.types.Err {
+const ProcMapCtx = struct {
+    pub fn map(_: *@This(), err: anyerror) core.providers.types.Err {
         if (err == error.Timeout or err == error.WireBreak) return error.TransportTransient;
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return error.TransportFatal;
     }
 };
 
+const ProcTr = core.providers.proc_transport.Transport;
+const ProcClient = core.providers.client.Client(ProcTr, ProcMapCtx, core.providers.client.VoidSleeper);
+
 const ProviderRuntime = struct {
-    tr: core.providers.proc_transport.Transport,
-    map_ctx: map_ctx_t = .{},
-    map: core.providers.types.Adapter = undefined,
+    tr: ProcTr,
+    map_ctx: ProcMapCtx = .{},
     pol: core.providers.client.Policy = undefined,
-    client: core.providers.client.Client = undefined,
+    client: ProcClient = undefined,
 
     fn init(self: *ProviderRuntime, alloc: std.mem.Allocator, provider_cmd: []const u8) !void {
-        self.tr = try core.providers.proc_transport.Transport.init(.{
+        self.tr = try ProcTr.init(.{
             .alloc = alloc,
             .cmd = provider_cmd,
         });
         self.map_ctx = .{};
-        self.map = core.providers.types.Adapter.from(map_ctx_t, &self.map_ctx, map_ctx_t.map);
         self.pol = try core.providers.client.Policy.init(.{
             .max_tries = 4,
             .backoff = .{
@@ -68,12 +69,11 @@ const ProviderRuntime = struct {
             },
             .retryable = core.providers.types.retryable,
         });
-        self.client = core.providers.client.Client.init(
+        self.client = ProcClient.init(
             alloc,
-            self.tr.asRawTransport(),
-            self.map,
+            &self.tr,
+            &self.map_ctx,
             self.pol,
-            null,
         );
     }
 

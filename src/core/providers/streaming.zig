@@ -14,116 +14,6 @@ pub fn retryable(err: Err) bool {
     return types.retryable(err);
 }
 
-/// Type-erased byte-chunk iterator over a provider response body.
-pub const ChunkStream = struct {
-    ctx: *anyopaque,
-    vt: *const Vt,
-
-    pub const Vt = struct {
-        next: *const fn (ctx: *anyopaque) Err!?[]const u8,
-        deinit: *const fn (ctx: *anyopaque) void,
-    };
-
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime next_fn: fn (ctx: *T) Err!?[]const u8,
-        comptime deinit_fn: fn (ctx: *T) void,
-    ) ChunkStream {
-        const Wrap = struct {
-            fn next(raw: *anyopaque) Err!?[]const u8 {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return next_fn(typed);
-            }
-
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
-
-            const vt = Vt{
-                .next = @This().next,
-                .deinit = @This().deinit,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn next(self: *ChunkStream) Err!?[]const u8 {
-        return self.vt.next(self.ctx);
-    }
-
-    pub fn deinit(self: *ChunkStream) void {
-        self.vt.deinit(self.ctx);
-    }
-};
-
-pub const Transport = struct {
-    ctx: *anyopaque,
-    vt: *const Vt,
-
-    pub const Vt = struct {
-        start: *const fn (ctx: *anyopaque, req: providers.Request) Err!ChunkStream,
-    };
-
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime start_fn: fn (ctx: *T, req: providers.Request) Err!ChunkStream,
-    ) Transport {
-        const Wrap = struct {
-            fn start(raw: *anyopaque, req: providers.Request) Err!ChunkStream {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return start_fn(typed, req);
-            }
-
-            const vt = Vt{
-                .start = @This().start,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn start(self: Transport, req: providers.Request) Err!ChunkStream {
-        return self.vt.start(self.ctx, req);
-    }
-};
-
-pub const Sleeper = struct {
-    ctx: *anyopaque,
-    wait_fn: *const fn (ctx: *anyopaque, wait_ms: u64) void,
-
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime wait_fn: fn (ctx: *T, wait_ms: u64) void,
-    ) Sleeper {
-        const Wrap = struct {
-            fn wait(raw: *anyopaque, wait_ms: u64) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                wait_fn(typed, wait_ms);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .wait_fn = Wrap.wait,
-        };
-    }
-
-    pub fn wait(self: Sleeper, wait_ms: u64) void {
-        self.wait_fn(self.ctx, wait_ms);
-    }
-};
-
 pub const RunResult = struct {
     arena: std.heap.ArenaAllocator,
     evs: []providers.Event,
@@ -135,11 +25,13 @@ pub const RunResult = struct {
 };
 
 pub fn run(
+    comptime Tr: type,
+    comptime Slp: type,
     alloc: std.mem.Allocator,
-    tr: Transport,
+    tr: *Tr,
     req: providers.Request,
     pol: Policy,
-    slp: ?Sleeper,
+    slp: ?*Slp,
 ) (retry.StepErr || Err)!RunResult {
     var tries: u16 = 0;
     while (true) {
@@ -147,7 +39,7 @@ pub fn run(
 
         var arena = std.heap.ArenaAllocator.init(alloc);
         const ar = arena.allocator();
-        const res = runOnce(ar, tr, req);
+        const res = runOnce(Tr, ar, tr, req);
         if (res) |evs| {
             return .{
                 .arena = arena,
@@ -168,7 +60,8 @@ pub fn run(
     }
 }
 
-fn runOnce(alloc: std.mem.Allocator, tr: Transport, req: providers.Request) Err![]providers.Event {
+/// ChunkIter: the return type of Tr.start(). Must have next() -> Err!?[]const u8 and deinit().
+fn runOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: providers.Request) Err![]providers.Event {
     var stream = try tr.start(req);
     defer stream.deinit();
 
@@ -198,7 +91,7 @@ const MockChunk = struct {
     idx: usize = 0,
     did_fail: bool = false,
 
-    fn next(self: *MockChunk) Err!?[]const u8 {
+    pub fn next(self: *MockChunk) Err!?[]const u8 {
         const at = self.at orelse return error.TransportFatal;
 
         if (!self.did_fail) {
@@ -216,7 +109,7 @@ const MockChunk = struct {
         return out;
     }
 
-    fn deinit(_: *MockChunk) void {}
+    pub fn deinit(_: *MockChunk) void {}
 };
 
 const MockTr = struct {
@@ -230,11 +123,7 @@ const MockTr = struct {
         };
     }
 
-    fn asTransport(self: *MockTr) Transport {
-        return Transport.from(MockTr, self, MockTr.start);
-    }
-
-    fn start(self: *MockTr, _: providers.Request) Err!ChunkStream {
+    pub fn start(self: *MockTr, _: providers.Request) Err!MockChunk {
         if (self.start_ct >= self.atts.len) return error.TransportFatal;
         const idx = self.start_ct;
         self.start_ct += 1;
@@ -247,7 +136,7 @@ const MockTr = struct {
             .idx = 0,
             .did_fail = false,
         };
-        return ChunkStream.from(MockChunk, &self.stream, MockChunk.next, MockChunk.deinit);
+        return self.stream;
     }
 };
 
@@ -255,11 +144,7 @@ const WaitLog = struct {
     waits: [8]u64 = [_]u64{0} ** 8,
     len: usize = 0,
 
-    fn asSleeper(self: *WaitLog) Sleeper {
-        return Sleeper.from(WaitLog, self, WaitLog.wait);
-    }
-
-    fn wait(self: *WaitLog, wait_ms: u64) void {
+    pub fn wait(self: *WaitLog, wait_ms: u64) void {
         self.waits[self.len] = wait_ms;
         self.len += 1;
     }
@@ -304,11 +189,13 @@ test "stream run retries transient transport and parses frames" {
     const pol = try mkPol(3);
 
     var out = try run(
+        MockTr,
+        WaitLog,
         std.testing.allocator,
-        tr.asTransport(),
+        &tr,
         reqStub(),
         pol,
-        waits.asSleeper(),
+        &waits,
     );
     defer out.deinit();
     const txt = switch (out.evs[0]) {
@@ -368,11 +255,13 @@ test "stream run drops partial events from failed retry attempt" {
     const pol = try mkPol(3);
 
     var out = try run(
+        MockTr,
+        WaitLog,
         std.testing.allocator,
-        tr.asTransport(),
+        &tr,
         reqStub(),
         pol,
-        waits.asSleeper(),
+        &waits,
     );
     defer out.deinit();
     const txt = switch (out.evs[0]) {
@@ -418,11 +307,13 @@ test "stream run does not retry parser failures" {
     try std.testing.expectError(
         error.BadFrame,
         run(
+            MockTr,
+            WaitLog,
             std.testing.allocator,
-            tr.asTransport(),
+            &tr,
             reqStub(),
             pol,
-            waits.asSleeper(),
+            &waits,
         ),
     );
     const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\n", .{
@@ -457,11 +348,13 @@ test "stream run stops at max tries for transient failures" {
     try std.testing.expectError(
         error.TransportTransient,
         run(
+            MockTr,
+            WaitLog,
             std.testing.allocator,
-            tr.asTransport(),
+            &tr,
             reqStub(),
             pol,
-            waits.asSleeper(),
+            &waits,
         ),
     );
     const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}|{d}\n", .{

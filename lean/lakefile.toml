@@ -1,0 +1,11 @@
+name = "pz-proofs"
+version = "0.1.0"
+keywords = ["math"]
+defaultTargets = ["PzProofs"]
+
+[leanOptions]
+pp.unicode.fun = true
+relaxedAutoImplicit = false
+
+[[lean_lib]]
+name = "PzProofs"

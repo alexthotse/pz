@@ -40,40 +40,22 @@ pub fn mapAlloc(_: std.mem.Allocator.Error) Err {
     return error.OutOfMemory;
 }
 
-pub const Adapter = struct {
-    ctx: *anyopaque,
-    vt: *const Vt,
+/// Comptime error-mapping adapter: `Map` must have `fn map(*Map, anyerror) Err`.
+pub fn Adapter(comptime Map: type) type {
+    return struct {
+        ctx: *Map,
 
-    pub const Vt = struct {
-        map: *const fn (ctx: *anyopaque, err: anyerror) Err,
+        const Self = @This();
+
+        pub fn init(ctx: *Map) Self {
+            return .{ .ctx = ctx };
+        }
+
+        pub fn map(self: Self, err: anyerror) Err {
+            return self.ctx.map(err);
+        }
     };
-
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime map_fn: fn (ctx: *T, err: anyerror) Err,
-    ) Adapter {
-        const Wrap = struct {
-            fn map(raw: *anyopaque, err: anyerror) Err {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return map_fn(typed, err);
-            }
-
-            const vt = Vt{
-                .map = @This().map,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn map(self: Adapter, err: anyerror) Err {
-        return self.vt.map(self.ctx, err);
-    }
-};
+}
 
 pub fn isOverflowError(alloc: std.mem.Allocator, err_text: []const u8) bool {
     if (err_text.len == 0) return false;
@@ -111,16 +93,16 @@ pub fn isOverflowError(alloc: std.mem.Allocator, err_text: []const u8) bool {
 
 const MapCtx = struct {
     calls: usize = 0,
+
+    fn map(self: *MapCtx, err: anyerror) Err {
+        self.calls += 1;
+
+        if (err == error.Timeout or err == error.WireBreak) return error.TransportTransient;
+        if (err == error.Closed) return error.TransportFatal;
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return error.TransportFatal;
+    }
 };
-
-fn mapRaw(ctx: *MapCtx, err: anyerror) Err {
-    ctx.calls += 1;
-
-    if (err == error.Timeout or err == error.WireBreak) return error.TransportTransient;
-    if (err == error.Closed) return error.TransportFatal;
-    if (err == error.OutOfMemory) return error.OutOfMemory;
-    return error.TransportFatal;
-}
 
 test "taxonomy class and retry classification" {
     const OhSnap = @import("ohsnap");
@@ -146,7 +128,7 @@ test "adapter maps provider errors into canonical taxonomy" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     var ctx = MapCtx{};
-    const ad = Adapter.from(MapCtx, &ctx, mapRaw);
+    const ad = Adapter(MapCtx).init(&ctx);
     const snap = try std.fmt.allocPrint(std.testing.allocator, "{s}|{s}|{s}|{s}|{d}\n", .{
         @errorName(ad.map(error.Timeout)),
         @errorName(ad.map(error.WireBreak)),

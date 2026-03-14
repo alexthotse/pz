@@ -9,202 +9,144 @@ const types = @import("types.zig");
 pub const Err = types.Err;
 pub const Policy = retry.Policy(Err);
 
-pub const RawChunkStream = struct {
-    ctx: *anyopaque,
-    vt: *const Vt,
+/// Generic client parameterized by raw transport and error mapper types.
+///
+/// `RawTr` must have:
+///   fn start(*RawTr, []const u8) anyerror!RawChunkIter
+///   where RawChunkIter has fn next(*RawChunkIter) anyerror!?[]const u8 and fn deinit(*RawChunkIter).
+///
+/// `Map` must have:
+///   fn map(*Map, anyerror) Err
+pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type {
+    // Resolve the raw chunk iterator type from RawTr.start return type.
+    const RawChunkIter = RawChunkIterType(RawTr);
 
-    pub const Vt = struct {
-        next: *const fn (ctx: *anyopaque) anyerror!?[]const u8,
-        deinit: *const fn (ctx: *anyopaque) void,
-    };
-
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime next_fn: anytype,
-        comptime deinit_fn: fn (ctx: *T) void,
-    ) RawChunkStream {
-        const Wrap = struct {
-            fn next(raw: *anyopaque) anyerror!?[]const u8 {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return next_fn(typed);
-            }
-
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
-
-            const vt = Vt{
-                .next = @This().next,
-                .deinit = @This().deinit,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn next(self: *RawChunkStream) anyerror!?[]const u8 {
-        return self.vt.next(self.ctx);
-    }
-
-    pub fn deinit(self: *RawChunkStream) void {
-        self.vt.deinit(self.ctx);
-    }
-};
-
-pub const RawTransport = struct {
-    ctx: *anyopaque,
-    vt: *const Vt,
-
-    pub const Vt = struct {
-        start: *const fn (ctx: *anyopaque, req_wire: []const u8) anyerror!RawChunkStream,
-    };
-
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime start_fn: anytype,
-    ) RawTransport {
-        const Wrap = struct {
-            fn start(raw: *anyopaque, req_wire: []const u8) anyerror!RawChunkStream {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return start_fn(typed, req_wire);
-            }
-
-            const vt = Vt{
-                .start = @This().start,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn start(self: RawTransport, req_wire: []const u8) anyerror!RawChunkStream {
-        return self.vt.start(self.ctx, req_wire);
-    }
-};
-
-pub const Client = struct {
-    alloc: std.mem.Allocator,
-    tr: RawTransport,
-    map: types.Adapter,
-    pol: Policy,
-    slp: ?streaming.Sleeper = null,
-
-    pub fn init(
+    return struct {
         alloc: std.mem.Allocator,
-        tr: RawTransport,
-        map: types.Adapter,
+        tr: *RawTr,
+        map: *Map,
         pol: Policy,
-        slp: ?streaming.Sleeper,
-    ) Client {
-        return .{
-            .alloc = alloc,
-            .tr = tr,
-            .map = map,
-            .pol = pol,
-            .slp = slp,
-        };
-    }
+        slp: ?*Slp = null,
 
-    pub fn asProvider(self: *Client) providers.Provider {
-        return providers.Provider.from(Client, self, Client.start);
-    }
+        const Self = @This();
 
-    fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
-        const req_wire = try buildReq(self.alloc, req);
-        defer self.alloc.free(req_wire);
-
-        var run_tr = RunTr{
-            .tr = self.tr,
-            .map = self.map,
-            .req_wire = req_wire,
-        };
-
-        const out = try streaming.run(
-            self.alloc,
-            run_tr.asTransport(),
-            req,
-            self.pol,
-            self.slp,
-        );
-
-        const st = try self.alloc.create(BufStream);
-        st.* = .{
-            .alloc = self.alloc,
-            .out = out,
-        };
-
-        return providers.Stream.from(BufStream, st, BufStream.next, BufStream.deinit);
-    }
-};
-
-const RunTr = struct {
-    tr: RawTransport,
-    map: types.Adapter,
-    req_wire: []const u8,
-    chunk: ChunkCtx = .{},
-
-    const ChunkCtx = struct {
-        raw: RawChunkStream = undefined,
-        has_raw: bool = false,
-        map: types.Adapter = undefined,
-
-        fn next(self: *ChunkCtx) Err!?[]const u8 {
-            if (!self.has_raw) return error.TransportFatal;
-            return self.raw.next() catch |err| return self.map.map(err);
+        pub fn init(
+            alloc: std.mem.Allocator,
+            tr: *RawTr,
+            map: *Map,
+            pol: Policy,
+        ) Self {
+            return .{
+                .alloc = alloc,
+                .tr = tr,
+                .map = map,
+                .pol = pol,
+            };
         }
 
-        fn deinit(self: *ChunkCtx) void {
-            if (self.has_raw) {
-                self.raw.deinit();
-                self.has_raw = false;
+        pub fn asProvider(self: *Self) providers.Provider {
+            return providers.Provider.from(Self, self, Self.start);
+        }
+
+        fn start(self: *Self, req: providers.Request) anyerror!providers.Stream {
+            const req_wire = try buildReq(self.alloc, req);
+            defer self.alloc.free(req_wire);
+
+            var run_tr = RunTr{
+                .tr = self.tr,
+                .map = self.map,
+                .req_wire = req_wire,
+            };
+
+            const out = try streaming.run(
+                RunTr,
+                Slp,
+                self.alloc,
+                &run_tr,
+                req,
+                self.pol,
+                self.slp,
+            );
+
+            const st = try self.alloc.create(BufStream);
+            st.* = .{
+                .alloc = self.alloc,
+                .out = out,
+            };
+
+            return providers.Stream.from(BufStream, st, BufStream.next, BufStream.deinit);
+        }
+
+        const ChunkCtx = struct {
+            raw: RawChunkIter = undefined,
+            has_raw: bool = false,
+            map_ctx: *Map = undefined,
+
+            pub fn next(self: *ChunkCtx) Err!?[]const u8 {
+                if (!self.has_raw) return error.TransportFatal;
+                return self.raw.next() catch |err| return self.map_ctx.map(err);
             }
-        }
-    };
 
-    fn asTransport(self: *RunTr) streaming.Transport {
-        return streaming.Transport.from(RunTr, self, RunTr.start);
-    }
-
-    fn start(self: *RunTr, _: providers.Request) Err!streaming.ChunkStream {
-        const raw = self.tr.start(self.req_wire) catch |err| return self.map.map(err);
-
-        self.chunk = .{
-            .raw = raw,
-            .has_raw = true,
-            .map = self.map,
+            pub fn deinit(self: *ChunkCtx) void {
+                if (self.has_raw) {
+                    self.raw.deinit();
+                    self.has_raw = false;
+                }
+            }
         };
 
-        return streaming.ChunkStream.from(ChunkCtx, &self.chunk, ChunkCtx.next, ChunkCtx.deinit);
-    }
+        const RunTr = struct {
+            tr: *RawTr,
+            map: *Map,
+            req_wire: []const u8,
+            chunk: ChunkCtx = .{},
+
+            pub fn start(self: *RunTr, _: providers.Request) Err!ChunkCtx {
+                const raw = self.tr.start(self.req_wire) catch |err| return self.map.map(err);
+
+                self.chunk = .{
+                    .raw = raw,
+                    .has_raw = true,
+                    .map_ctx = self.map,
+                };
+
+                return self.chunk;
+            }
+        };
+
+        const BufStream = struct {
+            alloc: std.mem.Allocator,
+            out: streaming.RunResult,
+            idx: usize = 0,
+
+            fn next(self: *BufStream) anyerror!?providers.Event {
+                if (self.idx >= self.out.evs.len) return null;
+
+                const ev = self.out.evs[self.idx];
+                self.idx += 1;
+                return ev;
+            }
+
+            fn deinit(self: *BufStream) void {
+                self.out.deinit();
+                self.alloc.destroy(self);
+            }
+        };
+    };
+}
+
+/// A sleeper that does nothing — used as default when no real sleeper is needed.
+pub const VoidSleeper = struct {
+    pub fn wait(_: *VoidSleeper, _: u64) void {}
 };
 
-const BufStream = struct {
-    alloc: std.mem.Allocator,
-    out: streaming.RunResult,
-    idx: usize = 0,
-
-    fn next(self: *BufStream) anyerror!?providers.Event {
-        if (self.idx >= self.out.evs.len) return null;
-
-        const ev = self.out.evs[self.idx];
-        self.idx += 1;
-        return ev;
-    }
-
-    fn deinit(self: *BufStream) void {
-        self.out.deinit();
-        self.alloc.destroy(self);
-    }
-};
+/// Extract the return type of RawTr.start (stripped of error union).
+fn RawChunkIterType(comptime RawTr: type) type {
+    const info = @typeInfo(@TypeOf(RawTr.start));
+    const ReturnType = info.@"fn".return_type.?;
+    // Unwrap error union to get the payload type
+    return @typeInfo(ReturnType).error_union.payload;
+}
 
 pub fn buildReq(alloc: std.mem.Allocator, req: providers.Request) Err![]u8 {
     var out: std.io.Writer.Allocating = .init(alloc);
@@ -336,16 +278,16 @@ const RawErr = error{
 
 const MapCtx = struct {
     calls: usize = 0,
+
+    pub fn map(self: *MapCtx, err: anyerror) Err {
+        self.calls += 1;
+
+        if (err == error.Timeout or err == error.WireBreak) return error.TransportTransient;
+        if (err == error.Closed or err == error.BadGateway) return error.TransportFatal;
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return error.TransportFatal;
+    }
 };
-
-fn mapErr(ctx: *MapCtx, err: anyerror) Err {
-    ctx.calls += 1;
-
-    if (err == error.Timeout or err == error.WireBreak) return error.TransportTransient;
-    if (err == error.Closed or err == error.BadGateway) return error.TransportFatal;
-    if (err == error.OutOfMemory) return error.OutOfMemory;
-    return error.TransportFatal;
-}
 
 const Attempt = struct {
     start_err: ?RawErr = null,
@@ -359,7 +301,7 @@ const MockRawChunk = struct {
     idx: usize = 0,
     did_fail: bool = false,
 
-    fn next(self: *MockRawChunk) RawErr!?[]const u8 {
+    pub fn next(self: *MockRawChunk) RawErr!?[]const u8 {
         const at = self.at orelse return error.Closed;
 
         if (!self.did_fail) {
@@ -377,7 +319,7 @@ const MockRawChunk = struct {
         return out;
     }
 
-    fn deinit(_: *MockRawChunk) void {}
+    pub fn deinit(_: *MockRawChunk) void {}
 };
 
 const MockRawTr = struct {
@@ -401,11 +343,7 @@ const MockRawTr = struct {
         self.reqs.deinit(self.alloc);
     }
 
-    fn asRawTransport(self: *MockRawTr) RawTransport {
-        return RawTransport.from(MockRawTr, self, MockRawTr.start);
-    }
-
-    fn start(self: *MockRawTr, req_wire: []const u8) anyerror!RawChunkStream {
+    pub fn start(self: *MockRawTr, req_wire: []const u8) anyerror!MockRawChunk {
         const req_copy = try self.alloc.dupe(u8, req_wire);
         try self.reqs.append(self.alloc, req_copy);
 
@@ -422,7 +360,7 @@ const MockRawTr = struct {
             .did_fail = false,
         };
 
-        return RawChunkStream.from(MockRawChunk, &self.stream, MockRawChunk.next, MockRawChunk.deinit);
+        return self.stream;
     }
 };
 
@@ -430,11 +368,7 @@ const WaitLog = struct {
     waits: [8]u64 = [_]u64{0} ** 8,
     len: usize = 0,
 
-    fn asSleeper(self: *WaitLog) streaming.Sleeper {
-        return streaming.Sleeper.from(WaitLog, self, WaitLog.wait);
-    }
-
-    fn wait(self: *WaitLog, wait_ms: u64) void {
+    pub fn wait(self: *WaitLog, wait_ms: u64) void {
         self.waits[self.len] = wait_ms;
         self.len += 1;
     }
@@ -550,20 +484,21 @@ test "first provider retries transient start and streams parsed events" {
     const pol = try mkPol(3);
 
     var map_ctx = MapCtx{};
-    var client = Client.init(
+    const MockClient = Client(MockRawTr, MapCtx, WaitLog);
+    var cli = MockClient.init(
         std.testing.allocator,
-        tr.asRawTransport(),
-        types.Adapter.from(MapCtx, &map_ctx, mapErr),
+        &tr,
+        &map_ctx,
         pol,
-        waits.asSleeper(),
     );
+    cli.slp = &waits;
 
     const req: providers.Request = .{
         .model = "first-model",
         .msgs = &.{},
     };
 
-    var stream = try client.asProvider().start(req);
+    var stream = try cli.asProvider().start(req);
     defer stream.deinit();
 
     const ev0 = (try stream.next()) orelse return error.TestUnexpectedResult;
@@ -615,20 +550,21 @@ test "first provider maps fatal transport errors without retry" {
     const pol = try mkPol(3);
 
     var map_ctx = MapCtx{};
-    var client = Client.init(
+    const MockClient = Client(MockRawTr, MapCtx, WaitLog);
+    var cli = MockClient.init(
         std.testing.allocator,
-        tr.asRawTransport(),
-        types.Adapter.from(MapCtx, &map_ctx, mapErr),
+        &tr,
+        &map_ctx,
         pol,
-        waits.asSleeper(),
     );
+    cli.slp = &waits;
 
     const req: providers.Request = .{
         .model = "m",
         .msgs = &.{},
     };
 
-    try std.testing.expectError(error.TransportFatal, client.asProvider().start(req));
+    try std.testing.expectError(error.TransportFatal, cli.asProvider().start(req));
     const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\nmap_calls={d}\n", .{
         tr.start_ct,
         waits.len,
@@ -665,20 +601,21 @@ test "first provider retries on transient chunk read failures" {
     const pol = try mkPol(3);
 
     var map_ctx = MapCtx{};
-    var client = Client.init(
+    const MockClient = Client(MockRawTr, MapCtx, WaitLog);
+    var cli = MockClient.init(
         std.testing.allocator,
-        tr.asRawTransport(),
-        types.Adapter.from(MapCtx, &map_ctx, mapErr),
+        &tr,
+        &map_ctx,
         pol,
-        waits.asSleeper(),
     );
+    cli.slp = &waits;
 
     const req: providers.Request = .{
         .model = "m",
         .msgs = &.{},
     };
 
-    var stream = try client.asProvider().start(req);
+    var stream = try cli.asProvider().start(req);
     defer stream.deinit();
 
     const ev0 = (try stream.next()) orelse return error.TestUnexpectedResult;

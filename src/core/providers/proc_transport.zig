@@ -1,6 +1,5 @@
 //! Child-process transport: pipe-based provider for local models.
 const std = @import("std");
-const client = @import("client.zig");
 const shell = @import("../shell.zig");
 
 pub const Transport = struct {
@@ -35,20 +34,12 @@ pub const Transport = struct {
         self.* = undefined;
     }
 
-    pub fn asRawTransport(self: *Transport) client.RawTransport {
-        return client.RawTransport.from(Transport, self, Transport.start);
-    }
-
-    fn start(self: *Transport, req_wire: []const u8) !client.RawChunkStream {
-        const stream = try self.alloc.create(ProcChunk);
-        errdefer self.alloc.destroy(stream);
-
-        stream.* = try ProcChunk.init(self.alloc, self.cmd, self.cwd, self.chunk_bytes, req_wire);
-        return client.RawChunkStream.from(ProcChunk, stream, ProcChunk.next, ProcChunk.deinit);
+    pub fn start(self: *Transport, req_wire: []const u8) !ProcChunk {
+        return try ProcChunk.init(self.alloc, self.cmd, self.cwd, self.chunk_bytes, req_wire);
     }
 };
 
-const ProcChunk = struct {
+pub const ProcChunk = struct {
     alloc: std.mem.Allocator,
     child: std.process.Child,
     stdout: std.fs.File,
@@ -104,7 +95,7 @@ const ProcChunk = struct {
         };
     }
 
-    fn next(self: *ProcChunk) anyerror!?[]const u8 {
+    pub fn next(self: *ProcChunk) anyerror!?[]const u8 {
         if (self.done) return null;
 
         const n = self.stdout.read(self.buf) catch |read_err| return mapIoErr(read_err);
@@ -124,7 +115,7 @@ const ProcChunk = struct {
         }
     }
 
-    fn deinit(self: *ProcChunk) void {
+    pub fn deinit(self: *ProcChunk) void {
         if (!self.done) {
             self.stdout.close();
             killAndWait(&self.child) catch |err| {
@@ -134,8 +125,6 @@ const ProcChunk = struct {
         }
 
         self.alloc.free(self.buf);
-        const alloc = self.alloc;
-        alloc.destroy(self);
     }
 };
 
@@ -171,7 +160,7 @@ test "proc transport streams stdout frames and exits cleanly" {
     });
     defer tr.deinit();
 
-    var raw = try tr.asRawTransport().start("{\"model\":\"m\"}");
+    var raw = try tr.start("{\"model\":\"m\"}");
     defer raw.deinit();
 
     var out: [128]u8 = undefined;
@@ -199,7 +188,7 @@ test "proc transport reports bad gateway on non-zero exit" {
     });
     defer tr.deinit();
 
-    var raw = try tr.asRawTransport().start("{\"model\":\"m\"}");
+    var raw = try tr.start("{\"model\":\"m\"}");
     defer raw.deinit();
 
     _ = (try raw.next()) orelse return error.TestUnexpectedResult;
