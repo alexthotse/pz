@@ -101,7 +101,7 @@ Each thread gets its own session file:
   <main-sid>.t.test.jsonl    # thread:test
 ```
 
-Episodes are stored as `prompt` events with text envelope content (`[EPISODE:name] {json}`). No new `Event.Data` variants — forward-compatible with old binaries (see Decision #11).
+Episodes are stored as new `Event.Data` variants (`episode: Episode`, `thread_start: ThreadStart`). Hard cutover — old binaries cannot read sessions with episodes. No compatibility shims, no migration.
 
 ## Orchestrator Protocol
 
@@ -232,7 +232,7 @@ Implementation:
 - Thread session files via `SessionFile` with validated naming (`<sid>.t.<name>.jsonl`, name: `[a-z0-9-]`, max 32 chars)
 - Session selector filtering: `fileSid`/`latestSidAlloc`/`fromIdOrPrefix` exclude `.t.` files
 - Episode injection: transient struct serialized to text envelope (`[EPISODE:name] {json}`), injected as `Part.text` with role `.user`, then freed.
-- Session persistence: store episodes as `prompt` events with text envelope content. No new `Event.Data` variants (forward-compat). No `tool_result` events (no `name` field; orphaned results rejected by Anthropic API).
+- Session persistence: new `Event.Data` variants (`episode: Episode`, `thread_start: ThreadStart`). Hard cutover — no forward compat. Update all exhaustive switches (`dupeData`, `freeData`, `sanitizeData`, `export.zig`, property tests). Deep-copy/free for Episode's nested slices.
 
 ### Phase 2: Parallel threads
 
@@ -432,15 +432,15 @@ P21b (multi-agent UX) designs separate result format with visible outcome states
 7. **Thread resumption**: No resumption. One action per thread. Follow-up spawns new thread with prior episode as input.
 8. **thread:spawn**: New tool kind. State machine transition in the event loop — registers a new provider stream fd, orchestrator's state machine yields until thread's state machine reaches `done`. NOT recursive `loop.run` (P10 eliminates the blocking loop pattern).
 9. **Policy enforcement**: Thread inherits parent's `ToolAuth` + `Approver`. Define `ToolAuth.noop`/`Approver.noop` sentinels (fail-closed), make fields non-optional.
-10. **Episode injection**: Serialize to text with structured envelope (`[EPISODE:name] {json}`) in `Part.text` with role `.user`. On session replay, `appendFromSession` detects the `[EPISODE:` prefix and wraps the text in a clear context envelope (e.g., `"Thread completion summary (not user input):\n[EPISODE:name] {json}"`) so the model does not treat it as user instructions.
-11. **Session schema**: No new `Event.Data` variants. Episodes stored as `prompt` events with text envelope. Forward-compatible with old binaries. No `tool_result` events (no `name` field; orphaned results rejected by API).
+10. **Episode injection**: New `Part.episode` variant in provider contract. Episodes are structured messages with a dedicated role/part type — not serialized as text in `Part.text`. Requires updating all provider encoders (Anthropic, OpenAI) to handle the new variant.
+11. **Session schema**: New `Event.Data` variants (`episode`, `thread_start`). Hard cutover — old binaries cannot read new sessions. No compat shims, no migration, no fallback. This is consistent with pz's core constraint: hard cutovers only.
 12. **Phase 1 tool registry**: Bump to `[11]` for `thread:spawn` only. `thread:join` is Phase 2 — not registered until parallel threads are implemented.
 
 ## Resolved Open Questions
 
 - **Phase ordering (Q4)**: P10 is assumed complete. Phase 1 builds directly on the async event loop. F5 (provider safety), F6 (CwdGuard), F7 (writer races) are resolved by P10 — not deferred. Phase 2 adds parallel fd multiplexing on top.
 - **Mode thread policy (Q5)**: Non-TUI modes restrict to sequential threads. Print/JSON receive episode events via the parent ModeSink only (thread events go to BufferSink).
-- **Session schema versioning (Q3)**: Store as `prompt` events. No new variants. Forward-compatible.
+- **Session schema versioning (Q3)**: New `Event.Data` variants. Hard cutover. No compat shims.
 
 ## Remaining Open Questions
 
