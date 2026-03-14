@@ -71,6 +71,12 @@ Use `joelreymont/zcheck` for property tests and add fuzz/property coverage where
 
 See `docs/zig.md` (mirrored from `~/.agents/docs/zig.md`).
 
+## Formal Verification
+
+- TLA+ spec for thread dispatch: `docs/tla/ThreadDispatch.tla`
+- Run with `/tla` skill after changing thread dispatch, file ownership, or join/cancel logic
+- Lean 4 proofs planned for policy enforcement and signing (see dot)
+
 ## Plan Rule
 
 Track execution against `PLAN.md`.
