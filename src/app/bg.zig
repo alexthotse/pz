@@ -733,8 +733,8 @@ pub const Mgr = struct {
 
 const ControlAudit = struct {
     op: []const u8,
-    out: core.audit.Out = .ok,
-    sev: core.audit.Sev = .info,
+    out: core.audit.Outcome = .ok,
+    sev: core.audit.Severity = .info,
     msg: ?core.audit.Str,
     argv: ?core.audit.Str = null,
     attrs: []const core.audit.Attr = &.{},
@@ -890,7 +890,7 @@ const AuditHdrDoc = struct {
     ts_ms: i64,
     sid: []const u8,
     seq: u64,
-    sev: core.audit.Sev,
+    sev: core.audit.Severity,
 };
 
 const AuditSealDoc = struct {
@@ -916,7 +916,7 @@ fn e2eFrameOpts() core.audit.FrameOpts {
 
 fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []const []const u8) !void {
     const key = e2eAuditKey();
-    var prev: ?core.audit_integrity.Tag = null;
+    var prev: ?core.audit_integrity.Mac = null;
 
     for (rows) |row| {
         const hdr = try std.json.parseFromSlice(AuditHdrDoc, alloc, row, .{
@@ -934,7 +934,7 @@ fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []
         });
         defer doc.deinit();
 
-        var next: core.audit_integrity.Tag = undefined;
+        var next: core.audit_integrity.Mac = undefined;
         _ = try std.fmt.hexToBytes(next[0..], doc.value.mac);
 
         const frame = try core.audit.encodeFrameBodyAlloc(alloc, e2eFrameOpts(), .{

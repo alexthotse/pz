@@ -1,6 +1,6 @@
 //! Child-process transport: pipe-based provider for local models.
 const std = @import("std");
-const first = @import("client.zig");
+const client = @import("client.zig");
 const shell = @import("../shell.zig");
 
 pub const Transport = struct {
@@ -35,16 +35,16 @@ pub const Transport = struct {
         self.* = undefined;
     }
 
-    pub fn asRawTransport(self: *Transport) first.RawTransport {
-        return first.RawTransport.from(Transport, self, Transport.start);
+    pub fn asRawTransport(self: *Transport) client.RawTransport {
+        return client.RawTransport.from(Transport, self, Transport.start);
     }
 
-    fn start(self: *Transport, req_wire: []const u8) !first.RawChunkStream {
+    fn start(self: *Transport, req_wire: []const u8) !client.RawChunkStream {
         const stream = try self.alloc.create(ProcChunk);
         errdefer self.alloc.destroy(stream);
 
         stream.* = try ProcChunk.init(self.alloc, self.cmd, self.cwd, self.chunk_bytes, req_wire);
-        return first.RawChunkStream.from(ProcChunk, stream, ProcChunk.next, ProcChunk.deinit);
+        return client.RawChunkStream.from(ProcChunk, stream, ProcChunk.next, ProcChunk.deinit);
     }
 };
 

@@ -14,7 +14,7 @@ pz's current compaction (`compact.zig`) runs mid-conversation, losing context un
 
 ## Core Primitive: Thread
 
-A **Thread** is a named, resumable sub-conversation with its own session, tool access, and provider. When a thread completes an action, its trajectory is compressed into an **Episode** — a structured summary that the orchestrator (or other threads) can reference.
+A **Thread** is a named, single-action sub-conversation with its own session, tool access, and provider. When a thread completes its action, its trajectory is compressed into an **Episode** — a structured summary that the orchestrator (or other threads) can reference. Threads are not resumable — follow-up work spawns a new thread with the prior episode as input (see Decision #7).
 
 ```
 Orchestrator (main loop)
@@ -32,7 +32,7 @@ Orchestrator (main loop)
 | Identity | Anonymous | Named, addressable |
 | Result | Response string | Structured Episode |
 | Context | Fully isolated | Episode composition |
-| Lifetime | Single-shot | Resumable across actions |
+| Lifetime | Single-shot | Single-action, not resumable |
 | Compaction | N/A (discarded) | Natural at completion boundary |
 | Parallelism | Independent | Orchestrator-coordinated |
 
@@ -47,10 +47,10 @@ pub const Thread = struct {
     session_id: []const u8, // own JSONL session
     state: State,
     parent: ?ThreadId,      // orchestrator thread
-    input_eps: []EpisodeRef, // episodes fed as context
+    input_eps: []const []const u8, // thread names whose episodes are deserialized from session text (Phase 3)
 
     pub const State = enum {
-        idle,     // waiting for orchestrator dispatch
+        pending,  // created, not yet started
         running,  // executing an action
         done,     // action complete, episode ready
         failed,   // action errored
@@ -87,14 +87,7 @@ pub const Episode = struct {
 };
 ```
 
-### EpisodeRef
-
-```zig
-pub const EpisodeRef = struct {
-    thread_name: []const u8,
-    episode: *const Episode,
-};
-```
+Episode values are transient — created at thread completion, serialized to text envelope (`[EPISODE:name] {json}`), then freed. Phase 3 episode composition deserializes from session text by thread name. No raw pointers to episodes (avoids UAF — see F12).
 
 ## Session Storage
 
@@ -108,15 +101,7 @@ Each thread gets its own session file:
   <main-sid>.t.test.jsonl    # thread:test
 ```
 
-Episodes are serialized as session events (new `Event.Data` variant):
-
-```zig
-pub const Data = union(Tag) {
-    // ... existing variants ...
-    episode: Episode,        // thread completion summary
-    thread_start: ThreadStart, // thread dispatch record
-};
-```
+Episodes are stored as `prompt` events with text envelope content (`[EPISODE:name] {json}`). No new `Event.Data` variants — forward-compatible with old binaries (see Decision #11).
 
 ## Orchestrator Protocol
 
@@ -143,11 +128,11 @@ When a thread finishes, the loop:
 3. Injects the Episode into the orchestrator's context as a structured message
 4. Marks the thread as `done`
 
-### Resumption
+### No Resumption
 
-Threads can be resumed for follow-up actions. The thread retains its full session history. A new action appends to the same session file and produces a new Episode.
+Threads are single-action. Follow-up work spawns a new thread with the prior episode deserialized from session text as input context (Phase 3). See Decision #7.
 
-### Parallel Dispatch
+### Parallel Dispatch (Phase 2)
 
 Multiple threads can run concurrently. The orchestrator blocks until all dispatched threads complete, then receives all Episodes at once:
 
@@ -159,45 +144,38 @@ thread:join ["a", "b"]  // blocks, returns both episodes
 
 ## Episode Generation
 
-When a thread completes, its full trajectory is compressed:
+When a thread completes, its trajectory is compressed into an Episode:
 
-1. Collect all session events from the thread's session
-2. Extract file operations (reads, writes, edits) from tool calls
-3. Call `generateSummary` (existing `compact.zig` infra) with the thread's events
-4. Model produces structured Episode fields: goal, outcome, key_findings
-5. Tool trace is mechanically compressed: tool name + target + truncated output
+1. Collect all session events from the thread's session file
+2. Extract mechanical fields deterministically: `files_read`, `files_changed` from tool calls, `tool_summary` (tool name + target + truncated output), `token_usage`, `elapsed_ms`
+3. Call `start()` with an episode-specific system prompt requesting JSON conforming to the Episode schema. The prompt includes the thread's session events as context.
+4. Collect full stream text. Strip markdown code fences if present.
+5. `std.json.parseFromSlice` into `EpisodeResult` to get `goal`, `outcome`, `key_findings`
+6. On parse failure, produce mechanical-only episode: `outcome: .failed`, empty `key_findings`, mechanical fields from step 2
 
-This reuses the existing `GeneratedSummary` / `SummaryReq` infrastructure in `compact.zig` / `contract.zig`.
+Does NOT reuse `generateSummary` / `SummaryReq` — different output shape (see F1, F30).
 
 ## Integration Points
 
 ### loop.zig
 
-New `ModeEv` variants:
+Phase 1: no new `ModeEv` variants. Thread events go to a `BufferSink`; only the episode text envelope reaches the parent ModeSink as a `Part.text` injection. Phase 2 may add `ModeEv` variants for TUI thread status display.
 
-```zig
-pub const ModeEv = union(enum) {
-    // ... existing ...
-    thread_start: ThreadStart,
-    thread_episode: Episode,
-};
-```
-
-The main loop gains a thread dispatch path: when a tool call requests `thread:spawn`, the loop creates a new Thread, runs it (possibly in a separate OS thread or sequentially), and on completion injects the Episode.
+The event loop gains a thread dispatch state: `thread:spawn` registers a new provider stream fd. The orchestrator's state machine yields until the thread's state machine reaches `done`, then injects the episode.
 
 ### runtime.zig
 
-Thread management: track active threads, their sessions, coordinate parallel dispatch. The TUI shows thread status in the footer.
+Thread management: track active threads, their sessions, coordinate dispatch. TUI shows thread status in the footer (Phase 2).
 
 ### compact.zig
 
-Episode generation reuses `generateSummary`. The key difference: compaction no longer runs mid-conversation on the orchestrator. Instead, each thread's trace is naturally bounded and compressed at completion.
+Episode generation does NOT reuse `generateSummary` (different output shape — see F1). New episode-specific prompt via `start()`, requesting JSON conforming to Episode schema. Mechanical fallback on parse failure.
 
-The orchestrator's context grows only by Episodes (small, structured) rather than raw tool traces.
+The orchestrator's context grows only by episode text envelopes (small, structured) rather than raw tool traces.
 
 ### Provider contract
 
-New `SummaryReq` variant or reuse existing one for episode generation. The model is asked to produce structured Episode fields given the raw thread trace.
+No new `SummaryReq` variant. Episode generation reuses `start()` with an episode-specific system prompt. The model produces structured JSON; the harness parses it into an Episode struct.
 
 ## Context Flow
 
@@ -226,53 +204,51 @@ With threads, the orchestrator's context grows much more slowly:
 
 When the orchestrator's context does eventually need compaction, episodes provide natural summary units that survive compression far better than raw traces.
 
+## Assumption
+
+This plan assumes **P10 (Zero-latency cancel)** is already implemented. The main loop is an async event loop driven by `poll`/`kqueue` fds. Tool calls are fd-registered state machines, not blocking calls. Provider streams are pollfds. `CwdGuard` is eliminated — file tools use `openat`/Dir-relative operations.
+
 ## Implementation Phases
 
 ### Phase 1: Sequential threads
 
-Prerequisites (verified viable, ~200-300 lines):
-- `ProviderFactory`: create fresh Provider instance per thread (reuse cached auth, separate HTTP client). NOT full thread-safety — just aliasing prevention.
-- `BufferSink` or `NullSink`: thread events go to a separate ModeSink. Only the episode summary is pushed to the parent's mode sink.
-- Per-thread `Writer` instance (separate `pending` counter). Same directory, different sid.
-- Thread `Opts.abort_slot = null` (or separate slot). Prevents clobbering parent's abort slot.
-- Thread `Opts.compactor = null`. Thread sessions are bounded (one action), no compaction needed.
-- Depth guard: `thread:spawn` handler checks depth counter in Opts, refuses if > 0.
-- Tool mask intersection: `thread_mask = requested & parent_mask`.
-- `ToolAuth` + `Approver` inherited from parent Opts (mandatory, fail-closed).
+Thread dispatch is a state machine transition in the event loop. The orchestrator's turn pauses while the thread's turn runs on its own provider stream fd. Sequential = one thread at a time, orchestrator waits.
+
+Per-thread isolation:
+- `ProviderFactory`: fresh Provider instance per thread (separate HTTP connection, reuse cached auth)
+- `BufferSink`: thread events go to a separate ModeSink. Only the episode summary is pushed to the parent's mode sink.
+- Per-thread `Writer` instance (separate session file, separate flush counter)
+- Per-thread `AbortSlot` (cancel targets the active thread's fd)
+- Per-thread `CmdCache` (approval state does not leak between thread and orchestrator)
+- No compaction for threads (bounded single-action lifetime)
+- Depth guard: thread state machine refuses `thread:spawn` if depth > 0
+- Tool mask: `thread_mask = requested & parent_mask`
+- `ToolAuth` + `Approver` inherited from parent (mandatory, fail-closed via `ToolAuth.noop` sentinel)
 
 Implementation:
 - `Thread` struct + `Episode` struct in `core/thread.zig`
-- Episode generation: reuse `start()` with episode-specific system prompt requesting JSON conforming to Episode schema. Collect full stream text. `std.json.parseFromSlice` into `EpisodeResult`. On parse failure, produce mechanical-only episode (`outcome: .failed`, empty `key_findings`, `tool_summary` from session data).
-- `thread:spawn` as new tool kind (NOT agent tool reuse — in-process, not RPC). Bump `entries`/`selected` arrays to `[12]`, add `mask_thread` + `mask_thread_join` bits, extend `activeEntries`/`maskForName`/`rebuildEntries`.
-- Sequential execution: recursive `loop.run` from within `runTool`, Opts by value with field overrides
+- Episode generation: `start()` with episode-specific system prompt requesting JSON conforming to Episode schema. Collect full stream text. Strip markdown code fences (`\`\`\`json ... \`\`\``) before parsing — models routinely wrap JSON in fences. `std.json.parseFromSlice` into `EpisodeResult`. On parse failure, produce mechanical-only episode (`outcome: .failed`, empty `key_findings`, `tool_summary` from session data).
+- `thread:spawn` as new tool kind (NOT agent tool reuse — in-process, not RPC). Bump `entries`/`selected` arrays to `[11]`, add `mask_thread` bit, extend `activeEntries`/`maskForName`/`rebuildEntries`. `thread:join` is Phase 2 (bump to `[12]` then).
 - Thread session files via `SessionFile` with validated naming (`<sid>.t.<name>.jsonl`, name: `[a-z0-9-]`, max 32 chars)
 - Session selector filtering: `fileSid`/`latestSidAlloc`/`fromIdOrPrefix` exclude `.t.` files
-- Episode storage: transient struct — created at thread completion, serialized to text envelope (`[EPISODE:name] {json}`), injected as `Part.text`, then freed. No stable arena needed for Phase 1. Phase 3 deserializes from session text.
-- Session event storage: do NOT add new `Event.Data` variants. Store episodes as `tool_result` events with convention (tool name `__episode__`, tool id `__thread_start__`). Existing readers pass these through to `Hist` via the `tool_result` arm. Forward-compatible with old binaries.
-
-### Phase 1.5: Runtime isolation (prerequisite for Phase 2)
-
-- File ownership enforcement: `owned_paths` on Runtime, checked at dispatch layer before write/edit
-- CwdGuard elimination: file tools use `openat`/Dir-relative operations instead of `chdir`
-- Provider thread-safety: mutex or per-thread instances via factory
-- Session writer locking or per-thread store instances
-- Per-thread `CmdCache` (or mutex-protected shared cache)
-- Per-thread `AbortSlot` with thread-selection for cancel
-- `ToolAuth.noop` and `Approver.noop` sentinels (fail-closed default, non-optional fields)
+- Episode injection: transient struct serialized to text envelope (`[EPISODE:name] {json}`), injected as `Part.text` with role `.user`, then freed.
+- Session persistence: store episodes as `prompt` events with text envelope content. No new `Event.Data` variants (forward-compat). No `tool_result` events (no `name` field; orphaned results rejected by Anthropic API).
 
 ### Phase 2: Parallel threads
 
-- Concurrent thread execution (OS threads)
+Multiple thread provider streams registered as concurrent pollfds in the event loop. Orchestrator continues processing its own events while threads run.
+
+- Thread dispatch via event loop fd registration
 - Scheduling: dependency-ordered dispatch
-- Backpressure: max concurrent threads, queuing when at capacity
-- `thread:join` with `timeout_ms`, partial-join semantics
+- Backpressure: max concurrent pollfds, queuing when at capacity
+- `thread:join` with `timeout_ms`, partial-join semantics (return completed episodes, mark timed-out threads as `.failed`)
 - Per-thread resource limits: `max_tokens` ceiling, pre-dispatch budget check
 - TUI thread status display
 - Print/JSON modes: sequential-only restriction or per-thread output buffering
 
 ### Phase 3: Episode composition
 
-- Pass episodes as input context to new threads (value-copied, not pointer)
+- Pass episodes as input context to new threads (deserialized from session text)
 - Episode-to-episode references
 - No thread resumption — follow-up spawns new thread with prior episode as input
 
@@ -281,9 +257,13 @@ Implementation:
 - Per-thread model override via ProviderFactory
 - Episode boundary as clean model handoff point
 
-## Review Findings (Round 1 — baseline R1-314a)
+## Review Findings
 
-Adversarial review by 6 agents. 8 Critical, 11 Major, 3 Minor accepted.
+**Note**: This plan now assumes P10 (async event loop) is complete. The following findings from Rounds 1-2 are **superseded by P10** and retained only for historical context: F2 (loop.run non-reentrant), F5 (provider thread-safety), F6 (CwdGuard), F7 (session writer races), F23 (provider stream aliasing), F24 (AbortSlot clobbering), F25 (mode sink reentrancy), F26 (shared Writer pending counter). These problems do not exist in a P10 world.
+
+### Round 1 (baseline R1-314a)
+
+6 agents. 8 Critical, 11 Major, 3 Minor accepted.
 
 ### Critical: GeneratedSummary produces wrong shape (F1)
 
@@ -331,7 +311,7 @@ Plan says "Write/edit tools require file ownership declared in Thread struct." N
 
 Phase 2 = main value proposition. Current design: one bullet point. Needs: scheduling, backpressure, max concurrency, file coordination, provider factory, CWD elimination, per-thread stores/writers/runtimes.
 
-**Required**: Add "Phase 1.5: Runtime isolation prerequisites" covering F3-F7 before parallel dispatch.
+**Required**: Phase 2 design. [Superseded: P10 resolves F5-F7; F3 (file ownership) deferred to Phase 2 per F40. No Phase 1.5 — P10 is the prerequisite.]
 
 ### Major: Event.Data variant blast radius (F9)
 
@@ -411,33 +391,58 @@ P21b (multi-agent UX) designs separate result format with visible outcome states
 
 **Critical: Episode generation contract undesigned (F30)** — Phase 1 says "EpisodeReq/EpisodeResult" but specifies nothing: no JSON schema, no streaming-to-JSON collection, no parse failure handling. Fixed: reuse `start()` with episode prompt, collect text, `std.json.parseFromSlice`, mechanical-only fallback on parse failure.
 
-**Critical: Q3 forward-compat factually wrong (F31)** — `MalformedReplayLine` is fatal in all callers (loop.run, compact, export use `try`). Adding `Event.Data` variants breaks old binaries. Fixed: store episodes as `tool_result` events with reserved tool names. No new variants.
+**Critical: Q3 forward-compat factually wrong (F31)** — `MalformedReplayLine` is fatal in all callers (loop.run, compact, export use `try`). Adding `Event.Data` variants breaks old binaries. Fixed: store episodes as `prompt` events with text envelope.
 
 **High: Tool registry array bump (F32)** — `entries`/`selected` are `[10]`. Adding `thread:spawn`+`thread:join` needs `[12]`, new mask bits, new entries in `activeEntries`/`maskForName`/`rebuildEntries`.
 
 **High: Episode arena contradiction (F33)** — Plan said "value-copied into stable arena" but Decision #11 uses text serialization. Fixed: Episode struct is transient — created, serialized to text, freed. No stable arena for Phase 1.
 
+### Round 4 Findings (baseline R4-314d)
+
+**Critical: tool_result convention broken (F34)** — `ToolResult` has no `name` field (only `id`, `out`, `is_err`). Can't encode episode identity via tool name. Fixed: abandoned `tool_result` approach entirely.
+
+**Critical: Orphaned tool_result rejected by API (F35)** — Standalone `tool_result` without matching `tool_call` is rejected by Anthropic API (400 error). Session replay after episode storage would fail. Fixed: use `prompt` events instead.
+
+**High: Storage/injection contradiction (F36)** — Line 250 said text envelope in `Part.text`, line 251 said `tool_result` events. Two representations = non-deterministic replay. Fixed: single representation — `prompt` event with text envelope.
+
+**Major: P10 dependency undeclared (F37)** — Entire plan now assumes P10 is complete. Thread dispatch is a state machine transition, not recursive loop.run.
+
+### Round 5 (baseline R5-314e)
+
+**Critical: Decision #8 contradicted P10 assumption (F38)** — Said "recursive loop.run" but plan assumes async event loop. Fixed: Decision #8 rewritten as state machine transition.
+
+**High: Episode replay phantom user turn (F39)** — `prompt` events replay as user messages. Model treats episode JSON as user input. Fixed: Decision #10 specifies `[EPISODE:` prefix detection and context wrapping on replay.
+
+**High: File ownership misplaced in Phase 1 (F40)** — Phase 1 listed file ownership but 3 other locations said Phase 2. Fixed: removed from Phase 1. Sequential threads don't need it.
+
+**High: thread:join unusable in Phase 1 (F41)** — Phase 1 is sequential; spawn blocks until complete. Registering join wastes a tool slot. Fixed: Decision #12 — bump to [11] for Phase 1, add join in Phase 2.
+
+**High: Episode generation budget unaccounted (F42)** — Thread at token ceiling can't generate episode. Fixed: Decision #6 reserves fixed budget for episode generation, subtracted before action.
+
+**High: Decision #10 referenced stale findings (F43)** — F5/F6/F7 said "not required for Phase 1" but P10 assumption means they're already resolved. Fixed: Resolved Q4 updated.
+
 ## Resolved Decisions
 
-1. **Thread depth**: Depth-1 only. Enforced by depth counter in Opts — `thread:spawn` handler refuses if depth > 0. Tool mask alone cannot prevent this (mask is bitwise, no concept of "orchestrator-only" tools).
-2. **Thread tool mask**: `thread_mask = requested & parent_mask` at spawn time. Trivially implementable. File ownership (Phase 1.5) is a separate, unresolved design question.
-3. **Thread naming**: Unique within session. Validated by NEW `validateThreadName` function (separate from `validateSid`): `[a-z0-9-]`, max 32 chars. `fileSid`/`latestSidAlloc`/`fromIdOrPrefix` must filter out `.t.` files.
-4. **Failure episodes**: Failed threads always produce episodes with `outcome: .failed`. If episode generation itself fails (corrupt session, provider error), produce mechanical-only episode from whatever session data is recoverable.
+1. **Thread depth**: Depth-1 only. Enforced by depth counter in thread state — `thread:spawn` handler refuses if depth > 0.
+2. **Thread tool mask**: `thread_mask = requested & parent_mask` at spawn time.
+3. **Thread naming**: Unique within session. Validated by `validateThreadName`: `[a-z0-9-]`, max 32 chars. `fileSid`/`latestSidAlloc`/`fromIdOrPrefix` filter out `.t.` files.
+4. **Failure episodes**: Failed threads always produce episodes with `outcome: .failed`. Episode generation failure produces mechanical-only episode. If budget exhausted after action, use mechanical-only (no provider call for episode).
 5. **Episode format**: Hybrid — mechanical fields extracted deterministically, `key_findings` model-generated and advisory.
-6. **Cost tracking**: Per-thread `token_usage` in Episode. Pre-dispatch budget check. Per-thread `max_tokens` ceiling.
-7. **Thread resumption**: No resumption. One action per thread. Follow-up spawns new thread with prior episode as input (value-copied).
-8. **thread:spawn**: New tool kind (not agent tool reuse). In-process recursive `loop.run` with Opts field overrides.
-9. **Policy enforcement**: Thread inherits parent's `ToolAuth` + `Approver`. Current fields are `?Optional = null` (fail-open). Fix: define `ToolAuth.noop`/`Approver.noop` sentinels, make fields non-optional, update all callers.
-10. **Phase 1 sequential viability**: Confirmed. Does NOT require F5 (provider thread-safety), F6 (CwdGuard), F7 (session writer races). Requires 6 targeted Opts overrides: ProviderFactory, BufferSink, per-thread Writer, abort_slot=null, compactor=null, depth guard.
-11. **Episode injection**: Serialize to text with structured envelope (e.g., `[EPISODE:name] {...}`) in `Part.text`. Lower blast radius than new `Part.episode` variant for Phase 1.
+6. **Cost tracking**: Per-thread `token_usage` in Episode. Pre-dispatch budget check. Per-thread `max_tokens` ceiling. Reserve fixed token budget for episode generation (subtracted from `max_tokens` before action starts).
+7. **Thread resumption**: No resumption. One action per thread. Follow-up spawns new thread with prior episode as input.
+8. **thread:spawn**: New tool kind. State machine transition in the event loop — registers a new provider stream fd, orchestrator's state machine yields until thread's state machine reaches `done`. NOT recursive `loop.run` (P10 eliminates the blocking loop pattern).
+9. **Policy enforcement**: Thread inherits parent's `ToolAuth` + `Approver`. Define `ToolAuth.noop`/`Approver.noop` sentinels (fail-closed), make fields non-optional.
+10. **Episode injection**: Serialize to text with structured envelope (`[EPISODE:name] {json}`) in `Part.text` with role `.user`. On session replay, `appendFromSession` detects the `[EPISODE:` prefix and wraps the text in a clear context envelope (e.g., `"Thread completion summary (not user input):\n[EPISODE:name] {json}"`) so the model does not treat it as user instructions.
+11. **Session schema**: No new `Event.Data` variants. Episodes stored as `prompt` events with text envelope. Forward-compatible with old binaries. No `tool_result` events (no `name` field; orphaned results rejected by API).
+12. **Phase 1 tool registry**: Bump to `[11]` for `thread:spawn` only. `thread:join` is Phase 2 — not registered until parallel threads are implemented.
 
-## Resolved Open Questions (from R2 evidence)
+## Resolved Open Questions
 
-- **Phase ordering (Q4)**: Phase 1 proceeds without Phase 1.5. Phase 1.5 is prerequisite for Phase 2 only.
+- **Phase ordering (Q4)**: P10 is assumed complete. Phase 1 builds directly on the async event loop. F5 (provider safety), F6 (CwdGuard), F7 (writer races) are resolved by P10 — not deferred. Phase 2 adds parallel fd multiplexing on top.
 - **Mode thread policy (Q5)**: Non-TUI modes restrict to sequential threads. Print/JSON receive episode events via the parent ModeSink only (thread events go to BufferSink).
-- **Session schema versioning (Q3)**: `MalformedReplayLine` is FATAL in all callers (`loop.run`, `compact.zig`, `export.zig` — all use `try rdr.next()`). Forward compat does NOT work. Solution: do not add new `Event.Data` variants. Store episodes as `tool_result` events with reserved tool names (`__episode__`, `__thread_start__`). Old binaries treat them as normal tool results — no parse failure, no schema break.
+- **Session schema versioning (Q3)**: Store as `prompt` events. No new variants. Forward-compatible.
 
 ## Remaining Open Questions
 
 1. **TUI rendering**: Dedicated footer panel vs. inline status markers for thread progress.
-2. **File ownership design** (Phase 1.5): Where stored (`Runtime.owned_paths`?), where checked (per-handler or generic pre-dispatch), how paths normalized for matching.
+2. **File ownership design** (Phase 2): Where stored (`Runtime.owned_paths`?), where checked (per-handler or generic pre-dispatch), how paths normalized. Not needed for Phase 1 (sequential, no concurrent file access).

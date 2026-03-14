@@ -2,21 +2,21 @@
 
 const std = @import("std");
 
-pub const Capture = enum {
+pub const Protocol = enum {
     none,
     kitty,
     iterm,
 };
 
-const term_cap_map = std.StaticStringMap(Capture).initComptime(.{
+const term_cap_map = std.StaticStringMap(Protocol).initComptime(.{
     .{ "xterm-kitty", .kitty },
 });
 
-const term_program_cap_map = std.StaticStringMap(Capture).initComptime(.{
+const term_program_cap_map = std.StaticStringMap(Protocol).initComptime(.{
     .{ "WezTerm", .kitty },
 });
 
-pub fn detect() Capture {
+pub fn detect() Protocol {
     if (std.posix.getenv("KITTY_WINDOW_ID") != null) return .kitty;
     if (std.posix.getenv("TERM")) |term| {
         if (term_cap_map.get(term)) |cap| return cap;
@@ -36,7 +36,7 @@ pub const img_rows: usize = 8;
 
 /// Write an image file to the terminal using the appropriate protocol.
 /// Positions cursor at (col, row) first using CUP sequence.
-pub fn writeImageAt(out: anytype, alloc: std.mem.Allocator, path: []const u8, col: usize, row: usize, cols: usize, cap: Capture) !void {
+pub fn writeImageAt(out: anytype, alloc: std.mem.Allocator, path: []const u8, col: usize, row: usize, cols: usize, cap: Protocol) !void {
     switch (cap) {
         .none => return,
         .kitty => {

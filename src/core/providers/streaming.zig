@@ -8,7 +8,7 @@ const types = @import("types.zig");
 pub const Err = types.Err;
 
 /// Retry policy instantiated for provider errors.
-pub const Pol = retry.Policy(Err);
+pub const Policy = retry.Policy(Err);
 
 pub fn retryable(err: Err) bool {
     return types.retryable(err);
@@ -138,7 +138,7 @@ pub fn run(
     alloc: std.mem.Allocator,
     tr: Transport,
     req: providers.Req,
-    pol: Pol,
+    pol: Policy,
     slp: ?Sleeper,
 ) (retry.StepErr || Err)!RunRes {
     var tries: u16 = 0;
@@ -272,8 +272,8 @@ fn reqStub() providers.Req {
     };
 }
 
-fn mkPol(max_tries: u16) !Pol {
-    return Pol.init(.{
+fn mkPol(max_tries: u16) !Policy {
+    return Policy.init(.{
         .max_tries = max_tries,
         .backoff = .{
             .base_ms = 10,

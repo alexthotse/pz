@@ -27,7 +27,7 @@ pub const Ui = struct {
     arg_src: ?[]const []const u8 = null, // runtime-provided arg completion source
     path_items: ?[][]u8 = null, // owned file path completion items
     path_prefix: ?[]u8 = null, // cached prefix for path_items
-    img_cap: image_mod.Capture = .none,
+    img_cap: image_mod.Protocol = .none,
     spin: u8 = 0,
 
     const BorderStatus = struct {

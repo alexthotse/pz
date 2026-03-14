@@ -192,7 +192,7 @@ fn fenceLen(txt: []const u8) usize {
     return @max(@as(usize, 3), best + 1);
 }
 
-fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.Out, err_name: ?[]const u8) audit.Entry {
+fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.Outcome, err_name: ?[]const u8) audit.Entry {
     return .{
         .ts_ms = ts_ms,
         .sid = sid,

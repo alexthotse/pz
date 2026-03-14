@@ -16,7 +16,7 @@ pub const Vis = enum {
 };
 
 /// Audit event severity (syslog-aligned).
-pub const Sev = enum {
+pub const Severity = enum {
     debug,
     info,
     notice,
@@ -26,19 +26,19 @@ pub const Sev = enum {
 };
 
 /// Audit event outcome.
-pub const Out = enum {
+pub const Outcome = enum {
     ok,
     deny,
     fail,
 };
 
-pub const Kind = enum {
+pub const EventKind = enum {
     sess,
     turn,
     tool,
     policy,
     auth,
-    ship,
+    forward,
 };
 
 /// Text with visibility annotation for redaction.
@@ -74,7 +74,7 @@ pub const ResKind = enum {
     net,
     auth,
     cfg,
-    ship,
+    forward,
 };
 
 pub const Res = struct {
@@ -146,20 +146,20 @@ pub const AuthData = struct {
     sub: ?Str = null,
 };
 
-pub const ShipData = struct {
+pub const ForwardData = struct {
     proto: []const u8,
     batch: u32,
     dst: Str,
     len: u32,
 };
 
-pub const Data = union(Kind) {
+pub const Data = union(EventKind) {
     sess: SessData,
     turn: TurnData,
     tool: ToolData,
     policy: PolicyData,
     auth: AuthData,
-    ship: ShipData,
+    forward: ForwardData,
 };
 
 pub const Entry = struct {
@@ -167,8 +167,8 @@ pub const Entry = struct {
     ts_ms: i64,
     sid: []const u8,
     seq: u64,
-    sev: Sev = .info,
-    out: Out = .ok,
+    sev: Severity = .info,
+    out: Outcome = .ok,
     site: Site = .{},
     actor: Actor = .{ .kind = .sys },
     res: ?Res = null,
@@ -177,7 +177,7 @@ pub const Entry = struct {
     attrs: []const Attr = &.{},
 };
 
-pub fn kindOf(ent: Entry) Kind {
+pub fn kindOf(ent: Entry) EventKind {
     return std.meta.activeTag(ent.data);
 }
 
@@ -211,7 +211,7 @@ pub const FrameHdr = struct {
     ts_ms: i64,
     sid: []const u8,
     seq: u64,
-    sev: Sev = .info,
+    sev: Severity = .info,
     site: Site = .{},
 };
 
@@ -275,7 +275,7 @@ pub const Connector = struct {
     }
 };
 
-pub const ShipOpts = struct {
+pub const ForwardOpts = struct {
     connector: Connector,
     buf_cap: usize = 64,
     backoff_min_ms: u32 = 100,
@@ -397,7 +397,7 @@ pub const ReconnSender = struct {
     backoff_ms: u32,
     next_retry_ms: ?i64 = null,
 
-    pub fn init(alloc: Allocator, opts: ShipOpts) !ReconnSender {
+    pub fn init(alloc: Allocator, opts: ForwardOpts) !ReconnSender {
         if (opts.backoff_min_ms == 0 or opts.backoff_max_ms < opts.backoff_min_ms) {
             return error.InvalidBackoff;
         }
@@ -553,7 +553,7 @@ pub const SyslogShipper = struct {
     frame: FrameOpts,
     reconn: ReconnSender,
 
-    pub fn init(alloc: Allocator, frame: FrameOpts, opts: ShipOpts) !SyslogShipper {
+    pub fn init(alloc: Allocator, frame: FrameOpts, opts: ForwardOpts) !SyslogShipper {
         return .{
             .alloc = alloc,
             .frame = frame,
@@ -688,7 +688,7 @@ pub fn sealAlloc(
     alloc: Allocator,
     ent: Entry,
     key: integrity.Key,
-    prev: ?integrity.Tag,
+    prev: ?integrity.Mac,
 ) ![]u8 {
     const body = try encodeAlloc(alloc, ent);
     defer alloc.free(body);
@@ -760,11 +760,11 @@ fn dataNeedsRedact(data: Data) bool {
         },
         .policy => false,
         .auth => |v| if (v.sub) |sub| sub.vis != .@"pub" else false,
-        .ship => |v| v.dst.vis != .@"pub",
+        .forward => |v| v.dst.vis != .@"pub",
     };
 }
 
-fn sevSyslog(sev: Sev) syslog.Severity {
+fn sevSyslog(sev: Severity) syslog.Severity {
     return switch (sev) {
         .debug => .debug,
         .info => .info,
@@ -1094,7 +1094,7 @@ fn writeData(w: anytype, data: Data) !void {
                 try writeStr(w, sub);
             }
         },
-        .ship => |v| {
+        .forward => |v| {
             try writeObjKey(w, &first, "proto");
             try writeJsonStr(w, v.proto);
 
@@ -1333,7 +1333,7 @@ test "snapshot: variant encodings stay canonical" {
         .seq = 4,
         .sev = .info,
         .data = .{
-            .ship = .{
+            .forward = .{
                 .proto = "syslog+tls",
                 .batch = 8,
                 .dst = .{ .text = "siem.internal:6514", .vis = .mask },
@@ -1346,7 +1346,7 @@ test "snapshot: variant encodings stay canonical" {
     });
     defer talloc.free(ship_raw);
 
-    const snap = try std.fmt.allocPrint(talloc, "sess={s} | policy={s} | auth={s} | ship={s}", .{
+    const snap = try std.fmt.allocPrint(talloc, "sess={s} | policy={s} | auth={s} | forward={s}", .{
         sess_raw,
         policy_raw,
         auth_raw,
@@ -1356,7 +1356,7 @@ test "snapshot: variant encodings stay canonical" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"[mask:47a56333843b7ed0]","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[secret:cb01a7199946da94]","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"[hash:ce3e6e686cd0c59f]","vis":"hash"}},"attrs":[]} | ship={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
+        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"[mask:47a56333843b7ed0]","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[secret:cb01a7199946da94]","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"[hash:ce3e6e686cd0c59f]","vis":"hash"}},"attrs":[]} | forward={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
     ).expectEqual(snap);
 }
 
@@ -1623,7 +1623,7 @@ fn testEntry(seq: u64) Entry {
         .sid = "sess-r",
         .seq = seq,
         .data = .{
-            .ship = .{
+            .forward = .{
                 .proto = "syslog+tls",
                 .batch = 1,
                 .dst = .{ .text = "siem.internal:6514", .vis = .mask },
@@ -1696,7 +1696,7 @@ test "syslog shipper buffers disconnect and flushes in order" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
+        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
     ).expectEqual(snap);
 }
 
@@ -1746,7 +1746,7 @@ test "syslog shipper drops oldest on ring overflow" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"ship","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
+        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
     ).expectEqual(snap);
 }
 

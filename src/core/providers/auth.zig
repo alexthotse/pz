@@ -1136,8 +1136,8 @@ fn emitAuthAudit(
     provider: Provider,
     op: []const u8,
     mech: []const u8,
-    out: audit.Out,
-    sev: audit.Sev,
+    out: audit.Outcome,
+    sev: audit.Severity,
     msg: audit.Str,
 ) !void {
     if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, .{

@@ -32,7 +32,7 @@ const AuditHdrDoc = struct {
     ts_ms: i64,
     sid: []const u8,
     seq: u64,
-    sev: audit.Sev,
+    sev: audit.Severity,
 };
 
 const AuditSealDoc = struct {
@@ -58,7 +58,7 @@ fn e2eFrameOpts() audit.FrameOpts {
 
 pub fn shipAuditRows(alloc: std.mem.Allocator, sender: *syslog.Sender, rows: []const []const u8) !void {
     const key = e2eAuditKey();
-    var prev: ?audit_integrity.Tag = null;
+    var prev: ?audit_integrity.Mac = null;
 
     for (rows) |row| {
         const hdr = try std.json.parseFromSlice(AuditHdrDoc, alloc, row, .{
@@ -76,7 +76,7 @@ pub fn shipAuditRows(alloc: std.mem.Allocator, sender: *syslog.Sender, rows: []c
         });
         defer doc.deinit();
 
-        var next: audit_integrity.Tag = undefined;
+        var next: audit_integrity.Mac = undefined;
         _ = try std.fmt.hexToBytes(next[0..], doc.value.mac);
 
         const frame = try audit.encodeFrameBodyAlloc(alloc, e2eFrameOpts(), .{

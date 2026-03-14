@@ -7,7 +7,7 @@ const streaming = @import("streaming.zig");
 const types = @import("types.zig");
 
 pub const Err = types.Err;
-pub const Pol = retry.Policy(Err);
+pub const Policy = retry.Policy(Err);
 
 pub const RawChunkStream = struct {
     ctx: *anyopaque,
@@ -95,14 +95,14 @@ pub const Client = struct {
     alloc: std.mem.Allocator,
     tr: RawTransport,
     map: types.Adapter,
-    pol: Pol,
+    pol: Policy,
     slp: ?streaming.Sleeper = null,
 
     pub fn init(
         alloc: std.mem.Allocator,
         tr: RawTransport,
         map: types.Adapter,
-        pol: Pol,
+        pol: Policy,
         slp: ?streaming.Sleeper,
     ) Client {
         return .{
@@ -440,8 +440,8 @@ const WaitLog = struct {
     }
 };
 
-fn mkPol(max_tries: u16) !Pol {
-    return Pol.init(.{
+fn mkPol(max_tries: u16) !Policy {
+    return Policy.init(.{
         .max_tries = max_tries,
         .backoff = .{
             .base_ms = 10,

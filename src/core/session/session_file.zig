@@ -6,13 +6,13 @@ const sid_path = @import("path.zig");
 
 /// Wraps a session file path with lifecycle tracking.
 /// If `close()` is never called, `deinit()` logs a warning and deletes the orphan.
-pub const SessionFile = struct {
+pub const File = struct {
     alloc: std.mem.Allocator,
     dir: std.fs.Dir,
     path: []const u8,
     closed: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8) !SessionFile {
+    pub fn init(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8) !File {
         const owned = try alloc.dupe(u8, path);
         errdefer alloc.free(owned);
 
@@ -28,11 +28,11 @@ pub const SessionFile = struct {
         };
     }
 
-    pub fn close(self: *SessionFile) void {
+    pub fn close(self: *File) void {
         self.closed = true;
     }
 
-    pub fn deinit(self: *SessionFile) void {
+    pub fn deinit(self: *File) void {
         if (!self.closed) {
             if (!builtin.is_test) {
                 std.debug.print("warning: session file not closed, deleting orphan: {s}\n", .{self.path});
@@ -53,10 +53,10 @@ pub fn createSessionFile(
     dir: std.fs.Dir,
     sid: []const u8,
     ext: []const u8,
-) !SessionFile {
+) !File {
     const path = try sid_path.sidExtAlloc(alloc, sid, ext);
     defer alloc.free(path);
-    return SessionFile.init(alloc, dir, path);
+    return File.init(alloc, dir, path);
 }
 
 /// Delete any orphaned `.compact.tmp` files left by interrupted compactions.
@@ -76,7 +76,7 @@ test "deinit without close deletes the file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var sf = try SessionFile.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
+    var sf = try File.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
     // Do NOT call close — simulate abnormal exit.
     sf.deinit();
 
@@ -91,7 +91,7 @@ test "close then deinit preserves the file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var sf = try SessionFile.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
+    var sf = try File.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
     sf.close();
     sf.deinit();
 
@@ -106,7 +106,7 @@ test "session file uses 0600 mode" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var sf = try SessionFile.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
+    var sf = try File.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
     sf.close();
     sf.deinit();
 

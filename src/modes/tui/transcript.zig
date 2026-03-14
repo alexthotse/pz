@@ -70,7 +70,7 @@ pub const Transcript = struct {
     alloc: std.mem.Allocator,
     blocks: std.ArrayListUnmanaged(Block) = .empty,
     next_seq: u64 = 1,
-    md: markdown.MdRenderer = .{},
+    md: markdown.Renderer = .{},
     scroll_off: usize = 0,
     show_tools: bool = true,
     show_thinking: bool = true,
@@ -254,7 +254,7 @@ pub const Transcript = struct {
             var skipped: usize = 0;
             var row: usize = 0;
 
-            var md = markdown.MdRenderer{};
+            var md = markdown.Renderer{};
             var first_vis = true;
             var prev_rendered: ?*Block = null;
             for (self.blocks.items) |*b| {

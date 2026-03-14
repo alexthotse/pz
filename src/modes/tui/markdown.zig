@@ -5,7 +5,7 @@ const theme = @import("theme.zig");
 const syntax = @import("syntax.zig");
 const wc = @import("wcwidth.zig");
 
-pub const MdRenderer = struct {
+pub const Renderer = struct {
     in_code_block: bool = false,
     code_lang: syntax.Lang = .unknown,
     in_table: bool = false,
@@ -14,7 +14,7 @@ pub const MdRenderer = struct {
     pub const RenderError = frame.Frame.PosError || error{InvalidUtf8};
 
     /// Advance code-block state for a skipped line (scrolled past).
-    pub fn advanceSkipped(self: *MdRenderer, line: []const u8) void {
+    pub fn advanceSkipped(self: *Renderer, line: []const u8) void {
         if (isFence(line)) {
             if (!self.in_code_block) {
                 self.code_lang = syntax.Lang.detect(trimFence(line));
@@ -41,7 +41,7 @@ pub const MdRenderer = struct {
 
     /// Render one line of markdown to frame at (x, y).
     /// Returns number of display columns written.
-    pub fn renderLine(self: *MdRenderer, frm: *frame.Frame, x: usize, y: usize, line: []const u8, max_w: usize, base_st: frame.Style) MdRenderer.RenderError!usize {
+    pub fn renderLine(self: *Renderer, frm: *frame.Frame, x: usize, y: usize, line: []const u8, max_w: usize, base_st: frame.Style) Renderer.RenderError!usize {
         if (max_w == 0) return 0;
 
         // Code fence toggle
@@ -220,7 +220,7 @@ fn renderTableLine(
     base_st: frame.Style,
     is_sep: bool,
     is_header: bool,
-) MdRenderer.RenderError!usize {
+) Renderer.RenderError!usize {
     const t = theme.get();
     const border_st = frame.Style{ .fg = t.border_muted, .bg = base_st.bg };
 
@@ -282,7 +282,7 @@ fn renderTableLine(
     return col;
 }
 
-fn renderCodeLine(frm: *frame.Frame, x: usize, y: usize, line: []const u8, max_w: usize, base_st: frame.Style, lang: syntax.Lang) MdRenderer.RenderError!usize {
+fn renderCodeLine(frm: *frame.Frame, x: usize, y: usize, line: []const u8, max_w: usize, base_st: frame.Style, lang: syntax.Lang) Renderer.RenderError!usize {
     var tok_buf: [512]syntax.Token = undefined;
     const toks = syntax.tokenize(line, lang, &tok_buf);
     var col: usize = 0;
@@ -297,7 +297,7 @@ fn renderCodeLine(frm: *frame.Frame, x: usize, y: usize, line: []const u8, max_w
 
 // -- Inline renderer --
 
-fn renderInline(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: usize, base_st: frame.Style) MdRenderer.RenderError!usize {
+fn renderInline(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: usize, base_st: frame.Style) Renderer.RenderError!usize {
     if (max_w == 0) return 0;
 
     var col: usize = 0;
@@ -533,7 +533,7 @@ fn trimLeadingSpaces(s: []const u8) []const u8 {
     return s[i..];
 }
 
-fn writeStr(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: usize, st: frame.Style) MdRenderer.RenderError!usize {
+fn writeStr(frm: *frame.Frame, x: usize, y: usize, text: []const u8, max_w: usize, st: frame.Style) Renderer.RenderError!usize {
     if (max_w == 0 or text.len == 0) return 0;
     if (x >= frm.w or y >= frm.h) return error.OutOfBounds;
 
@@ -685,7 +685,7 @@ test "heading renders bold with md_heading color" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     const n = try md.renderLine(&frm, 0, 0, "## Hello", 20, .{});
     try testing.expectEqual(@as(usize, 5), n);
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
@@ -700,7 +700,7 @@ test "code fence toggles code block mode" {
     var frm = try frame.Frame.init(testing.allocator, 30, 3);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
 
     // Opening fence
     _ = try md.renderLine(&frm, 0, 0, "```zig", 30, .{});
@@ -728,7 +728,7 @@ test "code block without lang hint uses generic highlighting" {
     var frm = try frame.Frame.init(testing.allocator, 30, 3);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "```", 30, .{});
     try testing.expect(md.in_code_block);
     try testing.expectEqual(syntax.Lang.unknown, md.code_lang);
@@ -748,7 +748,7 @@ test "blockquote renders bar prefix" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "> quoted", 20, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -762,7 +762,7 @@ test "unordered list renders bullet" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "- item", 20, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -776,7 +776,7 @@ test "ordered list renders number" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "3. third", 20, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -790,7 +790,7 @@ test "horizontal rule fills with line char" {
     var frm = try frame.Frame.init(testing.allocator, 10, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     const n = try md.renderLine(&frm, 0, 0, "---", 10, .{});
     try testing.expectEqual(@as(usize, 10), n);
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
@@ -805,7 +805,7 @@ test "inline code gets md_code style" {
     var frm = try frame.Frame.init(testing.allocator, 30, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "use `foo` here", 30, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -819,7 +819,7 @@ test "bold text gets bold attribute" {
     var frm = try frame.Frame.init(testing.allocator, 30, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "a **bold** z", 30, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -833,7 +833,7 @@ test "italic text gets italic attribute" {
     var frm = try frame.Frame.init(testing.allocator, 30, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "a *em* z", 30, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -847,7 +847,7 @@ test "link renders label in md_link color" {
     var frm = try frame.Frame.init(testing.allocator, 30, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "[click](http://x.com)", 30, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -861,7 +861,7 @@ test "fence lang tag rendered in code_border color" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "```python", 20, .{});
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
     defer testing.allocator.free(snap);
@@ -875,7 +875,7 @@ test "plain text renders unchanged" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     const n = try md.renderLine(&frm, 0, 0, "hello", 20, .{});
     try testing.expectEqual(@as(usize, 5), n);
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
@@ -890,7 +890,7 @@ test "max_w clips output" {
     var frm = try frame.Frame.init(testing.allocator, 20, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     const n = try md.renderLine(&frm, 0, 0, "abcdefghij", 3, .{});
     try testing.expectEqual(@as(usize, 3), n);
     const snap = try frameRowsStyleSnapAlloc(testing.allocator, &frm, 0, 0);
@@ -905,7 +905,7 @@ test "table header renders bold with borders" {
     var frm = try frame.Frame.init(testing.allocator, 40, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     const n = try md.renderLine(&frm, 0, 0, "| Name | Age |", 40, .{});
     try testing.expect(n > 0);
     try testing.expect(md.in_table);
@@ -925,7 +925,7 @@ test "table separator renders as box-drawing" {
     var frm = try frame.Frame.init(testing.allocator, 40, 2);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     // First line starts table
     _ = try md.renderLine(&frm, 0, 0, "| A | B |", 40, .{});
     // Separator line
@@ -950,7 +950,7 @@ test "table data row renders normal text with borders" {
     var frm = try frame.Frame.init(testing.allocator, 40, 3);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "| H1 | H2 |", 40, .{});
     _ = try md.renderLine(&frm, 0, 1, "|-----|-----|", 40, .{});
     _ = try md.renderLine(&frm, 0, 2, "| foo | bar |", 40, .{});
@@ -976,7 +976,7 @@ test "table state resets on non-table line" {
     var frm = try frame.Frame.init(testing.allocator, 40, 1);
     defer frm.deinit(testing.allocator);
 
-    var md = MdRenderer{};
+    var md = Renderer{};
     _ = try md.renderLine(&frm, 0, 0, "| A |", 40, .{});
     try testing.expect(md.in_table);
     md.advanceSkipped("not a table");

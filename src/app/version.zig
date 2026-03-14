@@ -12,20 +12,20 @@ const release_uri = std.Uri{
 const version_url_env = "PZ_VERSION_URL";
 
 /// Semver triple for comparison.
-pub const Ver = struct {
+pub const Semver = struct {
     major: u16,
     minor: u16,
     patch: u16,
 
-    pub fn isNewer(self: Ver, other: Ver) bool {
+    pub fn isNewer(self: Semver, other: Semver) bool {
         if (self.major != other.major) return self.major > other.major;
         if (self.minor != other.minor) return self.minor > other.minor;
         return self.patch > other.patch;
     }
 };
 
-/// Parse "v1.2.3", "1.2.3", or "1.2.3-rc1" into Ver.
-pub fn parseVersion(raw: []const u8) ?Ver {
+/// Parse "v1.2.3", "1.2.3", or "1.2.3-rc1" into Semver.
+pub fn parseVersion(raw: []const u8) ?Semver {
     var s = raw;
     if (s.len > 0 and s[0] == 'v') s = s[1..];
     // Strip suffix after dash
@@ -38,35 +38,35 @@ pub fn parseVersion(raw: []const u8) ?Ver {
 }
 
 /// Background version checker. Stack-allocatable.
-pub const Check = struct {
+pub const Checker = struct {
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: ?[]u8 = null,
     alloc: std.mem.Allocator,
     thread: ?std.Thread = null,
 
-    pub fn init(alloc: std.mem.Allocator) Check {
+    pub fn init(alloc: std.mem.Allocator) Checker {
         return .{ .alloc = alloc };
     }
 
-    pub fn spawn(self: *Check) void {
+    pub fn spawn(self: *Checker) void {
         self.thread = std.Thread.spawn(.{}, checkThread, .{self}) catch null;
     }
 
-    pub fn poll(self: *Check) ?[]const u8 {
+    pub fn poll(self: *Checker) ?[]const u8 {
         if (!self.done.load(.acquire)) return null;
         return self.result;
     }
 
-    pub fn isDone(self: *const Check) bool {
+    pub fn isDone(self: *const Checker) bool {
         return self.done.load(.acquire);
     }
 
-    pub fn deinit(self: *Check) void {
+    pub fn deinit(self: *Checker) void {
         if (self.thread) |t| t.join();
         if (self.result) |r| self.alloc.free(r);
     }
 
-    fn checkThread(self: *Check) void {
+    fn checkThread(self: *Checker) void {
         self.result = checkLatest(self.alloc) catch null;
         self.done.store(true, .release);
     }
@@ -83,7 +83,7 @@ fn initClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client 
     return try app_tls.initRuntimeClient(alloc);
 }
 
-/// Check GitHub releases for a newer version. Returns version string if newer, null otherwise.
+/// Checker GitHub releases for a newer version. Returns version string if newer, null otherwise.
 fn checkLatest(alloc: std.mem.Allocator) !?[]u8 {
     return try checkLatestWith(alloc, .{ .uri = versionUriFromEnv() orelse release_uri });
 }
@@ -225,7 +225,7 @@ test "parseVersion basic" {
     const oh = OhSnap{};
     const v = parseVersion("0.1.0").?;
     try oh.snap(@src(),
-        \\app.version.Ver
+        \\app.version.Semver
         \\  .major: u16 = 0
         \\  .minor: u16 = 1
         \\  .patch: u16 = 0
@@ -237,7 +237,7 @@ test "parseVersion strips v prefix" {
     const oh = OhSnap{};
     const v = parseVersion("v1.2.3").?;
     try oh.snap(@src(),
-        \\app.version.Ver
+        \\app.version.Semver
         \\  .major: u16 = 1
         \\  .minor: u16 = 2
         \\  .patch: u16 = 3
@@ -249,7 +249,7 @@ test "parseVersion strips suffix" {
     const oh = OhSnap{};
     const v = parseVersion("0.1.0-rc1").?;
     try oh.snap(@src(),
-        \\app.version.Ver
+        \\app.version.Semver
         \\  .major: u16 = 0
         \\  .minor: u16 = 1
         \\  .patch: u16 = 0
@@ -263,10 +263,10 @@ test "parseVersion bad input" {
 }
 
 test "isNewer comparisons" {
-    const v010 = Ver{ .major = 0, .minor = 1, .patch = 0 };
-    const v020 = Ver{ .major = 0, .minor = 2, .patch = 0 };
-    const v100 = Ver{ .major = 1, .minor = 0, .patch = 0 };
-    const v009 = Ver{ .major = 0, .minor = 0, .patch = 9 };
+    const v010 = Semver{ .major = 0, .minor = 1, .patch = 0 };
+    const v020 = Semver{ .major = 0, .minor = 2, .patch = 0 };
+    const v100 = Semver{ .major = 1, .minor = 0, .patch = 0 };
+    const v009 = Semver{ .major = 0, .minor = 0, .patch = 9 };
     try testing.expect(v020.isNewer(v010));
     try testing.expect(!v010.isNewer(v010));
     try testing.expect(!v009.isNewer(v010));

@@ -14,7 +14,7 @@ pub const regress = @import("session/regress.zig");
 pub const golden = @import("session/golden.zig");
 pub const session_file = @import("session/session_file.zig");
 
-pub const SessionFile = session_file.SessionFile;
+pub const File = session_file.File;
 pub const cleanOrphanTmpFiles = session_file.cleanOrphanTmpFiles;
 
 pub const Event = schema.Event;

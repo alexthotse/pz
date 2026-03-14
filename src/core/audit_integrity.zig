@@ -6,16 +6,16 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 pub const ver_current: u16 = 1;
 pub const mac_len: usize = HmacSha256.mac_length;
 
-pub const Tag = [mac_len]u8;
+pub const Mac = [mac_len]u8;
 
 pub const Key = struct {
     id: u32,
-    bytes: Tag,
+    bytes: Mac,
 };
 
 pub const State = struct {
     lines: u64 = 0,
-    last_mac: ?Tag = null,
+    last_mac: ?Mac = null,
     last_key_id: ?u32 = null,
 };
 
@@ -45,7 +45,7 @@ const Line = struct {
     body: []const u8,
 };
 
-pub fn sealAlloc(alloc: std.mem.Allocator, key: Key, prev: ?Tag, body: []const u8) ![]u8 {
+pub fn sealAlloc(alloc: std.mem.Allocator, key: Key, prev: ?Mac, body: []const u8) ![]u8 {
     const mac = try calcMac(alloc, key, prev, body);
     var prev_hex_buf: [mac_len * 2]u8 = undefined;
     var mac_hex_buf: [mac_len * 2]u8 = undefined;
@@ -125,7 +125,7 @@ pub fn verifyLogAlloc(alloc: std.mem.Allocator, raw: []const u8, keys: []const K
     return .{ .ok = st };
 }
 
-fn calcMac(alloc: std.mem.Allocator, key: Key, prev: ?Tag, body: []const u8) !Tag {
+fn calcMac(alloc: std.mem.Allocator, key: Key, prev: ?Mac, body: []const u8) !Mac {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(alloc);
     const w = buf.writer(alloc);
@@ -140,7 +140,7 @@ fn calcMac(alloc: std.mem.Allocator, key: Key, prev: ?Tag, body: []const u8) !Ta
     try w.writeByte('\n');
     try w.writeAll(body);
 
-    var out: Tag = undefined;
+    var out: Mac = undefined;
     HmacSha256.create(out[0..], buf.items, &key.bytes);
     return out;
 }
@@ -152,15 +152,15 @@ fn findKey(keys: []const Key, id: u32) ?Key {
     return null;
 }
 
-fn sameTag(a: ?Tag, b: ?Tag) bool {
+fn sameTag(a: ?Mac, b: ?Mac) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
     return std.mem.eql(u8, &a.?, &b.?);
 }
 
-fn parseTagHex(hex: []const u8) !Tag {
+fn parseTagHex(hex: []const u8) !Mac {
     if (hex.len != mac_len * 2) return error.BadHexLen;
-    var out: Tag = undefined;
+    var out: Mac = undefined;
     var i: usize = 0;
     while (i < out.len) : (i += 1) {
         out[i] = try parseHexByte(hex[i * 2], hex[i * 2 + 1]);
@@ -181,7 +181,7 @@ fn parseNibble(ch: u8) !u8 {
     };
 }
 
-fn hexEncode(buf: *[mac_len * 2]u8, bytes: *const Tag) []const u8 {
+fn hexEncode(buf: *[mac_len * 2]u8, bytes: *const Mac) []const u8 {
     const alpha = "0123456789abcdef";
     for (bytes, 0..) |b, i| {
         buf[i * 2] = alpha[b >> 4];
@@ -213,7 +213,7 @@ fn lineJoinAlloc(alloc: std.mem.Allocator, lines: []const []const u8) ![]u8 {
     return try out.toOwnedSlice(alloc);
 }
 
-fn tagHexAlloc(alloc: std.mem.Allocator, tag: ?Tag) !?[]u8 {
+fn tagHexAlloc(alloc: std.mem.Allocator, tag: ?Mac) !?[]u8 {
     if (tag == null) return null;
     const out = try alloc.alloc(u8, mac_len * 2);
     var buf: [mac_len * 2]u8 = undefined;
