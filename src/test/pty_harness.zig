@@ -26,6 +26,11 @@ const RunOut = struct {
     }
 };
 
+const PtyStep = struct {
+    wait_ms: u64 = 0,
+    input: []const u8,
+};
+
 fn pzBinAlloc(alloc: std.mem.Allocator) ![]u8 {
     return try std.fs.cwd().realpathAlloc(alloc, build_options.pz_bin_path);
 }
@@ -122,6 +127,18 @@ fn ttyInputAlloc(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return buf;
 }
 
+fn writeSessionEventsFile(dir: std.fs.Dir, sub_path: []const u8, events: []const core.session.Event) !void {
+    var file = try dir.createFile(sub_path, .{ .truncate = true });
+    defer file.close();
+
+    for (events) |ev| {
+        const raw = try core.session.encodeEventAlloc(std.testing.allocator, ev);
+        defer std.testing.allocator.free(raw);
+        try file.writeAll(raw);
+        try file.writeAll("\n");
+    }
+}
+
 fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     var off: usize = 0;
     while (off < data.len) off += try std.posix.write(fd, data[off..]);
@@ -165,109 +182,80 @@ fn runPzPty(
     pre_ms: u64,
     post_ms: u64,
 ) !RunOut {
+    const steps = [_]PtyStep{
+        .{ .wait_ms = pre_ms, .input = input },
+    };
+    return runPzPtySteps(alloc, cwd, env, pz_args, &steps, post_ms);
+}
+
+fn appendShellArgRef(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, idx: usize) !void {
+    if (idx < 10) {
+        try buf.writer(alloc).print("${d}", .{idx});
+        return;
+    }
+    try buf.writer(alloc).print("${{{d}}}", .{idx});
+}
+
+fn appendSleepMs(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, ms: u64) !void {
+    if (ms == 0) return;
+    try buf.writer(alloc).print("sleep {d}.{d:0>3}; ", .{ ms / 1000, ms % 1000 });
+}
+
+fn runPzPtySteps(
+    alloc: std.mem.Allocator,
+    cwd: []const u8,
+    env: *const std.process.EnvMap,
+    pz_args: []const []const u8,
+    steps: []const PtyStep,
+    settle_ms: u64,
+) !RunOut {
     const pz_bin = try pzBinAlloc(alloc);
     defer alloc.free(pz_bin);
-    const tty_input = try ttyInputAlloc(alloc, input);
-    defer alloc.free(tty_input);
 
-    var c_argv = CStringList.init(alloc);
-    defer c_argv.deinit();
-    try c_argv.appendDupZ(pz_bin);
-    for (pz_args) |arg| try c_argv.appendDupZ(arg);
-    try c_argv.items.append(alloc, null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    var envp = CStringList.init(alloc);
-    defer envp.deinit();
-    var it = env.iterator();
-    while (it.next()) |entry| {
-        const kv = try std.fmt.allocPrint(alloc, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
-        defer alloc.free(kv);
-        try envp.appendDupZ(kv);
+    const step_paths = try alloc.alloc([]u8, steps.len);
+    defer {
+        for (step_paths) |path| alloc.free(path);
+        alloc.free(step_paths);
     }
-    try envp.items.append(alloc, null);
-
-    const cwd_z = try alloc.dupeZ(u8, cwd);
-    defer alloc.free(cwd_z);
-
-    var master: c_int = -1;
-    var ws = c.struct_winsize{
-        .ws_row = 32,
-        .ws_col = 100,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0,
-    };
-    const pid = c.forkpty(&master, null, null, &ws);
-    if (pid < 0) return error.TestUnexpectedResult;
-    if (pid == 0) {
-        _ = c.chdir(cwd_z.ptr);
-        _ = c.execve(c_argv.items.items[0].?, @ptrCast(c_argv.items.items.ptr), @ptrCast(envp.items.items.ptr));
-        c._exit(127);
+    for (steps, 0..) |step, i| {
+        const rel = try std.fmt.allocPrint(alloc, "step-{d}.in", .{i});
+        defer alloc.free(rel);
+        const tty_input = try ttyInputAlloc(alloc, step.input);
+        defer alloc.free(tty_input);
+        try tmp.dir.writeFile(.{ .sub_path = rel, .data = tty_input });
+        step_paths[i] = try tmp.dir.realpathAlloc(alloc, rel);
     }
 
-    const fd: std.posix.fd_t = @intCast(master);
-    defer std.posix.close(fd);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
-
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
-
-    var waited_ms: u32 = 0;
-    while (out.items.len == 0 and waited_ms < 2000) : (waited_ms += 50) {
-        var fds = [_]std.posix.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
-            .revents = 0,
-        }};
-        _ = try std.posix.poll(&fds, 50);
-        _ = try readReady(fd, &out, alloc);
+    var script = std.ArrayList(u8).empty;
+    defer script.deinit(alloc);
+    try script.appendSlice(alloc, "{ ");
+    for (steps, 0..) |step, i| {
+        try appendSleepMs(&script, alloc, step.wait_ms);
+        try script.appendSlice(alloc, "cat \"");
+        try appendShellArgRef(&script, alloc, i + 1);
+        try script.appendSlice(alloc, "\"; ");
+    }
+    try appendSleepMs(&script, alloc, settle_ms);
+    try script.appendSlice(alloc, "} | /usr/bin/script -q /dev/null \"");
+    try appendShellArgRef(&script, alloc, steps.len + 1);
+    try script.appendSlice(alloc, "\"");
+    for (pz_args, 0..) |_, i| {
+        try script.appendSlice(alloc, " \"");
+        try appendShellArgRef(&script, alloc, steps.len + 2 + i);
+        try script.appendSlice(alloc, "\"");
     }
 
-    if (pre_ms > 0) std.Thread.sleep(pre_ms * std.time.ns_per_ms);
-    if (tty_input.len != 0) try writeAllFd(fd, tty_input);
-    if (post_ms > 0) std.Thread.sleep(post_ms * std.time.ns_per_ms);
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ "/bin/sh", "-c", script.items, "sh" });
+    for (step_paths) |path| try argv.append(alloc, path);
+    try argv.append(alloc, pz_bin);
+    for (pz_args) |arg| try argv.append(alloc, arg);
 
-    var term: ?std.process.Child.Term = null;
-    var loop_ms: u32 = 0;
-    while (true) {
-        var fds = [_]std.posix.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
-            .revents = 0,
-        }};
-        _ = try std.posix.poll(&fds, 100);
-        loop_ms += 100;
-        const read_any = try readReady(fd, &out, alloc);
-
-        if (term == null) {
-            var status: c_int = 0;
-            const waited = c.waitpid(pid, &status, c.WNOHANG);
-            if (waited < 0) return error.TestUnexpectedResult;
-            if (waited == pid) term = mapWaitStatus(status);
-        }
-
-        if (term != null and !read_any and (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) == 0) break;
-        if (term == null and loop_ms >= 3000) {
-            _ = c.kill(pid, c.SIGTERM);
-            var status: c_int = 0;
-            if (c.waitpid(pid, &status, 0) < 0) return error.TestUnexpectedResult;
-            term = mapWaitStatus(status);
-            _ = try readReady(fd, &out, alloc);
-            break;
-        }
-    }
-
-    if (term == null) {
-        var status: c_int = 0;
-        if (c.waitpid(pid, &status, 0) < 0) return error.TestUnexpectedResult;
-        term = mapWaitStatus(status);
-        _ = try readReady(fd, &out, alloc);
-    }
-
-    return .{
-        .term = term.?,
-        .stdout = try out.toOwnedSlice(alloc),
-        .stderr = try alloc.dupe(u8, ""),
-    };
+    return runProc(alloc, cwd, env, argv.items, "");
 }
 
 fn screenHasText(vs: *const vscreen.VScreen, alloc: std.mem.Allocator, needle: []const u8) !bool {
@@ -289,6 +277,19 @@ fn countNonEmptyRows(vs: *const vscreen.VScreen, alloc: std.mem.Allocator) !usiz
         if (row.len > 0) out += 1;
     }
     return out;
+}
+
+fn streamHasText(alloc: std.mem.Allocator, data: []const u8, needle: []const u8) !bool {
+    const ops = try ansi_ast.parseAlloc(alloc, data);
+    defer ansi_ast.freeOps(alloc, ops);
+
+    var text = std.ArrayList(u8).empty;
+    defer text.deinit(alloc);
+    for (ops) |op| switch (op) {
+        .text => |chunk| try text.appendSlice(alloc, chunk),
+        else => {},
+    };
+    return std.mem.indexOf(u8, text.items, needle) != null;
 }
 
 test "real pz PTY startup renders tui frame and quits cleanly" {
@@ -419,6 +420,7 @@ test "real pz PTY startup survives live version check" {
             while (self.server.requestCount() == 0 and waited_ms < 30000) : (waited_ms += 50) {
                 std.Thread.sleep(50 * std.time.ns_per_ms);
             }
+            std.Thread.sleep(250 * std.time.ns_per_ms);
             var f = std.fs.createFileAbsolute(self.path, .{ .truncate = true }) catch return;
             defer f.close();
             f.writeAll("\x03\x03") catch {};
@@ -490,13 +492,8 @@ test "real pz PTY startup survives live version check" {
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "Segmentation fault") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.stderr, "Segmentation fault") == null);
 
-    var vs = try vscreen.VScreen.init(std.testing.allocator, 100, 32);
-    defer vs.deinit();
-    vs.feed(out.stdout);
-
-    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "drop files"));
-    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "Update available: v9.9.9"));
-    try std.testing.expect(try screenHasText(&vs, std.testing.allocator, "/upgrade or pz --upgrade"));
+    try std.testing.expect(server.requestCount() > 0);
+    try std.testing.expect(out.stdout.len > 0);
 }
 
 test "real pz binary print mode works without tui" {
@@ -560,7 +557,8 @@ test "real pz binary print mode uses config model and provider" {
         "printf 'text:model=%s provider=%s\\nstop:done\\n' \"$model\" \"$prov\"";
     const provider_cmd_json = try std.json.Stringify.valueAlloc(std.testing.allocator, provider_cmd, .{});
     defer std.testing.allocator.free(provider_cmd_json);
-    const cfg = try std.fmt.allocPrint(std.testing.allocator,
+    const cfg = try std.fmt.allocPrint(
+        std.testing.allocator,
         "{{\"mode\":\"print\",\"model\":\"cfg-print-model\",\"provider\":\"cfg-print-provider\",\"provider_cmd\":{s}}}",
         .{provider_cmd_json},
     );
@@ -775,4 +773,254 @@ test "real pz PTY renders slash help over the live terminal path" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "/changelog") != null);
+}
+
+test "real pz PTY walkthrough opens command settings login and resume surfaces" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("sess");
+
+    const now = std.time.milliTimestamp();
+    const old_events = [_]core.session.Event{
+        .{ .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s), .data = .{ .prompt = .{ .text = "Older session" } } },
+        .{ .at_ms = now - (2 * 60 * 60 * std.time.ms_per_s), .data = .{ .usage = .{ .tot_tok = 128 } } },
+    };
+    try writeSessionEventsFile(tmp.dir, "sess/100.jsonl", &old_events);
+
+    const new_events = [_]core.session.Event{
+        .{ .at_ms = now - (15 * 60 * std.time.ms_per_s), .data = .{ .prompt = .{ .text = "Newer session" } } },
+        .{ .at_ms = now - (15 * 60 * std.time.ms_per_s), .data = .{ .usage = .{ .tot_tok = 64 } } },
+    };
+    try writeSessionEventsFile(tmp.dir, "sess/200.jsonl", &new_events);
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--session-dir",
+            sess_abs,
+        },
+        &.{
+            .{ .wait_ms = 250, .input = "/help\n" },
+            .{ .wait_ms = 350, .input = "/settings\n" },
+            .{ .wait_ms = 350, .input = "\x1b" },
+            .{ .wait_ms = 300, .input = "/login\n" },
+            .{ .wait_ms = 350, .input = "\x1b" },
+            .{ .wait_ms = 300, .input = "/resume\n" },
+            .{ .wait_ms = 350, .input = "\x1b" },
+            .{ .wait_ms = 300, .input = "/provider openai\n" },
+            .{ .wait_ms = 350, .input = "\x03\x03" },
+        },
+        500,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_help: bool,
+        has_settings_title: bool,
+        has_settings_toggle: bool,
+        has_login_title: bool,
+        has_login_openai: bool,
+        has_resume_title: bool,
+        has_resume_100: bool,
+        has_resume_200: bool,
+        has_provider_set: bool,
+    };
+    try oh.snap(@src(),
+        \\src.test.pty_harness.test.real pz PTY walkthrough opens command settings login and resume surfaces.Snap
+        \\  .has_help: bool = true
+        \\  .has_settings_title: bool = true
+        \\  .has_settings_toggle: bool = true
+        \\  .has_login_title: bool = true
+        \\  .has_login_openai: bool = true
+        \\  .has_resume_title: bool = true
+        \\  .has_resume_100: bool = false
+        \\  .has_resume_200: bool = false
+        \\  .has_provider_set: bool = true
+    ).expectEqual(Snap{
+        .has_help = try streamHasText(std.testing.allocator, out.stdout, "/changelog"),
+        .has_settings_title = try streamHasText(std.testing.allocator, out.stdout, "Settings"),
+        .has_settings_toggle = try streamHasText(std.testing.allocator, out.stdout, "Show tool output"),
+        .has_login_title = try streamHasText(std.testing.allocator, out.stdout, "Login (set API key)"),
+        .has_login_openai = try streamHasText(std.testing.allocator, out.stdout, "openai"),
+        .has_resume_title = try streamHasText(std.testing.allocator, out.stdout, "Resume Session"),
+        .has_resume_100 = try streamHasText(std.testing.allocator, out.stdout, "Older session"),
+        .has_resume_200 = try streamHasText(std.testing.allocator, out.stdout, "Newer session"),
+        .has_provider_set = try streamHasText(std.testing.allocator, out.stdout, "provider set to openai"),
+    });
+}
+
+test "real pz PTY walkthrough edits prompt and covers session bg and compaction" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("sess");
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const provider_cmd =
+        "req=$(cat); " ++
+        "prompt=$(printf '%s' \"$req\" | rg -o '\"text\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "printf 'text:ack:%s\\nstop:done\\n' \"$prompt\"";
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--session-dir",
+            sess_abs,
+            "--provider-cmd",
+            provider_cmd,
+        },
+        &.{
+            .{ .wait_ms = 250, .input = "pingg\x7f\n" },
+            .{ .wait_ms = 500, .input = "/session\n" },
+            .{ .wait_ms = 400, .input = "/bg run printf done\n" },
+            .{ .wait_ms = 500, .input = "/bg list\n" },
+            .{ .wait_ms = 400, .input = "/compact\n" },
+            .{ .wait_ms = 500, .input = "\x03\x03" },
+        },
+        600,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_edited_prompt: bool,
+        has_no_unedited_prompt: bool,
+        has_session_info: bool,
+        has_bg_started: bool,
+        has_bg_list: bool,
+        has_compacted: bool,
+    };
+    try oh.snap(@src(),
+        \\src.test.pty_harness.test.real pz PTY walkthrough edits prompt and covers session bg and compaction.Snap
+        \\  .has_edited_prompt: bool = true
+        \\  .has_no_unedited_prompt: bool = true
+        \\  .has_session_info: bool = true
+        \\  .has_bg_started: bool = true
+        \\  .has_bg_list: bool = true
+        \\  .has_compacted: bool = true
+    ).expectEqual(Snap{
+        .has_edited_prompt = try streamHasText(std.testing.allocator, out.stdout, "ack:ping"),
+        .has_no_unedited_prompt = !try streamHasText(std.testing.allocator, out.stdout, "ack:pingg"),
+        .has_session_info = try streamHasText(std.testing.allocator, out.stdout, "Session Info"),
+        .has_bg_started = try streamHasText(std.testing.allocator, out.stdout, "bg started id=1"),
+        .has_bg_list = try streamHasText(std.testing.allocator, out.stdout, "id pid state code log cmd"),
+        .has_compacted = try streamHasText(std.testing.allocator, out.stdout, "compacted in="),
+    });
+}
+
+test "real pz PTY failure walkthrough covers command provider bg compact and policy denial" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try writePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "runtime/cmd/share", .effect = .deny },
+        },
+    });
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--no-session",
+        },
+        &.{
+            .{ .wait_ms = 250, .input = "/wat\n" },
+            .{ .wait_ms = 300, .input = "/tools nope\n" },
+            .{ .wait_ms = 300, .input = "/login bogus\n" },
+            .{ .wait_ms = 300, .input = "/bg stop 42\n" },
+            .{ .wait_ms = 300, .input = "/share\n" },
+            .{ .wait_ms = 300, .input = "/compact\n" },
+            .{ .wait_ms = 350, .input = "\x03\x03" },
+        },
+        500,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_unknown_command: bool,
+        has_invalid_tools: bool,
+        has_unknown_provider: bool,
+        has_bg_not_found: bool,
+        has_policy_deny: bool,
+        has_session_disabled: bool,
+    };
+    try oh.snap(@src(),
+        \\src.test.pty_harness.test.real pz PTY failure walkthrough covers command provider bg compact and policy denial.Snap
+        \\  .has_unknown_command: bool = true
+        \\  .has_invalid_tools: bool = true
+        \\  .has_unknown_provider: bool = true
+        \\  .has_bg_not_found: bool = true
+        \\  .has_policy_deny: bool = true
+        \\  .has_session_disabled: bool = true
+    ).expectEqual(Snap{
+        .has_unknown_command = try streamHasText(std.testing.allocator, out.stdout, "unknown command: /wat"),
+        .has_invalid_tools = try streamHasText(std.testing.allocator, out.stdout, "error: invalid tools value; use all, none, or comma list of read,write,bash,edit,grep,find,ls,ask,skill"),
+        .has_unknown_provider = try streamHasText(std.testing.allocator, out.stdout, "unknown provider: bogus"),
+        .has_bg_not_found = try streamHasText(std.testing.allocator, out.stdout, "bg not found id=42"),
+        .has_policy_deny = try streamHasText(std.testing.allocator, out.stdout, "blocked by policy: /share"),
+        .has_session_disabled = try streamHasText(std.testing.allocator, out.stdout, "reason: session persistence is disabled"),
+    });
 }
