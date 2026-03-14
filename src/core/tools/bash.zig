@@ -238,7 +238,7 @@ pub const Handler = struct {
 pub fn deniesProtectedCmd(alloc: std.mem.Allocator, cmd: []const u8) Err!bool {
     return shell.touchesProtectedPath(alloc, cmd) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => false,
+        else => true, // fail closed: unparseable commands are denied
     };
 }
 

@@ -4,6 +4,15 @@ const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;
 const testing = std.testing;
 
+/// Constant-time byte comparison. Returns true iff all bytes match.
+/// Prevents timing side-channel attacks on secret comparisons.
+pub fn ctEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
 pub const seed_len: usize = Ed25519.KeyPair.seed_length;
 pub const pk_len: usize = Ed25519.PublicKey.encoded_length;
 pub const sig_len: usize = Ed25519.Signature.encoded_length;

@@ -194,9 +194,23 @@ pub const CmdCache = struct {
     }
 
     pub fn contains(self: *CmdCache, key: Key) bool {
+        return self.containsAt(key, 0);
+    }
+
+    pub fn containsAt(self: *CmdCache, key: Key, now_ms: i64) bool {
         const key_hash = hash(key);
         for (self.entries.items, 0..) |item, i| {
             if (item.hash != key_hash or !eql(item.key, key)) continue;
+            // Reject expired TTL entries
+            if (now_ms > 0) {
+                switch (item.key.life) {
+                    .expires_at_ms => |exp| if (now_ms > exp) {
+                        freeKey(self.alloc, self.entries.orderedRemove(i).key);
+                        return false;
+                    },
+                    .session => {},
+                }
+            }
             if (i + 1 < self.entries.items.len) {
                 const hit = item;
                 std.mem.copyForwards(Entry, self.entries.items[i .. self.entries.items.len - 1], self.entries.items[i + 1 ..]);
@@ -1169,7 +1183,7 @@ fn noteApproval(
         .policy = ctx.policy,
         .life = .{ .session = opts.sid },
     };
-    const cached = if (opts.cmd_cache) |cache| cache.contains(key) else false;
+    const cached = if (opts.cmd_cache) |cache| cache.containsAt(key, nowMs(opts)) else false;
     if (cached) return;
     const approver = opts.approver orelse return error.ApprovalRequired;
     try approver.check(key, false);

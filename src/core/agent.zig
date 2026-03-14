@@ -1,5 +1,6 @@
 //! Child agent RPC protocol: spawn, message framing, version negotiation.
 const std = @import("std");
+const signing = @import("signing.zig");
 const testing = std.testing;
 
 pub const protocol_version: u16 = 1;
@@ -223,7 +224,7 @@ pub const Stub = struct {
     fn recvHello(self: *Stub, msg: Hello) StubError!Event {
         if (self.state != .wait_hello) return error.UnexpectedMsg;
         if (msg.role != .child) return error.UnexpectedRole;
-        if (!std.mem.eql(u8, msg.policy_hash, self.policy_hash)) return error.PolicyMismatch;
+        if (!signing.ctEql(msg.policy_hash, self.policy_hash)) return error.PolicyMismatch;
         self.state = .idle;
         return .{ .ready = msg };
     }

@@ -51,7 +51,7 @@ pub const ApprovalBind = union(enum) {
             },
             .hash => |ah| switch (b) {
                 .version => false,
-                .hash => |bh| std.mem.eql(u8, ah, bh),
+                .hash => |bh| signing.ctEql(ah, bh),
             },
         };
     }
@@ -388,7 +388,7 @@ pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
 
     const embedded_pk = try signing.PublicKey.parseText(key.string);
     const pk = try trustedPolicyPk();
-    if (!std.mem.eql(u8, embedded_pk.raw[0..], pk.raw[0..])) return error.UntrustedSigner;
+    if (!signing.ctEql(embedded_pk.raw[0..], pk.raw[0..])) return error.UntrustedSigner;
     const sig_det = try signing.Signature.parseHex(sig.string);
     _ = try signing.verifyDetached(payload, sig_det, pk);
 
