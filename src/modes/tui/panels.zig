@@ -440,7 +440,7 @@ pub const Panels = struct {
         }
 
         if (tr.is_err) {
-            try self.setErr(tr.out);
+            try self.setErr(tr.output);
             self.run_state = .failed;
             return;
         }
@@ -822,7 +822,7 @@ test "panels track tool lifecycle and state transitions" {
 
     try ps.append(.{ .tool_result = .{
         .id = "call-1",
-        .out = "ok",
+        .output = "ok",
         .is_err = false,
     } });
     try std.testing.expect(ps.state() == .streaming);

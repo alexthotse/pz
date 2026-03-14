@@ -95,7 +95,7 @@ fn parseLine(
             const parts = try split3(val, '|');
             break :blk .{ .tool_result = .{
                 .id = try dup(alloc, parts[0]),
-                .out = try dup(alloc, parts[2]),
+                .output = try dup(alloc, parts[2]),
                 .is_err = try parseBool(parts[1]),
             } };
         },
@@ -258,7 +258,7 @@ test "parser handles tool_result usage and err frames" {
         \\    .tool_result: core.providers.stream_parse.SnapEv.ToolResult
         \\      .id: []const u8
         \\        "call-7"
-        \\      .out: []const u8
+        \\      .output: []const u8
         \\        "stderr"
         \\      .is_err: bool = true
         \\  [1]: core.providers.stream_parse.SnapEv
@@ -331,7 +331,7 @@ const SnapEv = union(enum) {
 
     const ToolResult = struct {
         id: []const u8,
-        out: []const u8,
+        output: []const u8,
         is_err: bool,
     };
 
@@ -358,7 +358,7 @@ fn snapEvs(alloc: std.mem.Allocator, evs: []const providers.Event) ![]SnapEv {
         } }),
         .tool_result => |res| try out.append(alloc, .{ .tool_result = .{
             .id = res.id,
-            .out = res.out,
+            .output = res.output,
             .is_err = res.is_err,
         } }),
         .usage => |usage| try out.append(alloc, .{ .usage = usage }),

@@ -10,7 +10,7 @@ const ToolCallOut = struct {
 
 const ToolResultOut = struct {
     id: []const u8,
-    out: []const u8,
+    output: []const u8,
     is_err: bool,
 };
 
@@ -47,7 +47,7 @@ pub const Formatter = struct {
 
         for (self.tool_results.items) |tr| {
             self.alloc.free(tr.id);
-            self.alloc.free(tr.out);
+            self.alloc.free(tr.output);
         }
         self.tool_results.deinit(self.alloc);
 
@@ -110,7 +110,7 @@ pub const Formatter = struct {
             try self.out.writeAll(" is_err=");
             try self.out.writeAll(if (tr.is_err) "true" else "false");
             try self.out.writeAll(" out=");
-            try writeQuoted(self.out, tr.out);
+            try writeQuoted(self.out, tr.output);
             try self.out.writeByte('\n');
         }
 
@@ -169,12 +169,12 @@ pub const Formatter = struct {
         const id = try self.alloc.dupe(u8, tr.id);
         errdefer self.alloc.free(id);
 
-        const out = try self.alloc.dupe(u8, tr.out);
+        const out = try self.alloc.dupe(u8, tr.output);
         errdefer self.alloc.free(out);
 
         try self.tool_results.append(self.alloc, .{
             .id = id,
-            .out = out,
+            .output = out,
             .is_err = tr.is_err,
         });
     }
@@ -227,7 +227,7 @@ pub const Formatter = struct {
 
         if (a.is_err != b.is_err) return !a.is_err;
 
-        return std.mem.order(u8, a.out, b.out) == .lt;
+        return std.mem.order(u8, a.output, b.output) == .lt;
     }
 };
 
@@ -301,14 +301,14 @@ test "formatter emits deterministic canonical output" {
     const evs_a = [_]core.providers.Event{
         .{ .text = "out-a" },
         .{ .thinking = "z-think" },
-        .{ .tool_result = .{ .id = "call-2", .out = "res-z", .is_err = true } },
+        .{ .tool_result = .{ .id = "call-2", .output = "res-z", .is_err = true } },
         .{ .tool_call = .{ .id = "call-2", .name = "write", .args = "{\"path\":\"b\"}" } },
         .{ .usage = .{ .in_tok = 2, .out_tok = 3, .tot_tok = 5 } },
         .{ .err = "z-err" },
         .{ .stop = .{ .reason = .done } },
         .{ .tool_call = .{ .id = "call-1", .name = "read", .args = "{\"path\":\"a\"}" } },
         .{ .thinking = "a-think" },
-        .{ .tool_result = .{ .id = "call-1", .out = "res-a", .is_err = false } },
+        .{ .tool_result = .{ .id = "call-1", .output = "res-a", .is_err = false } },
         .{ .usage = .{ .in_tok = 1, .out_tok = 1, .tot_tok = 2 } },
         .{ .err = "a-err" },
         .{ .stop = .{ .reason = .err } },
@@ -317,7 +317,7 @@ test "formatter emits deterministic canonical output" {
     const evs_b = [_]core.providers.Event{
         .{ .err = "a-err" },
         .{ .stop = .{ .reason = .err } },
-        .{ .tool_result = .{ .id = "call-1", .out = "res-a", .is_err = false } },
+        .{ .tool_result = .{ .id = "call-1", .output = "res-a", .is_err = false } },
         .{ .thinking = "a-think" },
         .{ .tool_call = .{ .id = "call-1", .name = "read", .args = "{\"path\":\"a\"}" } },
         .{ .err = "z-err" },
@@ -325,7 +325,7 @@ test "formatter emits deterministic canonical output" {
         .{ .tool_call = .{ .id = "call-2", .name = "write", .args = "{\"path\":\"b\"}" } },
         .{ .text = "out-a" },
         .{ .stop = .{ .reason = .done } },
-        .{ .tool_result = .{ .id = "call-2", .out = "res-z", .is_err = true } },
+        .{ .tool_result = .{ .id = "call-2", .output = "res-z", .is_err = true } },
         .{ .thinking = "z-think" },
         .{ .usage = .{ .in_tok = 2, .out_tok = 3, .tot_tok = 5 } },
     };

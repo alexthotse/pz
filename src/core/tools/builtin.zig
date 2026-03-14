@@ -782,7 +782,7 @@ test "agent tool uses runtime hook output" {
     const AgentImpl = struct {
         seen: usize = 0,
 
-        fn run(self: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunRes {
+        fn run(self: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunResult {
             self.seen += 1;
             return .{
                 .out = .{

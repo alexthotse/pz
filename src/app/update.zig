@@ -447,8 +447,8 @@ fn emitUpdateAudit(
         .ts_ms = hooks.now_ms(),
         .sid = "upgrade",
         .seq = seq,
-        .out = out,
-        .sev = sev,
+        .outcome = out,
+        .severity = sev,
         .actor = .{ .kind = .sys },
         .res = .{
             .kind = .cmd,

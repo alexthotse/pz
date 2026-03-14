@@ -11,15 +11,15 @@ pub const Err = error{
 
 pub const Hook = struct {
     ctx: *anyopaque,
-    run_fn: *const fn (ctx: *anyopaque, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunRes,
+    run_fn: *const fn (ctx: *anyopaque, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult,
 
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime run_fn: fn (ctx: *T, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunRes,
+        comptime run_fn: fn (ctx: *T, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult,
     ) Hook {
         const Wrap = struct {
-            fn call(raw: *anyopaque, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunRes {
+            fn call(raw: *anyopaque, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 return run_fn(typed, args);
             }
@@ -31,7 +31,7 @@ pub const Hook = struct {
         };
     }
 
-    pub fn run(self: Hook, args: tools.Call.AgentArgs) !rpc.ChildProc.RunRes {
+    pub fn run(self: Hook, args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
         return self.run_fn(self.ctx, args);
     }
 };
@@ -83,7 +83,7 @@ pub const Handler = struct {
     }
 };
 
-fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.ChildProc.RunRes) Err!tools.Result {
+fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.ChildProc.RunResult) Err!tools.Result {
     const full = try renderAlloc(self.alloc, agent_id, run_res);
     defer self.alloc.free(full);
 
@@ -132,7 +132,7 @@ fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.Ch
     };
 }
 
-fn finalFor(run_res: rpc.ChildProc.RunRes) tools.Result.Final {
+fn finalFor(run_res: rpc.ChildProc.RunResult) tools.Result.Final {
     if (run_res.err != null) {
         return .{ .failed = .{
             .kind = .exec,
@@ -159,7 +159,7 @@ fn finalFor(run_res: rpc.ChildProc.RunRes) tools.Result.Final {
     };
 }
 
-fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.ChildProc.RunRes) ![]u8 {
+fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.ChildProc.RunResult) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     const wr = out.writer(alloc);
@@ -215,7 +215,7 @@ test "agent handler renders info block and output" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const HookImpl = struct {
-        fn run(_: *@This(), args: tools.Call.AgentArgs) !rpc.ChildProc.RunRes {
+        fn run(_: *@This(), args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .out = .{
                     .id = "req-1",
@@ -277,7 +277,7 @@ test "agent handler truncates deterministically" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const HookImpl = struct {
-        fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunRes {
+        fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .out = .{
                     .id = "req-2",
@@ -340,7 +340,7 @@ test "agent handler maps rpc error to failed final" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const HookImpl = struct {
-        fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunRes {
+        fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .err = .{
                     .id = "req-3",

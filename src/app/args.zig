@@ -9,7 +9,7 @@ pub const Mode = enum {
     rpc,
 };
 
-pub const CfgSel = union(enum) {
+pub const ConfigSelection = union(enum) {
     auto,
     off,
     path: []const u8,
@@ -41,7 +41,7 @@ pub const Parsed = struct {
     mode: Mode = .tui,
     mode_set: bool = false,
     prompt: ?[]const u8 = null,
-    cfg: CfgSel = .auto,
+    cfg: ConfigSelection = .auto,
     session: SessionSel = .auto,
     no_session: bool = false,
     tool_mask: u16 = core.tools.builtin.mask_all,
@@ -357,7 +357,7 @@ fn setPrompt(out: *Parsed, prompt: []const u8) ParseError!void {
     out.prompt = prompt;
 }
 
-fn setCfg(out: *Parsed, cfg_seen: *bool, cfg: CfgSel) ParseError!void {
+fn setCfg(out: *Parsed, cfg_seen: *bool, cfg: ConfigSelection) ParseError!void {
     if (cfg_seen.*) {
         if (std.meta.activeTag(out.cfg) == std.meta.activeTag(cfg)) return error.DuplicateConfig;
         return error.ConfigConflict;

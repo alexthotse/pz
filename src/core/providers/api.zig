@@ -42,7 +42,7 @@ pub const ToolCall = struct {
 
 pub const ToolResult = struct {
     id: []const u8,
-    out: []const u8,
+    output: []const u8,
     is_err: bool = false,
 };
 

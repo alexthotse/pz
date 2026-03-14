@@ -189,7 +189,7 @@ const RunTr = struct {
 
 const BufStream = struct {
     alloc: std.mem.Allocator,
-    out: streaming.RunRes,
+    out: streaming.RunResult,
     idx: usize = 0,
 
     fn next(self: *BufStream) anyerror!?providers.Event {
@@ -318,7 +318,7 @@ fn writePart(js: *std.json.Stringify, part: providers.Part) anyerror!void {
             try js.objectField("id");
             try js.write(tr.id);
             try js.objectField("out");
-            try js.write(tr.out);
+            try js.write(tr.output);
             try js.objectField("is_err");
             try js.write(tr.is_err);
         },
@@ -486,7 +486,7 @@ test "buildReq emits request fixture JSON" {
         .{ .tool_call = .{ .id = "c1", .name = "read", .args = "{\"path\":\"/tmp\"}" } },
     };
     const tool_parts = [_]providers.Part{
-        .{ .tool_result = .{ .id = "c1", .out = "ok", .is_err = false } },
+        .{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } },
     };
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = user_parts[0..] },

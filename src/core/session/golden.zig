@@ -7,7 +7,7 @@ const replay_golden =
     \\{"version":1,"at_ms":1,"data":{"prompt":{"text":"hello"}}}
     \\{"version":1,"at_ms":2,"data":{"text":{"text":"world"}}}
     \\{"version":1,"at_ms":3,"data":{"tool_call":{"id":"c1","name":"read","args":"{\"path\":\"a.txt\"}"}}}
-    \\{"version":1,"at_ms":4,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}
+    \\{"version":1,"at_ms":4,"data":{"tool_result":{"id":"c1","output":"ok","is_err":false}}}
     \\{"version":1,"at_ms":5,"data":{"stop":{"reason":"done"}}}
     \\
 ;

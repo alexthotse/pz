@@ -70,11 +70,11 @@ pub const Cancel = struct {
 
 pub const Out = struct {
     id: []const u8,
-    kind: OutKind = .text,
+    kind: OutputKind = .text,
     text: []const u8,
 };
 
-pub const OutKind = enum {
+pub const OutputKind = enum {
     text,
     info,
 };
@@ -98,12 +98,12 @@ pub const Err = struct {
     fatal: bool = true,
 };
 
-pub const Req = struct {
+pub const Request = struct {
     id: []const u8,
     prompt: []const u8,
 };
 
-pub const Ev = union(Tag) {
+pub const Event = union(Tag) {
     ready: Hello,
     out: Out,
     done: Done,
@@ -176,7 +176,7 @@ pub const Stub = struct {
         });
     }
 
-    pub fn run(self: *Stub, req: Req) StubError!Frame {
+    pub fn run(self: *Stub, req: Request) StubError!Frame {
         if (self.state != .idle) return error.InvalidState;
         try validateId(req.id);
         if (req.prompt.len == 0) return error.EmptyPrompt;
@@ -200,7 +200,7 @@ pub const Stub = struct {
         });
     }
 
-    pub fn recv(self: *Stub, frame: Frame) StubError!Ev {
+    pub fn recv(self: *Stub, frame: Frame) StubError!Event {
         try validateFrame(frame);
         if (frame.seq <= self.recv_seq) return error.SeqOrder;
         self.recv_seq = frame.seq;
@@ -220,7 +220,7 @@ pub const Stub = struct {
         return Frame.init(seq, msg);
     }
 
-    fn recvHello(self: *Stub, msg: Hello) StubError!Ev {
+    fn recvHello(self: *Stub, msg: Hello) StubError!Event {
         if (self.state != .wait_hello) return error.UnexpectedMsg;
         if (msg.role != .child) return error.UnexpectedRole;
         if (!std.mem.eql(u8, msg.policy_hash, self.policy_hash)) return error.PolicyMismatch;
@@ -228,14 +228,14 @@ pub const Stub = struct {
         return .{ .ready = msg };
     }
 
-    fn recvOut(self: *Stub, out: Out) StubError!Ev {
+    fn recvOut(self: *Stub, out: Out) StubError!Event {
         const id = self.run_id orelse return error.InvalidState;
         if (self.state != .running) return error.UnexpectedMsg;
         if (!std.mem.eql(u8, out.id, id)) return error.UnexpectedId;
         return .{ .out = out };
     }
 
-    fn recvDone(self: *Stub, done: Done) StubError!Ev {
+    fn recvDone(self: *Stub, done: Done) StubError!Event {
         const id = self.run_id orelse return error.InvalidState;
         if (self.state != .running) return error.UnexpectedMsg;
         if (!std.mem.eql(u8, done.id, id)) return error.UnexpectedId;
@@ -244,7 +244,7 @@ pub const Stub = struct {
         return .{ .done = done };
     }
 
-    fn recvErr(self: *Stub, rpc_err: Err) StubError!Ev {
+    fn recvErr(self: *Stub, rpc_err: Err) StubError!Event {
         switch (self.state) {
             .wait_hello => {
                 if (rpc_err.id != null) return error.UnexpectedId;
@@ -288,7 +288,7 @@ pub const ChildProc = struct {
     in_buf: [4096]u8 = undefined,
     out_buf: [4096]u8 = undefined,
 
-    pub const RunRes = struct {
+    pub const RunResult = struct {
         out: ?Out = null,
         done: ?Done = null,
         err: ?Err = null,
@@ -356,9 +356,9 @@ pub const ChildProc = struct {
         };
     }
 
-    pub fn runReq(self: *ChildProc, req: Req) !RunRes {
+    pub fn runReq(self: *ChildProc, req: Request) !RunResult {
         try self.send(try self.stub.run(req));
-        var res: RunRes = .{};
+        var res: RunResult = .{};
         while (true) {
             const ev = try self.stub.recv(try self.recv());
             switch (ev) {
@@ -622,7 +622,7 @@ test "info output and truncation survive roundtrip" {
         \\  .out: core.agent.Out
         \\    .id: []const u8
         \\      "job-7"
-        \\    .kind: core.agent.OutKind
+        \\    .kind: core.agent.OutputKind
         \\      .info
         \\    .text: []const u8
         \\      "delegated to child agent"
@@ -682,7 +682,7 @@ test "stub handshake run output done flow" {
     }));
     try testing.expectEqual(Stub.State.idle, stub.state);
     try oh.snap(@src(),
-        \\core.agent.Ev
+        \\core.agent.Event
         \\  .ready: core.agent.Hello
         \\    .role: core.agent.Role
         \\      .child
@@ -716,11 +716,11 @@ test "stub handshake run output done flow" {
         },
     }));
     try oh.snap(@src(),
-        \\core.agent.Ev
+        \\core.agent.Event
         \\  .out: core.agent.Out
         \\    .id: []const u8
         \\      "job-1"
-        \\    .kind: core.agent.OutKind
+        \\    .kind: core.agent.OutputKind
         \\      .info
         \\    .text: []const u8
         \\      "delegated to child agent"
@@ -736,7 +736,7 @@ test "stub handshake run output done flow" {
     try testing.expectEqual(Stub.State.idle, stub.state);
     try testing.expect(stub.activeId() == null);
     try oh.snap(@src(),
-        \\core.agent.Ev
+        \\core.agent.Event
         \\  .done: core.agent.Done
         \\    .id: []const u8
         \\      "job-1"
@@ -797,7 +797,7 @@ test "stub cancel keeps run live until terminal frame" {
     try testing.expectEqual(Stub.State.idle, stub.state);
     try testing.expect(stub.activeId() == null);
     try oh.snap(@src(),
-        \\core.agent.Ev
+        \\core.agent.Event
         \\  .done: core.agent.Done
         \\    .id: []const u8
         \\      "job-2"
@@ -890,7 +890,7 @@ test "spawned child handshake and run succeed" {
         \\  .out: ?core.agent.Out
         \\    .id: []const u8
         \\      "job-1"
-        \\    .kind: core.agent.OutKind
+        \\    .kind: core.agent.OutputKind
         \\      .info
         \\    .text: []const u8
         \\      "echo:delegate this"
@@ -968,7 +968,7 @@ test "spawned child accepts inherited policy hash" {
         \\  .out: ?core.agent.Out
         \\    .id: []const u8
         \\      "job-echo"
-        \\    .kind: core.agent.OutKind
+        \\    .kind: core.agent.OutputKind
         \\      .info
         \\    .text: []const u8
         \\      "echo:inherit"

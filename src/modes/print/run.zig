@@ -87,7 +87,7 @@ fn mapEvent(ev: core.providers.Event) core.session.Event {
             .tool_result => |tr| .{
                 .tool_result = .{
                     .id = tr.id,
-                    .out = tr.out,
+                    .output = tr.output,
                     .is_err = tr.is_err,
                 },
             },
@@ -141,7 +141,7 @@ const RunToolCallSnap = struct {
 
 const RunToolResultSnap = struct {
     id: []const u8,
-    out: []const u8,
+    output: []const u8,
     is_err: bool,
 };
 
@@ -166,20 +166,20 @@ const RunVerboseSnap = struct {
     provider: RunProviderSnap,
     store: RunStoreSnap,
     events: RunEventsSnap,
-    out: []const u8,
+    output: []const u8,
 };
 
 const RunErrSnap = struct {
     deinit_ct: usize,
     append_ct: usize,
     prompt: []const u8,
-    out: []const u8,
+    output: []const u8,
 };
 
 const RunStopSnap = struct {
     deinit_ct: usize,
     append_ct: usize,
-    out: []const u8,
+    output: []const u8,
 };
 
 test "exec runs prompt path and persists mapped provider events" {
@@ -291,7 +291,7 @@ test "exec runs prompt path and persists mapped provider events" {
         .{
             .tool_result = .{
                 .id = "call-1",
-                .out = "ok",
+                .output = "ok",
                 .is_err = false,
             },
         },
@@ -377,7 +377,7 @@ test "exec runs prompt path and persists mapped provider events" {
                 else => return error.TestUnexpectedResult,
             },
             .tool_result = switch (store_impl.evs[4].data) {
-                .tool_result => |out| .{ .id = out.id, .out = out.out, .is_err = out.is_err },
+                .tool_result => |out| .{ .id = out.id, .output = out.output, .is_err = out.is_err },
                 else => return error.TestUnexpectedResult,
             },
             .usage = switch (store_impl.evs[5].data) {
@@ -393,7 +393,7 @@ test "exec runs prompt path and persists mapped provider events" {
                 else => return error.TestUnexpectedResult,
             },
         },
-        .out = out_fbs.getWritten(),
+        .output = out_fbs.getWritten(),
     };
     try oh.snap(@src(),
         \\modes.print.run.RunVerboseSnap
@@ -431,7 +431,7 @@ test "exec runs prompt path and persists mapped provider events" {
         \\    .tool_result: modes.print.run.RunToolResultSnap
         \\      .id: []const u8
         \\        "call-1"
-        \\      .out: []const u8
+        \\      .output: []const u8
         \\        "ok"
         \\      .is_err: bool = false
         \\    .usage: modes.print.run.RunUsageSnap
@@ -442,7 +442,7 @@ test "exec runs prompt path and persists mapped provider events" {
         \\      .done
         \\    .err: []const u8
         \\      "warn-a"
-        \\  .out: []const u8
+        \\  .output: []const u8
         \\    "out-a
         \\thinking "think-a"
         \\tool_call id="call-1" name="read" args="{\"path\":\"x\"}"
@@ -552,7 +552,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
             .prompt => |out| out.text,
             else => return error.TestUnexpectedResult,
         },
-        .out = out_fbs.getWritten(),
+        .output = out_fbs.getWritten(),
     };
     try oh.snap(@src(),
         \\modes.print.run.RunErrSnap
@@ -560,7 +560,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
         \\  .append_ct: usize = 1
         \\  .prompt: []const u8
         \\    "prompt-2"
-        \\  .out: []const u8
+        \\  .output: []const u8
         \\    ""
     ).expectEqual(snap);
 }
@@ -673,13 +673,13 @@ test "exec maps max_out stop reason to deterministic typed error" {
     const snap = RunStopSnap{
         .deinit_ct = provider_impl.stream.deinit_ct,
         .append_ct = store_impl.append_ct,
-        .out = out_fbs.getWritten(),
+        .output = out_fbs.getWritten(),
     };
     try oh.snap(@src(),
         \\modes.print.run.RunStopSnap
         \\  .deinit_ct: usize = 1
         \\  .append_ct: usize = 3
-        \\  .out: []const u8
+        \\  .output: []const u8
         \\    "out-z
         \\stop reason=max_out
         \\"

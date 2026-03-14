@@ -47,7 +47,7 @@ pub const Event = struct {
 
     pub const ToolResult = struct {
         id: []const u8,
-        out: []const u8,
+        output: []const u8,
         is_err: bool = false,
     };
 
@@ -111,8 +111,8 @@ pub const Event = struct {
             .tool_result => |tr| blk: {
                 const id = try alloc.dupe(u8, tr.id);
                 errdefer alloc.free(id);
-                const out = try alloc.dupe(u8, tr.out);
-                break :blk .{ .tool_result = .{ .id = id, .out = out, .is_err = tr.is_err } };
+                const out = try alloc.dupe(u8, tr.output);
+                break :blk .{ .tool_result = .{ .id = id, .output = out, .is_err = tr.is_err } };
             },
             .usage => |u| .{ .usage = u },
             .stop => |s| .{ .stop = s },
@@ -133,7 +133,7 @@ pub const Event = struct {
             },
             .tool_result => |tr| {
                 alloc.free(tr.id);
-                alloc.free(tr.out);
+                alloc.free(tr.output);
             },
         }
     }
@@ -176,7 +176,7 @@ fn sanitizeData(alloc: std.mem.Allocator, data: Event.Data) error{OutOfMemory}!E
         .tool_result => |tr| .{
             .tool_result = .{
                 .id = try utf8.sanitizeMaybeAlloc(alloc, tr.id),
-                .out = try utf8.sanitizeMaybeAlloc(alloc, tr.out),
+                .output = try utf8.sanitizeMaybeAlloc(alloc, tr.output),
                 .is_err = tr.is_err,
             },
         },
@@ -208,7 +208,7 @@ test "session event json roundtrip" {
         .data = .{
             .tool_result = .{
                 .id = "call-1",
-                .out = "{\"ok\":true}",
+                .output = "{\"ok\":true}",
                 .is_err = false,
             },
         },
@@ -228,7 +228,7 @@ test "session event json roundtrip" {
         \\    .tool_result: core.session.schema.Event.ToolResult
         \\      .id: []const u8
         \\        "call-1"
-        \\      .out: []const u8
+        \\      .output: []const u8
         \\        "{"ok":true}"
         \\      .is_err: bool = false
     ).expectEqual(parsed.value);
@@ -241,7 +241,7 @@ test "session event json replaces invalid utf8 lossy" {
         .data = .{
             .tool_result = .{
                 .id = "call-1",
-                .out = utf8_case.bad_tool_out[0..],
+                .output = utf8_case.bad_tool_out[0..],
                 .is_err = false,
             },
         },
@@ -254,7 +254,7 @@ test "session event json replaces invalid utf8 lossy" {
 
     var parsed = try decodeSlice(std.testing.allocator, raw);
     defer parsed.deinit();
-    try std.testing.expectEqualStrings(utf8_case.lossy_tool_out, parsed.value.data.tool_result.out);
+    try std.testing.expectEqualStrings(utf8_case.lossy_tool_out, parsed.value.data.tool_result.output);
 }
 
 test "session event json rejects wrong version" {
@@ -309,7 +309,7 @@ test "Event.dupe deep-copies tool_result strings" {
         .data = .{
             .tool_result = .{
                 .id = "c2",
-                .out = "output-data",
+                .output = "output-data",
                 .is_err = true,
             },
         },
@@ -325,7 +325,7 @@ test "Event.dupe deep-copies tool_result strings" {
         \\    .tool_result: core.session.schema.Event.ToolResult
         \\      .id: []const u8
         \\        "c2"
-        \\      .out: []const u8
+        \\      .output: []const u8
         \\        "output-data"
         \\      .is_err: bool = true
     ).expectEqual(d);
@@ -470,7 +470,7 @@ test "schema property: tool_result event roundtrip" {
                 .data = .{
                     .tool_result = .{
                         .id = args.id.slice(),
-                        .out = args.out.slice(),
+                        .output = args.out.slice(),
                         .is_err = args.is_err,
                     },
                 },
@@ -481,7 +481,7 @@ test "schema property: tool_result event roundtrip" {
             defer parsed.deinit();
             return switch (parsed.value.data) {
                 .tool_result => |tr| std.mem.eql(u8, tr.id, args.id.slice()) and
-                    std.mem.eql(u8, tr.out, args.out.slice()) and
+                    std.mem.eql(u8, tr.output, args.out.slice()) and
                     tr.is_err == args.is_err,
                 else => false,
             };
@@ -499,7 +499,7 @@ test "schema property: dupe preserves tool_result encode" {
                 .data = .{
                     .tool_result = .{
                         .id = args.id.slice(),
-                        .out = args.out.slice(),
+                        .output = args.out.slice(),
                         .is_err = args.is_err,
                     },
                 },
@@ -589,7 +589,7 @@ test "schema property: event encode/decode roundtrip across tags" {
                     .tool_result => .{
                         .tool_result = .{
                             .id = store.keepId(args.id),
-                            .out = pbt.utf8Slice(args.out, &store.a),
+                            .output = pbt.utf8Slice(args.out, &store.a),
                             .is_err = args.is_err,
                         },
                     },
@@ -706,7 +706,7 @@ test "schema property: Event.dupe preserves encode across tags" {
                     .tool_result => .{
                         .tool_result = .{
                             .id = store.keepId(args.id),
-                            .out = pbt.utf8Slice(args.out, &store.a),
+                            .output = pbt.utf8Slice(args.out, &store.a),
                             .is_err = args.is_err,
                         },
                     },

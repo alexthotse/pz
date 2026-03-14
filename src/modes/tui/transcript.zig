@@ -162,14 +162,14 @@ pub const Transcript = struct {
                 const gid = toolGroup(tr.id);
                 self.setToolCallStatus(gid, tr.is_err);
                 if (tr.is_err) {
-                    const idx = try self.pushAnsi(seq, .err, "", .{}, tr.out, .{
+                    const idx = try self.pushAnsi(seq, .err, "", .{}, tr.output, .{
                         .fg = theme.get().err,
                         .bg = theme.get().tool_error_bg,
                     });
                     self.tagToolAt(idx, gid, .result);
                 } else {
                     // Show result with collapsing like pi
-                    const idx = try self.pushToolResult(seq, tr.out);
+                    const idx = try self.pushToolResult(seq, tr.output);
                     self.tagToolAt(idx, gid, .result);
                 }
             },
@@ -1928,7 +1928,7 @@ test "transcript ignores empty blocks when auto-scrolling" {
 
     try tr.append(.{ .text = "" });
     try tr.append(.{ .tool_call = .{ .id = "empty", .name = "bash", .args = "{\"cmd\":\"printf ok\"}" } });
-    try tr.append(.{ .tool_result = .{ .id = "empty", .out = "", .is_err = false } });
+    try tr.append(.{ .tool_result = .{ .id = "empty", .output = "", .is_err = false } });
     try tr.append(.{ .text = "tail line" });
 
     var frm = try frame.Frame.init(std.testing.allocator, 24, 1);
@@ -2100,7 +2100,7 @@ test "tool result preserves ANSI colors" {
 
     try tr.append(.{ .tool_result = .{
         .id = "t1",
-        .out = "\x1b[31mfail\x1b[0m ok",
+        .output = "\x1b[31mfail\x1b[0m ok",
         .is_err = false,
     } });
 
@@ -2118,7 +2118,7 @@ test "tool result renders colored text to frame" {
 
     try tr.append(.{ .tool_result = .{
         .id = "t1",
-        .out = "\x1b[31mERR\x1b[0m",
+        .output = "\x1b[31mERR\x1b[0m",
         .is_err = false,
     } });
 
@@ -2320,7 +2320,7 @@ test "show_tools hides tool blocks" {
 
     try tr.append(.{ .text = "hello" });
     try tr.append(.{ .tool_call = .{ .id = "c1", .name = "read", .args = "{}" } });
-    try tr.append(.{ .tool_result = .{ .id = "c1", .out = "ok", .is_err = false } });
+    try tr.append(.{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } });
     try tr.append(.{ .text = "bye" });
 
     // 4 blocks + 3 gaps = 7 lines visible by default
@@ -2347,7 +2347,7 @@ test "transcript appendSeq keeps deny blocks in causal order" {
 
     try tr.appendSeq(1, .{ .tool_call = .{ .id = "deny-1", .name = "bash", .args = "{\"cmd\":\"cat ~/.ssh/id_rsa\"}" } });
     try tr.appendSeq(3, .{ .text = "later provider text" });
-    try tr.appendSeq(2, .{ .tool_result = .{ .id = "deny-1", .out = "permission denied", .is_err = true } });
+    try tr.appendSeq(2, .{ .tool_result = .{ .id = "deny-1", .output = "permission denied", .is_err = true } });
 
     var frm = try frame.Frame.init(std.testing.allocator, 48, 10);
     defer frm.deinit(std.testing.allocator);
@@ -2472,7 +2472,7 @@ test "tool result success uses tool output fg" {
 
     try tr.append(.{ .tool_result = .{
         .id = "r1",
-        .out = "all good",
+        .output = "all good",
         .is_err = false,
     } });
 
@@ -2492,7 +2492,7 @@ test "tool result ask payload renders as readable lines" {
 
     try tr.append(.{ .tool_result = .{
         .id = "ask-1",
-        .out = "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"Ship it\",\"index\":0},{\"id\":\"risk\",\"answer\":\"Low\",\"index\":1}]}",
+        .output = "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"Ship it\",\"index\":0},{\"id\":\"risk\",\"answer\":\"Low\",\"index\":1}]}",
         .is_err = false,
     } });
 
@@ -2510,7 +2510,7 @@ test "tool result error has err fg and error bg" {
 
     try tr.append(.{ .tool_result = .{
         .id = "r2",
-        .out = "not found",
+        .output = "not found",
         .is_err = true,
     } });
 
@@ -2538,7 +2538,7 @@ test "tool call pending recolors to success and joins result block" {
     const call_pending = try frm.cell(1, 0);
     try std.testing.expect(frame.Color.eql(call_pending.style.bg, t.tool_pending_bg));
 
-    try tr.append(.{ .tool_result = .{ .id = "c9", .out = "ok", .is_err = false } });
+    try tr.append(.{ .tool_result = .{ .id = "c9", .output = "ok", .is_err = false } });
     try tr.render(&frm, .{ .x = 0, .y = 0, .w = 30, .h = 2 });
 
     const call_done = try frm.cell(1, 0);
@@ -2600,7 +2600,7 @@ test "tool call recolors to error with failed result" {
     defer tr.deinit();
 
     try tr.append(.{ .tool_call = .{ .id = "ce", .name = "bash", .args = "{\"cmd\":\"false\"}" } });
-    try tr.append(.{ .tool_result = .{ .id = "ce", .out = "failed", .is_err = true } });
+    try tr.append(.{ .tool_result = .{ .id = "ce", .output = "failed", .is_err = true } });
 
     var frm = try frame.Frame.init(std.testing.allocator, 30, 2);
     defer frm.deinit(std.testing.allocator);

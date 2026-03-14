@@ -25,7 +25,7 @@ pub fn stateName(st: State) []const u8 {
     };
 }
 
-pub const StopRes = enum {
+pub const StopResult = enum {
     sent,
     already_done,
     not_found,
@@ -57,7 +57,7 @@ pub fn deinitView(alloc: std.mem.Allocator, v: View) void {
 }
 
 const WaitCtx = struct {
-    mgr: *Mgr,
+    mgr: *Manager,
     job_id: u64,
     child: std.process.Child,
 };
@@ -76,7 +76,7 @@ const Job = struct {
     ctx: *WaitCtx,
 };
 
-pub const Mgr = struct {
+pub const Manager = struct {
     pub const Opts = struct {
         state_dir: ?[]const u8 = null,
         recover: bool = true,
@@ -99,11 +99,11 @@ pub const Mgr = struct {
     now_ms: *const fn () i64 = nowMs,
     audit_seq: u64 = 1,
 
-    pub fn init(alloc: std.mem.Allocator) !Mgr {
+    pub fn init(alloc: std.mem.Allocator) !Manager {
         return initWithOpts(alloc, .{});
     }
 
-    pub fn initWithOpts(alloc: std.mem.Allocator, opts: Opts) !Mgr {
+    pub fn initWithOpts(alloc: std.mem.Allocator, opts: Opts) !Manager {
         if (opts.emit_audit != null and opts.emit_audit_ctx == null) return error.InvalidArgs;
         const pipe = try std.posix.pipe2(.{
             .NONBLOCK = true,
@@ -114,7 +114,7 @@ pub const Mgr = struct {
             std.posix.close(pipe[1]);
         }
 
-        var out: Mgr = .{
+        var out: Manager = .{
             .alloc = alloc,
             .wake_r = pipe[0],
             .wake_w = pipe[1],
@@ -133,7 +133,7 @@ pub const Mgr = struct {
         return out;
     }
 
-    pub fn deinit(self: *Mgr) void {
+    pub fn deinit(self: *Manager) void {
         self.mu.lock();
         for (self.jobs.items) |job| {
             if (job.state == .running) {
@@ -175,14 +175,14 @@ pub const Mgr = struct {
         self.* = undefined;
     }
 
-    pub fn wakeFd(self: *const Mgr) std.posix.fd_t {
+    pub fn wakeFd(self: *const Manager) std.posix.fd_t {
         return self.wake_r;
     }
 
-    pub fn start(self: *Mgr, cmd_raw: []const u8, cwd: ?[]const u8) !u64 {
+    pub fn start(self: *Manager, cmd_raw: []const u8, cwd: ?[]const u8) !u64 {
         const cmd = std.mem.trim(u8, cmd_raw, " \t");
         const cwd_txt = cwd orelse "";
-        const start_attrs = [_]core.audit.Attr{
+        const start_attrs = [_]core.audit.Attribute{
             .{ .key = "cwd", .vis = .mask, .val = .{ .str = cwd_txt } },
         };
         try self.emitControlAudit(.{
@@ -194,8 +194,8 @@ pub const Mgr = struct {
         if (cmd.len == 0) {
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = "InvalidArgs", .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -205,8 +205,8 @@ pub const Mgr = struct {
         if (try shell.touchesProtectedPath(self.alloc, cmd)) {
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = "Denied", .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -250,8 +250,8 @@ pub const Mgr = struct {
         child.spawn() catch |err| {
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(err), .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -273,8 +273,8 @@ pub const Mgr = struct {
         self.journal.appendLaunch(id, pid, cmd_dup, log_path, started_at_ms) catch |err| {
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(err), .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -306,8 +306,8 @@ pub const Mgr = struct {
             self.alloc.free(log_path);
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(append_err), .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -333,8 +333,8 @@ pub const Mgr = struct {
             }
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(spawn_err), .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -351,8 +351,8 @@ pub const Mgr = struct {
             self.journal.appendCleanup(id, "start_internal_error") catch {};
             try self.emitControlAudit(.{
                 .op = "start",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = "InternalError", .vis = .mask },
                 .argv = .{ .text = cmd, .vis = .mask },
                 .attrs = &start_attrs,
@@ -361,7 +361,7 @@ pub const Mgr = struct {
         }
         self.mu.unlock();
 
-        const ok_attrs = [_]core.audit.Attr{
+        const ok_attrs = [_]core.audit.Attribute{
             .{ .key = "job_id", .val = .{ .uint = id } },
             .{ .key = "pid", .val = .{ .uint = @intCast(pid) } },
             .{ .key = "cwd", .vis = .mask, .val = .{ .str = cwd_txt } },
@@ -376,8 +376,8 @@ pub const Mgr = struct {
         return id;
     }
 
-    pub fn stop(self: *Mgr, id: u64) !StopRes {
-        const start_attrs = [_]core.audit.Attr{
+    pub fn stop(self: *Manager, id: u64) !StopResult {
+        const start_attrs = [_]core.audit.Attribute{
             .{ .key = "job_id", .val = .{ .uint = id } },
         };
         try self.emitControlAudit(.{
@@ -388,14 +388,14 @@ pub const Mgr = struct {
         self.mu.lock();
         const idx = self.findIdxLocked(id) orelse {
             self.mu.unlock();
-            const fail_attrs = [_]core.audit.Attr{
+            const fail_attrs = [_]core.audit.Attribute{
                 .{ .key = "job_id", .val = .{ .uint = id } },
                 .{ .key = "status", .val = .{ .str = "not_found" } },
             };
             try self.emitControlAudit(.{
                 .op = "stop",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = "bg not found", .vis = .@"pub" },
                 .attrs = &fail_attrs,
             });
@@ -404,7 +404,7 @@ pub const Mgr = struct {
         const job = self.jobs.items[idx];
         if (job.state != .running) {
             self.mu.unlock();
-            const done_attrs = [_]core.audit.Attr{
+            const done_attrs = [_]core.audit.Attribute{
                 .{ .key = "job_id", .val = .{ .uint = id } },
                 .{ .key = "status", .val = .{ .str = "already_done" } },
             };
@@ -420,7 +420,7 @@ pub const Mgr = struct {
 
         std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
             error.ProcessNotFound => {
-                const done_attrs = [_]core.audit.Attr{
+                const done_attrs = [_]core.audit.Attribute{
                     .{ .key = "job_id", .val = .{ .uint = id } },
                     .{ .key = "status", .val = .{ .str = "already_done" } },
                 };
@@ -434,15 +434,15 @@ pub const Mgr = struct {
             else => {
                 try self.emitControlAudit(.{
                     .op = "stop",
-                    .out = .fail,
-                    .sev = .err,
+                    .outcome = .fail,
+                    .severity = .err,
                     .msg = .{ .text = @errorName(err), .vis = .mask },
                     .attrs = &start_attrs,
                 });
                 return err;
             },
         };
-        const ok_attrs = [_]core.audit.Attr{
+        const ok_attrs = [_]core.audit.Attribute{
             .{ .key = "job_id", .val = .{ .uint = id } },
             .{ .key = "status", .val = .{ .str = "sent" } },
         };
@@ -454,7 +454,7 @@ pub const Mgr = struct {
         return .sent;
     }
 
-    pub fn list(self: *Mgr, alloc: std.mem.Allocator) ![]View {
+    pub fn list(self: *Manager, alloc: std.mem.Allocator) ![]View {
         try self.emitControlAudit(.{
             .op = "list",
             .msg = .{ .text = "bg control start", .vis = .@"pub" },
@@ -465,8 +465,8 @@ pub const Mgr = struct {
         const out = alloc.alloc(View, self.jobs.items.len) catch |err| {
             try self.emitControlAudit(.{
                 .op = "list",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(err), .vis = .mask },
             });
             return err;
@@ -487,15 +487,15 @@ pub const Mgr = struct {
             out[i] = copyJob(alloc, job) catch |err| {
                 try self.emitControlAudit(.{
                     .op = "list",
-                    .out = .fail,
-                    .sev = .err,
+                    .outcome = .fail,
+                    .severity = .err,
                     .msg = .{ .text = @errorName(err), .vis = .mask },
                 });
                 return err;
             };
             i += 1;
         }
-        const ok_attrs = [_]core.audit.Attr{
+        const ok_attrs = [_]core.audit.Attribute{
             .{ .key = "count", .val = .{ .uint = @intCast(out.len) } },
         };
         try self.emitControlAudit(.{
@@ -506,7 +506,7 @@ pub const Mgr = struct {
         return out;
     }
 
-    pub fn view(self: *Mgr, alloc: std.mem.Allocator, id: u64) !?View {
+    pub fn view(self: *Manager, alloc: std.mem.Allocator, id: u64) !?View {
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -514,7 +514,7 @@ pub const Mgr = struct {
         return try copyJob(alloc, self.jobs.items[idx]);
     }
 
-    pub fn drainDone(self: *Mgr, alloc: std.mem.Allocator) ![]View {
+    pub fn drainDone(self: *Manager, alloc: std.mem.Allocator) ![]View {
         try self.emitControlAudit(.{
             .op = "drain",
             .msg = .{ .text = "bg control start", .vis = .@"pub" },
@@ -524,8 +524,8 @@ pub const Mgr = struct {
             self.mu.unlock();
             try self.emitControlAudit(.{
                 .op = "drain",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(err), .vis = .mask },
             });
             return err;
@@ -538,8 +538,8 @@ pub const Mgr = struct {
         const out = alloc.alloc(View, ids.len) catch |err| {
             try self.emitControlAudit(.{
                 .op = "drain",
-                .out = .fail,
-                .sev = .err,
+                .outcome = .fail,
+                .severity = .err,
                 .msg = .{ .text = @errorName(err), .vis = .mask },
             });
             return err;
@@ -560,16 +560,16 @@ pub const Mgr = struct {
             const v = (self.view(alloc, id) catch |err| {
                 try self.emitControlAudit(.{
                     .op = "drain",
-                    .out = .fail,
-                    .sev = .err,
+                    .outcome = .fail,
+                    .severity = .err,
                     .msg = .{ .text = @errorName(err), .vis = .mask },
                 });
                 return err;
             }) orelse {
                 try self.emitControlAudit(.{
                     .op = "drain",
-                    .out = .fail,
-                    .sev = .err,
+                    .outcome = .fail,
+                    .severity = .err,
                     .msg = .{ .text = "InternalError", .vis = .mask },
                 });
                 return error.InternalError;
@@ -577,7 +577,7 @@ pub const Mgr = struct {
             out[i] = v;
             i += 1;
         }
-        const ok_attrs = [_]core.audit.Attr{
+        const ok_attrs = [_]core.audit.Attribute{
             .{ .key = "count", .val = .{ .uint = @intCast(out.len) } },
         };
         try self.emitControlAudit(.{
@@ -594,7 +594,7 @@ pub const Mgr = struct {
         ctx.mgr.onExit(ctx.job_id, ended_at_ms, wait_term);
     }
 
-    fn onExit(self: *Mgr, id: u64, ended_at_ms: i64, wait_term: anyerror!std.process.Child.Term) void {
+    fn onExit(self: *Manager, id: u64, ended_at_ms: i64, wait_term: anyerror!std.process.Child.Term) void {
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -644,7 +644,7 @@ pub const Mgr = struct {
         _ = std.posix.write(self.wake_w, &b) catch {};
     }
 
-    fn recoverStale(self: *Mgr) !void {
+    fn recoverStale(self: *Manager) !void {
         const active = try self.journal.replayActive(self.alloc);
         defer journal_mod.deinitActives(self.alloc, active);
 
@@ -664,14 +664,14 @@ pub const Mgr = struct {
         }
     }
 
-    fn findIdxLocked(self: *Mgr, id: u64) ?usize {
+    fn findIdxLocked(self: *Manager, id: u64) ?usize {
         for (self.jobs.items, 0..) |job, i| {
             if (job.id == id) return i;
         }
         return null;
     }
 
-    fn mkLogPath(self: *Mgr, id: u64) ![]u8 {
+    fn mkLogPath(self: *Manager, id: u64) ![]u8 {
         var n: u32 = 0;
         while (n < 64) : (n += 1) {
             const ts = std.time.milliTimestamp();
@@ -699,7 +699,7 @@ pub const Mgr = struct {
         return error.PathAlreadyExists;
     }
 
-    fn emitControlAudit(self: *Mgr, req: ControlAudit) !void {
+    fn emitControlAudit(self: *Manager, req: ControlAudit) !void {
         const emit = self.emit_audit orelse return;
         self.audit_mu.lock();
         const seq = self.audit_seq;
@@ -710,8 +710,8 @@ pub const Mgr = struct {
             .ts_ms = self.now_ms(),
             .sid = "bg",
             .seq = seq,
-            .sev = req.sev,
-            .out = req.out,
+            .severity = req.severity,
+            .outcome = req.outcome,
             .actor = .{ .kind = .sys },
             .res = .{
                 .kind = .cmd,
@@ -733,11 +733,11 @@ pub const Mgr = struct {
 
 const ControlAudit = struct {
     op: []const u8,
-    out: core.audit.Outcome = .ok,
-    sev: core.audit.Severity = .info,
+    outcome: core.audit.Outcome = .ok,
+    severity: core.audit.Severity = .info,
     msg: ?core.audit.Str,
     argv: ?core.audit.Str = null,
-    attrs: []const core.audit.Attr = &.{},
+    attrs: []const core.audit.Attribute = &.{},
 };
 
 fn nowMs() i64 {
@@ -941,7 +941,7 @@ fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []
             .ts_ms = hdr.value.ts_ms,
             .sid = hdr.value.sid,
             .seq = hdr.value.seq,
-            .sev = hdr.value.sev,
+            .severity = hdr.value.sev,
         }, sealed);
         defer alloc.free(frame);
 
@@ -985,14 +985,14 @@ fn joinShippedBodiesAlloc(alloc: std.mem.Allocator, collector: anytype) ![]u8 {
 }
 
 test "bg manager rejects empty command" {
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
     try std.testing.expectError(error.InvalidArgs, mgr.start("", null));
     try std.testing.expectError(error.InvalidArgs, mgr.start("   ", null));
 }
 
 test "bg manager rejects protected commands" {
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
     try std.testing.expectError(error.AccessDenied, mgr.start("env FOO=1 bash -c 'cat ~/.pz/settings.json'", null));
 }
@@ -1001,7 +1001,7 @@ test "bg manager captures stdout+stderr and reports completion" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     _ = try mgr.start("printf 'out'; printf 'err' 1>&2", null);
@@ -1046,7 +1046,7 @@ test "bg manager supports multiple concurrent jobs" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     _ = try mgr.start("sleep 1", null);
@@ -1087,7 +1087,7 @@ test "bg manager records non-zero exit code" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     _ = try mgr.start("printf 'bad'; exit 7", null);
@@ -1116,7 +1116,7 @@ test "bg manager view handles missing ids" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     try std.testing.expect((try mgr.view(std.testing.allocator, 1)) == null);
@@ -1140,7 +1140,7 @@ test "bg manager view handles missing ids" {
 }
 
 test "bg manager drainDone is empty after first drain" {
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     _ = try mgr.start("printf x", null);
@@ -1160,7 +1160,7 @@ test "bg manager stop reports already_done after completion" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     const id = try mgr.start("printf done", null);
@@ -1187,7 +1187,7 @@ test "bg manager stop reports already_done after completion" {
 }
 
 test "bg manager stop sends termination signal" {
-    var mgr = try Mgr.init(std.testing.allocator);
+    var mgr = try Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     const id = try mgr.start("sleep 5", null);
@@ -1210,7 +1210,7 @@ test "bg manager recovers and clears stale journal launch entries" {
     try j.appendLaunch(99, 999_999, "sleep 30", "/tmp/none.log", 1);
     j.deinit();
 
-    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+    var mgr = try Manager.initWithOpts(std.testing.allocator, .{
         .state_dir = state_dir,
         .recover = true,
     });
@@ -1228,7 +1228,7 @@ test "bg manager audit emits start and success entries for control ops" {
     var cap = AuditCap{};
     defer cap.deinit(std.testing.allocator);
 
-    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+    var mgr = try Manager.initWithOpts(std.testing.allocator, .{
         .emit_audit_ctx = &cap,
         .emit_audit = captureAudit,
         .now_ms = struct {
@@ -1279,7 +1279,7 @@ test "bg manager audit emits failure entries for invalid start and missing stop"
     var cap = AuditCap{};
     defer cap.deinit(std.testing.allocator);
 
-    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+    var mgr = try Manager.initWithOpts(std.testing.allocator, .{
         .emit_audit_ctx = &cap,
         .emit_audit = captureAudit,
         .now_ms = struct {
@@ -1291,7 +1291,7 @@ test "bg manager audit emits failure entries for invalid start and missing stop"
     defer mgr.deinit();
 
     try std.testing.expectError(error.InvalidArgs, mgr.start("   ", null));
-    try std.testing.expectEqual(StopRes.not_found, try mgr.stop(42));
+    try std.testing.expectEqual(StopResult.not_found, try mgr.stop(42));
 
     const joined = try std.mem.join(std.testing.allocator, "\n", cap.rows.items);
     defer std.testing.allocator.free(joined);
@@ -1312,7 +1312,7 @@ test "bg manager syslog e2e ships redacted chained success audit over udp" {
     var cap = AuditCap{};
     defer cap.deinit(std.testing.allocator);
 
-    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+    var mgr = try Manager.initWithOpts(std.testing.allocator, .{
         .emit_audit_ctx = &cap,
         .emit_audit = captureAudit,
         .now_ms = struct {
@@ -1395,7 +1395,7 @@ test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
     var cap = AuditCap{};
     defer cap.deinit(std.testing.allocator);
 
-    var mgr = try Mgr.initWithOpts(std.testing.allocator, .{
+    var mgr = try Manager.initWithOpts(std.testing.allocator, .{
         .emit_audit_ctx = &cap,
         .emit_audit = captureAudit,
         .now_ms = struct {
@@ -1407,7 +1407,7 @@ test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
     defer mgr.deinit();
 
     try std.testing.expectError(error.InvalidArgs, mgr.start("   ", null));
-    try std.testing.expectEqual(StopRes.not_found, try mgr.stop(42));
+    try std.testing.expectEqual(StopResult.not_found, try mgr.stop(42));
 
     var collector = try syslog_mock.TcpCollector.init();
     defer collector.deinit();

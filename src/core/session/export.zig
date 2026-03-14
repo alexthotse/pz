@@ -77,10 +77,10 @@ fn toMarkdownWith(
                 try buf.appendSlice(alloc, if (tr.is_err) "#### Error\n\n" else "#### Result\n\n");
                 // Truncate very long tool output
                 const max_out = 2000;
-                const raw_out = if (tr.out.len > max_out) tr.out[0..max_out] else tr.out;
+                const raw_out = if (tr.output.len > max_out) tr.output[0..max_out] else tr.output;
                 try appendFence(alloc, &buf, raw_out);
-                if (tr.out.len > max_out) {
-                    const trunc_msg = try std.fmt.allocPrint(alloc, "\n... ({d} bytes truncated)", .{tr.out.len - max_out});
+                if (tr.output.len > max_out) {
+                    const trunc_msg = try std.fmt.allocPrint(alloc, "\n... ({d} bytes truncated)", .{tr.output.len - max_out});
                     defer alloc.free(trunc_msg);
                     try buf.appendSlice(alloc, trunc_msg);
                 }
@@ -197,8 +197,8 @@ fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.
         .ts_ms = ts_ms,
         .sid = sid,
         .seq = 2,
-        .out = out,
-        .sev = if (out == .ok) .info else .err,
+        .outcome = out,
+        .severity = if (out == .ok) .info else .err,
         .actor = .{ .kind = .sys },
         .res = .{
             .kind = .file,
@@ -261,7 +261,7 @@ test "export session to markdown" {
     try wr.append("ex1", .{ .at_ms = 2, .data = .{ .text = .{ .text = "# hi\n<script>alert(1)</script>" } } });
     try wr.append("ex1", .{ .at_ms = 3, .data = .{ .thinking = .{ .text = "```internal```" } } });
     try wr.append("ex1", .{ .at_ms = 4, .data = .{ .tool_call = .{ .id = "c1", .name = "bash", .args = "cat ~/.pz/auth.json" } } });
-    try wr.append("ex1", .{ .at_ms = 5, .data = .{ .tool_result = .{ .id = "c1", .out = "```\nraw\n```", .is_err = false } } });
+    try wr.append("ex1", .{ .at_ms = 5, .data = .{ .tool_result = .{ .id = "c1", .output = "```\nraw\n```", .is_err = false } } });
     try wr.append("ex1", .{ .at_ms = 6, .data = .{ .stop = .{ .reason = .done } } });
 
     // Export to a specific path
@@ -363,7 +363,7 @@ test "export markdown redacts secrets and neutralizes markdown" {
     try wr.append("sec1", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "# heading\nsk-live-secret" } } });
     try wr.append("sec1", .{ .at_ms = 2, .data = .{ .text = .{ .text = "<script>alert(1)</script>\n```boom```" } } });
     try wr.append("sec1", .{ .at_ms = 3, .data = .{ .tool_call = .{ .id = "c1", .name = "bash", .args = "cat ~/.pz/auth.json" } } });
-    try wr.append("sec1", .{ .at_ms = 4, .data = .{ .tool_result = .{ .id = "c1", .out = "authorization: bearer sk-test", .is_err = true } } });
+    try wr.append("sec1", .{ .at_ms = 4, .data = .{ .tool_result = .{ .id = "c1", .output = "authorization: bearer sk-test", .is_err = true } } });
 
     const real = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(real);
@@ -424,7 +424,7 @@ test "export markdown replaces invalid utf8 from persisted tool output" {
     try wr.append("utf8", .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "run" } } });
     try wr.append("utf8", .{ .at_ms = 2, .data = .{ .tool_result = .{
         .id = "c1",
-        .out = utf8_case.bad_tool_out[0..],
+        .output = utf8_case.bad_tool_out[0..],
         .is_err = false,
     } } });
 

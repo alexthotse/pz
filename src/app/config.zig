@@ -340,7 +340,7 @@ const FileCfg = struct {
 fn loadFile(
     alloc: std.mem.Allocator,
     dir: std.fs.Dir,
-    cfg_sel: args.CfgSel,
+    cfg_sel: args.ConfigSelection,
 ) Err!?std.json.Parsed(FileCfg) {
     const path = switch (cfg_sel) {
         .off => return null,

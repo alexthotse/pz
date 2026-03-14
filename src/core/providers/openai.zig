@@ -729,7 +729,7 @@ fn writeToolInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []co
             try js.objectField("call_id");
             try js.write(callIdFromToolId(tr.id));
             try js.objectField("output");
-            try writeJsonLossy(alloc, js, tr.out);
+            try writeJsonLossy(alloc, js, tr.output);
             try js.endObject();
         },
         else => {},
@@ -1098,7 +1098,7 @@ test "buildBody includes system assistant tool history and tool definitions" {
         } }} },
         .{ .role = .tool, .parts = &.{.{ .tool_result = .{
             .id = "call-1|fc_1",
-            .out = "ok",
+            .output = "ok",
         } }} },
     };
     const tools = [_]providers.Tool{
@@ -1127,7 +1127,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
         } }} },
         .{ .role = .tool, .parts = &.{.{ .tool_result = .{
             .id = "call-1|fc_1",
-            .out = utf8_case.bad_tool_out[0..],
+            .output = utf8_case.bad_tool_out[0..],
         } }} },
     };
     const body = try buildBody(testing.allocator, .{

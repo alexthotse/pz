@@ -17,7 +17,7 @@ pub const ErrKind = enum {
 pub const State = struct {
     version: u16 = version_current,
     tries_done: u16 = 0,
-    fail_ct: u16 = 0,
+    fail_count: u16 = 0,
     next_wait_ms: u64 = 0,
     last_err: ErrKind = .none,
 };
@@ -30,7 +30,7 @@ pub fn save(
 ) !void {
     var out = state;
     out.version = version_current;
-    if (out.fail_ct > out.tries_done) return error.InvalidRetryState;
+    if (out.fail_count > out.tries_done) return error.InvalidRetryState;
 
     const path = try sid_path.sidExtAlloc(alloc, sid, ".retry.json");
     defer alloc.free(path);
@@ -68,7 +68,7 @@ pub fn load(
     defer parsed.deinit();
 
     if (parsed.value.version != version_current) return error.UnsupportedRetryStateVersion;
-    if (parsed.value.fail_ct > parsed.value.tries_done) return error.InvalidRetryState;
+    if (parsed.value.fail_count > parsed.value.tries_done) return error.InvalidRetryState;
 
     return parsed.value;
 }
@@ -81,7 +81,7 @@ test "retry state persists and restores counters after reload" {
 
     const in = State{
         .tries_done = 4,
-        .fail_ct = 3,
+        .fail_count = 3,
         .next_wait_ms = 250,
         .last_err = .transient,
     };
@@ -94,7 +94,7 @@ test "retry state persists and restores counters after reload" {
         \\core.session.retry_state.State
         \\  .version: u16 = 1
         \\  .tries_done: u16 = 4
-        \\  .fail_ct: u16 = 3
+        \\  .fail_count: u16 = 3
         \\  .next_wait_ms: u64 = 250
         \\  .last_err: core.session.retry_state.ErrKind = .transient
     ).expectEqual(out);
@@ -121,7 +121,7 @@ test "retry state rejects invalid counters" {
         "s1",
         .{
             .tries_done = 1,
-            .fail_ct = 2,
+            .fail_count = 2,
         },
     ));
 }
@@ -132,7 +132,7 @@ test "retry state rejects torn file without trailing newline" {
 
     try tmp.dir.writeFile(.{
         .sub_path = "s1.retry.json",
-        .data = "{\"version\":1,\"tries_done\":1,\"fail_ct\":1,\"next_wait_ms\":0,\"last_err\":\"none\"}",
+        .data = "{\"version\":1,\"tries_done\":1,\"fail_count\":1,\"next_wait_ms\":0,\"last_err\":\"none\"}",
     });
 
     try std.testing.expectError(error.TornRetryState, load(std.testing.allocator, tmp.dir, "s1"));

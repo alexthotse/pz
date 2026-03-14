@@ -138,7 +138,7 @@ pub const Ui = struct {
         return act;
     }
 
-    pub fn onMouse(self: *Ui, ev: mouse.Ev) void {
+    pub fn onMouse(self: *Ui, ev: mouse.Event) void {
         switch (ev) {
             .scroll_up => self.tr.scrollUp(3),
             .scroll_down => self.tr.scrollDown(3),

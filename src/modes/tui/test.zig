@@ -111,7 +111,7 @@ test "e2e tool call and result" {
     } });
     try ui.onProvider(.{ .tool_result = .{
         .id = "c1",
-        .out = "const std = @import(\"std\");",
+        .output = "const std = @import(\"std\");",
         .is_err = false,
     } });
     try ui.onProvider(.{ .text = "The file imports std." });
@@ -183,7 +183,7 @@ test "e2e tool result with ANSI is stripped" {
 
     try ui.onProvider(.{ .tool_result = .{
         .id = "c1",
-        .out = "\x1b[31mred text\x1b[0m normal",
+        .output = "\x1b[31mred text\x1b[0m normal",
         .is_err = false,
     } });
 
@@ -437,9 +437,9 @@ test "e2e multiple parallel tool calls" {
     try ui.onProvider(.{ .tool_call = .{ .id = "c1", .name = "read", .args = "{}" } });
     try ui.onProvider(.{ .tool_call = .{ .id = "c2", .name = "write", .args = "{}" } });
     try ui.onProvider(.{ .tool_call = .{ .id = "c3", .name = "bash", .args = "{}" } });
-    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .out = "ok", .is_err = false } });
-    try ui.onProvider(.{ .tool_result = .{ .id = "c2", .out = "ok", .is_err = false } });
-    try ui.onProvider(.{ .tool_result = .{ .id = "c3", .out = "fail", .is_err = true } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "c2", .output = "ok", .is_err = false } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "c3", .output = "fail", .is_err = true } });
     try ui.onProvider(.{ .text = "Done." });
 
     var vs = try VScreen.init(std.testing.allocator, 60, 14);
@@ -550,7 +550,7 @@ test "golden: tool_result success has readable fg with success bg" {
     var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
     defer ui.deinit();
 
-    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .out = "ok", .is_err = false } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } });
 
     var vs = try VScreen.init(std.testing.allocator, 40, 8);
     defer vs.deinit();

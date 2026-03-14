@@ -10,23 +10,23 @@ pub const Kind = enum {
     delete,
 };
 
-pub const Ev = struct {
+pub const Event = struct {
     kind: Kind,
     path: []const u8,
 };
 
 /// Comptime-generic event sink for file watcher notifications.
-pub fn Sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Ev) void) type {
+pub fn Sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Event) void) type {
     return struct {
         ctx: *T,
 
-        pub fn onEvent(self: @This(), ev: Ev) void {
+        pub fn onEvent(self: @This(), ev: Event) void {
             on_event(self.ctx, ev);
         }
     };
 }
 
-pub fn sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Ev) void, ctx: *T) Sink(T, on_event) {
+pub fn sink(comptime T: type, comptime on_event: fn (ctx: *T, ev: Event) void, ctx: *T) Sink(T, on_event) {
     return .{ .ctx = ctx };
 }
 
@@ -347,7 +347,7 @@ fn nsToTimespec(ns: u64) std.posix.timespec {
 
 const OhSnap = @import("ohsnap");
 
-const EvSnap = struct {
+const EventSnap = struct {
     kind: Kind,
     base: []const u8,
 };
@@ -355,9 +355,9 @@ const EvSnap = struct {
 const Recorder = struct {
     stop: *std.atomic.Value(bool),
     count: usize = 0,
-    snap: ?EvSnap = null,
+    snap: ?EventSnap = null,
 
-    fn onEvent(self: *Recorder, ev: Ev) void {
+    fn onEvent(self: *Recorder, ev: Event) void {
         self.count += 1;
         self.snap = .{
             .kind = ev.kind,
@@ -509,7 +509,7 @@ test "watchLoop emits debounced write event" {
     const oh = OhSnap{};
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
-        \\core.watcher.EvSnap
+        \\core.watcher.EventSnap
         \\  .kind: core.watcher.Kind
         \\    .write
         \\  .base: []const u8
@@ -563,7 +563,7 @@ test "watchLoop flushes write storm after max window" {
     const oh = OhSnap{};
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
-        \\core.watcher.EvSnap
+        \\core.watcher.EventSnap
         \\  .kind: core.watcher.Kind
         \\    .write
         \\  .base: []const u8
@@ -615,7 +615,7 @@ test "watchLoop emits delete event" {
     const oh = OhSnap{};
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
-        \\core.watcher.EvSnap
+        \\core.watcher.EventSnap
         \\  .kind: core.watcher.Kind
         \\    .delete
         \\  .base: []const u8
@@ -666,7 +666,7 @@ test "watchLoop emits write event when missing path appears" {
     const oh = OhSnap{};
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
-        \\core.watcher.EvSnap
+        \\core.watcher.EventSnap
         \\  .kind: core.watcher.Kind
         \\    .write
         \\  .base: []const u8
@@ -721,7 +721,7 @@ test "watchLoop emits rename event on macOS" {
     const oh = OhSnap{};
     const snap = rec.snap orelse return error.MissingEvent;
     try oh.snap(@src(),
-        \\core.watcher.EvSnap
+        \\core.watcher.EventSnap
         \\  .kind: core.watcher.Kind
         \\    .rename
         \\  .base: []const u8

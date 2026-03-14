@@ -124,12 +124,12 @@ pub const Sleeper = struct {
     }
 };
 
-pub const RunRes = struct {
+pub const RunResult = struct {
     arena: std.heap.ArenaAllocator,
     evs: []providers.Event,
     tries: u16,
 
-    pub fn deinit(self: *RunRes) void {
+    pub fn deinit(self: *RunResult) void {
         self.arena.deinit();
     }
 };
@@ -140,7 +140,7 @@ pub fn run(
     req: providers.Request,
     pol: Policy,
     slp: ?Sleeper,
-) (retry.StepErr || Err)!RunRes {
+) (retry.StepErr || Err)!RunResult {
     var tries: u16 = 0;
     while (true) {
         tries += 1;

@@ -183,7 +183,7 @@ test "tool contract handlers emit deterministic envelopes" {
     defer ls_h.deinitResult(ls_res);
 
     const AgentImpl = struct {
-        fn run(_: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunRes {
+        fn run(_: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunResult {
             return .{
                 .out = .{
                     .id = "req-1",

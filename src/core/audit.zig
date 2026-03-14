@@ -66,7 +66,7 @@ pub const Actor = struct {
     role: ?[]const u8 = null,
 };
 
-pub const ResKind = enum {
+pub const ResourceKind = enum {
     sess,
     turn,
     file,
@@ -77,34 +77,34 @@ pub const ResKind = enum {
     forward,
 };
 
-pub const Res = struct {
-    kind: ResKind,
+pub const Resource = struct {
+    kind: ResourceKind,
     name: Str,
     op: ?[]const u8 = null,
 };
 
-pub const Val = union(enum) {
+pub const Value = union(enum) {
     str: []const u8,
     int: i64,
     uint: u64,
     bool: bool,
 };
 
-pub const Attr = struct {
+pub const Attribute = struct {
     key: []const u8,
     vis: Vis = .@"pub",
-    val: Val,
+    val: Value,
 };
 
-pub const SessOp = enum {
+pub const SessionOp = enum {
     start,
     @"resume",
     stop,
     compact,
 };
 
-pub const SessData = struct {
-    op: SessOp,
+pub const SessionData = struct {
+    op: SessionOp,
     tty: bool = false,
     wd: ?Str = null,
 };
@@ -130,20 +130,20 @@ pub const ToolData = struct {
     ms: ?u32 = null,
 };
 
-pub const PolicyEff = enum {
+pub const PolicyEffect = enum {
     allow,
     deny,
 };
 
 pub const PolicyData = struct {
-    eff: PolicyEff,
+    effect: PolicyEffect,
     rule: ?[]const u8 = null,
     scope: ?[]const u8 = null,
 };
 
 pub const AuthData = struct {
-    mech: []const u8,
-    sub: ?Str = null,
+    mechanism: []const u8,
+    subject: ?Str = null,
 };
 
 pub const ForwardData = struct {
@@ -154,7 +154,7 @@ pub const ForwardData = struct {
 };
 
 pub const Data = union(EventKind) {
-    sess: SessData,
+    sess: SessionData,
     turn: TurnData,
     tool: ToolData,
     policy: PolicyData,
@@ -167,14 +167,14 @@ pub const Entry = struct {
     ts_ms: i64,
     sid: []const u8,
     seq: u64,
-    sev: Severity = .info,
-    out: Outcome = .ok,
+    severity: Severity = .info,
+    outcome: Outcome = .ok,
     site: Site = .{},
     actor: Actor = .{ .kind = .sys },
-    res: ?Res = null,
+    res: ?Resource = null,
     msg: ?Str = null,
     data: Data,
-    attrs: []const Attr = &.{},
+    attrs: []const Attribute = &.{},
 };
 
 pub fn kindOf(ent: Entry) EventKind {
@@ -211,25 +211,25 @@ pub const FrameHdr = struct {
     ts_ms: i64,
     sid: []const u8,
     seq: u64,
-    sev: Severity = .info,
+    severity: Severity = .info,
     site: Site = .{},
 };
 
-pub const ConnVTable = struct {
+pub const ConnectionVTable = struct {
     sendRaw: *const fn (ctx: *anyopaque, raw: []const u8) anyerror!void,
     deinit: *const fn (ctx: *anyopaque) void,
 };
 
-pub const Conn = struct {
+pub const Connection = struct {
     ctx: *anyopaque,
-    vtable: *const ConnVTable,
+    vtable: *const ConnectionVTable,
 
     pub fn from(
         comptime T: type,
         ctx: *T,
         comptime send_fn: fn (ctx: *T, raw: []const u8) anyerror!void,
         comptime deinit_fn: fn (ctx: *T) void,
-    ) Conn {
+    ) Connection {
         const Wrap = struct {
             fn send(raw: *anyopaque, data: []const u8) anyerror!void {
                 const typed: *T = @ptrCast(@alignCast(raw));
@@ -239,7 +239,7 @@ pub const Conn = struct {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 deinit_fn(typed);
             }
-            const vt = ConnVTable{
+            const vt = ConnectionVTable{
                 .sendRaw = send,
                 .deinit = @This().deinit,
             };
@@ -247,26 +247,26 @@ pub const Conn = struct {
         return .{ .ctx = ctx, .vtable = &Wrap.vt };
     }
 
-    pub fn sendRaw(self: Conn, raw: []const u8) !void {
+    pub fn sendRaw(self: Connection, raw: []const u8) !void {
         try self.vtable.sendRaw(self.ctx, raw);
     }
 
-    pub fn deinit(self: Conn) void {
+    pub fn deinit(self: Connection) void {
         self.vtable.deinit(self.ctx);
     }
 };
 
 pub const Connector = struct {
     ctx: *anyopaque,
-    connect: *const fn (ctx: *anyopaque) anyerror!Conn,
+    connect: *const fn (ctx: *anyopaque) anyerror!Connection,
 
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime connect_fn: fn (ctx: *T) anyerror!Conn,
+        comptime connect_fn: fn (ctx: *T) anyerror!Connection,
     ) Connector {
         const Wrap = struct {
-            fn connect(raw: *anyopaque) anyerror!Conn {
+            fn connect(raw: *anyopaque) anyerror!Connection {
                 const typed: *T = @ptrCast(@alignCast(raw));
                 return connect_fn(typed);
             }
@@ -287,7 +287,7 @@ pub const SendState = enum {
     buffered,
 };
 
-pub const SendRes = struct {
+pub const SendResult = struct {
     state: SendState,
     flushed: usize = 0,
     queued: usize = 0,
@@ -297,7 +297,7 @@ pub const SendRes = struct {
     next_retry_ms: ?i64 = null,
 };
 
-pub const FlushRes = struct {
+pub const FlushResult = struct {
     sent: usize = 0,
     queued: usize = 0,
     err: ?anyerror = null,
@@ -390,7 +390,7 @@ const Ring = struct {
 pub const ReconnSender = struct {
     alloc: Allocator,
     connr: Connector,
-    conn: ?Conn = null,
+    conn: ?Connection = null,
     ring: Ring,
     backoff_min_ms: u32,
     backoff_max_ms: u32,
@@ -428,7 +428,7 @@ pub const ReconnSender = struct {
         };
     }
 
-    pub fn sendRaw(self: *ReconnSender, raw: []const u8, now_ms: i64) !SendRes {
+    pub fn sendRaw(self: *ReconnSender, raw: []const u8, now_ms: i64) !SendResult {
         if (self.conn == null or self.ring.len > 0) {
             const conn = try self.tryConn(now_ms);
             if (!conn.ok) {
@@ -479,7 +479,7 @@ pub const ReconnSender = struct {
         };
     }
 
-    pub fn flush(self: *ReconnSender, now_ms: i64) !FlushRes {
+    pub fn flush(self: *ReconnSender, now_ms: i64) !FlushResult {
         const conn = try self.tryConn(now_ms);
         if (!conn.ok) {
             return .{
@@ -507,7 +507,7 @@ pub const ReconnSender = struct {
         return .{ .ok = true };
     }
 
-    fn flushLive(self: *ReconnSender, now_ms: i64) !FlushRes {
+    fn flushLive(self: *ReconnSender, now_ms: i64) !FlushResult {
         var sent: usize = 0;
         while (self.ring.peek()) |raw| {
             self.conn.?.sendRaw(raw) catch |err| {
@@ -566,13 +566,13 @@ pub const SyslogShipper = struct {
         self.* = undefined;
     }
 
-    pub fn send(self: *SyslogShipper, ent: Entry, now_ms: i64) !SendRes {
+    pub fn send(self: *SyslogShipper, ent: Entry, now_ms: i64) !SendResult {
         const raw = try encodeFrameAlloc(self.alloc, self.frame, ent);
         defer self.alloc.free(raw);
         return try self.reconn.sendRaw(raw, now_ms);
     }
 
-    pub fn flush(self: *SyslogShipper, now_ms: i64) !FlushRes {
+    pub fn flush(self: *SyslogShipper, now_ms: i64) !FlushResult {
         return try self.reconn.flush(now_ms);
     }
 
@@ -597,12 +597,12 @@ pub const SenderConnector = struct {
         sender: syslog.Sender,
     };
 
-    const peer_vt = ConnVTable{
+    const peer_vt = ConnectionVTable{
         .sendRaw = peerSendRaw,
         .deinit = peerDeinit,
     };
 
-    fn connect(ctx: *anyopaque) !Conn {
+    fn connect(ctx: *anyopaque) !Connection {
         const self: *SenderConnector = @ptrCast(@alignCast(ctx));
         const peer = try self.alloc.create(Peer);
         errdefer self.alloc.destroy(peer);
@@ -638,7 +638,7 @@ pub fn encodeFrameAlloc(alloc: Allocator, opts: FrameOpts, ent: Entry) ![]u8 {
         .ts_ms = ent.ts_ms,
         .sid = ent.sid,
         .seq = ent.seq,
-        .sev = ent.sev,
+        .severity = ent.severity,
         .site = ent.site,
     }, body);
 }
@@ -657,7 +657,7 @@ pub fn encodeFrameBodyAlloc(alloc: Allocator, opts: FrameOpts, hdr: FrameHdr, bo
     return try syslog.encodeAlloc(alloc, .{
         .pri = .{
             .facility = opts.facility,
-            .severity = sevSyslog(hdr.sev),
+            .severity = sevSyslog(hdr.severity),
         },
         .timestamp_ms = hdr.ts_ms,
         .hostname = hdr.site.host orelse opts.hostname orelse syslog.nil,
@@ -715,10 +715,10 @@ pub fn writeEntry(w: anytype, ent: Entry) !void {
     try writeJsonStr(w, @tagName(kindOf(ent)));
 
     try writeObjKey(w, &first, "sev");
-    try writeJsonStr(w, @tagName(ent.sev));
+    try writeJsonStr(w, @tagName(ent.severity));
 
     try writeObjKey(w, &first, "out");
-    try writeJsonStr(w, @tagName(ent.out));
+    try writeJsonStr(w, @tagName(ent.outcome));
 
     if (hasSite(ent.site)) {
         try writeObjKey(w, &first, "site");
@@ -759,7 +759,7 @@ fn dataNeedsRedact(data: Data) bool {
             break :blk false;
         },
         .policy => false,
-        .auth => |v| if (v.sub) |sub| sub.vis != .@"pub" else false,
+        .auth => |v| if (v.subject) |sub| sub.vis != .@"pub" else false,
         .forward => |v| v.dst.vis != .@"pub",
     };
 }
@@ -820,7 +820,7 @@ fn writeActor(w: anytype, actor: Actor) !void {
     try w.writeByte('}');
 }
 
-fn writeRes(w: anytype, res: Res) !void {
+fn writeRes(w: anytype, res: Resource) !void {
     try w.writeByte('{');
     var first = true;
 
@@ -973,7 +973,7 @@ fn writeStr(w: anytype, s: Str) !void {
     try w.writeByte('}');
 }
 
-fn writeAttrs(w: anytype, attrs: []const Attr) !void {
+fn writeAttrs(w: anytype, attrs: []const Attribute) !void {
     try w.writeByte('[');
     for (attrs, 0..) |attr, i| {
         if (i > 0) try w.writeByte(',');
@@ -982,7 +982,7 @@ fn writeAttrs(w: anytype, attrs: []const Attr) !void {
     try w.writeByte(']');
 }
 
-fn writeAttr(w: anytype, attr: Attr) !void {
+fn writeAttr(w: anytype, attr: Attribute) !void {
     try w.writeByte('{');
     var first = true;
 
@@ -1074,7 +1074,7 @@ fn writeData(w: anytype, data: Data) !void {
         },
         .policy => |v| {
             try writeObjKey(w, &first, "eff");
-            try writeJsonStr(w, @tagName(v.eff));
+            try writeJsonStr(w, @tagName(v.effect));
 
             if (v.rule) |rule| {
                 try writeObjKey(w, &first, "rule");
@@ -1087,9 +1087,9 @@ fn writeData(w: anytype, data: Data) !void {
         },
         .auth => |v| {
             try writeObjKey(w, &first, "mech");
-            try writeJsonStr(w, v.mech);
+            try writeJsonStr(w, v.mechanism);
 
-            if (v.sub) |sub| {
+            if (v.subject) |sub| {
                 try writeObjKey(w, &first, "sub");
                 try writeStr(w, sub);
             }
@@ -1153,7 +1153,7 @@ test "snapshot: canonical tool entry encoding" {
     const oh = OhSnap{};
     const talloc = testing.allocator;
 
-    const attrs = [_]Attr{
+    const attrs = [_]Attribute{
         .{ .key = "cache_hit", .val = .{ .bool = false } },
         .{ .key = "bytes", .val = .{ .uint = 512 } },
         .{ .key = "stderr", .vis = .mask, .val = .{ .str = "permission denied" } },
@@ -1163,8 +1163,8 @@ test "snapshot: canonical tool entry encoding" {
         .ts_ms = 1_731_000_000_123,
         .sid = "sess-01",
         .seq = 7,
-        .sev = .warn,
-        .out = .fail,
+        .severity = .warn,
+        .outcome = .fail,
         .site = .{
             .host = "mbp",
             .app = "pz",
@@ -1290,7 +1290,7 @@ test "snapshot: variant encodings stay canonical" {
         .ts_ms = 11,
         .sid = "sess-a",
         .seq = 2,
-        .out = .deny,
+        .outcome = .deny,
         .actor = .{
             .kind = .sys,
         },
@@ -1301,7 +1301,7 @@ test "snapshot: variant encodings stay canonical" {
         },
         .data = .{
             .policy = .{
-                .eff = .deny,
+                .effect = .deny,
                 .rule = "*.audit.log",
                 .scope = "path",
             },
@@ -1313,15 +1313,15 @@ test "snapshot: variant encodings stay canonical" {
         .ts_ms = 12,
         .sid = "sess-a",
         .seq = 3,
-        .sev = .notice,
+        .severity = .notice,
         .actor = .{
             .kind = .user,
             .id = .{ .text = "joel", .vis = .@"pub" },
         },
         .data = .{
             .auth = .{
-                .mech = "oauth",
-                .sub = .{ .text = "user@example.com", .vis = .hash },
+                .mechanism = "oauth",
+                .subject = .{ .text = "user@example.com", .vis = .hash },
             },
         },
     });
@@ -1331,7 +1331,7 @@ test "snapshot: variant encodings stay canonical" {
         .ts_ms = 13,
         .sid = "sess-a",
         .seq = 4,
-        .sev = .info,
+        .severity = .info,
         .data = .{
             .forward = .{
                 .proto = "syslog+tls",
@@ -1448,7 +1448,7 @@ test "snapshot: runtime control entries encode canonically" {
         .ts_ms = 88,
         .sid = "runtime",
         .seq = 1,
-        .sev = .notice,
+        .severity = .notice,
         .actor = .{ .kind = .sys },
         .res = .{
             .kind = .cfg,
@@ -1473,8 +1473,8 @@ test "snapshot: runtime control entries encode canonically" {
         .ts_ms = 89,
         .sid = "runtime",
         .seq = 2,
-        .sev = .err,
-        .out = .fail,
+        .severity = .err,
+        .outcome = .fail,
         .actor = .{ .kind = .sys },
         .res = .{
             .kind = .sess,
@@ -1517,7 +1517,7 @@ test "snapshot: audit payload ships through syslog canonically" {
         .ts_ms = 123,
         .sid = "sess-c",
         .seq = 7,
-        .sev = .warn,
+        .severity = .warn,
         .actor = .{
             .kind = .tool,
             .id = .{ .text = "bash", .vis = .@"pub" },
@@ -1585,12 +1585,12 @@ const MockNet = struct {
         };
     }
 
-    const vt = ConnVTable{
+    const vt = ConnectionVTable{
         .sendRaw = sendRaw,
         .deinit = deinitConn,
     };
 
-    fn connect(ctx: *anyopaque) !Conn {
+    fn connect(ctx: *anyopaque) !Connection {
         const self: *MockNet = @ptrCast(@alignCast(ctx));
         self.conn_calls += 1;
         const step = if (self.conn_idx < self.conn_steps.len) self.conn_steps[self.conn_idx] else .ok;

@@ -83,7 +83,7 @@ pub fn shipAuditRows(alloc: std.mem.Allocator, sender: *syslog.Sender, rows: []c
             .ts_ms = hdr.value.ts_ms,
             .sid = hdr.value.sid,
             .seq = hdr.value.seq,
-            .sev = hdr.value.sev,
+            .severity = hdr.value.sev,
         }, sealed);
         defer alloc.free(frame);
 
@@ -246,8 +246,8 @@ fn addManualRows(rows: *Rows) !void {
         .ts_ms = 132,
         .sid = "upgrade",
         .seq = 2,
-        .out = .deny,
-        .sev = .warn,
+        .outcome = .deny,
+        .severity = .warn,
         .actor = .{ .kind = .sys },
         .res = .{
             .kind = .cmd,
@@ -268,8 +268,8 @@ fn addManualRows(rows: *Rows) !void {
         .ts_ms = 141,
         .sid = "sess-bash",
         .seq = 1,
-        .out = .deny,
-        .sev = .warn,
+        .outcome = .deny,
+        .severity = .warn,
         .actor = .{
             .kind = .tool,
             .id = .{ .text = "bash", .vis = .@"pub" },
@@ -310,7 +310,7 @@ fn addAuthRows(rows: *Rows) !void {
 }
 
 fn addBgRows(rows: *Rows) !void {
-    var mgr = try bg.Mgr.initWithOpts(testing.allocator, .{
+    var mgr = try bg.Manager.initWithOpts(testing.allocator, .{
         .emit_audit_ctx = rows,
         .emit_audit = Rows.emit,
         .now_ms = struct {

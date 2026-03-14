@@ -721,7 +721,7 @@ fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []cons
                     try js.objectField("tool_use_id");
                     try js.write(tr.id);
                     try js.objectField("content");
-                    try writeJsonLossy(alloc, js, tr.out);
+                    try writeJsonLossy(alloc, js, tr.output);
                     if (tr.is_err) {
                         try js.objectField("is_error");
                         try js.write(true);
@@ -1274,7 +1274,7 @@ test "buildBody tool_call and tool_result" {
         } }} },
         .{ .role = .tool, .parts = &.{.{ .tool_result = .{
             .id = "tc1",
-            .out = "file.txt",
+            .output = "file.txt",
         } }} },
     };
     const body = try buildBody(testing.allocator, .{
@@ -1299,7 +1299,7 @@ test "buildBody tool_result error flag" {
         } }} },
         .{ .role = .tool, .parts = &.{.{ .tool_result = .{
             .id = "tc2",
-            .out = "command failed",
+            .output = "command failed",
             .is_err = true,
         } }} },
     };
@@ -1325,7 +1325,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
         } }} },
         .{ .role = .tool, .parts = &.{.{ .tool_result = .{
             .id = "tc2",
-            .out = utf8_case.bad_tool_out[0..],
+            .output = utf8_case.bad_tool_out[0..],
         } }} },
     };
     const body = try buildBody(testing.allocator, .{

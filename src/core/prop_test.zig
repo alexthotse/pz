@@ -6,8 +6,8 @@ const zc = @import("zcheck");
 pub const Str = zc.String;
 pub const Id = zc.Id;
 pub const Path = zc.FilePath;
-pub const DrawCfg = zc.GenerateConfig;
-pub const ShrinkCfg = struct {
+pub const DrawConfig = zc.GenerateConfig;
+pub const ShrinkConfig = struct {
     use_default_values: bool = true,
 };
 
@@ -75,7 +75,7 @@ pub const Gen = struct {
         return anyWith(T, seed, .{});
     }
 
-    pub fn anyWith(comptime T: type, seed: u64, cfg0: DrawCfg) T {
+    pub fn anyWith(comptime T: type, seed: u64, cfg0: DrawConfig) T {
         var prng = std.Random.DefaultPrng.init(seed);
         return zc.generateWithConfig(T, prng.random(), cfg0);
     }
@@ -89,7 +89,7 @@ pub const Gen = struct {
         comptime T: type,
         n: usize,
         seed: u64,
-        cfg0: DrawCfg,
+        cfg0: DrawConfig,
     ) ![]T {
         const out = try alloc.alloc(T, n);
         errdefer alloc.free(out);
@@ -212,7 +212,7 @@ pub const Shrink = struct {
         return oneWith(T, value, .{});
     }
 
-    pub fn oneWith(comptime T: type, value: T, cfg0: ShrinkCfg) ?T {
+    pub fn oneWith(comptime T: type, value: T, cfg0: ShrinkConfig) ?T {
         return shrinkOnce(T, value, cfg0);
     }
 
@@ -220,7 +220,7 @@ pub const Shrink = struct {
         return loopWith(T, value, max_steps, .{});
     }
 
-    pub fn loopWith(comptime T: type, value: T, max_steps: usize, cfg0: ShrinkCfg) T {
+    pub fn loopWith(comptime T: type, value: T, max_steps: usize, cfg0: ShrinkConfig) T {
         var out = value;
         var steps: usize = 0;
         while (steps < max_steps) : (steps += 1) {
@@ -258,7 +258,7 @@ pub const Fmt = struct {
     }
 };
 
-pub const Opt = struct {
+pub const Options = struct {
     iterations: usize = 200,
     seed: u64 = 0,
     max_shrinks: usize = 128,
@@ -284,19 +284,19 @@ pub fn FailureOf(comptime prop: anytype) type {
     return zc.Failure(ArgsOf(prop));
 }
 
-pub fn run(comptime prop: anytype, opt: Opt) !void {
+pub fn run(comptime prop: anytype, opt: Options) !void {
     try zc.check(prop, cfg(opt));
 }
 
-pub fn check(comptime prop: anytype, opt: Opt) ?FailureOf(prop) {
+pub fn check(comptime prop: anytype, opt: Options) ?FailureOf(prop) {
     return zc.checkResult(prop, cfg(opt));
 }
 
-pub fn expectFail(comptime prop: anytype, opt: Opt) !FailureOf(prop) {
+pub fn expectFail(comptime prop: anytype, opt: Options) !FailureOf(prop) {
     return check(prop, opt) orelse error.ExpectedFailure;
 }
 
-pub fn expectShrunk(comptime prop: anytype, opt: Opt) !FailureOf(prop) {
+pub fn expectShrunk(comptime prop: anytype, opt: Options) !FailureOf(prop) {
     const fail = try expectFail(prop, opt);
     if (std.meta.eql(fail.original, fail.shrunk)) return error.NotShrunk;
     return fail;
@@ -306,7 +306,7 @@ pub fn draw(comptime T: type, seed: u64) T {
     return Gen.any(T, seed);
 }
 
-pub fn drawWith(comptime T: type, seed: u64, cfg0: DrawCfg) T {
+pub fn drawWith(comptime T: type, seed: u64, cfg0: DrawConfig) T {
     return Gen.anyWith(T, seed, cfg0);
 }
 
@@ -327,7 +327,7 @@ pub fn drawNWith(
     comptime T: type,
     n: usize,
     seed: u64,
-    cfg0: DrawCfg,
+    cfg0: DrawConfig,
 ) ![]T {
     return Gen.manyWith(alloc, T, n, seed, cfg0);
 }
@@ -344,7 +344,7 @@ pub fn reportAlloc(
     return Fmt.failureAlloc(alloc, prop, fail);
 }
 
-pub fn expectSanValid(comptime san: anytype, comptime max_len: usize, opt: Opt) !void {
+pub fn expectSanValid(comptime san: anytype, comptime max_len: usize, opt: Options) !void {
     const Raw = Bytes(max_len);
     var cfg0 = opt;
     cfg0.use_default_values = false;
@@ -359,7 +359,7 @@ pub fn expectSanValid(comptime san: anytype, comptime max_len: usize, opt: Opt) 
     }.prop, cfg0);
 }
 
-pub fn expectSanPreserves(comptime san: anytype, comptime max_cp: usize, opt: Opt) !void {
+pub fn expectSanPreserves(comptime san: anytype, comptime max_cp: usize, opt: Options) !void {
     const Text = Utf8(max_cp);
     var cfg0 = opt;
     cfg0.use_default_values = false;
@@ -375,7 +375,7 @@ pub fn expectSanPreserves(comptime san: anytype, comptime max_cp: usize, opt: Op
     }.prop, cfg0);
 }
 
-fn cfg(opt: Opt) zc.Config {
+fn cfg(opt: Options) zc.Config {
     return .{
         .iterations = opt.iterations,
         .seed = opt.seed,
@@ -391,7 +391,7 @@ pub fn shrink(comptime T: type, value: T) ?T {
     return Shrink.one(T, value);
 }
 
-pub fn shrinkWith(comptime T: type, value: T, cfg0: ShrinkCfg) ?T {
+pub fn shrinkWith(comptime T: type, value: T, cfg0: ShrinkConfig) ?T {
     return Shrink.oneWith(T, value, cfg0);
 }
 
@@ -399,11 +399,11 @@ pub fn shrinkN(comptime T: type, value: T, max_steps: usize) T {
     return Shrink.loop(T, value, max_steps);
 }
 
-pub fn shrinkNWith(comptime T: type, value: T, max_steps: usize, cfg0: ShrinkCfg) T {
+pub fn shrinkNWith(comptime T: type, value: T, max_steps: usize, cfg0: ShrinkConfig) T {
     return Shrink.loopWith(T, value, max_steps, cfg0);
 }
 
-fn shrinkOnce(comptime T: type, value: T, cfg0: ShrinkCfg) ?T {
+fn shrinkOnce(comptime T: type, value: T, cfg0: ShrinkConfig) ?T {
     if (T == Str) return shrinkStr(value);
     if (T == Id) return shrinkId(value);
     if (T == Path) return shrinkPath(value);
@@ -564,7 +564,7 @@ fn shrinkEnum(comptime T: type, value: T) ?T {
     return null;
 }
 
-fn shrinkArray(comptime Elem: type, comptime len: usize, value: [len]Elem, cfg0: ShrinkCfg) ?[len]Elem {
+fn shrinkArray(comptime Elem: type, comptime len: usize, value: [len]Elem, cfg0: ShrinkConfig) ?[len]Elem {
     var out = value;
     for (&out, 0..) |*elem, i| {
         if (shrinkOnce(Elem, value[i], cfg0)) |next| {
@@ -579,7 +579,7 @@ fn shrinkStruct(
     comptime T: type,
     comptime s: std.builtin.Type.Struct,
     value: T,
-    cfg0: ShrinkCfg,
+    cfg0: ShrinkConfig,
 ) ?T {
     var out = value;
     inline for (s.fields) |field| {
@@ -598,7 +598,7 @@ fn shrinkUnion(
     comptime T: type,
     comptime u: std.builtin.Type.Union,
     value: T,
-    cfg0: ShrinkCfg,
+    cfg0: ShrinkConfig,
 ) ?T {
     if (u.tag_type == null) return null;
 

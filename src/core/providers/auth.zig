@@ -1144,8 +1144,8 @@ fn emitAuthAudit(
         .ts_ms = hooks.now_ms(),
         .sid = "auth",
         .seq = seq,
-        .out = out,
-        .sev = sev,
+        .outcome = out,
+        .severity = sev,
         .actor = .{ .kind = .sys },
         .res = .{
             .kind = .auth,
@@ -1155,8 +1155,8 @@ fn emitAuthAudit(
         .msg = msg,
         .data = .{
             .auth = .{
-                .mech = mech,
-                .sub = .{ .text = providerName(provider), .vis = .@"pub" },
+                .mechanism = mech,
+                .subject = .{ .text = providerName(provider), .vis = .@"pub" },
             },
         },
     });

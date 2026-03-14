@@ -968,7 +968,7 @@ test "multi-event roundtrip preserves all event types" {
         .{ .at_ms = 2, .data = .{ .text = .{ .text = "world" } } },
         .{ .at_ms = 3, .data = .{ .thinking = .{ .text = "hmm" } } },
         .{ .at_ms = 4, .data = .{ .tool_call = .{ .id = "c1", .name = "bash", .args = "{}" } } },
-        .{ .at_ms = 5, .data = .{ .tool_result = .{ .id = "c1", .out = "ok" } } },
+        .{ .at_ms = 5, .data = .{ .tool_result = .{ .id = "c1", .output = "ok" } } },
         .{ .at_ms = 6, .data = .{ .usage = .{ .in_tok = 10, .out_tok = 20, .tot_tok = 30, .cache_read = 5, .cache_write = 2 } } },
         .{ .at_ms = 7, .data = .{ .stop = .{ .reason = .done } } },
         .{ .at_ms = 8, .data = .{ .err = .{ .text = "oops" } } },
@@ -988,8 +988,8 @@ test "multi-event roundtrip preserves all event types" {
         \\  .version: u16 = 1
         \\  .in_lines: u64 = 8
         \\  .out_lines: u64 = 8
-        \\  .in_bytes: u64 = 568
-        \\  .out_bytes: u64 = 568
+        \\  .in_bytes: u64 = 571
+        \\  .out_bytes: u64 = 571
         \\  .compacted_at_ms: i64 = 999
     ).expectEqual(ck);
 
@@ -1008,7 +1008,7 @@ test "multi-event roundtrip preserves all event types" {
         \\    [3]: []u8
         \\      "{"version":1,"at_ms":4,"data":{"tool_call":{"id":"c1","name":"bash","args":"{}"}}}"
         \\    [4]: []u8
-        \\      "{"version":1,"at_ms":5,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}"
+        \\      "{"version":1,"at_ms":5,"data":{"tool_result":{"id":"c1","output":"ok","is_err":false}}}"
         \\    [5]: []u8
         \\      "{"version":1,"at_ms":6,"data":{"usage":{"in_tok":10,"out_tok":20,"tot_tok":30,"cache_read":5,"cache_write":2}}}"
         \\    [6]: []u8
@@ -1025,7 +1025,7 @@ test "multi-event roundtrip preserves all event types" {
         \\    [3]: []u8
         \\      "{"version":1,"at_ms":4,"data":{"tool_call":{"id":"c1","name":"bash","args":"{}"}}}"
         \\    [4]: []u8
-        \\      "{"version":1,"at_ms":5,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}"
+        \\      "{"version":1,"at_ms":5,"data":{"tool_result":{"id":"c1","output":"ok","is_err":false}}}"
         \\    [5]: []u8
         \\      "{"version":1,"at_ms":6,"data":{"usage":{"in_tok":10,"out_tok":20,"tot_tok":30,"cache_read":5,"cache_write":2}}}"
         \\    [6]: []u8
@@ -1205,7 +1205,7 @@ test "generateSummary with tool_call events produces file_ops" {
         } } },
         .{ .at_ms = 3, .data = .{ .tool_result = .{
             .id = "c1",
-            .out = "ok",
+            .output = "ok",
         } } },
     };
 
@@ -1232,7 +1232,7 @@ test "generateSummary with tool_call events produces file_ops" {
         \\</untrusted-input>"
         \\    [2]: []const u8
         \\      "<untrusted-input kind="session-event" name="tool_result">
-        \\{"version":1,"at_ms":3,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}
+        \\{"version":1,"at_ms":3,"data":{"tool_result":{"id":"c1","output":"ok","is_err":false}}}
         \\</untrusted-input>"
         \\  .req_event_jsons: []const []const u8
         \\    [0]: []const u8
@@ -1245,7 +1245,7 @@ test "generateSummary with tool_call events produces file_ops" {
         \\</untrusted-input>"
         \\    [2]: []const u8
         \\      "<untrusted-input kind="session-event" name="tool_result">
-        \\{"version":1,"at_ms":3,"data":{"tool_result":{"id":"c1","out":"ok","is_err":false}}}
+        \\{"version":1,"at_ms":3,"data":{"tool_result":{"id":"c1","output":"ok","is_err":false}}}
         \\</untrusted-input>"
     ).expectEqual(SummarySnap{
         .file_ops = summary.file_ops,

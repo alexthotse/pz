@@ -304,8 +304,8 @@ const PolicyToolAuth = struct {
             .ts_ms = self.now_ms(),
             .sid = self.sid,
             .seq = seq,
-            .sev = .warn,
-            .out = .deny,
+            .severity = .warn,
+            .outcome = .deny,
             .actor = .{
                 .kind = .tool,
                 .id = .{ .text = name, .vis = .@"pub" },
@@ -328,7 +328,7 @@ const PolicyToolAuth = struct {
 };
 
 const ToolAuditInfo = struct {
-    res_kind: core.audit.ResKind,
+    res_kind: core.audit.ResourceKind,
     op: []const u8,
     target: []const u8,
     argv: []const u8,
@@ -1492,11 +1492,11 @@ fn dupProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) !core.provi
         .tool_result => |tr| blk: {
             const id = try alloc.dupe(u8, tr.id);
             errdefer alloc.free(id);
-            const out = try alloc.dupe(u8, tr.out);
+            const out = try alloc.dupe(u8, tr.output);
             break :blk .{
                 .tool_result = .{
                     .id = id,
-                    .out = out,
+                    .output = out,
                     .is_err = tr.is_err,
                 },
             };
@@ -1518,7 +1518,7 @@ fn freeProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) void {
         },
         .tool_result => |tr| {
             alloc.free(tr.id);
-            alloc.free(tr.out);
+            alloc.free(tr.output);
         },
         .usage, .stop => {},
         .err => |txt| alloc.free(txt),
@@ -1593,13 +1593,13 @@ const RuntimeCtlAudit = struct {
 
     const Req = struct {
         op: []const u8,
-        res_kind: core.audit.ResKind,
+        res_kind: core.audit.ResourceKind,
         res_name: core.audit.Str,
-        out: core.audit.Outcome = .ok,
-        sev: core.audit.Severity = .info,
+        outcome: core.audit.Outcome = .ok,
+        severity: core.audit.Severity = .info,
         msg: core.audit.Str,
         argv: ?core.audit.Str = null,
-        attrs: []const core.audit.Attr = &.{},
+        attrs: []const core.audit.Attribute = &.{},
     };
 
     fn emit(self: *RuntimeCtlAudit, alloc: std.mem.Allocator, req: Req) !void {
@@ -1610,8 +1610,8 @@ const RuntimeCtlAudit = struct {
             .ts_ms = self.hooks.now_ms(),
             .sid = "runtime",
             .seq = seq,
-            .sev = req.sev,
-            .out = req.out,
+            .severity = req.severity,
+            .outcome = req.outcome,
             .actor = .{ .kind = .sys },
             .res = .{
                 .kind = req.res_kind,
@@ -1645,7 +1645,7 @@ const PolicyToolAudit = struct {
             .ts_ms = self.hooks.now_ms(),
             .sid = self.sid,
             .seq = seq,
-            .out = .deny,
+            .outcome = .deny,
             .actor = .{ .kind = .sys },
             .res = .{
                 .kind = auditResKind(call.kind),
@@ -1655,7 +1655,7 @@ const PolicyToolAudit = struct {
             .msg = .{ .text = policy_denied_msg, .vis = .@"pub" },
             .data = .{
                 .policy = .{
-                    .eff = .deny,
+                    .effect = .deny,
                     .scope = "tool",
                 },
             },
@@ -1663,7 +1663,7 @@ const PolicyToolAudit = struct {
     }
 };
 
-fn auditResKind(kind: core.tools.Kind) core.audit.ResKind {
+fn auditResKind(kind: core.tools.Kind) core.audit.ResourceKind {
     return switch (kind) {
         .read, .write, .edit, .grep, .find, .ls => .file,
         .web => .net,
@@ -1728,10 +1728,10 @@ fn runtimeCtlStart(
     audit: *RuntimeCtlAudit,
     alloc: std.mem.Allocator,
     op: []const u8,
-    res_kind: core.audit.ResKind,
+    res_kind: core.audit.ResourceKind,
     res_name: core.audit.Str,
     argv: ?core.audit.Str,
-    attrs: []const core.audit.Attr,
+    attrs: []const core.audit.Attribute,
 ) !void {
     try audit.emit(alloc, .{
         .op = op,
@@ -1747,16 +1747,16 @@ fn runtimeCtlSuccess(
     audit: *RuntimeCtlAudit,
     alloc: std.mem.Allocator,
     op: []const u8,
-    res_kind: core.audit.ResKind,
+    res_kind: core.audit.ResourceKind,
     res_name: core.audit.Str,
     argv: ?core.audit.Str,
-    attrs: []const core.audit.Attr,
+    attrs: []const core.audit.Attribute,
 ) !void {
     try audit.emit(alloc, .{
         .op = op,
         .res_kind = res_kind,
         .res_name = res_name,
-        .sev = .notice,
+        .severity = .notice,
         .msg = .{ .text = "runtime control success", .vis = .@"pub" },
         .argv = argv,
         .attrs = attrs,
@@ -1767,18 +1767,18 @@ fn runtimeCtlFail(
     audit: *RuntimeCtlAudit,
     alloc: std.mem.Allocator,
     op: []const u8,
-    res_kind: core.audit.ResKind,
+    res_kind: core.audit.ResourceKind,
     res_name: core.audit.Str,
     argv: ?core.audit.Str,
     msg: core.audit.Str,
-    attrs: []const core.audit.Attr,
+    attrs: []const core.audit.Attribute,
 ) !void {
     try audit.emit(alloc, .{
         .op = op,
         .res_kind = res_kind,
         .res_name = res_name,
-        .out = .fail,
-        .sev = .err,
+        .outcome = .fail,
+        .severity = .err,
         .msg = msg,
         .argv = argv,
         .attrs = attrs,
@@ -1827,7 +1827,7 @@ fn reloadContextWithAudit(
         if (sys_prompt_owned.*) |old| alloc.free(old);
         sys_prompt_owned.* = new_ctx;
         sys_prompt.* = new_ctx;
-        const attrs = [_]core.audit.Attr{
+        const attrs = [_]core.audit.Attribute{
             .{
                 .key = "loaded",
                 .vis = .@"pub",
@@ -1840,7 +1840,7 @@ fn reloadContextWithAudit(
     if (sys_prompt_owned.*) |old| alloc.free(old);
     sys_prompt_owned.* = null;
     sys_prompt.* = null;
-    const attrs = [_]core.audit.Attr{
+    const attrs = [_]core.audit.Attribute{
         .{
             .key = "loaded",
             .vis = .@"pub",
@@ -2396,7 +2396,7 @@ fn runTui(
     defer approval_bind.deinit(alloc);
     const approval_loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, approval_loc);
-    var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
+    var bg_mgr = try bg.Manager.initWithOpts(alloc, .{
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
         .emit_audit = audit_hooks.emit_audit,
         .now_ms = audit_hooks.now_ms,
@@ -2660,7 +2660,7 @@ fn runTui(
                                         const argv: core.audit.Str = .{ .text = sel, .vis = .@"pub" };
                                         try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
                                         try replaceOwnedText(alloc, &model, &model_owned, sel);
-                                        const attrs = [_]core.audit.Attr{
+                                        const attrs = [_]core.audit.Attribute{
                                             .{
                                                 .key = "provider",
                                                 .vis = .@"pub",
@@ -3412,7 +3412,7 @@ fn runRpc(
         .approval_bind = approval_bind,
         .approval_loc = approval_loc,
     };
-    var bg_mgr = try bg.Mgr.initWithOpts(alloc, .{
+    var bg_mgr = try bg.Manager.initWithOpts(alloc, .{
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
         .emit_audit = audit_hooks.emit_audit,
         .now_ms = audit_hooks.now_ms,
@@ -3534,7 +3534,7 @@ fn runRpc(
                 const argv = if (next.len > 0) core.audit.Str{ .text = next, .vis = .@"pub" } else null;
                 const has_alias_provider = isSetModelAlias(raw_cmd) and req.provider != null and req.provider.?.len > 0;
                 if (has_alias_provider) {
-                    const start_attrs = [_]core.audit.Attr{
+                    const start_attrs = [_]core.audit.Attribute{
                         .{
                             .key = "provider",
                             .vis = .@"pub",
@@ -3568,7 +3568,7 @@ fn runRpc(
                     try replaceOwnedText(alloc, &provider_label, &provider_owned, req.provider.?);
                 }
                 try replaceOwnedText(alloc, &model, &model_owned, next);
-                const done_attrs = [_]core.audit.Attr{
+                const done_attrs = [_]core.audit.Attribute{
                     .{
                         .key = "provider",
                         .vis = .@"pub",
@@ -3646,7 +3646,7 @@ fn runRpc(
                 defer alloc.free(tool_csv);
                 if (raw.len != 0) {
                     const argv: core.audit.Str = .{ .text = raw, .vis = .@"pub" };
-                    const attrs = [_]core.audit.Attr{
+                    const attrs = [_]core.audit.Attribute{
                         .{
                             .key = "tools",
                             .vis = .@"pub",
@@ -3940,7 +3940,7 @@ fn runRpc(
                     );
                     return err;
                 };
-                const attrs = [_]core.audit.Attr{
+                const attrs = [_]core.audit.Attribute{
                     .{
                         .key = "in_lines",
                         .vis = .@"pub",
@@ -4227,7 +4227,7 @@ fn handleSlashCommand(
     provider_owned: *?[]u8,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
-    bg_mgr: *bg.Mgr,
+    bg_mgr: *bg.Manager,
     session_dir_path: ?[]const u8,
     no_session: bool,
     _: ?[]const u8, // sys_prompt (unused after settings became interactive)
@@ -4342,7 +4342,7 @@ fn handleSlashCommand(
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
             try runtimeCtlStart(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
             try replaceOwnedText(alloc, model, model_owned, arg);
-            const attrs = [_]core.audit.Attr{
+            const attrs = [_]core.audit.Attribute{
                 .{
                     .key = "provider",
                     .vis = .@"pub",
@@ -4384,7 +4384,7 @@ fn handleSlashCommand(
                 tools_rt.tool_mask = mask;
                 const tool_csv = try toolMaskCsvAlloc(alloc, tools_rt.tool_mask);
                 defer alloc.free(tool_csv);
-                const attrs = [_]core.audit.Attr{
+                const attrs = [_]core.audit.Attribute{
                     .{
                         .key = "tools",
                         .vis = .@"pub",
@@ -4548,7 +4548,7 @@ fn handleSlashCommand(
                 );
                 return err;
             };
-            const attrs = [_]core.audit.Attr{
+            const attrs = [_]core.audit.Attribute{
                 .{
                     .key = "in_lines",
                     .vis = .@"pub",
@@ -4603,7 +4603,7 @@ fn handleSlashCommand(
                 return .handled;
             };
             defer alloc.free(path);
-            const attrs = [_]core.audit.Attr{
+            const attrs = [_]core.audit.Attribute{
                 .{
                     .key = "path",
                     .vis = .mask,
@@ -4778,7 +4778,7 @@ fn handleSlashCommand(
                 return .handled;
             };
             defer alloc.free(gist_url);
-            const attrs = [_]core.audit.Attr{
+            const attrs = [_]core.audit.Attribute{
                 .{
                     .key = "url",
                     .vis = .mask,
@@ -4799,7 +4799,7 @@ fn handleSlashCommand(
     return .handled;
 }
 
-fn runBgCommand(alloc: std.mem.Allocator, bg_mgr: *bg.Mgr, arg: []const u8) ![]u8 {
+fn runBgCommand(alloc: std.mem.Allocator, bg_mgr: *bg.Manager, arg: []const u8) ![]u8 {
     const body = std.mem.trim(u8, arg, " \t");
     if (body.len == 0) {
         return alloc.dupe(u8, bg_usage);
@@ -4880,7 +4880,7 @@ fn parseBgId(text: []const u8) !u64 {
     return std.fmt.parseInt(u64, tok, 10);
 }
 
-fn flushBgDone(alloc: std.mem.Allocator, ui: *tui_harness.Ui, bg_mgr: *bg.Mgr) !void {
+fn flushBgDone(alloc: std.mem.Allocator, ui: *tui_harness.Ui, bg_mgr: *bg.Manager) !void {
     const done = try bg_mgr.drainDone(alloc);
     defer bg.deinitViews(alloc, done);
 
@@ -4905,7 +4905,7 @@ fn flushBgDone(alloc: std.mem.Allocator, ui: *tui_harness.Ui, bg_mgr: *bg.Mgr) !
     if (done.len > 0) ui.tr.scrollToBottom();
 }
 
-fn syncBgFooter(alloc: std.mem.Allocator, ui: *tui_harness.Ui, bg_mgr: *bg.Mgr) !void {
+fn syncBgFooter(alloc: std.mem.Allocator, ui: *tui_harness.Ui, bg_mgr: *bg.Manager) !void {
     const jobs = try bg_mgr.list(alloc);
     defer bg.deinitViews(alloc, jobs);
 
@@ -5383,7 +5383,7 @@ fn restoreSessionIntoUi(
             } }),
             .tool_result => |tr| try ui.onProvider(.{ .tool_result = .{
                 .id = tr.id,
-                .out = tr.out,
+                .output = tr.output,
                 .is_err = tr.is_err,
             } }),
             .usage => |u| try ui.onProvider(.{ .usage = .{
@@ -6696,7 +6696,7 @@ fn runBashMode(
         } });
         try ui.tr.append(.{ .tool_result = .{
             .id = "bash",
-            .out = "bash denied: protected path",
+            .output = "bash denied: protected path",
             .is_err = true,
         } });
 
@@ -6709,7 +6709,7 @@ fn runBashMode(
             } } });
             _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .tool_result = .{
                 .id = "bash",
-                .out = "bash denied: protected path",
+                .output = "bash denied: protected path",
                 .is_err = true,
             } } });
         }
@@ -6745,7 +6745,7 @@ fn runBashMode(
     } });
     try ui.tr.append(.{ .tool_result = .{
         .id = "bash",
-        .out = if (output.len > 0) output else "(no output)",
+        .output = if (output.len > 0) output else "(no output)",
         .is_err = is_err,
     } });
 
@@ -6759,7 +6759,7 @@ fn runBashMode(
         } } });
         _ = try appendSessionOrNote(ui, sid, store, .{ .data = .{ .tool_result = .{
             .id = "bash",
-            .out = if (output.len > 0) output else "(no output)",
+            .output = if (output.len > 0) output else "(no output)",
             .is_err = is_err,
         } } });
     }
@@ -7812,7 +7812,7 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
         },
         .{
             .at_ms = 4,
-            .data = .{ .tool_result = .{ .id = "call-1", .out = "ok", .is_err = false } },
+            .data = .{ .tool_result = .{ .id = "call-1", .output = "ok", .is_err = false } },
         },
         .{
             .at_ms = 5,
@@ -7896,7 +7896,7 @@ test "restoreSessionIntoUi ignores empty blocks when rendering bottom row" {
         },
         .{
             .at_ms = 3,
-            .data = .{ .tool_result = .{ .id = "call-1", .out = "", .is_err = false } },
+            .data = .{ .tool_result = .{ .id = "call-1", .output = "", .is_err = false } },
         },
         .{
             .at_ms = 4,
@@ -8124,9 +8124,9 @@ const AuditEntrySnap = struct {
     sid: []const u8,
     seq: u64,
     kind: core.audit.EventKind,
-    sev: core.audit.Severity,
-    out: core.audit.Outcome,
-    res_kind: ?core.audit.ResKind = null,
+    severity: core.audit.Severity,
+    outcome: core.audit.Outcome,
+    res_kind: ?core.audit.ResourceKind = null,
     res_name: ?[]const u8 = null,
     op: ?[]const u8 = null,
     msg: ?[]const u8 = null,
@@ -8169,9 +8169,9 @@ fn auditTraceSnap(alloc: std.mem.Allocator, rows: []const []const u8) ![]AuditEn
             .sid = jsonStr(root.object, "sid") orelse return error.UnexpectedToken,
             .seq = jsonU64(root.object, "seq") orelse return error.UnexpectedToken,
             .kind = kind,
-            .sev = sev,
-            .out = out_tag,
-            .res_kind = if (res_obj) |obj| std.meta.stringToEnum(core.audit.ResKind, jsonStr(obj, "kind") orelse return error.UnexpectedToken) else null,
+            .severity = sev,
+            .outcome = out_tag,
+            .res_kind = if (res_obj) |obj| std.meta.stringToEnum(core.audit.ResourceKind, jsonStr(obj, "kind") orelse return error.UnexpectedToken) else null,
             .res_name = if (res_obj) |obj| jsonVisText(obj, "name") else null,
             .op = if (res_obj) |obj| jsonStr(obj, "op") else null,
             .msg = if (msg_obj) |obj| jsonVisText(obj, null) else null,
@@ -8390,7 +8390,7 @@ test "runtime blocks tool dispatch under verified policy" {
     while (try rdr.next()) |ev| {
         switch (ev.data) {
             .tool_result => |tr| {
-                if (std.mem.eql(u8, tr.id, "call-1") and tr.is_err and std.mem.eql(u8, tr.out, "blocked by policy")) {
+                if (std.mem.eql(u8, tr.id, "call-1") and tr.is_err and std.mem.eql(u8, tr.output, "blocked by policy")) {
                     saw_blocked = true;
                 }
             },
@@ -9674,7 +9674,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
     defer if (provider_owned) |buf| std.testing.allocator.free(buf);
     var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
     defer tools_rt.deinit();
-    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    var bg_mgr = try bg.Manager.init(std.testing.allocator);
     defer bg_mgr.deinit();
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
     var out_buf: [256]u8 = undefined;
@@ -9737,7 +9737,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
     defer if (provider_owned) |buf| std.testing.allocator.free(buf);
     var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
     defer tools_rt.deinit();
-    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    var bg_mgr = try bg.Manager.init(std.testing.allocator);
     defer bg_mgr.deinit();
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
     var out_buf: [256]u8 = undefined;
@@ -9927,7 +9927,7 @@ test "handleSlashCommand blocks builtins under verified policy" {
     defer if (provider_owned) |buf| std.testing.allocator.free(buf);
     var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
     defer tools_rt.deinit();
-    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    var bg_mgr = try bg.Manager.init(std.testing.allocator);
     defer bg_mgr.deinit();
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
     var out_buf: [256]u8 = undefined;
@@ -10003,7 +10003,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
     defer if (provider_owned) |buf| std.testing.allocator.free(buf);
     var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
     defer tools_rt.deinit();
-    var bg_mgr = try bg.Mgr.init(std.testing.allocator);
+    var bg_mgr = try bg.Manager.init(std.testing.allocator);
     defer bg_mgr.deinit();
     var rows = AuditRows{};
     defer rows.deinit(std.testing.allocator);
@@ -10469,11 +10469,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10495,11 +10495,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10527,11 +10527,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -10553,11 +10553,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .notice
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -10579,11 +10579,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 3
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10605,11 +10605,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 4
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10637,11 +10637,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -10663,11 +10663,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .notice
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -10689,11 +10689,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 5
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10715,11 +10715,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 6
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10747,11 +10747,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10773,11 +10773,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10805,11 +10805,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -10831,11 +10831,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .err
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .fail
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -10857,11 +10857,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 3
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10883,11 +10883,11 @@ test "runtime rpc auth commands emit audited success and failure records" {
         \\    .seq: u64 = 4
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -10980,11 +10980,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11006,11 +11006,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11038,11 +11038,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 3
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11070,11 +11070,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 4
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11123,11 +11123,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 5
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11149,11 +11149,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 6
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11181,11 +11181,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 7
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11207,11 +11207,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 8
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11239,11 +11239,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 9
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11265,11 +11265,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 10
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11297,11 +11297,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 11
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11329,11 +11329,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 12
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .err
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .fail
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11368,11 +11368,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 13
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11394,11 +11394,11 @@ test "runtime rpc bg commands emit audited redacted control records" {
         \\    .seq: u64 = 14
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11533,11 +11533,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11559,11 +11559,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11591,11 +11591,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -11617,11 +11617,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .notice
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -11643,11 +11643,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 3
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11669,11 +11669,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 4
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11701,11 +11701,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -11727,11 +11727,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .notice
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -11753,11 +11753,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 5
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11779,11 +11779,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 6
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11811,11 +11811,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11837,11 +11837,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11869,11 +11869,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -11895,11 +11895,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .auth
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .err
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .fail
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .auth
         \\    .res_name: ?[]const u8
         \\      "openai"
@@ -11921,11 +11921,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 3
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -11947,11 +11947,11 @@ test "runtime tui auth commands emit audited success and failure records" {
         \\    .seq: u64 = 4
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12038,11 +12038,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 1
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12064,11 +12064,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 2
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12096,11 +12096,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 3
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12128,11 +12128,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 4
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12181,11 +12181,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 5
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12207,11 +12207,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 6
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12239,11 +12239,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 7
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12265,11 +12265,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 8
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12297,11 +12297,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 9
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12323,11 +12323,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 10
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12355,11 +12355,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 11
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12387,11 +12387,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 12
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .err
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .fail
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12426,11 +12426,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 13
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12452,11 +12452,11 @@ test "runtime tui bg commands emit audited redacted control records" {
         \\    .seq: u64 = 14
         \\    .kind: core.audit.EventKind
         \\      .tool
-        \\    .sev: core.audit.Severity
+        \\    .severity: core.audit.Severity
         \\      .info
-        \\    .out: core.audit.Outcome
+        \\    .outcome: core.audit.Outcome
         \\      .ok
-        \\    .res_kind: ?core.audit.ResKind
+        \\    .res_kind: ?core.audit.ResourceKind
         \\      .cmd
         \\    .res_name: ?[]const u8
         \\      "bg"
@@ -12682,7 +12682,7 @@ test "runtime rpc control commands emit audited redacted control records" {
 }
 
 test "runtime bg command validates usage and missing ids" {
-    var mgr = try bg.Mgr.init(std.testing.allocator);
+    var mgr = try bg.Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     const usage = try runBgCommand(std.testing.allocator, &mgr, "");
@@ -12838,7 +12838,7 @@ test "resolveArgSrc maps slash command names to completion sources" {
 }
 
 test "runtime bg command run show list workflow" {
-    var mgr = try bg.Mgr.init(std.testing.allocator);
+    var mgr = try bg.Manager.init(std.testing.allocator);
     defer mgr.deinit();
 
     const started = try runBgCommand(std.testing.allocator, &mgr, "run sleep 1");

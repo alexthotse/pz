@@ -34,7 +34,7 @@ test "session persistence regression covers compacted replay and retry restore" 
         .data = .{
             .tool_result = .{
                 .id = "c1",
-                .out = "ok",
+                .output = "ok",
                 .is_err = false,
             },
         },
@@ -42,7 +42,7 @@ test "session persistence regression covers compacted replay and retry restore" 
 
     try retry_state.save(std.testing.allocator, tmp.dir, "sid-1", .{
         .tries_done = 2,
-        .fail_ct = 1,
+        .fail_count = 1,
         .next_wait_ms = 100,
         .last_err = .transient,
     });
@@ -67,7 +67,7 @@ test "session persistence regression covers compacted replay and retry restore" 
         \\    .tool_result: core.session.schema.Event.ToolResult
         \\      .id: []const u8
         \\        "c1"
-        \\      .out: []const u8
+        \\      .output: []const u8
         \\        "ok"
         \\      .is_err: bool = false
     ).expectEqual(ev1);
@@ -80,7 +80,7 @@ test "session persistence regression covers compacted replay and retry restore" 
         \\core.session.retry_state.State
         \\  .version: u16 = 1
         \\  .tries_done: u16 = 2
-        \\  .fail_ct: u16 = 1
+        \\  .fail_count: u16 = 1
         \\  .next_wait_ms: u64 = 100
         \\  .last_err: core.session.retry_state.ErrKind = .transient
     ).expectEqual(rs);
