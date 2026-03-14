@@ -7,6 +7,7 @@ const sid_path = @import("path.zig");
 const session_file = @import("session_file.zig");
 const providers = @import("../providers.zig");
 const prov_api = @import("../providers/api.zig");
+const summary_types = @import("summary.zig");
 const fs_secure = @import("../fs_secure.zig");
 
 pub const checkpoint_version: u16 = 1;
@@ -149,7 +150,7 @@ fn freeJsonSlice(alloc: std.mem.Allocator, rows: [][]u8) void {
 }
 
 pub const GeneratedSummary = struct {
-    req: providers.SummaryReq,
+    req: summary_types.SummaryReq,
     file_ops: ?[]const u8,
     event_jsons: [][]u8,
 };
@@ -401,7 +402,7 @@ const SummaryCall = struct {
     req: providers.Request,
     msgs: []providers.Msg,
     prompt: []u8,
-    meta: prov_api.SummaryMeta,
+    meta: summary_types.SummaryMeta,
 };
 
 fn freeSummaryCall(alloc: std.mem.Allocator, call: SummaryCall) void {
@@ -419,7 +420,7 @@ fn satAddU32(a: u32, b: usize) u32 {
     return std.math.add(u32, a, add) catch std.math.maxInt(u32);
 }
 
-fn pushTextMeta(meta: *prov_api.SummaryMeta, text: []const u8) void {
+fn pushTextMeta(meta: *summary_types.SummaryMeta, text: []const u8) void {
     meta.input_bytes = satAddU64(meta.input_bytes, text.len);
     // Exact provider tokenizers vary; byte count is a deterministic upper bound.
     meta.input_tokens = satAddU32(meta.input_tokens, text.len);
@@ -429,8 +430,8 @@ fn clampCount(n: usize) u32 {
     return if (n > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(n);
 }
 
-fn summaryInputMeta(events_json: []const []const u8, file_ops: ?[]const u8, budget: prov_api.SummaryBudget) prov_api.SummaryMeta {
-    var meta = prov_api.SummaryMeta{
+fn summaryInputMeta(events_json: []const []const u8, file_ops: ?[]const u8, budget: summary_types.SummaryBudget) summary_types.SummaryMeta {
+    var meta = summary_types.SummaryMeta{
         .max_bytes = budget.max_bytes,
         .max_input_tokens = budget.max_input_tokens,
         .kept_events = clampCount(events_json.len),
@@ -438,7 +439,7 @@ fn summaryInputMeta(events_json: []const []const u8, file_ops: ?[]const u8, budg
     };
 
     pushTextMeta(&meta, prov_api.prompt_guard);
-    pushTextMeta(&meta, prov_api.summary_system_prompt);
+    pushTextMeta(&meta, summary_types.system_prompt);
     pushTextMeta(&meta, summary_conv_open);
     for (events_json, 0..) |ev, i| {
         if (i != 0) pushTextMeta(&meta, summary_chunk_sep);
@@ -450,15 +451,15 @@ fn summaryInputMeta(events_json: []const []const u8, file_ops: ?[]const u8, budg
         pushTextMeta(&meta, footer);
     }
     pushTextMeta(&meta, summary_chunk_sep);
-    pushTextMeta(&meta, prov_api.summary_prompt);
+    pushTextMeta(&meta, summary_types.prompt);
     return meta;
 }
 
-fn metaWithinBudget(meta: prov_api.SummaryMeta) bool {
+fn metaWithinBudget(meta: summary_types.SummaryMeta) bool {
     return meta.input_bytes <= meta.max_bytes and meta.input_tokens <= meta.max_input_tokens;
 }
 
-fn fitSummaryReq(req: providers.SummaryReq) providers.SummaryReq {
+fn fitSummaryReq(req: summary_types.SummaryReq) summary_types.SummaryReq {
     var out = req;
     const full = summaryInputMeta(req.events_json, req.file_ops, req.budget);
     if (metaWithinBudget(full)) {
@@ -481,7 +482,7 @@ fn fitSummaryReq(req: providers.SummaryReq) providers.SummaryReq {
 
     if (keep_len == 0) {
         out.events_json = req.events_json[req.events_json.len..];
-        out.meta = prov_api.SummaryMeta{
+        out.meta = summary_types.SummaryMeta{
             .outcome = .over_budget,
             .input_bytes = full.input_bytes,
             .input_tokens = full.input_tokens,
@@ -503,7 +504,7 @@ fn fitSummaryReq(req: providers.SummaryReq) providers.SummaryReq {
 
 fn buildSummaryPromptAlloc(
     alloc: std.mem.Allocator,
-    req: providers.SummaryReq,
+    req: summary_types.SummaryReq,
 ) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -519,14 +520,14 @@ fn buildSummaryPromptAlloc(
         try out.appendSlice(alloc, footer);
     }
     try out.appendSlice(alloc, summary_chunk_sep);
-    try out.appendSlice(alloc, prov_api.summary_prompt);
+    try out.appendSlice(alloc, summary_types.prompt);
     return try out.toOwnedSlice(alloc);
 }
 
 fn buildSummaryCall(
     alloc: std.mem.Allocator,
     model: []const u8,
-    req: providers.SummaryReq,
+    req: summary_types.SummaryReq,
 ) !SummaryCall {
     const fit_req = fitSummaryReq(req);
     if (fit_req.meta.outcome == .over_budget) return error.SummaryInputOverBudget;
@@ -540,7 +541,7 @@ fn buildSummaryCall(
     errdefer alloc.free(parts);
 
     parts[0] = .{ .text = prov_api.prompt_guard };
-    parts[1] = .{ .text = prov_api.summary_system_prompt };
+    parts[1] = .{ .text = summary_types.system_prompt };
     parts[2] = .{ .text = prompt };
     msgs[0] = .{ .role = .system, .parts = parts[0..2] };
     msgs[1] = .{ .role = .user, .parts = parts[2..3] };
@@ -584,8 +585,8 @@ pub fn generateSummaryWithProvider(
     provider: providers.Provider,
     model: []const u8,
     events: []const schema.Event,
-    budget: ?prov_api.SummaryBudget,
-) !?providers.SummaryResult {
+    budget: ?summary_types.SummaryBudget,
+) !?summary_types.SummaryResult {
     const generated = (try generateSummary(alloc, events)) orelse return null;
     defer freeGeneratedSummary(alloc, generated);
 
@@ -1340,7 +1341,7 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
             try std.testing.expectEqual(@as(usize, 2), req.msgs[0].parts.len);
             try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, "<conversation>") != null);
             try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, "<untrusted-input kind=\"file-ops\">") != null);
-            try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, prov_api.summary_prompt) != null);
+            try std.testing.expect(std.mem.indexOf(u8, req.msgs[1].parts[0].text, summary_types.prompt) != null);
 
             const ctx = try std.testing.allocator.create(StreamCtx);
             ctx.* = .{ .alloc = std.testing.allocator };

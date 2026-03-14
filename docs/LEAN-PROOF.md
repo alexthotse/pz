@@ -48,19 +48,22 @@ where `mask_all` is the union of bits 0-9 (10 known tools).
 
 **Lean model**:
 ```lean
-def mask_all : BitVec 16 := 0x3FF  -- bits 0-9
+-- Parameterized by N (number of masked tools). Currently N=10.
+-- CI sync: extract popcount(mask_all) from builtin.zig, assert == N.
+-- Known exclusion: tools.Kind.web has no mask bit (documented).
+def mask_all (N : Nat) : BitVec 16 := (1 <<< N) - 1
 
-theorem sanitize_strips_unknown (input : BitVec 16) :
-    (input &&& mask_all) ≤ mask_all := by
+theorem sanitize_strips_unknown (N : Fin 16) (input : BitVec 16) :
+    (input &&& mask_all N) ≤ mask_all N := by
   bv_decide
 
-theorem sanitize_preserves_known (input : BitVec 16) :
-    ∀ i : Fin 10, input.getLsbD i = true →
-      (input &&& mask_all).getLsbD i = true := by
+theorem sanitize_preserves_known (N : Fin 16) (input : BitVec 16) :
+    ∀ i : Fin N, input.getLsbD i = true →
+      (input &&& mask_all N).getLsbD i = true := by
   bv_decide
 ```
 
-**What it proves**: For ALL 2^16 possible mask inputs, sanitization never produces bits outside `mask_all`, and always preserves requested bits within the known set. Scope: mask layer ONLY — does not cover tool_auth or approval (separate access control layers providing defense-in-depth).
+**What it proves**: For ALL 2^16 possible mask inputs, sanitization never produces bits outside `mask_all`, and always preserves requested bits within the known set. Scope: mask layer ONLY — does not cover tool_auth or approval (separate access control layers providing defense-in-depth). Note: `tools.Kind.web` (11th variant) has no mask bit and sits outside the mask system entirely — not covered by this proof. CI sync should flag `Kind` enum changes.
 
 **Future extension**: When `thread_default_mask` is implemented (EPISODES-PLAN.md), add:
 ```lean
@@ -96,7 +99,7 @@ if (!std.mem.eql(u8, msg.policy_hash, self.policy_hash)) return error.PolicyMism
 ```
 NOTE: `std.mem.eql` is NOT constant-time — timing side-channel. Fix in code (dot created).
 
-**Lean model**: Abstract the crypto primitives:
+**Lean model**: Model the parse→canonicalize→verify pipeline, not just the signature scheme:
 ```lean
 class SignatureScheme where
   Key : Type
@@ -105,11 +108,21 @@ class SignatureScheme where
   sign : Key → Msg → Sig
   verify : Key → Msg → Sig → Bool
   correctness : ∀ k m, verify k m (sign k m) = true
-  -- Conditional on crypto assumption, not absolute
+  -- Idealized unforgeability (stronger than EUF-CMA — assumes perfect security)
   unforgeability : ∀ k m m' s, m ≠ m' → verify k m' (sign k m) = false
+
+-- Model the actual verification pipeline
+def canonicalize (raw : RawPolicy) : Policy := parseDoc raw |> encodeDoc
+def verifyPolicy (key : Key) (raw : RawPolicy) (sig : Sig) : Bool :=
+  verify key (canonicalize raw) sig
 ```
 
-**What it proves**: Conditional on the `unforgeability` axiom (modeling EUF-CMA as an assumption, not proving Ed25519 correct), modified policy fails verification. The proof is conditional — it says "IF the signature scheme is unforgeable, THEN policy cannot be tampered." This is standard for applied crypto proofs.
+**What it proves**: The signature covers the **canonical re-serialization** (`parseDoc → encodeDoc`), not raw JSON bytes. The proof models the three-step chain and proves:
+- Any modification to canonical content (including rule reordering — rules are an ordered list, not a set, because `evaluate` uses last-match-wins) fails verification
+- `parseDoc` is invariant to the presence/absence/content of the `signature` key in input JSON (the signature metadata is excluded from signed content by construction)
+- Extra JSON fields not parsed by `parseDoc` are silently dropped — proof covers canonical content integrity, not raw-byte integrity
+
+The `unforgeability` axiom is idealized (stronger than computational EUF-CMA) — sufficient for the enterprise deliverable but should not be cited as a game-based crypto proof.
 
 **Acceptance criteria**:
 - Lean proof compiles with abstract `SignatureScheme` typeclass
@@ -135,23 +148,36 @@ class SignatureScheme where
 f ∈ owned[t]
 ```
 
-**Lean model**:
+**Lean model**: Inductive invariant over the dispatch state machine — prove that NO sequence of valid operations can reach a state where two active threads share a file.
 ```lean
-theorem ownership_exclusive (threads : Fin n → ThreadState)
-    (dispatch_ok : ∀ i j, i ≠ j →
-      threads i |>.state ∈ active →
-      threads j |>.state ∈ active →
-      threads i |>.owned ∩ threads j |>.owned = ∅) :
-    ∀ i j f, i ≠ j →
-      f ∈ threads i |>.owned →
-      f ∈ threads j |>.owned →
-      ¬(threads i |>.state ∈ active ∧ threads j |>.state ∈ active) := by
-  intro i j f hne hfi hfj ⟨hai, haj⟩
-  have := dispatch_ok i j hne hai haj
-  exact Finset.not_mem_empty f (this ▸ Finset.mem_inter.mpr ⟨hfi, hfj⟩)
+inductive Op
+  | dispatch (t : Fin n) (files : Finset File)  -- assign files to thread t
+  | complete (t : Fin n)                         -- thread t finishes, releases files
+  | reassign (t : Fin n) (files : Finset File)  -- re-dispatch with new files
+
+def step (s : State n) : Op → Option (State n)
+  | .dispatch t files =>
+    -- Precondition: t is unused, files disjoint from all active threads
+    if s.threads[t].status = .unused ∧
+       ∀ j, j ≠ t → s.threads[j].status ∈ active →
+         files ∩ s.threads[j].owned = ∅
+    then some (s.activate t files)
+    else none
+  | .complete t => some (s.deactivate t)
+  | .reassign t files => step s (.dispatch t files)  -- same precondition
+
+-- The inductive invariant: disjointness holds in all reachable states
+theorem ownership_invariant :
+    ∀ (ops : List Op) (s : State n),
+      s = initial →
+      (s' = foldOps s ops) →
+      ∀ i j, i ≠ j →
+        s'.threads[i].status ∈ active →
+        s'.threads[j].status ∈ active →
+        s'.threads[i].owned ∩ s'.threads[j].owned = ∅
 ```
 
-**What it proves**: Dispatch-time disjointness check → runtime write exclusivity, for arbitrary thread count `n`. Complements TLA+ spec (`FileOwnershipDisjoint` invariant) which only checks `n=3`.
+**What it proves**: Starting from an empty state, no sequence of dispatch/complete/reassign operations can violate file ownership disjointness. This is the inductive invariant — not a tautology from a hypothesis, but a proof that the dispatch precondition is sufficient to maintain the invariant across all state transitions. Complements TLA+ spec (`FileOwnershipDisjoint`) which only checks `n=3`; Lean proof is universal over all `n`.
 
 **Acceptance criteria**:
 - Lean proof compiles for arbitrary `n`
@@ -205,7 +231,7 @@ Each proof produces:
 - Mapping from Lean model to Zig implementation (file:line ranges)
 - CI validation step ensuring model-code correspondence
 
-Enterprise artifact (when all proofs complete): "pz's policy enforcement has been formally verified in Lean 4. The proofs establish that tool mask sanitization cannot be bypassed, approval scoping prevents cross-context replay, signed policies cannot be tampered with, and file ownership boundaries cannot be violated. These properties hold for all possible inputs, not just tested cases. Proofs are conditional on standard cryptographic assumptions for the signature scheme."
+Enterprise artifact (when all proofs complete): "Four specific security properties of pz's policy enforcement have been formally verified in Lean 4: (1) tool mask sanitization strips unknown bits for all inputs, (2) approval keys are scoped by tool/command/location/policy/lifetime, (3) signed policy canonical content cannot be modified without detection under an idealized unforgeability assumption, (4) file ownership dispatch maintains disjointness across all state transitions. These properties hold for all possible inputs and all reachable states, not just tested cases."
 
 ## Review Findings (Round 1 — baseline L1-314a)
 

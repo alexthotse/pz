@@ -8,6 +8,7 @@ pub const null_store = @import("session/null_store.zig");
 pub const selector = @import("session/selector.zig");
 pub const path = @import("session/path.zig");
 pub const compact = @import("session/compact.zig");
+pub const summary = @import("session/summary.zig");
 pub const @"export" = @import("session/export.zig");
 pub const retry_state = @import("session/retry_state.zig");
 pub const regress = @import("session/regress.zig");

@@ -10,7 +10,7 @@ const version_check = @import("version.zig");
 const config = @import("config.zig");
 const core = @import("../core.zig");
 const core_skill = @import("../core/skill.zig");
-const prov_api = @import("../core/providers/api.zig");
+const summary_types = @import("../core/session/summary.zig");
 const print_fmt = @import("../modes/print/format.zig");
 const print_err = @import("../modes/print/errors.zig");
 const tui_harness = @import("../modes/tui/harness.zig");
@@ -6318,7 +6318,7 @@ fn shouldRetryOverflowState(
 
 const CompactRun = union(enum) {
     compacted,
-    stopped: prov_api.SummaryMeta,
+    stopped: summary_types.SummaryMeta,
 };
 
 const AutoCompactOutcome = enum {
@@ -6347,7 +6347,7 @@ fn compactNow(
     return .compacted;
 }
 
-fn formatCompactStopAlloc(alloc: std.mem.Allocator, meta: prov_api.SummaryMeta) ![]u8 {
+fn formatCompactStopAlloc(alloc: std.mem.Allocator, meta: summary_types.SummaryMeta) ![]u8 {
     return std.fmt.allocPrint(
         alloc,
         "[auto-compact stopped: summary input over budget bytes={d}/{d} tokens={d}/{d} kept={d} dropped={d}]",
