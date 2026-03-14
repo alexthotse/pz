@@ -1,3 +1,4 @@
+//! Syntax highlighter: token classification for code blocks.
 const std = @import("std");
 const frame = @import("frame.zig");
 const theme = @import("theme.zig");

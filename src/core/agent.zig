@@ -1,3 +1,4 @@
+//! Child agent RPC protocol: spawn, message framing, version negotiation.
 const std = @import("std");
 const testing = std.testing;
 

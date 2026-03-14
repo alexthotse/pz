@@ -1,3 +1,4 @@
+//! Bash tool: shell command execution with sandbox and policy.
 const builtin = @import("builtin");
 const std = @import("std");
 const policy = @import("../policy.zig");

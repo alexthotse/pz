@@ -1,3 +1,4 @@
+//! Print mode output formatting: JSON and text serialization.
 const std = @import("std");
 const core = @import("../../core.zig");
 

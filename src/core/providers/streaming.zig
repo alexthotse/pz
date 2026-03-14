@@ -1,3 +1,4 @@
+//! Streaming response reader with retry and chunk reassembly.
 const std = @import("std");
 const providers = @import("contract.zig");
 const retry = @import("retry.zig");
@@ -6,12 +7,14 @@ const types = @import("types.zig");
 
 pub const Err = types.Err;
 
+/// Retry policy instantiated for provider errors.
 pub const Pol = retry.Policy(Err);
 
 pub fn retryable(err: Err) bool {
     return types.retryable(err);
 }
 
+/// Type-erased byte-chunk iterator over a provider response body.
 pub const ChunkStream = struct {
     ctx: *anyopaque,
     vt: *const Vt,

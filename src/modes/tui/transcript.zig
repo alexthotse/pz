@@ -1,3 +1,4 @@
+//! Conversation transcript: scrollable message history panel.
 const std = @import("std");
 const core = @import("../../core.zig");
 const frame = @import("frame.zig");

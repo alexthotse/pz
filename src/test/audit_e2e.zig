@@ -1,3 +1,4 @@
+//! End-to-end audit pipeline tests.
 const std = @import("std");
 const testing = std.testing;
 const audit = @import("../core/audit.zig");

@@ -1,7 +1,9 @@
+//! Shell command tokenizer and pipeline parser.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const policy = @import("policy.zig");
 
+/// Pipeline separator: &&, ||, ;, |.
 pub const Sep = enum {
     start,
     @"and",

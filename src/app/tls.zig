@@ -1,3 +1,4 @@
+//! App-level TLS config: CA bundle and certificate setup.
 const std = @import("std");
 const args = @import("args.zig");
 const config = @import("config.zig");

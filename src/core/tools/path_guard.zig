@@ -1,3 +1,4 @@
+//! TOCTOU-safe path resolution and directory traversal guard.
 const builtin = @import("builtin");
 const std = @import("std");
 const posix = std.posix;

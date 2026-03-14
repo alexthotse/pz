@@ -1,3 +1,4 @@
+//! Session persistence regression tests.
 const std = @import("std");
 const writer = @import("writer.zig");
 const reader = @import("reader.zig");

@@ -1,3 +1,4 @@
+//! Terminal size query via ioctl.
 const std = @import("std");
 
 pub const Size = struct {

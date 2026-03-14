@@ -1,3 +1,4 @@
+//! Structured audit log: events, severity, HMAC-chained integrity.
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -6,6 +7,7 @@ const syslog = @import("syslog.zig");
 
 pub const ver_current: u16 = 1;
 
+/// Field visibility level for audit redaction.
 pub const Vis = enum {
     @"pub",
     mask,
@@ -13,6 +15,7 @@ pub const Vis = enum {
     secret,
 };
 
+/// Audit event severity (syslog-aligned).
 pub const Sev = enum {
     debug,
     info,
@@ -22,6 +25,7 @@ pub const Sev = enum {
     crit,
 };
 
+/// Audit event outcome.
 pub const Out = enum {
     ok,
     deny,
@@ -37,6 +41,7 @@ pub const Kind = enum {
     ship,
 };
 
+/// Text with visibility annotation for redaction.
 pub const Str = struct {
     text: []const u8,
     vis: Vis = .@"pub",

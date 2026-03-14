@@ -1,3 +1,4 @@
+//! Panel layout: transcript, status bar, input area composition.
 const std = @import("std");
 const core = @import("../../core.zig");
 const frame = @import("frame.zig");

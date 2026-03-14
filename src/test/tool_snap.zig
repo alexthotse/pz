@@ -1,3 +1,4 @@
+//! Test helper: tool result snapshot formatting.
 const std = @import("std");
 
 pub fn resultAlloc(alloc: std.mem.Allocator, res: anytype) ![]u8 {

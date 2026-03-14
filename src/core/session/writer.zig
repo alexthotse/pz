@@ -1,3 +1,4 @@
+//! JSONL session event writer with configurable flush policy.
 const std = @import("std");
 const posix = std.posix;
 const schema = @import("schema.zig");
@@ -7,6 +8,7 @@ const OhSnap = @import("ohsnap");
 
 pub const Event = schema.Event;
 
+/// When to fsync: after every write or every N writes.
 pub const FlushPolicy = union(enum) {
     always: void,
     every_n: u32,

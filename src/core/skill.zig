@@ -1,3 +1,4 @@
+//! Skill discovery: scan directories for SKILL.md metadata.
 const std = @import("std");
 
 pub const SkillMeta = struct {

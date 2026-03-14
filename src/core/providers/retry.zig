@@ -1,3 +1,4 @@
+//! Exponential backoff retry with jitter.
 const std = @import("std");
 
 pub const InitErr = error{

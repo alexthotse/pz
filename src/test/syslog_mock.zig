@@ -1,3 +1,4 @@
+//! Test mock: UDP syslog collector.
 const std = @import("std");
 const max_msgs: usize = 16;
 const max_msg_len: usize = 4096;

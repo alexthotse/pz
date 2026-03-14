@@ -1,3 +1,4 @@
+//! Generic fixed-capacity LRU cache (ring buffer, linear scan).
 const std = @import("std");
 
 /// Fixed-capacity LRU cache using a ring buffer with linear scan.

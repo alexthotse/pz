@@ -1,3 +1,4 @@
+//! Tool definitions, registry, and dispatch types.
 const std = @import("std");
 const runtime = @import("tools/runtime.zig");
 pub const truncate = @import("tools/truncate.zig");

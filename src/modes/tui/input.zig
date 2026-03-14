@@ -1,3 +1,4 @@
+//! Raw terminal input: ANSI escape sequence parsing.
 const std = @import("std");
 const editor = @import("editor.zig");
 const mouse = @import("mouse.zig");

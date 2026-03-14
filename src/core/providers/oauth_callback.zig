@@ -1,3 +1,4 @@
+//! Local HTTP server for OAuth redirect callback.
 const std = @import("std");
 
 pub const Opts = struct {

@@ -1,3 +1,4 @@
+//! Secure filesystem helpers: restrictive modes, safe dir creation.
 const std = @import("std");
 const builtin = @import("builtin");
 

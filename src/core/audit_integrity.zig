@@ -1,3 +1,4 @@
+//! HMAC-SHA256 chain for audit log tamper detection.
 const std = @import("std");
 const testing = std.testing;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;

@@ -1,3 +1,4 @@
+//! TUI test fixtures: harness setup for snapshot tests.
 const std = @import("std");
 const core = @import("../../core.zig");
 const frame = @import("frame.zig");

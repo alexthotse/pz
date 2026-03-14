@@ -1,3 +1,4 @@
+//! Runtime orchestration: wire providers, tools, and modes together.
 const builtin = @import("builtin");
 const std = @import("std");
 const cli = @import("cli.zig");

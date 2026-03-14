@@ -1,3 +1,4 @@
+//! Application layer: CLI parsing, config, and runtime orchestration.
 const std = @import("std");
 
 pub const args = @import("app/args.zig");

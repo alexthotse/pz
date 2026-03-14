@@ -1,3 +1,4 @@
+//! CLI entry: parse args, load config, select mode.
 const std = @import("std");
 const Args = @import("args.zig");
 const config = @import("config.zig");

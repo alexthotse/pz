@@ -1,3 +1,4 @@
+//! Tool call display: format and truncate tool args for the UI.
 const std = @import("std");
 const core = @import("../../core.zig");
 

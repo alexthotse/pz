@@ -1,3 +1,4 @@
+//! Configuration: env, settings.json, and CLI flag merging.
 const std = @import("std");
 const args = @import("args.zig");
 const core = @import("../core.zig");

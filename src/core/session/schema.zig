@@ -1,3 +1,4 @@
+//! Session event schema: versioned JSONL event types.
 const std = @import("std");
 const utf8 = @import("../utf8.zig");
 

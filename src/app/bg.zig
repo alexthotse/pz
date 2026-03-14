@@ -1,3 +1,4 @@
+//! Background job management: spawn, track, and reap child processes.
 const std = @import("std");
 const core = @import("../core.zig");
 const journal_mod = @import("job_journal.zig");

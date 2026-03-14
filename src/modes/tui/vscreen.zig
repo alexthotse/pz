@@ -1,3 +1,4 @@
+//! Virtual screen: off-screen cell buffer for snapshot testing.
 const std = @import("std");
 const wc = @import("wcwidth.zig");
 

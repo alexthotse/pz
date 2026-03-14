@@ -1,3 +1,4 @@
+//! Fuzzy string matching for command picker and completions.
 const std = @import("std");
 
 /// Fuzzy match scoring (lower = better, null = no match).

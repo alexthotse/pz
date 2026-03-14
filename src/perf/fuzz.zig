@@ -1,3 +1,4 @@
+//! Performance fuzz: policy and parser throughput gates.
 const std = @import("std");
 const policy = @import("../core/policy.zig");
 const stream_parse = @import("../core/providers/stream_parse.zig");

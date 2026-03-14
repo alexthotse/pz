@@ -1,3 +1,4 @@
+//! TLS certificate bundle helpers.
 const std = @import("std");
 
 pub fn applyCaFile(client: *std.http.Client, alloc: std.mem.Allocator, ca_file: ?[]const u8) !void {

@@ -1,3 +1,4 @@
+//! Core engine: agent loop, providers, tools, session, policy.
 pub const session = @import("core/session.zig");
 pub const tools = @import("core/tools.zig");
 pub const providers = @import("core/providers.zig");

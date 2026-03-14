@@ -1,3 +1,4 @@
+//! Web fetch tool: HTTP requests with policy enforcement.
 const std = @import("std");
 const policy_mod = @import("../policy.zig");
 const http_mock = @import("../../test/http_mock.zig");

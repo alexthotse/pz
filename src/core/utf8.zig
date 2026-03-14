@@ -1,3 +1,4 @@
+//! UTF-8 validation and lossy sanitization.
 const std = @import("std");
 
 pub const Lossy = struct {

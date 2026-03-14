@@ -1,3 +1,4 @@
+//! Color theme definitions for light and dark terminals.
 const std = @import("std");
 const Color = @import("frame.zig").Color;
 

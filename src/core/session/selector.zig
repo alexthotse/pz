@@ -1,3 +1,4 @@
+//! Session selector: resolve SID from args or create new.
 const std = @import("std");
 const sid_path = @import("path.zig");
 

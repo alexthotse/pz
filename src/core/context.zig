@@ -1,3 +1,4 @@
+//! AGENTS.md context discovery and loading.
 const std = @import("std");
 const policy = @import("policy.zig");
 const prov_contract = @import("providers/contract.zig");

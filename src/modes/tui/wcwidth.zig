@@ -1,3 +1,4 @@
+//! Unicode display width: wcwidth for terminal column counting.
 const std = @import("std");
 
 /// Display width of a Unicode codepoint.

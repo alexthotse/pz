@@ -1,3 +1,4 @@
+//! Modal overlay dialogs: model picker, session selector, settings.
 const std = @import("std");
 const frame_mod = @import("frame.zig");
 const theme_mod = @import("theme.zig");

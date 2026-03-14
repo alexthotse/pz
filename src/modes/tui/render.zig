@@ -1,3 +1,4 @@
+//! Terminal renderer: diff-based frame output with escape sequences.
 const std = @import("std");
 const frame = @import("frame.zig");
 const color_detect = @import("color_detect.zig");

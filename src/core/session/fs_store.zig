@@ -1,3 +1,4 @@
+//! Filesystem-backed session store.
 const std = @import("std");
 const session = @import("../session.zig");
 const writer = @import("writer.zig");

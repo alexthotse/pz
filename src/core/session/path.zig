@@ -1,3 +1,4 @@
+//! Session ID to filesystem path mapping.
 const std = @import("std");
 
 pub fn sidJsonlAlloc(alloc: std.mem.Allocator, sid: []const u8) ![]u8 {

@@ -1,3 +1,4 @@
+//! Mouse event types: scroll, press, release.
 const std = @import("std");
 
 pub const Ev = union(enum) {

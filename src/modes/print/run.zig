@@ -1,3 +1,4 @@
+//! Print mode execution loop.
 const std = @import("std");
 const core = @import("../../core.zig");
 const mode = @import("../mode.zig");

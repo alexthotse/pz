@@ -1,3 +1,4 @@
+//! Line-oriented stream parser for provider SSE responses.
 const std = @import("std");
 const providers = @import("contract.zig");
 const types = @import("types.zig");

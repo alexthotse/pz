@@ -1,3 +1,4 @@
+//! No-op session store for --no-session mode.
 const std = @import("std");
 const session = @import("../session.zig");
 

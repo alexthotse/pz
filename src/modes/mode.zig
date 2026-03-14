@@ -1,3 +1,4 @@
+//! Mode interface: type-erased run context and dispatch.
 const std = @import("std");
 const core = @import("../core.zig");
 

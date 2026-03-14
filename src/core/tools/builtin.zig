@@ -1,3 +1,4 @@
+//! Built-in tool specs: parameter schemas and metadata.
 const std = @import("std");
 const tools = @import("../tools.zig");
 const read = @import("read.zig");

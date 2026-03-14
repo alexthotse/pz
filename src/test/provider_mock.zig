@@ -1,3 +1,4 @@
+//! Test mock: scripted provider with canned responses.
 const std = @import("std");
 const providers = @import("../core/providers.zig");
 

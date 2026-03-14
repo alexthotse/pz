@@ -1,3 +1,4 @@
+//! ANSI escape sequence parser for test assertions.
 const std = @import("std");
 
 pub const Csi = struct {

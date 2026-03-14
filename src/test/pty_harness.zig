@@ -1,3 +1,4 @@
+//! PTY-based integration test harness for TUI walkthroughs.
 const std = @import("std");
 const build_options = @import("build_options");
 const app_config = @import("../app/config.zig");

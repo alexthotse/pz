@@ -1,3 +1,4 @@
+//! Self-update: download and replace the running binary.
 const std = @import("std");
 const builtin = @import("builtin");
 const cli = @import("cli.zig");

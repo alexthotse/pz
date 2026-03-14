@@ -1,3 +1,4 @@
+//! TUI harness: main event loop, input dispatch, panel management.
 const std = @import("std");
 const core = @import("../../core.zig");
 pub const editor = @import("editor.zig");

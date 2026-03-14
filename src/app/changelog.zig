@@ -1,3 +1,4 @@
+//! Embedded changelog: delta since last seen commit hash.
 const std = @import("std");
 const build_options = @import("build_options");
 

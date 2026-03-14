@@ -1,3 +1,4 @@
+//! Aggregated test imports for `zig build test`.
 comptime {
     _ = @import("app/cli.zig");
     _ = @import("app/changelog.zig");

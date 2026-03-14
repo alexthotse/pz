@@ -1,3 +1,4 @@
+//! Directory listing tool with path guarding.
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");

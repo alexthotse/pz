@@ -1,3 +1,4 @@
+//! Session layer: JSONL persistence, replay, compaction, export.
 const std = @import("std");
 const schema = @import("session/schema.zig");
 pub const writer = @import("session/writer.zig");

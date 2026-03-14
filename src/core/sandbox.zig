@@ -1,3 +1,4 @@
+//! Command sandbox: allowlist-based execution gating.
 const builtin = @import("builtin");
 const std = @import("std");
 

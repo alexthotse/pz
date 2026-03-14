@@ -1,3 +1,4 @@
+//! Version check: fetch latest release from GitHub, compare semver.
 const std = @import("std");
 const app_tls = @import("tls.zig");
 const cli = @import("cli.zig");

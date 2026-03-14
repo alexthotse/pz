@@ -1,3 +1,4 @@
+//! User-facing error reports: map error codes to summaries and next steps.
 const std = @import("std");
 
 const Rule = struct {

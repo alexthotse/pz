@@ -1,3 +1,4 @@
+//! Performance baseline: parser hot-path timing gate.
 const std = @import("std");
 const stream_parse = @import("../core/providers/stream_parse.zig");
 const providers = @import("../core/providers/contract.zig");

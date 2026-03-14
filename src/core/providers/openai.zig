@@ -1,3 +1,4 @@
+//! OpenAI Responses API client.
 const std = @import("std");
 const providers = @import("contract.zig");
 const auth_mod = @import("auth.zig");

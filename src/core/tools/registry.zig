@@ -1,3 +1,4 @@
+//! Comptime tool registry: kind-keyed dispatch table generation.
 const std = @import("std");
 
 pub fn bind(

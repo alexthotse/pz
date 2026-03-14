@@ -1,3 +1,4 @@
+//! Session file lifecycle: create, close, orphan cleanup.
 const std = @import("std");
 const builtin = @import("builtin");
 const fs_secure = @import("../fs_secure.zig");

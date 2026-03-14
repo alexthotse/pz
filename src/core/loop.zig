@@ -1,3 +1,4 @@
+//! Agent loop: provider request / tool dispatch cycle.
 const std = @import("std");
 const policy = @import("policy.zig");
 const providers = @import("providers.zig");

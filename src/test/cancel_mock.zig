@@ -1,3 +1,4 @@
+//! Test mock: atomic cancellation flag.
 const std = @import("std");
 
 pub const Flag = struct {

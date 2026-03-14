@@ -1,3 +1,4 @@
+//! Markdown renderer: inline styles, code blocks, tables.
 const std = @import("std");
 const frame = @import("frame.zig");
 const theme = @import("theme.zig");

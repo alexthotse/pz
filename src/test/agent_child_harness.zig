@@ -1,3 +1,4 @@
+//! Test harness: child agent RPC protocol scenarios.
 const builtin = @import("builtin");
 const std = @import("std");
 const agent = @import("core_agent");

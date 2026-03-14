@@ -1,3 +1,4 @@
+//! Braille spinner animation frames.
 const std = @import("std");
 
 pub const chars = [_]u21{

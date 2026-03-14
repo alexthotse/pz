@@ -1,3 +1,4 @@
+//! Provider authentication: API key and OAuth token resolution.
 const std = @import("std");
 const builtin = @import("builtin");
 const oauth_callback = @import("oauth_callback.zig");

@@ -1,3 +1,4 @@
+//! Session compaction: summarize history to fit context window.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const schema = @import("schema.zig");

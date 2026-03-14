@@ -1,3 +1,4 @@
+//! Input line editor: key bindings, cursor, history.
 const std = @import("std");
 
 pub const Key = union(enum) {

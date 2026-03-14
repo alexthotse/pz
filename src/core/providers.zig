@@ -1,3 +1,4 @@
+//! Provider layer: LLM API clients, auth, streaming, retry.
 pub const retry = @import("providers/retry.zig");
 pub const types = @import("providers/types.zig");
 pub const stream_parse = @import("providers/stream_parse.zig");

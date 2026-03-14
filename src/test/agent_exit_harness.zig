@@ -1,3 +1,4 @@
+//! Test harness: agent exit-code scenarios.
 const std = @import("std");
 const agent = @import("core_agent");
 

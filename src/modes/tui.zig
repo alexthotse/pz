@@ -1,3 +1,4 @@
+//! TUI mode: interactive terminal UI components.
 pub const frame = @import("tui/frame.zig");
 pub const render = @import("tui/render.zig");
 pub const editor = @import("tui/editor.zig");

@@ -1,3 +1,4 @@
+//! Grep tool: regex search across files with path guarding.
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");

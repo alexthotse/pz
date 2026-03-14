@@ -1,3 +1,4 @@
+//! Skill invocation tool: discover and run slash-command skills.
 const std = @import("std");
 const core_skill = @import("../skill.zig");
 const tools = @import("../tools.zig");

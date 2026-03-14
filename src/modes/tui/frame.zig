@@ -1,3 +1,4 @@
+//! Terminal frame buffer: styled cell grid with cursor tracking.
 const std = @import("std");
 const wcwidth = @import("wcwidth.zig").wcwidth;
 

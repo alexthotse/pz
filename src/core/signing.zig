@@ -1,3 +1,4 @@
+//! Ed25519 signing for policy locks and audit integrity.
 const std = @import("std");
 
 const Ed25519 = std.crypto.sign.Ed25519;

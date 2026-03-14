@@ -1,3 +1,4 @@
+//! Persisted retry state: survive restarts across transient failures.
 const std = @import("std");
 const sid_path = @import("path.zig");
 const fs_secure = @import("../fs_secure.zig");

@@ -1,3 +1,4 @@
+//! Tool contract tests: verify all tools conform to registry interface.
 const std = @import("std");
 const OhSnap = @import("ohsnap");
 const path_guard = @import("path_guard.zig");

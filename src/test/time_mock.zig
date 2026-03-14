@@ -1,3 +1,4 @@
+//! Test mock: fixed-time clock.
 const std = @import("std");
 
 pub const FixedMs = struct {

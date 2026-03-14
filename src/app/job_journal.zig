@@ -1,3 +1,4 @@
+//! Persistent job journal: track active background jobs across restarts.
 const builtin = @import("builtin");
 const std = @import("std");
 const fs_secure = @import("../core/fs_secure.zig");

@@ -1,3 +1,4 @@
+//! File read tool with path guarding and line-range support.
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");

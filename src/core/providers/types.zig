@@ -1,3 +1,4 @@
+//! Provider error types and classification.
 const std = @import("std");
 
 pub const Err = error{

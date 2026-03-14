@@ -1,3 +1,4 @@
+//! RFC 5424 syslog client: UDP/TCP transport, structured data.
 const std = @import("std");
 const policy = @import("policy.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");

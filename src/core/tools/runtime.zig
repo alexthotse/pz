@@ -1,3 +1,4 @@
+//! Runtime tool execution: dispatch calls and collect results.
 const std = @import("std");
 const registry = @import("registry.zig");
 

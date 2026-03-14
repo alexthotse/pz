@@ -1,3 +1,4 @@
+//! Agent tool: spawn child agent via RPC.
 const std = @import("std");
 const rpc = @import("../agent.zig");
 const tools = @import("../tools.zig");

@@ -1,3 +1,4 @@
+//! Test mock: HTTP request/response stub.
 const std = @import("std");
 
 pub const Response = struct {

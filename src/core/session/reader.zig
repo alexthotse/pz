@@ -1,3 +1,4 @@
+//! JSONL session event reader and replay.
 const std = @import("std");
 const schema = @import("schema.zig");
 const sid_path = @import("path.zig");

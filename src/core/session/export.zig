@@ -1,9 +1,11 @@
+//! Session export: convert JSONL session to markdown.
 const std = @import("std");
 const audit = @import("../audit.zig");
 const utf8 = @import("../utf8.zig");
 const reader_mod = @import("reader.zig");
 const sid_path = @import("path.zig");
 
+/// Optional callbacks for audit emission during export.
 pub const AuditHooks = struct {
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,

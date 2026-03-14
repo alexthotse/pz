@@ -1,3 +1,4 @@
+//! Child-process transport: pipe-based provider for local models.
 const std = @import("std");
 const first = @import("client.zig");
 const shell = @import("../shell.zig");

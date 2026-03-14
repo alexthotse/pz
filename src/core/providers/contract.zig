@@ -1,3 +1,4 @@
+//! Provider contract: shared types for messages, tools, and events.
 const std = @import("std");
 const testing = std.testing;
 

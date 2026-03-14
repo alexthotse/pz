@@ -1,3 +1,4 @@
+//! Policy engine: path-pattern allow/deny rules with signed locks.
 const std = @import("std");
 const signing = @import("signing.zig");
 const build_options = @import("build_options");

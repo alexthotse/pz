@@ -1,3 +1,4 @@
+//! Print mode error types and result union.
 const std = @import("std");
 const core = @import("../../core.zig");
 
