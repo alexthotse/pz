@@ -1,5 +1,7 @@
 //! Child-process transport: pipe-based provider for local models.
+const builtin = @import("builtin");
 const std = @import("std");
+const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const providers = @import("api.zig");
 const types = @import("types.zig");
@@ -63,11 +65,17 @@ pub const ProcChunk = struct {
             cmd,
         };
 
+        var env = std.process.getEnvMap(alloc) catch |err| return mapProcErr(err);
+        defer env.deinit();
+        sandbox.scrubEnv(&env);
+
         var child = std.process.Child.init(argv[0..], alloc);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
         child.cwd = cwd;
+        child.env_map = &env;
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) child.pgid = 0;
 
         child.spawn() catch |spawn_err| return mapProcErr(spawn_err);
         errdefer {
@@ -133,13 +141,37 @@ pub const ProcChunk = struct {
 };
 
 fn killAndWait(child: *std.process.Child) !void {
-    _ = child.kill() catch |kill_err| switch (kill_err) {
-        error.AlreadyTerminated => {
-            _ = child.wait() catch |wait_err| return mapProcErr(wait_err);
-            return;
-        },
-        else => return mapProcErr(kill_err),
-    };
+    const pid = child.id;
+
+    // TERM the process group first.
+    if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+        std.posix.kill(-pid, std.posix.SIG.TERM) catch |err| switch (err) {
+            error.ProcessNotFound => {
+                _ = child.wait() catch |wait_err| return mapProcErr(wait_err);
+                return;
+            },
+            else => return mapProcErr(err),
+        };
+
+        // Poll with WNOHANG for ~150ms.
+        var polls: u32 = 0;
+        while (polls < 15) : (polls += 1) {
+            const res = std.posix.waitpid(pid, std.c.W.NOHANG);
+            if (res.pid != 0) {
+                child.id = undefined;
+                return;
+            }
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
+
+        // Escalate to KILL on the process group.
+        std.posix.kill(-pid, std.posix.SIG.KILL) catch |err| switch (err) {
+            error.ProcessNotFound => {},
+            else => return mapProcErr(err),
+        };
+    }
+
+    _ = child.wait() catch |wait_err| return mapProcErr(wait_err);
 }
 
 fn mapProcErr(err: anyerror) anyerror {

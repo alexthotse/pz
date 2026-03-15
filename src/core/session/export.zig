@@ -2,6 +2,7 @@
 const std = @import("std");
 const audit = @import("../audit.zig");
 const utf8 = @import("../utf8.zig");
+const fs_secure = @import("../fs_secure.zig");
 const reader_mod = @import("reader.zig");
 const sid_path = @import("path.zig");
 
@@ -131,12 +132,8 @@ fn toMarkdownWith(
         },
     });
 
-    const file = std.fs.createFileAbsolute(dest, .{ .truncate = true }) catch |err| {
-        try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .fail, @errorName(err)));
-        return err;
-    };
-    defer file.close();
-    file.writeAll(buf.items) catch |err| {
+    // Atomic export: write to temp, fsync, rename.
+    atomicExportWrite(dest, buf.items) catch |err| {
         try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .fail, @errorName(err)));
         return err;
     };
@@ -144,6 +141,44 @@ fn toMarkdownWith(
     try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .ok, null));
 
     return dest;
+}
+
+/// Atomic write for export: temp file + fsync + rename over dest.
+fn atomicExportWrite(dest: []const u8, data: []const u8) !void {
+    const dir_path = std.fs.path.dirname(dest) orelse return error.FileNotFound;
+    const basename = std.fs.path.basename(dest);
+
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        try std.fs.openDirAbsolute(dir_path, .{})
+    else
+        try std.fs.cwd().openDir(dir_path, .{});
+    defer dir.close();
+
+    // Temp name: ".basename.tmp"
+    var tmp_buf: [512]u8 = undefined;
+    const needed = 1 + basename.len + 4;
+    if (needed > tmp_buf.len) return error.NameTooLong;
+    tmp_buf[0] = '.';
+    @memcpy(tmp_buf[1 .. 1 + basename.len], basename);
+    @memcpy(tmp_buf[1 + basename.len .. needed], ".tmp");
+    const tmp_name = tmp_buf[0..needed];
+
+    // Clean up stale temp, create, write, fsync
+    dir.deleteFile(tmp_name) catch {};
+    var file = try dir.createFile(tmp_name, .{ .truncate = true, .mode = fs_secure.file_mode });
+    errdefer {
+        file.close();
+        dir.deleteFile(tmp_name) catch {};
+    }
+    try file.writeAll(data);
+    try file.sync();
+    file.close();
+
+    // Rename over target
+    dir.rename(tmp_name, basename) catch |err| {
+        dir.deleteFile(tmp_name) catch {};
+        return err;
+    };
 }
 
 fn appendSection(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), title: []const u8, txt: []const u8) !void {

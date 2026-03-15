@@ -8480,6 +8480,7 @@ fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
                 .transport = .udp,
                 .host = "127.0.0.1",
                 .port = collector.port(),
+                .allow_private = true,
             });
             defer sender.deinit();
 
@@ -8487,7 +8488,7 @@ fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
             t.join();
             try audit_e2e.verifyRoundTrip(&collector, rows.rows.items);
         },
-        .tcp => {
+        .tcp, .tls => {
             var collector = try syslog_mock.TcpCollector.init();
             defer collector.deinit();
             const t = try collector.spawnCount(rows.rows.items.len);
@@ -8496,6 +8497,7 @@ fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
                 .transport = .tcp,
                 .host = "127.0.0.1",
                 .port = collector.port(),
+                .allow_private = true,
             });
             defer sender.deinit();
 

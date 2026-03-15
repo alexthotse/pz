@@ -1,12 +1,12 @@
 # PZ-TODO: Built-in Task Management
 
-Replaces external `dots` CLI. Tasks are the executable work-tracking layer.
-Add as `SK8` in the plan file.
+Replaces external `dots` CLI. A task list is a single markdown file.
+Add as `SK8` in the plan.
 
 ## Goals
 
 1. Model proposes task updates via tool call; approval gate on mutations; user manages directly via `/todo`.
-2. Tasks persist as markdown in `.pz/tasks/` for durability and implementation detail.
+2. Tasks persist in a single markdown file (default: `.pz/tasks.md`).
 3. All modes (TUI, print, JSON, RPC) handle todo events. TUI gets inline transcript blocks + `/todo` overlay.
 4. No external dependencies — all logic lives in pz.
 
@@ -14,107 +14,96 @@ Add as `SK8` in the plan file.
 
 ### Codex (OpenAI)
 - Model calls `update_plan` tool with full plan state each time (replace, not patch).
-- CLI rendering: `✓` green, `→` cyan, `•` dim. TUI: `✔` strikethrough+dim, `□` cyan bold, `□` dim.
-- Plan updates as `HistoryCell` blocks in chat transcript.
+- CLI: `✓` green, `→` cyan, `•` dim. TUI: `✔` strikethrough+dim, `□` cyan bold, `□` dim.
 
 ### dots (joelreymont/dots)
-- Zig CLI, markdown frontmatter files in `.dots/`, archive subdir for closed items.
+- Zig CLI, one markdown file per task in `.dots/`, archive subdir for closed.
 - Features: parent-child hierarchy, blocking deps, slug-based IDs, search, tree view.
-- Commands: `add`, `ls`, `on`, `off`, `rm`, `show`, `tree`, `find`, `ready`.
 
-## Design
+---
 
-### Storage: `.pz/tasks/`
+## Storage
 
-```
-.pz/tasks/
-  fix-uaf-3a7b1e2f.md   # open task
-  add-grep-c1f29d0a.md   # open task
-  archive/                # completed tasks moved here
-    setup-ci-8e4d5f7b.md
-```
+### Single file: `.pz/tasks.md`
 
-No config file. IDs are slug + random hex (no sequence numbers).
-`TaskStore.open()` calls `makePath(".pz/tasks/archive")` to create the directory tree on first use.
-
-Each task file uses line-oriented frontmatter (NOT YAML) + markdown body:
+One file holds all tasks. Each task is a `## ` section:
 
 ```markdown
----
-id: fix-uaf-3a7b1e2f
-title: Fix UAF in compaction
-status: open
-priority: 1
-parent:
-blocks:
-created: 2026-03-15T10:00:00+01:00
-closed:
----
+## Fix UAF in compaction
+id: fix-uaf-3a7b | status: active | priority: 1 | created: 2026-03-15
 
 Do: prove/refute ReplayReader arena-dangle in multi-event compaction.
 Files: `src/core/session/compact.zig`, `src/core/session/reader.zig`
 Accept: allocator regression proves no dangling event data across next() calls.
+
+## Add grep tool
+id: add-grep-c1f2 | status: open | priority: 2 | created: 2026-03-15
+
+Add grep tool with ripgrep backend.
+
+## Setup CI pipeline
+id: setup-ci-8e4d | status: done | priority: 2 | created: 2026-03-14 | closed: 2026-03-15
+
+Configure GitHub Actions for CI.
 ```
 
-### Frontmatter Format
+The file IS the plan. The review skill reads it directly.
+Any file in this format works — `todo(file="./sprint-3.md")`, `/todo --file ./sprint-3.md`.
 
-NOT YAML. Minimal line-oriented `key: value` format:
-- Delimited by `---` lines (start and end)
-- One field per line: `key: value`
-- First `: ` (colon-space) is the delimiter; value is everything after
-- Empty value = null (e.g., `parent:`, `closed:`)
-- Arrays: comma-separated inline (e.g., `blocks: id1, id2`) or empty for `[]`
-- No multiline values, no nested objects, no quoting, no anchors
-- Body cannot contain `---` on a line by itself (serializer escapes to `\-\-\-`)
+### Section format
 
-### Status Model
+```
+## {title}
+id: {id} | status: {status} | priority: {N} | created: {ISO} [| closed: {ISO}] [| parent: {id}] [| blocks: {id}, {id}]
 
-Three stored states: `open`, `active`, `done`.
-`blocked` is computed at display time from dependency graph (same as dots).
-No `cancelled` — delete the file instead.
+{body — free-form markdown, max 4KB per task}
+```
 
-### ID Generation
+- **Line 1** (`## `): title, max 80 chars.
+- **Line 2** (metadata): pipe-delimited `key: value`. Parsed by splitting on ` | ` then first `: ` only.
+- **Lines 3+**: body. Free-form markdown.
+- Sections separated by blank lines.
+- **Section boundary rule**: a `## ` line is a section start ONLY if the next non-empty line contains `id:`. This prevents `## ` in body text from being misparse as a new task.
 
-`{slug}-{hex8}` where slug is kebab-case from title (max 20 chars), hex8 is 4 random bytes hex-encoded (8 hex chars).
-
-**Slug sanitization (security-critical):**
-- Characters restricted to `[a-z0-9-]` only; all others stripped
-- Leading dots and path separators (`/`, `\`) forbidden
-- Final filename validated as single path component (no `/`, `\`, `.`, `..`)
-- On collision (file exists), retry with new random bytes (max 3 retries, then error)
-
-**Short-ID resolution:** unique prefix match. Ambiguous prefix (matches >1 task) returns error listing all matches.
-
-### Task File Format
+### Metadata fields
 
 | Field     | Type       | Required | Description |
 |-----------|------------|----------|-------------|
 | `id`      | string     | yes      | Unique slug-hex ID |
-| `title`   | string     | yes      | Short description (< 80 chars) |
 | `status`  | enum       | yes      | `open`, `active`, `done` |
 | `priority`| int 0-9    | yes      | 0 = highest, default 2 |
-| `parent`  | string?    | no       | Parent task ID for hierarchy |
-| `blocks`  | []string   | no       | IDs this task blocks (dependency) |
 | `created` | ISO 8601   | yes      | Creation timestamp |
-| `closed`  | ISO 8601?  | no       | Completion timestamp |
+| `closed`  | ISO 8601   | no       | Completion timestamp |
+| `parent`  | string     | no       | Parent task ID |
+| `blocks`  | string csv | no       | IDs this task blocks |
 
-Body: free-form markdown, max 4KB. Implementation notes, file references, acceptance criteria.
+Title comes from the `## ` heading. Values must NOT contain ` | ` (enforced on write, error on parse).
 
-**Body sanitization:** body cannot contain frontmatter delimiters (`---` on its own line).
-The serializer escapes these on write; the parser un-escapes on read.
+### Status model
 
-### Module: `src/core/tasks/`
+Three stored states: `open`, `active`, `done`.
+`blocked` computed from dependency graph at display time.
+No `cancelled` — remove the section.
+
+### ID generation
+
+`{slug}-{hex8}`: kebab-case from title (max 20 chars) + 4 random bytes hex-encoded.
+Slug chars: `[a-z0-9-]` only. All other chars stripped. No leading dots or path separators.
+Short-ID resolution: unique prefix match across all tasks in file. Ambiguous → error listing matches.
+Collision: retry with new random (max 3).
+
+---
+
+## Module: `src/core/tasks/`
 
 ```
 src/core/tasks/
-  mod.zig       # public API: TaskStore, Task, Status, re-exports
-  store.zig     # disk I/O, CRUD, resolve, archive, dependency graph
-  format.zig    # frontmatter parse/serialize
+  mod.zig       # TaskList, Task, Status, re-exports
+  parse.zig     # parse task file → []Task
+  render.zig    # []Task → markdown
 ```
 
-No separate `resolve.zig` — resolution and dependency logic live in `store.zig`.
-
-#### `Task` struct
+### `Task` struct
 
 ```zig
 pub const Status = enum { open, active, done };
@@ -123,100 +112,103 @@ pub const Task = struct {
     id: []const u8,
     title: []const u8,
     status: Status,
-    priority: u4,           // 0-9
+    priority: u4,
     parent: ?[]const u8,
     blocks: []const []const u8,
-    created: []const u8,    // ISO 8601
+    created: []const u8,
     closed: ?[]const u8,
-    body: []const u8,       // markdown after frontmatter, max 4KB
+    body: []const u8,
 };
 ```
 
-#### `TaskStore` API
+### `TaskList` API
 
 ```zig
-pub const TaskStore = struct {
-    dir: fs.Dir,            // .pz/tasks/
+pub const TaskList = struct {
     alloc: Allocator,
+    tasks: []Task,
+    path: []const u8,
 
-    /// Opens .pz/tasks/, creating directory tree if needed.
-    pub fn open(alloc: Allocator) !TaskStore;
-    pub fn close(self: *TaskStore) void;
+    /// Load task file. Creates if missing. Default: ".pz/tasks.md".
+    pub fn open(alloc: Allocator, path: []const u8) !TaskList;
+    pub fn deinit(self: *TaskList) void;
 
-    // CRUD
-    pub fn create(self: *TaskStore, title: []const u8, opts: CreateOpts) !Task;
-    pub fn get(self: *TaskStore, id: []const u8) !?Task;
-    pub fn list(self: *TaskStore, filter: ?Status) ![]Task;
-    pub fn delete(self: *TaskStore, id: []const u8) !void;
+    // Mutations (each calls flush — atomic rewrite)
+    pub fn add(self: *TaskList, title: []const u8, opts: AddOpts) !*Task;
+    pub fn remove(self: *TaskList, id: []const u8) !void;
+    pub fn activate(self: *TaskList, id: []const u8) !void;
+    pub fn complete(self: *TaskList, id: []const u8) !void;
+    pub fn reopen(self: *TaskList, id: []const u8) !void;
 
-    // Status transitions (enforce state machine)
-    pub fn activate(self: *TaskStore, id: []const u8) !void;   // open → active
-    pub fn complete(self: *TaskStore, id: []const u8) !void;    // active → done, archive
-    pub fn reopen(self: *TaskStore, id: []const u8) !void;      // done → open, unarchive
+    // Lifecycle
+    pub fn clear(self: *TaskList) !usize;   // remove done tasks (skip if parent of non-done), return count
+    pub fn reset(self: *TaskList) !void;     // remove all tasks (writes backup to .pz/tasks.md.bak first)
 
-    // Queries (always read from disk, no caching)
-    pub fn resolve(self: *TaskStore, short_id: []const u8) ![]const u8;
-    pub fn ready(self: *TaskStore) ![]Task;     // unblocked open tasks
-    pub fn tree(self: *TaskStore, root: ?[]const u8) ![]TreeNode;
+    // Queries — returned slices are borrowed from TaskList, invalid after deinit()
+    pub fn get(self: *TaskList, id: []const u8) ?*Task;
+    pub fn resolve(self: *TaskList, short_id: []const u8) !*Task;  // min 4 chars
+    pub fn filter(self: *TaskList, status: ?Status) []Task;
+    pub fn ready(self: *TaskList) []Task;
+    pub fn isBlocked(self: *TaskList, id: []const u8) bool;
+
+    // Persistence
+    fn flush(self: *TaskList) !void;  // atomic: write {path}.tmp, stat-check mtime, rename
 };
 ```
 
-No `update(Patch)` — status changes go through named transition methods.
-No `sync()` — incremental updates only, never bulk replace.
-All query methods read from disk on every call (no in-memory cache). Correct for small task counts and avoids stale-state bugs.
+Short-lived: open, mutate, close. Always reads fresh from disk.
 
-### Security
+---
 
-#### Policy bypass
+## Security
 
-The todo tool writes to `.pz/tasks/` inside the protected `.pz/` directory.
-Intentional, scoped bypass of `path_guard`:
-- `TaskStore` does NOT go through `path_guard.createFile()`
-- Writes only within `.pz/tasks/` via its own `fs.Dir` handle
-- Slug sanitizer prevents path traversal out of this directory
-- Acceptable because: (a) narrowly scoped, (b) content validated, (c) gated by approval
+### Policy bypass
 
-#### Approval gate
+Default `.pz/tasks.md` is inside protected `.pz/`. Protection comes from policy rules (not path_guard). `toolPolicyPath` for `.todo` returns `"runtime/tool/todo"` (synthetic — like `ask`/`web`). The handler bypasses policy's `.pz/` self-protection by writing directly, acceptable because: (a) narrowly scoped to one file, (b) content validated, (c) gated by approval.
 
-The `todo` tool is marked `destructive = true` on the `tools.Tool` entry (static flag). This means `read` actions also trigger the approval gate. This is the correct tradeoff: the `destructive` flag is set at entry construction time in `rebuildEntries()` and cannot vary per-call. Marking non-destructive would leave mutations ungated.
+Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to validate the path BEFORE `TaskList.open()`. Both must pass.
 
-After the first approval, the approval cache suppresses subsequent prompts for the session.
+### Approval gate
 
-#### Content validation
+`destructive = true` on `tools.Tool` entry (static). All actions including `read` trigger approval on first use. Cache suppresses repeats.
 
-- Title: max 80 chars, slug-safe subset validated
-- Body: max 4KB, frontmatter delimiters escaped
-- Status: closed enum, no arbitrary values
-- Priority from model: `?i64` in `TodoArgs`, clamped to `u4` (0-9) before storage
-- IDs from model: validated via `resolve()` which only matches existing files
-- Model cannot delete tasks — deletion is user-only via `/todo rm`
+### Content validation
 
-#### Tool mask inheritance
+- Title: max 80 chars, must not contain `\n`, `\r`, ` | `, or `#` (prevents metadata/section injection)
+- Body: max 4KB per task, lines matching `^## ` escaped on write (`\## `), unescaped on read
+- Status: closed enum
+- Priority: `?i64` clamped to `u4` (0-9)
+- IDs: validated via `resolve()`, minimum 4 chars to prevent overly broad prefix matches
+- Note: max 256 bytes
+- Model cannot delete tasks — user-only via `/todo rm`
+- Max 200 tasks per file. `add()` errors when exceeded.
 
-`mask_todo` IS included in `mask_all` (so `init()` at `builtin.zig:173` does not strip it via `opts.tool_mask & mask_all`). Child agent inheritance is controlled at spawn time: the `agent` tool explicitly strips `mask_todo` from the child's mask. Background agents (read-only by policy) cannot mutate tasks because the approval gate blocks them.
+### Tool mask
 
-### Model Tool: `todo`
+`mask_todo` in `mask_all`. Child agents get it stripped at spawn — orchestrator-only writes. Note: the agent tool is currently unimplemented (`agent.zig` returns "unavailable"). The mask stripping must be added when the agent tool is wired up. `AgentArgs` will need a `tool_mask` field or the spawn protocol must carry the mask. Blocked on agent tool implementation — mark as dependency.
 
-Added to `builtin.zig`:
-- `mask_todo: u16 = 1 << 10` — included in `mask_all`
-- Bump `entries: [11]tools.Entry` and `selected: [11]tools.Entry` (from `[10]`)
-- Also bump `PolicyToolRegistry` arrays in `runtime.zig:~251`: `ctxs: [11]` and `entries: [11]`
-- Add `mask_todo` check in `activeEntries()` (and update fast-path: `mask_all` equality still works since `mask_todo` is in `mask_all`)
-- Add `"todo"` to `maskForName` static map
-- Add 11th entry in `rebuildEntries()`
-- Uses `schema_json` (raw JSON schema), same pattern as `ask` tool
-- `destructive = true` on the entry spec
-- Note: `web` has a `Kind` variant but no builtin entry; array size `[11]` counts registered entries, not `Kind` variants (12 with `todo`)
+---
 
-#### Type changes in `src/core/tools.zig`
+## Model Tool: `todo`
+
+### Registration in `builtin.zig`
+
+- `mask_todo: u16 = 1 << 10` in `mask_all`
+- Bump `entries`/`selected` `[10]` → `[11]`
+- Bump `PolicyToolRegistry` in `runtime.zig` (`PolicyToolRegistry` struct): `ctxs`/`entries` `[10]` → `[11]`
+- Add to `activeEntries()`, `maskForName`, `rebuildEntries()`
+- `schema_json` pattern (like `ask`)
+- `destructive = true`
+- Note: `web` has Kind variant but no entry; `[11]` = registered entries
+
+### Type changes in `tools.zig`
 
 ```zig
-// Add to Kind enum (line ~18):
 pub const Kind = enum { read, write, bash, edit, grep, find, ls, agent, web, ask, skill, todo };
 
-// Add TodoArgs struct:
 pub const TodoArgs = struct {
     action: enum { read, update, add },
+    file: ?[]const u8,         // default: ".pz/tasks.md"
     tasks: ?[]const TaskItem,
     note: ?[]const u8,
 
@@ -224,40 +216,39 @@ pub const TodoArgs = struct {
         id: ?[]const u8,
         title: ?[]const u8,
         status: ?[]const u8,
-        priority: ?i64,       // clamped to u4(0-9) by handler
+        priority: ?i64,
         parent: ?[]const u8,
         body: ?[]const u8,
     };
 };
 
-// Add to Call.Args union (line ~107):
 pub const Args = union(Kind) {
-    // ... existing variants ...
+    // ... existing ...
     todo: TodoArgs,
 };
 ```
 
-**Every exhaustive switch on `Kind` or `Args` must be updated.** Known sites:
-- `loop.zig:~1173` (`noteApproval` — needs_approval)
-- `loop.zig:~1197` (`approvalSummaryAlloc`)
-- `loop.zig:~1256` (`parseCallArgs`)
-- `runtime.zig:~209` (`toolPolicyPath`)
-- `runtime.zig:~342` (`toolAuditInfo`)
-- `runtime.zig:~1671` (`auditResKind`)
-- `runtime.zig:~1680` (`auditResOp`)
-- Plus any switches in session serialization and test infrastructure. Grep for `switch.*Kind` and `switch.*Args` across codebase.
+**Exhaustive switch sites** (add `.todo` arm). Use function/type names as anchors — line numbers are approximate:
+- `loop.zig` `noteApproval` fn
+- `loop.zig` `approvalSummaryAlloc` fn — **CRITICAL**: currently `else => unreachable`. Must add `.todo` arm with format string `"todo {action} {file}"` or runtime crash on first approval.
+- `loop.zig` `parseCallArgs` fn — must handle `TodoArgs` nested `[]const TaskItem` JSON deserialization
+- `runtime.zig` `toolPolicyPath` fn — return `"runtime/tool/todo"` (synthetic)
+- `runtime.zig` `toolAuditInfo` fn — `.todo => .{ .res_kind = .cfg, .op = @tagName(action), .target = file, .argv = "todo" }`
+- `runtime.zig` `auditResKind` fn
+- `runtime.zig` `auditResOp` fn
+- Plus session serialization, test infra, and any others. Grep `switch.*Kind` and `switch.*Args` for full list (expect 9+).
 
-Tool schema sent to the model (via `schema_json`):
+### Tool schema (`schema_json`)
 
 ```json
 {
   "name": "todo",
-  "description": "View or update the task list. Use 'read' to see current tasks, 'update' to modify task statuses, 'add' to create new tasks.",
+  "description": "Manage a task list. 'read' to see tasks, 'update' to change statuses, 'add' to create.",
   "parameters": {
     "action": { "type": "string", "enum": ["read", "update", "add"], "required": true },
+    "file": { "type": "string", "description": "Task file (default: .pz/tasks.md)" },
     "tasks": {
       "type": "array",
-      "description": "For 'update': [{id, status}]. For 'add': [{title, priority?, parent?, body?}].",
       "items": {
         "type": "object",
         "properties": {
@@ -270,150 +261,109 @@ Tool schema sent to the model (via `schema_json`):
         }
       }
     },
-    "note": { "type": "string", "description": "Optional explanation of what changed and why" }
+    "note": { "type": "string", "description": "Explanation of what changed" }
   }
 }
 ```
 
-**action=read**: Returns task list as markdown table (titles + status only, NOT bodies).
-**action=update**: Patches task statuses. Each item processed independently — one bad ID does not abort the batch. Result shows per-item success/failure.
-**action=add**: Creates new tasks with validated title/body. Model cannot set `id` (auto-generated).
+**action=read**: titles + status (no bodies). Warn if empty tasks array on update.
+**action=update**: patch statuses, per-item errors.
+**action=add**: create tasks, model cannot set `id`.
 
-### Tool Handler: `src/core/tools/todo.zig`
+---
 
-The handler runs inside `builtin.Runtime` which has NO access to `ModeEv` or mode sinks. Therefore the handler does NOT emit `ModeEv` events. Instead, `app/runtime.zig` emits the `ModeEv.todo_update` event post-tool-result when it detects a completed `todo` tool call. This follows the principle that tool handlers return results, and the runtime routes events.
+## Tool Handler: `src/core/tools/todo.zig`
 
-Handler signature matches existing pattern:
+Runs in `builtin.Runtime` — NO access to `ModeEv`. Returns `tools.Result` (with `call_id`, timestamps, `out` slice, `final`). Reference `runAsk` in `builtin.zig` for the correct pattern — the pseudocode below is simplified.
 
-```zig
-pub fn runTodo(self: *@This(), call: tools.Call, writer: tools.Sink) !tools.Result {
-    const args = call.args.todo;
-    var store = try TaskStore.open(self.alloc);
-    defer store.close();
+`app/runtime.zig` emits `ModeEv.todo_update` post-tool-result. This is a **new pattern** — no existing post-tool ModeEv emission exists. Add the check in the tool-result handling path (after `execTool` returns in `loop.zig`), not in the handler.
 
-    switch (args.action) {
-        .read => {
-            const tasks = try store.list(null);
-            return .{ .output = formatSummary(self.alloc, tasks) };
-        },
-        .update => {
-            var errs = std.ArrayList(u8).init(self.alloc);
-            for (args.tasks orelse &.{}) |item| {
-                const raw_id = item.id orelse {
-                    try errs.appendSlice("error: missing id for update item\n");
-                    continue;
-                };
-                const id = store.resolve(raw_id) catch |e| {
-                    try appendErr(&errs, "resolve", raw_id, e);
-                    continue;
-                };
-                const status = parseStatus(item.status) catch |e| {
-                    try appendErr(&errs, "status", raw_id, e);
-                    continue;
-                };
-                switch (status) {
-                    .active => store.activate(id) catch |e| {
-                        try appendErr(&errs, "activate", raw_id, e);
-                    },
-                    .done => store.complete(id) catch |e| {
-                        try appendErr(&errs, "complete", raw_id, e);
-                    },
-                    .open => store.reopen(id) catch |e| {
-                        try appendErr(&errs, "reopen", raw_id, e);
-                    },
-                }
-            }
-            const tasks = try store.list(null);
-            var out = formatSummary(self.alloc, tasks);
-            if (errs.items.len > 0) out = try appendErrors(self.alloc, out, errs.items);
-            return .{ .output = out };
-        },
-        .add => {
-            for (args.tasks orelse &.{}) |item| {
-                const title = item.title orelse continue;
-                const prio: ?u4 = if (item.priority) |p|
-                    std.math.cast(u4, std.math.clamp(p, 0, 9))
-                else null;
-                _ = try store.create(title, .{
-                    .priority = prio,
-                    .parent = item.parent,
-                    .body = item.body,
-                });
-            }
-            const tasks = try store.list(null);
-            return .{ .output = formatSummary(self.alloc, tasks) };
-        },
-    }
-}
-```
+**PrintSink note:** `PrintSink.push()` delegates to `Formatter.push()` which only knows `providers.Event`. The `.todo_update` arm must be handled BEFORE the formatter delegation, directly in `PrintSink.push()`.
 
-**Post-tool-result event emission** (in `app/runtime.zig`, tool result handling path):
-After a `todo` tool call completes, the runtime checks `call.kind == .todo` and, if the action was `update` or `add`, reads the current task state and pushes `ModeEv.todo_update` to the mode sink. This keeps the tool handler pure (no sink coupling) and matches how other post-tool side effects are handled.
-
-### User Command: `/todo`
-
-Registered as a built-in slash command in `runtime.zig`, NOT in skill.zig:
-- Add `.todo` to `Cmd` enum at `runtime.zig:~4251`
-- Add `"todo"` to `cmd_map` StaticStringMap at `runtime.zig:~4252`
-- Add `.todo` case in the dispatch switch at `runtime.zig:~4298`
-- Add `{ .name = "todo", .desc = "Manage tasks" }` to `cmds` array in `cmdpicker.zig:~16` (maintain alphabetical sort — insert between `"tree"` and `"upgrade"`)
+Handler pseudocode (simplified — actual must construct full `tools.Result`):
 
 ```
-/todo              — show task list (overlay)
-/todo add "title"  — create task interactively
-/todo on <id>      — activate task
-/todo off <id>     — complete task
-/todo rm <id>      — delete task
-/todo tree         — show hierarchy
+runTodo(self, call, sink):
+  args = call.args.todo
+  file = args.file orelse ".pz/tasks.md"
+  if file != default: validate via path_guard + isProtectedPath
+  list = TaskList.open(alloc, file)
+  defer list.deinit()
+
+  switch args.action:
+    .read => return result(formatSummary(list.tasks))
+    .update =>
+      items = args.tasks orelse return result("error: no tasks for update")
+      errs = []
+      for items: resolve id, parse status, call activate/complete/reopen
+        collect per-item errors (missing id, bad status, transition failure)
+      return result(formatSummary(list.tasks) + errs)
+    .add =>
+      for items: validate title (error if missing, not skip), clamp priority, add
+      return result(formatSummary(list.tasks) + errs)
 ```
 
-`/todo` with no args opens the overlay. Subcommands execute immediately and re-render.
-`/todo` mutations go through the same `TaskStore` path as the model tool. All mutations are serialized through the event loop (single-threaded owner) to avoid concurrent write races.
+---
 
-### TUI Rendering
+## `/todo` Command
 
-#### Inline Transcript Block
+Built-in slash command in `runtime.zig`:
+- `.todo` in `Cmd` enum
+- `"todo"` in `cmd_map` StaticStringMap
+- `.todo` case in dispatch switch
+- `{ .name = "todo", .desc = "Manage tasks" }` in `cmdpicker.zig` (sorted, between `"tree"` and `"upgrade"`)
 
-When a `todo_update` ModeEv fires, a block is pushed to the transcript:
+```
+/todo                        — show task list (overlay)
+/todo --file ./sprint-3.md   — different task file
+/todo add "title"            — create task
+/todo on <id>                — activate
+/todo off <id>               — complete
+/todo rm <id>                — delete section
+/todo tree                   — hierarchy view
+/todo clear                  — remove done tasks (skips parents of non-done)
+/todo reset                  — empty file (writes .bak first)
+```
+
+No auto-deletion when all done. Done tasks stay as context until `/todo clear` or `/todo reset`.
+
+---
+
+## TUI Rendering
+
+### Inline transcript block
+
+On `ModeEv.todo_update`:
 
 ```
 • Updated Tasks
-  └ ✔ ̶F̶i̶x̶ ̶U̶A̶F̶ ̶i̶n̶ ̶c̶o̶m̶p̶a̶c̶t̶i̶o̶n̶          (strikethrough + dim)
-  └ □ Add grep tool                   (cyan bold = active)
-  └ □ Write session export            (dim = pending)
+  └ ✔ ̶F̶i̶x̶ ̶U̶A̶F̶          (strikethrough + dim)
+  └ □ Add grep tool   (cyan bold)
+  └ □ Write export    (dim)
 ```
 
-| Status   | Marker | Text Style |
-|----------|--------|------------|
-| `done`   | `✔`    | `crossed_out` + `dim` |
-| `active` | `□`    | `cyan` + `bold` |
-| `open`   | `□`    | `dim` |
+| Status | Marker | Style |
+|--------|--------|-------|
+| `done` | `✔` | `crossed_out` + `dim` |
+| `active` | `□` | `cyan` + `bold` |
+| `open` | `□` | `dim` |
 
-Implementation in `src/modes/tui/transcript.zig`: add `.todo_update` to the `Kind` enum (at line ~19, alongside `text, user, thinking, tool, err, meta, image`). Block holds `TaskSnapshot` slice + optional note.
+Add `.todo_update` to transcript `Kind` enum in `transcript.zig`.
 
-#### `/todo` Overlay
+### `/todo` overlay
 
-Add `.todo` to `overlay.Kind` enum (at line ~11). Audit all `overlay.Kind` switches for exhaustiveness.
+Add `.todo` to `overlay.Kind` enum in `overlay.zig`. Separate `TodoOverlay` struct. Tree view (max depth 3), status markers, priority, blocked indicator. Scrollable, ESC dismisses.
 
-Create a separate `TodoOverlay` struct (not the generic `Overlay`, which only supports `[]const []const u8` rows). Shows:
-- Tasks grouped by parent (tree view), max depth 3
-- Status markers with color
-- Priority column
-- Blocked indicator
-- Scrollable, dismissible with ESC
+---
 
-### Event Plumbing
+## Event Plumbing
 
-New variant in `ModeEv` union at `src/core/loop.zig:~23`:
+New `ModeEv` variant in `loop.zig` (`ModeEv` union):
 
 ```zig
 pub const ModeEv = union(enum) {
-    replay: ...,
-    session: ...,
-    provider: ...,
-    tool: ...,
-    session_write_err: ...,
-    todo_update: TodoUpdate,   // NEW
+    // ... existing ...
+    todo_update: TodoUpdate,
 };
 
 pub const TodoUpdate = struct {
@@ -429,143 +379,149 @@ pub const TaskSnapshot = struct {
 };
 ```
 
-**All four mode sinks must handle `.todo_update` explicitly.** Three of the four sinks (`PrintSink`, `TuiSink`, `LiveTurnSink`) currently use `else => {}`. As part of Step 6, convert these to exhaustive switches (or add explicit `.todo_update` arms before the `else`):
+All 4 sinks need explicit `.todo_update` arm (3 use `else => {}`):
 
-| Sink | File:line | Handling |
-|------|-----------|----------|
-| `TuiSink.push` | `runtime.zig:~452` | Push `TodoUpdateBlock` to transcript; refresh overlay if open |
-| `PrintSink.push` | `runtime.zig:~422` | Print text: `✓`/`→`/`•` markers per task |
-| `JsonSink.push` | `runtime.zig:~1536` | Emit `{"type":"todo_update","note":...,"tasks":[...]}` (already exhaustive — will get compile error if missing) |
-| `LiveTurnSink.push` | `runtime.zig:~1348` | Ignore (add explicit `.todo_update => {}` arm) |
+| Sink | Handling |
+|------|----------|
+| `TuiSink` | Push block to transcript; refresh overlay |
+| `PrintSink` | Print `✓`/`→`/`•` per task |
+| `JsonSink` | `{"type":"todo_update",...}` (already exhaustive) |
+| `LiveTurnSink` | `.todo_update => {}` |
 
-**RPC mode** (if/when added): forward as structured JSON, same as `JsonSink`.
+Handler does NOT emit ModeEv — runtime does post-tool-result.
 
-The todo handler does NOT emit `ModeEv` — the runtime does post-tool-result (see Tool Handler section). No changes needed to `tools.Event` union.
+---
 
-### Session Replay
+## Session, Context, Concurrency
 
-Todo tool calls are persisted in session JSONL like any other tool call.
-On replay, the stored result is used — the tool is NOT re-executed.
-The `ModeEv.todo_update` side-channel does NOT fire during replay. Task state is authoritative on disk, not in the session. Model can call `todo(action=read)` to get current state on resume.
+**Session replay:** stored result used, tool not re-executed. `ModeEv` doesn't fire on replay. Task state authoritative in file.
 
-### Context Injection
+**Context injection:** task summary as LAST system part in `buildReqMsgs` (`loop.zig` `buildReqMsgs` fn). Order: `[pz_identity, system_prompt, task_summary]`. `sys_part_ct` adds `+ (task_summary ? 1 : 0)`. The `loop.zig` `Opts` struct needs a `task_file` field to thread the path. If `TaskList.open()` fails with file-not-found, omit (no tasks yet). If other error, log warning to mode sink (not silent skip). Format: titles + status only, wrapped with `wrapUntrusted(alloc, "task-list", summary)` to prevent cross-session prompt injection. Cap 50 tasks; >50 filter done first, then cap by priority.
 
-**Injection point:** Add a task summary as the LAST system message part in `buildReqMsgs` (`loop.zig:~865`), incrementing `sys_part_ct` from its current computed value. Ordering: `[pz_identity, system_prompt, task_summary]`. Task summary is last so changes to it do not invalidate the cached prefix (pz_identity + system_prompt).
+**Concurrency:** single-writer. Orchestrator only. Subagents work and report; orchestrator checks off. `mask_todo` stripped from child agents. File atomicity via write-tmp-rename (tmp in same dir as target). All `/todo` commands and model tool calls serialized through event loop. Tool calls within a single model turn are dispatched sequentially by the agent loop — no concurrent `todo` execution possible.
 
-Note: `sys_part_ct` is currently `1 + (if system_prompt != null then 1 else 0)`. Must change to `1 + (if system_prompt != null then 1 else 0) + (if task_summary != null then 1 else 0)`. The parts array allocation at `live_len + sys_part_ct` must account for this. If `TaskStore.open()` fails (no `.pz/` directory), skip the task summary part gracefully — do not fail the request build.
+**Concurrent modification detection:** `flush()` stats the file at open time (mtime + size) and re-stats before rename. If changed externally between open and flush, return error instead of silently overwriting.
 
-**Format:** Compact markdown, titles and status only (never bodies — bodies are untrusted model-written content, per P27 prompt injection concerns):
+---
 
-```markdown
-## Current Tasks
-- [active] fix-uaf-3a7b: Fix UAF in compaction
-- [open] add-grep-c1f2: Add grep tool
-- [done] setup-ci-8e4d: Setup CI pipeline
-```
+## Migration from dots
 
-**Refresh:** Regenerated on every turn (cheap — reads disk, formats ~100 bytes per task).
-**Token budget:** Cap at 50 tasks. If >50, show only `active` and `open` (skip `done`).
+CLI subcommand `pz todo import`:
 
-### Concurrency
+1. Scan `.dots/` for frontmatter markdown files
+2. Map status: `open`→`open`, `active`→`active`, `closed`→`done`, unknown→`open`
+3. Validate: same sanitization as `TaskList.add()`. Skip malformed with warning.
+4. Append as sections to `.pz/tasks.md`, preserving parent/blocks
 
-**Single-writer model.** Only the orchestrator (main session model + user `/todo`) mutates tasks. Subagents are workers — they do work and report results; the orchestrator evaluates and checks tasks off. Subagents do NOT get `mask_todo` (already stripped at spawn).
+## Review Integration
 
-This eliminates all contention: one writer, many readers. No locking needed.
+The task file IS a plan. Point the review-plan skill at `.pz/tasks.md` (or any task-format file). All 6 review agents read the same file — they partition by concern (security, completeness, feasibility), not by task. No aggregation needed.
 
-File-level atomicity for `complete()`:
-1. Write updated frontmatter to temp file in `.pz/tasks/`
-2. Rename temp to `archive/{id}.md` (atomic on same filesystem)
-3. Delete original. If step 3 fails, archive copy is canonical.
-
-### Review Integration
-
-Task files ARE plan items. The review-plan skill takes a path — file or directory:
-- File: reviews that file as a plan (existing behavior)
-- Directory: globs `*.md`, reviews each file as a plan item
-
-Each review agent gets a subset of task files — natural parallelism. Findings reference task IDs directly. Orchestrator applies via `todo(action=update)`.
-
-No aggregation, temp files, or special review commands needed. One-line change in the review skill prompt to accept directory paths.
-
-### Migration from dots
-
-One-time CLI subcommand: `pz todo import` (add to `Cmd` enum and dispatch in `runtime.zig`, plus `args.zig` for CLI parsing).
-
-1. Scan `.dots/` for markdown files with frontmatter.
-2. Parse each into `Task` (map: `open`→`open`, `active`→`active`, `closed`→`done`; unknown→`open`).
-3. **Validate imported content:** same sanitization as `TaskStore.create()` — size limits on body, slug validation on IDs, frontmatter escaping. Imported content is untrusted. Skip malformed files with warning.
-4. Write to `.pz/tasks/`, preserving parent-child and blocking deps.
-
-After migration, `.dots/` can be removed. No backward compatibility.
+---
 
 ## Implementation Order
 
-1. **`src/core/tasks/format.zig`** — frontmatter parser/serializer
+1. **`src/core/tasks/parse.zig`** — parse `## ` sections → `[]Task` (two-line lookahead: `## ` + `id:`)
    - Deps: none
-   - Tests: zcheck roundtrip property (`parse(serialize(task)) == task`), ohsnap for parse output, edge cases (special chars in title, empty body, max body size, `---` in body)
+   - Tests: zcheck roundtrip (`render(parse(f)) == f`), ohsnap parse output, edge cases (`## ` in body, pipe in value, empty file, malformed metadata)
 
-2. **`src/core/tasks/store.zig`** — disk I/O (create, read, list, archive, resolve, dependency graph)
+2. **`src/core/tasks/render.zig`** — `[]Task` → markdown sections
    - Deps: step 1
-   - Tests: ohsnap for list output, temp dir CRUD, collision retry, ambiguous short-ID error, slug sanitization (path traversal attempts), priority clamping
+   - Tests: ohsnap output, roundtrip with parse
 
-3. **`src/core/tasks/mod.zig`** — public API surface, re-exports
+3. **`src/core/tasks/mod.zig`** — `TaskList` API, clear/reset
    - Deps: steps 1-2
+   - Tests: temp file CRUD, ID collision retry, short-ID ambiguity, slug sanitization, priority clamp, clear skips parents, reset writes backup
 
-4. **`src/core/tools.zig` + `src/core/tools/builtin.zig`** — add `.todo` to `Kind`, `TodoArgs` to `Args`, `mask_todo` (in `mask_all`), bump `[10]`→`[11]`, `schema_json`, `maskForName`, `rebuildEntries`, `activeEntries`, `destructive=true`
-   - Also: bump `PolicyToolRegistry` arrays in `runtime.zig:~251` from `[10]` to `[11]`
+4. **`tools.zig` + `builtin.zig`** — `.todo` Kind, `TodoArgs`, `mask_todo` in `mask_all`, `[11]`, `schema_json`, `destructive=true`
+   - Also: `PolicyToolRegistry` `[11]` in `runtime.zig`
    - Deps: step 3
-   - Tests: registry test (tool count = 11), mask round-trip
-   - **Grep `switch.*Kind` and `switch.*Args`** — update all 7+ exhaustive switch sites
+   - Tests: registry (count=11), mask roundtrip, ohsnap `parseCallArgs(.todo, ...)` with read/update/add payloads (null tasks, empty array, missing optionals)
+   - Grep all exhaustive `Kind`/`Args` switches (9+)
 
-5. **`src/core/tools/todo.zig`** — tool handler `(self, Call, Sink) -> !Result` pattern
+5. **`todo.zig`** — handler `(self, Call, Sink) -> !Result`, path_guard for non-default files
    - Deps: steps 3-4
-   - Tests: ohsnap for tool results, temp dir TaskStore, per-item error collection, priority clamping
+   - Tests: ohsnap results, per-item errors, priority clamp, empty update error
 
-6. **Event plumbing** — `TodoUpdate` in `ModeEv` (`loop.zig`), post-tool-result emission in `runtime.zig`, explicit `.todo_update` arms in all 4 sinks
+6. **Event plumbing** — `ModeEv.todo_update`, post-tool emission, 4 sink arms
    - Deps: step 5
-   - Tests: ohsnap for print/json output format
+   - Tests: ohsnap print/json output
 
-7. **`src/modes/tui/transcript.zig`** — add `.todo_update` to `Kind` enum, `TodoUpdateBlock` rendering
+7. **`transcript.zig`** — `.todo_update` Kind, block rendering
    - Deps: step 6
-   - Tests: ohsnap for rendered cells
+   - Tests: ohsnap cells
 
-8. **`src/modes/tui/overlay.zig`** — add `.todo` to `overlay.Kind`, `TodoOverlay` struct, audit Kind switches
+8. **`overlay.zig`** — `.todo` Kind, `TodoOverlay`
    - Deps: step 7
-   - Tests: ohsnap for rendered frame
+   - Tests: ohsnap frame
 
-9. **`/todo` slash command** — `Cmd.todo` + `cmd_map` + dispatch in `runtime.zig`, entry in `cmdpicker.zig` (sorted)
+9. **`/todo` command** — `Cmd.todo`, `cmd_map`, dispatch, `cmdpicker`
    - Deps: steps 7-8
-   - Tests: integration test with mock harness
+   - Tests: integration
 
-10. **Context injection** — task summary as last system part in `buildReqMsgs`, `sys_part_ct` arithmetic, graceful fallback if no `.pz/`
+10. **Context injection** — `buildReqMsgs`, `sys_part_ct`, warn on failure
     - Deps: step 3
-    - Tests: ohsnap for injected content, verify bodies never included, verify TaskStore failure doesn't break request
+    - Tests: ohsnap content, no bodies, failure logs warning
 
-11. **`pz todo import`** — dots migration CLI subcommand in `args.zig` + `runtime.zig`
+11. **`pz todo import`** — dots migration. Requires subcommand concept in `cli.zig` (not trivial — `args.zig` does not exist, current parser has no subcommands)
     - Deps: step 3
-    - Tests: ohsnap for migrated output, malformed input handling
+    - Tests: ohsnap migrated output, malformed input
+
+---
 
 ## File Inventory
 
-New files:
-- `docs/PZ-TODO.md` (this document)
+New:
 - `src/core/tasks/mod.zig`
-- `src/core/tasks/store.zig`
-- `src/core/tasks/format.zig`
+- `src/core/tasks/parse.zig`
+- `src/core/tasks/render.zig`
 - `src/core/tools/todo.zig`
 
-Modified files:
-- `src/core/tools.zig` — `.todo` in `Kind`, `TodoArgs`, `todo: TodoArgs` in `Args`
-- `src/core/tools/builtin.zig` — `mask_todo = 1 << 10` in `mask_all`, `[10]`→`[11]`, `schema_json`, `maskForName`, `rebuildEntries`, `activeEntries`, `destructive=true`
-- `src/core/loop.zig` — `todo_update: TodoUpdate` in `ModeEv`, structs, all exhaustive `Kind`/`Args` switches
-- `src/app/runtime.zig` — `PolicyToolRegistry` `[10]`→`[11]`, all 4 sink `.todo_update` arms, post-tool-result `ModeEv` emission, `Cmd.todo` + `cmd_map` + dispatch, `pz todo import`, all exhaustive `Kind`/`Args` switches
-- `src/modes/tui/transcript.zig` — `.todo_update` in `Kind` enum, block rendering
-- `src/modes/tui/overlay.zig` — `.todo` in `overlay.Kind`, `TodoOverlay` struct
-- `src/modes/tui/cmdpicker.zig` — `/todo` entry in `cmds` (sorted)
-- `src/app/args.zig` — `pz todo import` CLI subcommand parsing
+Modified:
+- `src/core/tools.zig` — `.todo` Kind, `TodoArgs`, `Args`
+- `src/core/tools/builtin.zig` — `mask_todo`, `[11]`, `schema_json`, `destructive=true`
+- `src/core/loop.zig` — `ModeEv.todo_update`, `Opts.task_file`, post-tool emission, exhaustive switches incl `approvalSummaryAlloc`
+- `src/core.zig` — barrel import: `pub const tasks = @import("core/tasks/mod.zig")`
+- `src/app/runtime.zig` — `PolicyToolRegistry[11]`, 4 sinks (PrintSink needs pre-Formatter arm), post-tool ModeEv emission, `Cmd.todo`, `toolPolicyPath` synthetic, `toolAuditInfo`
+- `src/app/cli.zig` — `pz todo import` subcommand dispatch (needs subcommand concept — not trivial)
+- `src/modes/tui/transcript.zig` — `.todo_update` Kind
+- `src/modes/tui/overlay.zig` — `.todo` Kind, `TodoOverlay`
+- `src/modes/tui/cmdpicker.zig` — `/todo` entry
+- `lean/PzProofs/Mask.lean` — `mask_all := 0x7FF` (was `0x3FF`), re-verify theorems
 
 ## Design Decisions
 
-- **Multi-file storage**: one file per task. Subagents read their assigned task file for context; orchestrator writes. No contention.
-- **Single-writer concurrency**: orchestrator only. Subagents report results, don't manage state.
-- **Review via directory**: review-plan skill generalized to accept a directory. Task files are self-contained plan items.
+- **Single file.** All tasks in `.pz/tasks.md`. One read, one write, review skill works directly.
+- **Any file.** `TaskList.open(alloc, path)` works on any task-format markdown.
+- **Single writer.** Orchestrator only. Subagents work and report; orchestrator checks off.
+- **Task file IS a plan.** Same format, same review skill. No separate plan concept.
+- **No auto-cleanup.** Done tasks stay until `/todo clear` or `/todo reset`.
+- **Section boundary = `## ` + `id:` on next line.** Prevents body `## ` from breaking parser.
+- **Metadata split: first `: ` only.** Values with `: ` are safe. Values with ` | ` are forbidden.
+- **`clear` skips parents.** Done tasks with non-done children are preserved.
+- **`reset` writes backup.** `.pz/tasks.md.bak` before emptying.
+- **Context injection warns on failure.** Not silent skip — logs to mode sink. File-not-found is OK (no tasks yet).
+- **Context wrapped untrusted.** `wrapUntrusted("task-list", ...)` prevents cross-session prompt injection.
+- **Tmp file in same dir.** `{path}.tmp` ensures same-filesystem rename.
+- **Concurrent mod detection.** `flush()` checks mtime before rename.
+- **Title sanitization.** Rejects `\n`, `\r`, ` | `, `#` — prevents metadata/section injection.
+- **Body escaping.** Lines matching `^## ` escaped on write to prevent section forgery.
+- **Max 200 tasks.** `add()` errors when exceeded.
+- **toolPolicyPath returns synthetic.** `"runtime/tool/todo"` — bypasses `.pz/` self-protection for default file only.
+- **Handler constructs full `tools.Result`.** Reference `runAsk` pattern — not the simplified `.output` form.
+- **Post-tool ModeEv is a new pattern.** No existing precedent — add in `loop.zig` after `execTool`.
+- **PrintSink pre-Formatter.** `.todo_update` handled before `Formatter.push()` delegation.
+- **Lean proofs updated.** `mask_all` changes from `0x3FF` to `0x7FF`.
+- **u16 mask: 5 bits remaining.** Bit 10 = todo. Future tools may need `u32` migration.
+- **Deletion via update+clear.** Known social engineering risk. Approval gate shows status changes. Document as accepted tradeoff.
+- **Agent mask stripping.** Blocked on agent tool implementation — tracked as dependency.
+
+### Malformed file handling
+
+- Section with no metadata line: skip with warning
+- Unknown metadata keys: ignore
+- Duplicate metadata keys: first wins
+- Title >80 chars on read: accept (enforce only on add)
+- Body >4KB on read: accept (enforce only on add)
+- Content before first `## `: ignored (preamble)
+- `## ` in body without valid `id:` on next line: treated as body text

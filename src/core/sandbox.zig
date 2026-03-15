@@ -252,6 +252,32 @@ fn isWithin(root: []const u8, path: []const u8) bool {
     return std.fs.path.isSep(path[root.len]);
 }
 
+/// Environment variable keys that must be scrubbed before spawning
+/// sandboxed children. These may leak credentials or config into
+/// untrusted subprocesses.
+pub const sensitive_env = [_][]const u8{
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "PZ_API_KEY",
+    "PZ_AUTH_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "NPM_TOKEN",
+    "DOCKER_AUTH_CONFIG",
+    "KUBECONFIG",
+    "SSH_AUTH_SOCK",
+};
+
+/// Remove sensitive keys from env map in-place.
+pub fn scrubEnv(env: *std.process.EnvMap) void {
+    for (sensitive_env) |key| {
+        env.remove(key);
+    }
+}
+
 fn mapFsErr(err: anyerror) Err {
     return switch (err) {
         error.FileNotFound, error.NotDir => error.NotFound,
@@ -315,4 +341,22 @@ test "prepareBash denies cwd escapes" {
     try env.put("PATH", "/usr/bin:/bin");
 
     try std.testing.expectError(error.Denied, prepareBash(std.testing.allocator, &env, "escape", "true"));
+}
+
+test "scrubEnv removes sensitive keys and preserves others" {
+    var env = std.process.EnvMap.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin");
+    try env.put("ANTHROPIC_API_KEY", "sk-secret");
+    try env.put("OPENAI_API_KEY", "sk-openai");
+    try env.put("HOME", "/home/user");
+    try env.put("GITHUB_TOKEN", "ghp_tok");
+
+    scrubEnv(&env);
+
+    try std.testing.expect(env.get("ANTHROPIC_API_KEY") == null);
+    try std.testing.expect(env.get("OPENAI_API_KEY") == null);
+    try std.testing.expect(env.get("GITHUB_TOKEN") == null);
+    try std.testing.expectEqualStrings("/usr/bin", env.get("PATH").?);
+    try std.testing.expectEqualStrings("/home/user", env.get("HOME").?);
 }

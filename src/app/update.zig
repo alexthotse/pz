@@ -26,7 +26,7 @@ const release_limit = 256 * 1024;
 const asset_limit = 256 * 1024 * 1024;
 const body_snip_limit = 220;
 const any_accept = "*/*";
-const sig_suffix = ".sig";
+const sig_suffix = ".manifest";
 const update_policy_path = ".pz/upgrade";
 const update_policy_file = ".pz/policy.json";
 const update_policy_tool = "upgrade";
@@ -307,7 +307,7 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     if (try checkUpdateUrlOrAudit(alloc, hooks, sig_url, "signature host denied")) |out| {
         return out;
     }
-    const sig_http = hooks.http_get(alloc, sig_url, any_accept, 8 * 1024) catch |err| {
+    const sig_http = hooks.http_get(alloc, sig_url, any_accept, core.signing.Manifest.max_len) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
             alloc,
@@ -342,7 +342,7 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
             );
         },
     };
-    verifyArchiveSignature(archive, sig_raw) catch |err| {
+    verifyArchiveManifest(archive, sig_raw, release.tag_name, asset_name) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
             alloc,
@@ -538,15 +538,15 @@ fn trustedUpdatePk() !core.signing.PublicKey {
     return core.signing.PublicKey.parseHex(update_pk_hex);
 }
 
-fn parseSignatureHex(sig_raw: []const u8) !core.signing.Signature {
-    const trimmed = std.mem.trim(u8, sig_raw, " \t\r\n");
-    return core.signing.Signature.parseHex(trimmed);
-}
-
-fn verifyArchiveSignature(archive: []const u8, sig_raw: []const u8) !void {
+fn verifyArchiveManifest(
+    archive: []const u8,
+    manifest_raw: []const u8,
+    tag_name: []const u8,
+    asset_name: []const u8,
+) !void {
     const pk = trustedUpdatePk() catch return error.SignatureVerifyFailed;
-    const sig = parseSignatureHex(sig_raw) catch return error.SignatureVerifyFailed;
-    _ = core.signing.verifyDetached(archive, sig, pk) catch return error.SignatureVerifyFailed;
+    _ = core.signing.verifyManifest(manifest_raw, pk, archive, tag_name, asset_name) catch
+        return error.SignatureVerifyFailed;
 }
 
 fn httpGetResult(
@@ -958,7 +958,14 @@ fn extractPzBinary(alloc: std.mem.Allocator, archive_gz: []const u8) ![]u8 {
 
 fn installBinary(alloc: std.mem.Allocator, exe_path: []const u8, binary: []const u8) !void {
     const exe_dir = std.fs.path.dirname(exe_path) orelse return error.InvalidExecutablePath;
-    const tmp_path = try std.fs.path.join(alloc, &.{ exe_dir, ".pz-self-update.tmp" });
+    const exe_base = std.fs.path.basename(exe_path);
+
+    // Unique temp name: .<base>-update-<pid>-<timestamp>.tmp
+    const pid = std.c.getpid();
+    const ts = @as(u64, @intCast(std.time.milliTimestamp()));
+    const tmp_name = try std.fmt.allocPrint(alloc, ".{s}-update-{d}-{d}.tmp", .{ exe_base, pid, ts });
+    defer alloc.free(tmp_name);
+    const tmp_path = try std.fs.path.join(alloc, &.{ exe_dir, tmp_name });
     defer alloc.free(tmp_path);
 
     var moved = false;
@@ -970,8 +977,16 @@ fn installBinary(alloc: std.mem.Allocator, exe_path: []const u8, binary: []const
     try f.writeAll(binary);
     if (std.fs.has_executable_bit) try f.chmod(0o755);
 
+    // fsync data+metadata before rename for crash safety.
+    try f.sync();
+
     try std.fs.renameAbsolute(tmp_path, exe_path);
     moved = true;
+
+    // fsync containing directory to persist the rename.
+    var dir = std.fs.openDirAbsolute(exe_dir, .{}) catch return;
+    defer dir.close();
+    std.posix.fsync(dir.fd) catch {};
 }
 
 fn makeTarGzAlloc(alloc: std.mem.Allocator, name: []const u8, data: []const u8) ![]u8 {
@@ -1333,9 +1348,6 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
     const asset_name = targetAssetName() orelse unreachable;
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
-    const sig_hex = try updateTestSigHexAlloc(std.testing.allocator, archive, false);
-    defer std.testing.allocator.free(sig_hex);
-
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
     var server = try http_mock.Server.initSeq(&resps);
     defer server.deinit();
@@ -1346,8 +1358,11 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
     defer std.testing.allocator.free(latest_url);
     const archive_url = try server.urlAlloc(std.testing.allocator, "/asset/archive");
     defer std.testing.allocator.free(archive_url);
-    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.sig");
+    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.manifest");
     defer std.testing.allocator.free(sig_url);
+
+    const manifest = try updateTestManifestAlloc(std.testing.allocator, archive, false, "v9.9.9", asset_name, archive_url);
+    defer std.testing.allocator.free(manifest);
     const release_body = try updateReleaseBodyAlloc(std.testing.allocator, "v9.9.9", asset_name, archive_url, sig_url);
     defer std.testing.allocator.free(release_body);
 
@@ -1363,11 +1378,11 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
         .headers = &.{"Content-Type: application/octet-stream"},
         .body = archive,
     };
-    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.sig"} };
+    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.manifest"} };
     resps[5] = .{
         .status = "200 OK",
         .headers = &.{"Content-Type: text/plain"},
-        .body = sig_hex,
+        .body = manifest,
     };
 
     const CaHooks = struct {
@@ -1431,8 +1446,8 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
         \\GET /release/meta HTTP/1.1
         \\GET /asset/archive HTTP/1.1
         \\GET /blob/archive HTTP/1.1
-        \\GET /asset/archive.sig HTTP/1.1
-        \\GET /blob/archive.sig HTTP/1.1"
+        \\GET /asset/archive.manifest HTTP/1.1
+        \\GET /blob/archive.manifest HTTP/1.1"
         \\  .req_ct: usize = 6
         \\  .fetch_ct: usize = 3
         \\  .all_have_ca: bool = true
@@ -1638,7 +1653,7 @@ test "update denies archive host before transport" {
                 const asset_name = targetAssetName() orelse return error.TestUnexpectedResult;
                 const body = try std.fmt.allocPrint(
                     alloc,
-                    "{{\"tag_name\":\"v9.9.9\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"https://dl.invalid/pz.tar.gz\"}},{{\"name\":\"{s}.sig\",\"browser_download_url\":\"https://dl.invalid/pz.tar.gz.sig\"}}]}}",
+                    "{{\"tag_name\":\"v9.9.9\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"https://dl.invalid/pz.tar.gz\"}},{{\"name\":\"{s}" ++ sig_suffix ++ "\",\"browser_download_url\":\"https://dl.invalid/pz.tar.gz" ++ sig_suffix ++ "\"}}]}}",
                     .{ asset_name, asset_name },
                 );
                 return .{ .ok = body };
@@ -1702,9 +1717,6 @@ test "update e2e verify fail stays local and audits deterministically" {
     const asset_name = targetAssetName() orelse unreachable;
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
-    const sig_hex = try updateTestSigHexAlloc(std.testing.allocator, archive, false);
-    defer std.testing.allocator.free(sig_hex);
-
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
     var server = try http_mock.Server.initSeq(&resps);
     defer server.deinit();
@@ -1715,8 +1727,11 @@ test "update e2e verify fail stays local and audits deterministically" {
     defer std.testing.allocator.free(latest_url);
     const archive_url = try server.urlAlloc(std.testing.allocator, "/asset/archive");
     defer std.testing.allocator.free(archive_url);
-    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.sig");
+    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.manifest");
     defer std.testing.allocator.free(sig_url);
+
+    const manifest = try updateTestManifestAlloc(std.testing.allocator, archive, false, "v9.9.9", asset_name, archive_url);
+    defer std.testing.allocator.free(manifest);
     const release_body = try updateReleaseBodyAlloc(std.testing.allocator, "v9.9.9", asset_name, archive_url, sig_url);
     defer std.testing.allocator.free(release_body);
 
@@ -1732,11 +1747,11 @@ test "update e2e verify fail stays local and audits deterministically" {
         .headers = &.{"Content-Type: application/octet-stream"},
         .body = archive,
     };
-    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.sig"} };
+    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.manifest"} };
     resps[5] = .{
         .status = "200 OK",
         .headers = &.{"Content-Type: text/plain"},
-        .body = sig_hex,
+        .body = manifest,
     };
 
     var cap = AuditCap{};
@@ -1814,8 +1829,8 @@ test "update e2e verify fail stays local and audits deterministically" {
         \\GET /release/meta HTTP/1.1
         \\GET /asset/archive HTTP/1.1
         \\GET /blob/archive HTTP/1.1
-        \\GET /asset/archive.sig HTTP/1.1
-        \\GET /blob/archive.sig HTTP/1.1"
+        \\GET /asset/archive.manifest HTTP/1.1
+        \\GET /blob/archive.manifest HTTP/1.1"
         \\  .rows: []const u8
         \\    "{"v":1,"ts_ms":111,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":111,"sid":"upgrade","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"signature verify failed","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:b72e4e6e8646e320]","vis":"mask"}},"attrs":[]}"
@@ -1836,9 +1851,6 @@ test "update e2e verify success installs via local redirects and audits determin
     const asset_name = targetAssetName() orelse unreachable;
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
-    const sig_hex = try updateTestSigHexAlloc(std.testing.allocator, archive, true);
-    defer std.testing.allocator.free(sig_hex);
-
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
     var server = try http_mock.Server.initSeq(&resps);
     defer server.deinit();
@@ -1849,8 +1861,11 @@ test "update e2e verify success installs via local redirects and audits determin
     defer std.testing.allocator.free(latest_url);
     const archive_url = try server.urlAlloc(std.testing.allocator, "/asset/archive");
     defer std.testing.allocator.free(archive_url);
-    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.sig");
+    const sig_url = try server.urlAlloc(std.testing.allocator, "/asset/archive.manifest");
     defer std.testing.allocator.free(sig_url);
+
+    const manifest = try updateTestManifestAlloc(std.testing.allocator, archive, true, "v9.9.9", asset_name, archive_url);
+    defer std.testing.allocator.free(manifest);
     const release_body = try updateReleaseBodyAlloc(std.testing.allocator, "v9.9.9", asset_name, archive_url, sig_url);
     defer std.testing.allocator.free(release_body);
 
@@ -1866,11 +1881,11 @@ test "update e2e verify success installs via local redirects and audits determin
         .headers = &.{"Content-Type: application/octet-stream"},
         .body = archive,
     };
-    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.sig"} };
+    resps[4] = .{ .status = "307 Temporary Redirect", .headers = &.{"Location: ../blob/archive.manifest"} };
     resps[5] = .{
         .status = "200 OK",
         .headers = &.{"Content-Type: text/plain"},
-        .body = sig_hex,
+        .body = manifest,
     };
 
     var cap = AuditCap{};
@@ -1966,8 +1981,8 @@ test "update e2e verify success installs via local redirects and audits determin
         \\GET /release/meta HTTP/1.1
         \\GET /asset/archive HTTP/1.1
         \\GET /blob/archive HTTP/1.1
-        \\GET /asset/archive.sig HTTP/1.1
-        \\GET /blob/archive.sig HTTP/1.1"
+        \\GET /asset/archive.manifest HTTP/1.1
+        \\GET /blob/archive.manifest HTTP/1.1"
         \\  .rows: []const u8
         \\    "{"v":1,"ts_ms":222,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":222,"sid":"upgrade","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade complete","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:d7880361f7426c62]","vis":"mask"}},"attrs":[]}"
@@ -2000,14 +2015,18 @@ const AuditCap = struct {
     }
 };
 
-fn updateTestSigHexAlloc(alloc: std.mem.Allocator, archive: []const u8, valid: bool) ![]u8 {
-    const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
-    const kp = try core.signing.KeyPair.fromSeed(seed);
-    const sig = try kp.sign(archive);
-    const raw = sig.bytes();
-    const hex = std.fmt.bytesToHex(raw[0..], .lower);
-    const txt = try std.fmt.allocPrint(alloc, "{s}\n", .{hex[0..]});
-    if (!valid) txt[0] = if (txt[0] == '0') '1' else '0';
+fn updateTestManifestAlloc(
+    alloc: std.mem.Allocator,
+    archive: []const u8,
+    valid: bool,
+    ver: []const u8,
+    asset: []const u8,
+    url: []const u8,
+) ![]u8 {
+    const test_seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
+    const kp = try core.signing.KeyPair.fromSeed(test_seed);
+    const txt = try core.signing.signManifestAlloc(alloc, ver, asset, archive, url, kp);
+    if (!valid) txt[0] = if (txt[0] == 'p') 'q' else 'p';
     return txt;
 }
 
@@ -2020,7 +2039,7 @@ fn updateReleaseBodyAlloc(
 ) ![]u8 {
     return std.fmt.allocPrint(
         alloc,
-        "{{\"tag_name\":\"{s}\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"{s}\"}},{{\"name\":\"{s}.sig\",\"browser_download_url\":\"{s}\"}}]}}",
+        "{{\"tag_name\":\"{s}\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"{s}\"}},{{\"name\":\"{s}" ++ sig_suffix ++ "\",\"browser_download_url\":\"{s}\"}}]}}",
         .{ tag_name, asset_name, asset_url, asset_name, sig_url },
     );
 }

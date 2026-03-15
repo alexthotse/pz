@@ -1,7 +1,9 @@
 //! Background job management: spawn, track, and reap child processes.
+const builtin = @import("builtin");
 const std = @import("std");
 const core = @import("../core.zig");
 const journal_mod = @import("job_journal.zig");
+const sandbox = @import("../core/sandbox.zig");
 const shell = @import("../core/shell.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");
 
@@ -137,7 +139,9 @@ pub const Manager = struct {
         self.mu.lock();
         for (self.jobs.items) |job| {
             if (job.state == .running) {
-                _ = std.posix.kill(@as(std.posix.pid_t, @intCast(job.pid)), std.posix.SIG.KILL) catch {};
+                const p: std.posix.pid_t = @intCast(job.pid);
+                const tgt: std.posix.pid_t = if (builtin.os.tag != .windows and builtin.os.tag != .wasi) -p else p;
+                _ = std.posix.kill(tgt, std.posix.SIG.KILL) catch {};
                 self.journal.appendCleanup(job.id, "shutdown_kill") catch {};
             }
         }
@@ -230,6 +234,7 @@ pub const Manager = struct {
 
         var env = try std.process.getEnvMap(self.alloc);
         defer env.deinit();
+        sandbox.scrubEnv(&env);
         try env.put("PZ_BG_LOG", log_path);
 
         const wrapped = try std.fmt.allocPrint(self.alloc, "({s}) >\"${{PZ_BG_LOG}}\" 2>&1", .{cmd});
@@ -247,6 +252,7 @@ pub const Manager = struct {
         child.stderr_behavior = .Ignore;
         child.cwd = cwd;
         child.env_map = &env;
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) child.pgid = 0;
         child.spawn() catch |err| {
             try self.emitControlAudit(.{
                 .op = "start",
@@ -418,7 +424,9 @@ pub const Manager = struct {
         const pid: std.posix.pid_t = @intCast(job.pid);
         self.mu.unlock();
 
-        std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
+        // Signal the entire process group (negative pid).
+        const sig_target: std.posix.pid_t = if (builtin.os.tag != .windows and builtin.os.tag != .wasi) -pid else pid;
+        std.posix.kill(sig_target, std.posix.SIG.TERM) catch |err| switch (err) {
             error.ProcessNotFound => {
                 const done_attrs = [_]core.audit.Attribute{
                     .{ .key = "job_id", .val = .{ .uint = id } },
@@ -650,16 +658,34 @@ pub const Manager = struct {
 
         for (active) |job| {
             const pid: std.posix.pid_t = @intCast(job.pid);
+            // Send TERM, then poll with WNOHANG up to ~150ms.
             std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
-                error.ProcessNotFound => {},
+                error.ProcessNotFound => {
+                    self.journal.appendCleanup(job.id, "startup_reap") catch {};
+                    continue;
+                },
                 else => {},
             };
-            // Give TERM a chance, then force kill to avoid lingering jobs.
-            std.Thread.sleep(150 * std.time.ns_per_ms);
-            std.posix.kill(pid, std.posix.SIG.KILL) catch |err| switch (err) {
-                error.ProcessNotFound => {},
-                else => {},
-            };
+
+            var reaped = false;
+            var polls: u32 = 0;
+            while (polls < 15) : (polls += 1) {
+                const res = std.posix.waitpid(pid, std.c.W.NOHANG);
+                if (res.pid != 0) {
+                    reaped = true;
+                    break;
+                }
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
+
+            if (!reaped) {
+                std.posix.kill(pid, std.posix.SIG.KILL) catch |err| switch (err) {
+                    error.ProcessNotFound => {},
+                    else => {},
+                };
+                // Final blocking reap after KILL.
+                _ = std.posix.waitpid(pid, 0);
+            }
             self.journal.appendCleanup(job.id, "startup_reap") catch {};
         }
     }
@@ -1346,6 +1372,7 @@ test "bg manager syslog e2e ships redacted chained success audit over udp" {
         .transport = .udp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 
@@ -1417,6 +1444,7 @@ test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
         .transport = .tcp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 

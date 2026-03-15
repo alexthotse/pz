@@ -2,6 +2,7 @@
 const std = @import("std");
 const schema = @import("schema.zig");
 const sid_path = @import("path.zig");
+const fs_secure = @import("../fs_secure.zig");
 
 pub const Event = schema.Event;
 
@@ -28,7 +29,8 @@ pub const ReplayReader = struct {
         const path = try sid_path.sidJsonlAlloc(alloc, sid);
         defer alloc.free(path);
 
-        const file = try dir.openFile(path, .{ .mode = .read_only });
+        // Confined open: O_NOFOLLOW + hardlink check for .pz state.
+        const file = try fs_secure.openConfined(dir, path, .{ .mode = .read_only });
 
         return .{
             .alloc = alloc,

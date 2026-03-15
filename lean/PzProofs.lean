@@ -3,3 +3,5 @@ import PzProofs.Mask
 import PzProofs.Approval
 import PzProofs.Policy
 import PzProofs.PathGuard
+import PzProofs.Egress
+import PzProofs.AgentOutput

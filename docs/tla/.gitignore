@@ -1,2 +1,3 @@
 states/
-*_TTrace*.tla
+*_TTrace*
+*.st

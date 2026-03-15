@@ -1,4 +1,4 @@
-//! RFC 5424 syslog client: UDP/TCP transport, structured data.
+//! RFC 5424 syslog client: UDP/TCP/TLS transport, structured data.
 const std = @import("std");
 const policy = @import("policy.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");
@@ -9,6 +9,7 @@ pub const nil = "-";
 pub const Transport = enum {
     udp,
     tcp,
+    tls,
 };
 
 pub const Facility = enum(u5) {
@@ -97,12 +98,20 @@ pub const Message = struct {
     }
 };
 
+pub const TlsOpts = struct {
+    ca_file: ?[]const u8 = null,
+    client_cert: ?[]const u8 = null,
+    client_key: ?[]const u8 = null,
+};
+
 pub const SenderOpts = struct {
     transport: Transport = .udp,
     host: []const u8,
     port: u16 = 514,
     egress: ?policy.Policy = null,
     tool: ?[]const u8 = "syslog",
+    allow_private: bool = false,
+    tls: TlsOpts = .{},
     hooks: Hooks = .{},
 };
 
@@ -111,9 +120,12 @@ pub const Sender = struct {
     transport: Transport,
     host: []u8,
     port: u16,
+    allow_private: bool,
+    tls_opts: TlsOpts,
     hooks: Hooks,
     fd: std.posix.socket_t,
     addr: std.net.Address,
+    tls_state: ?*anyopaque = null,
 
     pub fn init(alloc: std.mem.Allocator, opts: SenderOpts) !Sender {
         if (opts.host.len == 0) return error.InvalidHost;
@@ -123,23 +135,38 @@ pub const Sender = struct {
         errdefer alloc.free(host);
 
         const addr = try opts.hooks.resolve(alloc, opts.host, opts.port);
-        const fd = try opts.hooks.open_socket(addr, opts.transport);
+
+        if (!opts.allow_private and policy.isBlockedNetAddr(addr))
+            return error.PrivateAddr;
+
+        const sock_transport: Transport = if (opts.transport == .tls) .tcp else opts.transport;
+        const fd = try opts.hooks.open_socket(addr, sock_transport);
         errdefer opts.hooks.close_socket(fd);
 
-        if (opts.transport == .tcp) try opts.hooks.connect(fd, addr);
+        if (opts.transport == .tcp or opts.transport == .tls)
+            try opts.hooks.connect(fd, addr);
+
+        var tls_state: ?*anyopaque = null;
+        if (opts.transport == .tls) {
+            tls_state = try opts.hooks.tls_handshake(fd, host, opts.tls);
+        }
 
         return .{
             .alloc = alloc,
             .transport = opts.transport,
             .host = host,
             .port = opts.port,
+            .allow_private = opts.allow_private,
+            .tls_opts = opts.tls,
             .hooks = opts.hooks,
             .fd = fd,
             .addr = addr,
+            .tls_state = tls_state,
         };
     }
 
     pub fn deinit(self: *Sender) void {
+        if (self.tls_state) |st| self.hooks.tls_close(st);
         self.hooks.close_socket(self.fd);
         self.alloc.free(self.host);
         self.* = undefined;
@@ -165,18 +192,36 @@ pub const Sender = struct {
                     try self.sendTcp(raw);
                 };
             },
+            .tls => {
+                self.sendTls(raw) catch {
+                    try self.refresh();
+                    try self.sendTls(raw);
+                };
+            },
         }
     }
 
     fn refresh(self: *Sender) !void {
         const addr = try self.hooks.resolve(self.alloc, self.host, self.port);
-        const fd = try self.hooks.open_socket(addr, self.transport);
-        errdefer self.hooks.close_socket(fd);
-        if (self.transport == .tcp) try self.hooks.connect(fd, addr);
 
+        if (!self.allow_private and policy.isBlockedNetAddr(addr))
+            return error.PrivateAddr;
+
+        const sock_transport: Transport = if (self.transport == .tls) .tcp else self.transport;
+        const fd = try self.hooks.open_socket(addr, sock_transport);
+        errdefer self.hooks.close_socket(fd);
+        if (self.transport == .tcp or self.transport == .tls) try self.hooks.connect(fd, addr);
+
+        var tls_state: ?*anyopaque = null;
+        if (self.transport == .tls) {
+            tls_state = try self.hooks.tls_handshake(fd, self.host, self.tls_opts);
+        }
+
+        if (self.tls_state) |st| self.hooks.tls_close(st);
         self.hooks.close_socket(self.fd);
         self.fd = fd;
         self.addr = addr;
+        self.tls_state = tls_state;
     }
 
     fn sendUdp(self: *Sender, raw: []const u8) !void {
@@ -190,6 +235,14 @@ pub const Sender = struct {
         const prefix = try std.fmt.bufPrint(&prefix_buf, "{d} ", .{raw.len});
         try self.hooks.send_tcp(self.fd, prefix);
         try self.hooks.send_tcp(self.fd, raw);
+    }
+
+    fn sendTls(self: *Sender, raw: []const u8) !void {
+        const st = self.tls_state orelse return error.TlsNotEstablished;
+        var prefix_buf: [32]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&prefix_buf, "{d} ", .{raw.len});
+        try self.hooks.tls_send(st, prefix);
+        try self.hooks.tls_send(st, raw);
     }
 };
 
@@ -209,6 +262,9 @@ const Hooks = struct {
     send_udp: *const fn (fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) anyerror!void = sendUdpRaw,
     send_tcp: *const fn (fd: std.posix.socket_t, raw: []const u8) anyerror!void = sendAll,
     close_socket: *const fn (fd: std.posix.socket_t) void = closeSocket,
+    tls_handshake: *const fn (fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) anyerror!*anyopaque = tlsHandshakeStub,
+    tls_send: *const fn (state: *anyopaque, data: []const u8) anyerror!void = tlsSendStub,
+    tls_close: *const fn (state: *anyopaque) void = tlsCloseStub,
 };
 
 const udp_max_len: usize = 1024;
@@ -397,11 +453,11 @@ fn resolve(alloc: std.mem.Allocator, host: []const u8, port: u16) !std.net.Addre
 fn openSocket(addr: std.net.Address, transport: Transport) !std.posix.socket_t {
     const kind: u32 = switch (transport) {
         .udp => std.posix.SOCK.DGRAM,
-        .tcp => std.posix.SOCK.STREAM,
+        .tcp, .tls => std.posix.SOCK.STREAM,
     };
     const proto: u32 = switch (transport) {
         .udp => std.posix.IPPROTO.UDP,
-        .tcp => std.posix.IPPROTO.TCP,
+        .tcp, .tls => std.posix.IPPROTO.TCP,
     };
     return try std.posix.socket(addr.any.family, kind | std.posix.SOCK.CLOEXEC, proto);
 }
@@ -427,6 +483,16 @@ fn sendAll(fd: std.posix.socket_t, raw: []const u8) !void {
         off += sent;
     }
 }
+
+fn tlsHandshakeStub(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
+    return error.TlsNotConfigured;
+}
+
+fn tlsSendStub(_: *anyopaque, _: []const u8) !void {
+    return error.TlsNotConfigured;
+}
+
+fn tlsCloseStub(_: *anyopaque) void {}
 
 fn writeTimestamp(writer: anytype, timestamp_ms: i64) !void {
     if (timestamp_ms < 0) return error.InvalidTimestamp;
@@ -578,6 +644,7 @@ test "udp sender emits datagram to local collector" {
         .transport = .udp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 
@@ -617,6 +684,7 @@ test "tcp sender emits octet-counted frame to local collector" {
         .transport = .tcp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 
@@ -648,6 +716,7 @@ test "udp sender truncates only the payload and annotates metadata" {
         .transport = .udp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 
@@ -692,6 +761,7 @@ test "tcp sender preserves the full payload for large messages" {
         .transport = .tcp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 
@@ -760,6 +830,7 @@ test "udp sender re-resolves hostname after send failure" {
         .transport = .udp,
         .host = "localhost",
         .port = 514,
+        .allow_private = true,
         .hooks = .{
             .resolve = Wrap.resolve,
             .open_socket = Wrap.openSocket,
@@ -827,6 +898,7 @@ test "sender init accepts host allowed by policy" {
     var sender = try Sender.init(std.testing.allocator, .{
         .host = "Audit.EXAMPLE.com",
         .egress = .{ .rules = &rules },
+        .allow_private = true,
         .hooks = .{
             .resolve = Wrap.resolve,
             .open_socket = Wrap.openSocket,
@@ -839,4 +911,209 @@ test "sender init accepts host allowed by policy" {
     defer sender.deinit();
 
     try std.testing.expect(Wrap.resolved);
+}
+
+test "sender rejects private address after resolution" {
+    try std.testing.expectError(error.PrivateAddr, Sender.init(std.testing.allocator, .{
+        .host = "private.example.com",
+        .hooks = .{
+            .resolve = struct {
+                fn f(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
+                    return std.net.Address.initIp4(.{ 10, 0, 0, 1 }, port);
+                }
+            }.f,
+        },
+    }));
+}
+
+test "sender allows private address when allow_private set" {
+    const Wrap = struct {
+        fn resolve(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
+            return std.net.Address.initIp4(.{ 192, 168, 1, 1 }, port);
+        }
+        fn openSocket(_: std.net.Address, _: Transport) !std.posix.socket_t { return 0; }
+        fn connect(_: std.posix.socket_t, _: std.net.Address) !void {}
+        fn sendUdp(_: std.posix.socket_t, _: []const u8, _: std.net.Address) !void {}
+        fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
+        fn closeSocket(_: std.posix.socket_t) void {}
+    };
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .host = "internal.example.com",
+        .allow_private = true,
+        .hooks = .{
+            .resolve = Wrap.resolve,
+            .open_socket = Wrap.openSocket,
+            .connect = Wrap.connect,
+            .send_udp = Wrap.sendUdp,
+            .send_tcp = Wrap.sendTcp,
+            .close_socket = Wrap.closeSocket,
+        },
+    });
+    defer sender.deinit();
+}
+
+test "tls sender invokes handshake and send hooks" {
+    const Wrap = struct {
+        var state = TlsMockState{};
+
+        const TlsMockState = struct {
+            handshake_ct: usize = 0,
+            closed: bool = false,
+        };
+
+        fn resolve(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
+            return std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port);
+        }
+        fn openSocket(_: std.net.Address, _: Transport) !std.posix.socket_t { return 0; }
+        fn connect(_: std.posix.socket_t, _: std.net.Address) !void {}
+        fn sendUdp(_: std.posix.socket_t, _: []const u8, _: std.net.Address) !void {}
+        fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
+        fn closeSocket(_: std.posix.socket_t) void {}
+
+        fn handshake(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
+            state.handshake_ct += 1;
+            return @ptrCast(&state);
+        }
+
+        fn tlsClose(ptr: *anyopaque) void {
+            _ = ptr;
+            state.closed = true;
+        }
+    };
+
+    Wrap.state = .{};
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .transport = .tls,
+        .host = "syslog.example.com",
+        .port = 6514,
+        .hooks = .{
+            .resolve = Wrap.resolve,
+            .open_socket = Wrap.openSocket,
+            .connect = Wrap.connect,
+            .send_udp = Wrap.sendUdp,
+            .send_tcp = Wrap.sendTcp,
+            .close_socket = Wrap.closeSocket,
+            .tls_handshake = Wrap.handshake,
+            .tls_close = Wrap.tlsClose,
+        },
+    });
+    defer sender.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), Wrap.state.handshake_ct);
+    try std.testing.expect(sender.tls_state != null);
+}
+
+test "tls sender re-handshakes on refresh" {
+    const Wrap = struct {
+        var state = State{};
+
+        const State = struct {
+            handshake_ct: usize = 0,
+            send_fail: bool = true,
+            closed_ct: usize = 0,
+        };
+
+        fn resolve(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
+            return std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port);
+        }
+        fn openSocket(_: std.net.Address, _: Transport) !std.posix.socket_t { return 0; }
+        fn connect(_: std.posix.socket_t, _: std.net.Address) !void {}
+        fn sendUdp(_: std.posix.socket_t, _: []const u8, _: std.net.Address) !void {}
+        fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
+        fn closeSocket(_: std.posix.socket_t) void {}
+
+        fn handshake(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
+            state.handshake_ct += 1;
+            return @ptrCast(&state);
+        }
+
+        fn tlsSend(_: *anyopaque, _: []const u8) !void {
+            if (state.send_fail) {
+                state.send_fail = false;
+                return error.ConnectionReset;
+            }
+        }
+
+        fn tlsClose(_: *anyopaque) void {
+            state.closed_ct += 1;
+        }
+    };
+
+    Wrap.state = .{};
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .transport = .tls,
+        .host = "syslog.example.com",
+        .port = 6514,
+        .hooks = .{
+            .resolve = Wrap.resolve,
+            .open_socket = Wrap.openSocket,
+            .connect = Wrap.connect,
+            .send_udp = Wrap.sendUdp,
+            .send_tcp = Wrap.sendTcp,
+            .close_socket = Wrap.closeSocket,
+            .tls_handshake = Wrap.handshake,
+            .tls_send = Wrap.tlsSend,
+            .tls_close = Wrap.tlsClose,
+        },
+    });
+    defer sender.deinit();
+
+    try sender.send(.{
+        .hostname = "host",
+        .app_name = "pz",
+        .procid = "1",
+        .msgid = "AUDIT",
+        .msg = "tls-retry",
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), Wrap.state.handshake_ct);
+    try std.testing.expectEqual(@as(usize, 1), Wrap.state.closed_ct);
+}
+
+test "private address check on refresh after re-resolution" {
+    const Wrap = struct {
+        var h = struct {
+            resolve_ct: usize = 0,
+        }{};
+
+        fn resolve(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
+            h.resolve_ct += 1;
+            if (h.resolve_ct == 1) return std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port);
+            return std.net.Address.initIp4(.{ 10, 0, 0, 1 }, port);
+        }
+        fn openSocket(_: std.net.Address, _: Transport) !std.posix.socket_t { return 0; }
+        fn connect(_: std.posix.socket_t, _: std.net.Address) !void {}
+        fn sendUdp(_: std.posix.socket_t, _: []const u8, _: std.net.Address) !void {
+            return error.NetworkUnreachable;
+        }
+        fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
+        fn closeSocket(_: std.posix.socket_t) void {}
+    };
+
+    Wrap.h = .{};
+
+    var sender = try Sender.init(std.testing.allocator, .{
+        .transport = .udp,
+        .host = "syslog.example.com",
+        .hooks = .{
+            .resolve = Wrap.resolve,
+            .open_socket = Wrap.openSocket,
+            .connect = Wrap.connect,
+            .send_udp = Wrap.sendUdp,
+            .send_tcp = Wrap.sendTcp,
+            .close_socket = Wrap.closeSocket,
+        },
+    });
+    defer sender.deinit();
+
+    try std.testing.expectError(error.PrivateAddr, sender.send(.{
+        .hostname = "host",
+        .app_name = "pz",
+        .procid = "1",
+        .msgid = "AUDIT",
+        .msg = "dns-rebind",
+    }));
 }

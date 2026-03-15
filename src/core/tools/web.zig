@@ -68,7 +68,7 @@ pub const Scheme = enum {
 };
 
 pub const RedirectPolicy = struct {
-    egress: policy_mod.Policy = .{ .rules = &.{} },
+    egress: policy_mod.EgressPolicy = .{},
     allow_cross_host: bool = false,
     allow_cross_port: bool = false,
     allow_https_downgrade: bool = false,
@@ -93,12 +93,15 @@ pub const RedirectErr = std.Uri.ResolveInPlaceError || error{
     HttpsDowngrade,
     HostDenied,
     BlockedAddr,
+    DeadlineExceeded,
     OutOfMemory,
 };
 
 pub const ResolveErr = ParseErr || error{
     HostDenied,
     BlockedAddr,
+    ProxyDenied,
+    DeadlineExceeded,
     ResolveFailed,
     OutOfMemory,
 };
@@ -124,6 +127,48 @@ pub const OwnedUrl = struct {
 
     pub fn deinit(self: OwnedUrl, alloc: std.mem.Allocator) void {
         alloc.free(self.text);
+    }
+};
+
+/// Bounded deadline for egress requests.
+pub const Deadline = struct {
+    start_ms: i64,
+    connect_ms: u32,
+    total_ms: u32,
+
+    pub fn init(pol: policy_mod.EgressPolicy) Deadline {
+        return .{
+            .start_ms = milliTimestamp(),
+            .connect_ms = pol.connectMs(),
+            .total_ms = pol.totalMs(),
+        };
+    }
+
+    pub fn connectRemaining(self: Deadline) error{DeadlineExceeded}!u32 {
+        const elapsed = self.elapsedMs();
+        if (elapsed >= self.total_ms) return error.DeadlineExceeded;
+        const remaining_total: u32 = self.total_ms - elapsed;
+        const remaining_connect = if (elapsed >= self.connect_ms) 0 else self.connect_ms - elapsed;
+        if (remaining_connect == 0) return error.DeadlineExceeded;
+        return @min(remaining_connect, remaining_total);
+    }
+
+    pub fn readRemaining(self: Deadline) error{DeadlineExceeded}!u32 {
+        const elapsed = self.elapsedMs();
+        if (elapsed >= self.total_ms) return error.DeadlineExceeded;
+        return self.total_ms - elapsed;
+    }
+
+    fn elapsedMs(self: Deadline) u32 {
+        const now = milliTimestamp();
+        const diff = now - self.start_ms;
+        if (diff < 0) return 0;
+        if (diff > std.math.maxInt(u32)) return std.math.maxInt(u32);
+        return @intCast(diff);
+    }
+
+    fn milliTimestamp() i64 {
+        return std.time.milliTimestamp();
     }
 };
 
@@ -241,13 +286,13 @@ fn validateRedirect(base: ParsedUrl, uri: std.Uri, policy: RedirectPolicy) Redir
     try validateEgressHost(host, policy);
 }
 
-fn validateEgressHost(host: []const u8, policy: RedirectPolicy) error{HostDenied}!void {
+fn validateEgressHost(host: []const u8, pol: RedirectPolicy) error{HostDenied}!void {
     var path_buf: [320]u8 = undefined;
     const prefix = "runtime/web/";
     if (prefix.len + host.len > path_buf.len) return error.HostDenied;
     @memcpy(path_buf[0..prefix.len], prefix);
     for (host, 0..) |c, i| path_buf[prefix.len + i] = std.ascii.toLower(c);
-    if (policy.egress.eval(path_buf[0 .. prefix.len + host.len], "web") != .allow) {
+    if (pol.egress.policy().eval(path_buf[0 .. prefix.len + host.len], "web") != .allow) {
         return error.HostDenied;
     }
 }
@@ -1045,4 +1090,45 @@ test "redirect e2e blocks rebound redirect targets" {
         .ct = server.requestCount(),
         .line = http_mock.requestLine(server.request(0)).?,
     });
+}
+
+test "Deadline init uses policy bounds" {
+    const ep: policy_mod.EgressPolicy = .{
+        .connect_deadline_ms = 5_000,
+        .total_deadline_ms = 20_000,
+    };
+    const dl = Deadline.init(ep);
+    try std.testing.expectEqual(@as(u32, 5_000), dl.connect_ms);
+    try std.testing.expectEqual(@as(u32, 20_000), dl.total_ms);
+}
+
+test "Deadline clamps over-max values" {
+    const ep: policy_mod.EgressPolicy = .{
+        .connect_deadline_ms = 999_999,
+        .total_deadline_ms = 999_999,
+    };
+    const dl = Deadline.init(ep);
+    try std.testing.expectEqual(policy_mod.EgressPolicy.max_connect_ms, dl.connect_ms);
+    try std.testing.expectEqual(policy_mod.EgressPolicy.max_total_ms, dl.total_ms);
+}
+
+test "Deadline defaults match EgressPolicy defaults" {
+    const dl = Deadline.init(.{});
+    try std.testing.expectEqual(policy_mod.EgressPolicy.default_connect_ms, dl.connect_ms);
+    try std.testing.expectEqual(policy_mod.EgressPolicy.default_total_ms, dl.total_ms);
+}
+
+test "Deadline readRemaining returns remaining total" {
+    // Freshly created deadline should have nearly full total remaining.
+    const dl = Deadline.init(.{ .total_deadline_ms = 60_000 });
+    const rem = try dl.readRemaining();
+    try std.testing.expect(rem > 59_000);
+    try std.testing.expect(rem <= 60_000);
+}
+
+test "Deadline connectRemaining returns remaining connect" {
+    const dl = Deadline.init(.{ .connect_deadline_ms = 10_000, .total_deadline_ms = 60_000 });
+    const rem = try dl.connectRemaining();
+    try std.testing.expect(rem > 9_000);
+    try std.testing.expect(rem <= 10_000);
 }

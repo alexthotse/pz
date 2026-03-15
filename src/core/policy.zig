@@ -221,6 +221,62 @@ pub fn isBlockedIp6(ip: [16]u8) bool {
     return false;
 }
 
+/// Egress policy for web tool: endpoint allowlists, deadlines, proxy.
+pub const EgressPolicy = struct {
+    rules: []const Rule = &.{},
+    /// Per-request connect deadline in ms. 0 = use default (10_000).
+    connect_deadline_ms: u32 = 0,
+    /// Per-request total deadline in ms. 0 = use default (30_000).
+    total_deadline_ms: u32 = 0,
+    /// Policy-bound HTTPS proxy URL. null = direct.
+    proxy_url: ?[]const u8 = null,
+
+    pub const default_connect_ms: u32 = 10_000;
+    pub const default_total_ms: u32 = 30_000;
+    pub const max_connect_ms: u32 = 30_000;
+    pub const max_total_ms: u32 = 120_000;
+
+    pub fn connectMs(self: EgressPolicy) u32 {
+        const raw = if (self.connect_deadline_ms == 0) default_connect_ms else self.connect_deadline_ms;
+        return @min(raw, max_connect_ms);
+    }
+
+    pub fn totalMs(self: EgressPolicy) u32 {
+        const raw = if (self.total_deadline_ms == 0) default_total_ms else self.total_deadline_ms;
+        return @min(raw, max_total_ms);
+    }
+
+    pub fn policy(self: EgressPolicy) Policy {
+        return .{ .rules = self.rules };
+    }
+
+    /// Validate that a proxy URL is well-formed and policy-allowed.
+    pub fn validatedProxy(self: EgressPolicy) error{ UnsupportedScheme, MissingHost, HostDenied }!?[]const u8 {
+        const url = self.proxy_url orelse return null;
+        // Proxy must be http or https scheme.
+        if (!startsWith(url, "http://") and !startsWith(url, "https://")) return error.UnsupportedScheme;
+        // Extract host from proxy URL for policy check.
+        const after_scheme = if (startsWith(url, "https://")) url[8..] else url[7..];
+        const host_end = std.mem.indexOfAny(u8, after_scheme, ":/") orelse after_scheme.len;
+        if (host_end == 0) return error.MissingHost;
+        const host = after_scheme[0..host_end];
+        // Proxy host must be allowed by egress rules.
+        var path_buf: [320]u8 = undefined;
+        const prefix = "runtime/web/";
+        if (prefix.len + host.len > path_buf.len) return error.HostDenied;
+        @memcpy(path_buf[0..prefix.len], prefix);
+        for (host, 0..) |c, i| path_buf[prefix.len + i] = std.ascii.toLower(c);
+        if (evaluate(self.rules, path_buf[0 .. prefix.len + host.len], "web") != .allow) {
+            return error.HostDenied;
+        }
+        return url;
+    }
+
+    fn startsWith(hay: []const u8, needle: []const u8) bool {
+        return hay.len >= needle.len and std.mem.eql(u8, hay[0..needle.len], needle);
+    }
+};
+
 /// Evaluate env key+val against rules using last-match-wins semantics.
 /// Allows specific allow rules to override broad deny rules (and vice versa).
 /// Default (no match): deny.
@@ -1932,4 +1988,49 @@ test "signed deny cannot be weakened by unsigned allow" {
     try testing.expectEqual(Effect.deny, evaluate(resolved.doc.rules, "any/path.zig", null));
     try testing.expectEqual(Effect.deny, evaluate(resolved.doc.rules, "src/main.zig", "read"));
     try testing.expectEqual(Effect.deny, evaluate(resolved.doc.rules, "foo.txt", "write"));
+}
+
+test "EgressPolicy deadlines clamp to bounds" {
+    const ep0: EgressPolicy = .{};
+    try testing.expectEqual(@as(u32, 10_000), ep0.connectMs());
+    try testing.expectEqual(@as(u32, 30_000), ep0.totalMs());
+
+    const ep1: EgressPolicy = .{ .connect_deadline_ms = 50_000, .total_deadline_ms = 200_000 };
+    try testing.expectEqual(@as(u32, 30_000), ep1.connectMs());
+    try testing.expectEqual(@as(u32, 120_000), ep1.totalMs());
+
+    const ep2: EgressPolicy = .{ .connect_deadline_ms = 5_000, .total_deadline_ms = 15_000 };
+    try testing.expectEqual(@as(u32, 5_000), ep2.connectMs());
+    try testing.expectEqual(@as(u32, 15_000), ep2.totalMs());
+}
+
+test "EgressPolicy proxy validation requires allowed host" {
+    const rules = [_]Rule{
+        .{ .pattern = "runtime/web/proxy.corp", .effect = .allow, .tool = "web" },
+    };
+    const ep: EgressPolicy = .{
+        .rules = &rules,
+        .proxy_url = "https://proxy.corp:8080",
+    };
+    const proxy = try ep.validatedProxy();
+    try testing.expectEqualStrings("https://proxy.corp:8080", proxy.?);
+
+    const ep_denied: EgressPolicy = .{
+        .rules = &rules,
+        .proxy_url = "https://rogue.host:8080",
+    };
+    try testing.expectError(error.HostDenied, ep_denied.validatedProxy());
+}
+
+test "EgressPolicy proxy rejects bad schemes" {
+    const ep: EgressPolicy = .{
+        .proxy_url = "socks5://proxy.corp:1080",
+    };
+    try testing.expectError(error.UnsupportedScheme, ep.validatedProxy());
+}
+
+test "EgressPolicy proxy null returns null" {
+    const ep: EgressPolicy = .{};
+    const proxy = try ep.validatedProxy();
+    try testing.expect(proxy == null);
 }

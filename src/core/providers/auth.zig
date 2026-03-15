@@ -296,8 +296,8 @@ fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provider:
     const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return error.AuthNotFound;
     const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch return error.AuthNotFound;
+        .ignore_unknown_fields = false,
+    }) catch return error.AuthCorrupt;
     const entry = switch (provider) {
         .anthropic => parsed.value.anthropic,
         .openai => parsed.value.openai,
@@ -964,15 +964,15 @@ fn saveOAuthForProviderHome(alloc: std.mem.Allocator, home: []const u8, provider
     const path = try authFilePath(ar, home_dup);
 
     var auth_file: AuthFile = .{};
-    // Load existing
     if (std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024)) |raw| {
-        if (std.json.parseFromSlice(AuthFile, ar, raw, .{
+        auth_file = (try std.json.parseFromSlice(AuthFile, ar, raw, .{
             .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        })) |parsed| {
-            auth_file = parsed.value;
-        } else |_| {}
-    } else |_| {}
+            .ignore_unknown_fields = false,
+        })).value;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
 
     const entry: AuthEntry = .{
         .type = "oauth",
@@ -987,9 +987,17 @@ fn saveOAuthForProviderHome(alloc: std.mem.Allocator, home: []const u8, provider
     }
 
     const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
-    const file = try fs_secure.createFilePath(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(out);
+    try atomicAuthWrite(dir_path, "auth.json", out);
+}
+
+/// Atomic auth file write: temp + fsync + rename into dir_path.
+fn atomicAuthWrite(dir_path: []const u8, name: []const u8, data: []const u8) !void {
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        try std.fs.openDirAbsolute(dir_path, .{})
+    else
+        try std.fs.cwd().openDir(dir_path, .{});
+    defer dir.close();
+    try fs_secure.atomicWriteAt(dir, name, data);
 }
 
 /// List providers that have credentials stored (merges all auth files).
@@ -1009,8 +1017,8 @@ fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {
     const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return try alloc.alloc(Provider, 0);
     const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    }) catch return try alloc.alloc(Provider, 0);
+        .ignore_unknown_fields = false,
+    }) catch return error.AuthCorrupt;
     merged.anthropic = parsed.value.anthropic;
     merged.openai = parsed.value.openai;
     merged.google = parsed.value.google;
@@ -1041,6 +1049,7 @@ fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Pro
     const ar = arena.allocator();
 
     const home_dup = try ar.dupe(u8, home);
+    const dir_path = try primaryAuthDir(ar, home_dup);
     const path = try authFilePath(ar, home_dup);
     const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch |err| {
         if (err == error.FileNotFound) {
@@ -1052,10 +1061,10 @@ fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Pro
     };
     var parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
+        .ignore_unknown_fields = false,
     }) catch {
-        try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .ok, .notice, .{ .text = "logout noop", .vis = .@"pub" });
-        return;
+        try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .fail, .err, .{ .text = "AuthCorrupt", .vis = .mask });
+        return error.AuthCorrupt;
     };
 
     switch (provider) {
@@ -1065,9 +1074,10 @@ fn logoutHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider: Pro
     }
 
     const out = try std.json.Stringify.valueAlloc(ar, parsed.value, .{ .whitespace = .indent_2 });
-    const file = try fs_secure.createFilePath(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(out);
+    atomicAuthWrite(dir_path, "auth.json", out) catch |err| {
+        try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
+        return err;
+    };
     try emitAuthAudit(alloc, hooks, 2, provider, "logout", "stored", .ok, .notice, .{ .text = "logout complete", .vis = .@"pub" });
 }
 
@@ -1106,15 +1116,15 @@ fn saveApiKeyHomeRaw(alloc: std.mem.Allocator, home: []const u8, provider: Provi
     const path = try authFilePath(ar, home_dup);
 
     var auth_file: AuthFile = .{};
-    // Try loading existing
     if (std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024)) |raw| {
-        if (std.json.parseFromSlice(AuthFile, ar, raw, .{
+        auth_file = (try std.json.parseFromSlice(AuthFile, ar, raw, .{
             .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
-        })) |parsed| {
-            auth_file = parsed.value;
-        } else |_| {}
-    } else |_| {}
+            .ignore_unknown_fields = false,
+        })).value;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
 
     const entry = AuthEntry{ .type = "api_key", .key = key };
     switch (provider) {
@@ -1124,9 +1134,7 @@ fn saveApiKeyHomeRaw(alloc: std.mem.Allocator, home: []const u8, provider: Provi
     }
 
     const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
-    const file = try fs_secure.createFilePath(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(out);
+    try atomicAuthWrite(dir_path, "auth.json", out);
 }
 
 fn emitAuthAudit(
@@ -1587,6 +1595,40 @@ test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.AuthNotFound, loadFileAuthForProvider(arena.allocator(), home, .openai));
+}
+
+test "loadFileAuthForProvider fails closed on corrupt auth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "not json" });
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.AuthCorrupt, loadFileAuthForProvider(arena.allocator(), home, .anthropic));
+}
+
+test "loadFileAuthForProvider rejects unknown fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "{\"anthropic\":{\"type\":\"api_key\",\"key\":\"k\"},\"bogus\":1}" });
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.AuthCorrupt, loadFileAuthForProvider(arena.allocator(), home, .anthropic));
+}
+
+test "listLoggedInHome fails closed on corrupt auth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "garbage" });
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    try std.testing.expectError(error.AuthCorrupt, listLoggedInHome(std.testing.allocator, home));
 }
 
 test "oauth helpers expose provider capabilities and metadata" {

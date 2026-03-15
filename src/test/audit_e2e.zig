@@ -406,6 +406,7 @@ test "audit e2e ships mixed privileged control rows over udp" {
         .transport = .udp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 
@@ -427,6 +428,7 @@ test "audit e2e ships mixed privileged control rows over tcp" {
         .transport = .tcp,
         .host = "127.0.0.1",
         .port = collector.port(),
+        .allow_private = true,
     });
     defer sender.deinit();
 

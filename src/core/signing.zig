@@ -244,6 +244,143 @@ pub fn verifyDetached(msg: []const u8, sig: Signature, pk: PublicKey) VerifyErro
     return .{ .pk = pk, .sig = sig };
 }
 
+// ── Release manifest ────────────────────────────────────────────────
+//
+// A manifest binds (version, asset, sha256, url) to a signature so that
+// unsigned metadata cannot induce downgrade or content/version mismatch.
+// Wire format: "pz-manifest-v1\n" header followed by key=value lines
+// terminated by "\n", then 128 hex chars of Ed25519 signature over the
+// canonical text (header + fields, excluding the signature line itself).
+
+pub const Manifest = struct {
+    version: []const u8,
+    asset: []const u8,
+    sha256: [64]u8, // hex-encoded SHA-256
+    url: []const u8,
+    sig: Signature,
+
+    pub const header = "pz-manifest-v1\n";
+    pub const max_len = 4096;
+
+    pub const ParseError = error{
+        BadHeader,
+        BadField,
+        MissingSig,
+        MissingField,
+    };
+
+    /// Build the canonical signed payload (everything except the sig= line).
+    pub fn canonical(self: Manifest, buf: *[max_len]u8) error{Overflow}![]const u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const w = fbs.writer();
+        w.writeAll(header) catch return error.Overflow;
+        w.print("version={s}\n", .{self.version}) catch return error.Overflow;
+        w.print("asset={s}\n", .{self.asset}) catch return error.Overflow;
+        w.print("sha256={s}\n", .{self.sha256}) catch return error.Overflow;
+        w.print("url={s}\n", .{self.url}) catch return error.Overflow;
+        return fbs.getWritten();
+    }
+
+    /// Parse a manifest from wire text.
+    pub fn parse(txt: []const u8) (ParseError || SigError)!Manifest {
+        if (!std.mem.startsWith(u8, txt, header)) return error.BadHeader;
+        var ver: ?[]const u8 = null;
+        var asset: ?[]const u8 = null;
+        var sha: ?[64]u8 = null;
+        var url: ?[]const u8 = null;
+        var sig: ?Signature = null;
+
+        var it = std.mem.splitScalar(u8, txt[header.len..], '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            if (std.mem.startsWith(u8, line, "version=")) {
+                ver = line["version=".len..];
+            } else if (std.mem.startsWith(u8, line, "asset=")) {
+                asset = line["asset=".len..];
+            } else if (std.mem.startsWith(u8, line, "sha256=")) {
+                const val = line["sha256=".len..];
+                if (val.len != 64) return error.BadField;
+                sha = val[0..64].*;
+            } else if (std.mem.startsWith(u8, line, "url=")) {
+                url = line["url=".len..];
+            } else if (std.mem.startsWith(u8, line, "sig=")) {
+                const val = line["sig=".len..];
+                sig = try Signature.parseHex(std.mem.trim(u8, val, " \t\r"));
+            }
+        }
+        return .{
+            .version = ver orelse return error.MissingField,
+            .asset = asset orelse return error.MissingField,
+            .sha256 = sha orelse return error.MissingField,
+            .url = url orelse return error.MissingField,
+            .sig = sig orelse return error.MissingSig,
+        };
+    }
+};
+
+pub const ManifestVerifyError = VerifyError || Manifest.ParseError || SigError || error{
+    Overflow,
+    DigestMismatch,
+    VersionMismatch,
+    AssetMismatch,
+};
+
+/// Verify a signed manifest against a public key then check that the
+/// claimed SHA-256 digest matches the actual archive content.
+pub fn verifyManifest(
+    txt: []const u8,
+    pk: PublicKey,
+    archive: []const u8,
+    expected_ver: []const u8,
+    expected_asset: []const u8,
+) ManifestVerifyError!Manifest {
+    const m = try Manifest.parse(txt);
+    var buf: [Manifest.max_len]u8 = undefined;
+    const payload = try m.canonical(&buf);
+    _ = try verifyDetached(payload, m.sig, pk);
+
+    // Verify archive digest.
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(archive, &digest, .{});
+    const actual_hex = std.fmt.bytesToHex(digest, .lower);
+    if (!ctEql(actual_hex[0..], m.sha256[0..])) return error.DigestMismatch;
+
+    // Verify version and asset name match release metadata.
+    if (!std.mem.eql(u8, m.version, expected_ver)) return error.VersionMismatch;
+    if (!std.mem.eql(u8, m.asset, expected_asset)) return error.AssetMismatch;
+
+    return m;
+}
+
+pub fn signManifestAlloc(
+    alloc: std.mem.Allocator,
+    ver: []const u8,
+    asset: []const u8,
+    archive: []const u8,
+    url: []const u8,
+    kp: KeyPair,
+) (std.mem.Allocator.Error || SignError || error{Overflow})![]u8 {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(archive, &digest, .{});
+    const sha_hex = std.fmt.bytesToHex(digest, .lower);
+
+    const m = Manifest{
+        .version = ver,
+        .asset = asset,
+        .sha256 = sha_hex,
+        .url = url,
+        .sig = undefined,
+    };
+    var buf: [Manifest.max_len]u8 = undefined;
+    const payload = m.canonical(&buf) catch return error.Overflow;
+    const sig = try kp.sign(payload);
+    const sig_hex_arr = std.fmt.bytesToHex(sig.raw, .lower);
+
+    return std.fmt.allocPrint(alloc, "{s}sig={s}\n", .{ payload, sig_hex_arr[0..] });
+}
+
 const seed_hex = "8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166";
 const pk_hex = "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083";
 const sig_hex = "10a442b4a80cc4225b154f43bef28d2472ca80221951262eb8e0df9091575e2687cc486e77263c3418c757522d54f84b0359236abbbd4acd20dc297fdca66808";
@@ -440,6 +577,116 @@ test "signing property: signature mutation fails verification" {
         .iterations = 500,
         .seed = 0x5eed_51a9,
     });
+}
+
+test "manifest roundtrip sign and verify" {
+    const kp = try fixtureKeyPair();
+    const pk = kp.publicKey();
+    const archive = "binary-content-here";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v1.2.3",
+        "pz-aarch64-macos.tar.gz",
+        archive,
+        "https://dl.example/pz.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+
+    const m = try verifyManifest(txt, pk, archive, "v1.2.3", "pz-aarch64-macos.tar.gz");
+    try testing.expectEqualStrings("v1.2.3", m.version);
+    try testing.expectEqualStrings("pz-aarch64-macos.tar.gz", m.asset);
+    try testing.expectEqualStrings("https://dl.example/pz.tar.gz", m.url);
+}
+
+test "manifest rejects tampered archive" {
+    const kp = try fixtureKeyPair();
+    const pk = kp.publicKey();
+    const archive = "binary-content-here";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v1.2.3",
+        "pz-aarch64-macos.tar.gz",
+        archive,
+        "https://dl.example/pz.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+
+    try testing.expectError(
+        error.DigestMismatch,
+        verifyManifest(txt, pk, "tampered-binary", "v1.2.3", "pz-aarch64-macos.tar.gz"),
+    );
+}
+
+test "manifest rejects version mismatch" {
+    const kp = try fixtureKeyPair();
+    const pk = kp.publicKey();
+    const archive = "binary-content-here";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v1.2.3",
+        "pz-aarch64-macos.tar.gz",
+        archive,
+        "https://dl.example/pz.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+
+    try testing.expectError(
+        error.VersionMismatch,
+        verifyManifest(txt, pk, archive, "v9.9.9", "pz-aarch64-macos.tar.gz"),
+    );
+}
+
+test "manifest rejects asset mismatch" {
+    const kp = try fixtureKeyPair();
+    const pk = kp.publicKey();
+    const archive = "binary-content-here";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v1.2.3",
+        "pz-aarch64-macos.tar.gz",
+        archive,
+        "https://dl.example/pz.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+
+    try testing.expectError(
+        error.AssetMismatch,
+        verifyManifest(txt, pk, archive, "v1.2.3", "pz-x86_64-linux.tar.gz"),
+    );
+}
+
+test "manifest rejects wrong signing key" {
+    const kp = try fixtureKeyPair();
+    const archive = "binary-content-here";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v1.2.3",
+        "pz-aarch64-macos.tar.gz",
+        archive,
+        "https://dl.example/pz.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+
+    // Different key.
+    const other_seed = seedFromParts(1, 2, 3, 4);
+    const other_kp = try KeyPair.fromSeed(other_seed);
+    const other_pk = other_kp.publicKey();
+
+    const err = verifyManifest(txt, other_pk, archive, "v1.2.3", "pz-aarch64-macos.tar.gz");
+    try testing.expectError(error.SigMismatch, err);
+}
+
+test "manifest parse rejects bad header" {
+    try testing.expectError(error.BadHeader, Manifest.parse("bad-header\nversion=v1\n"));
+}
+
+test "manifest parse rejects missing fields" {
+    try testing.expectError(error.MissingField, Manifest.parse("pz-manifest-v1\nsig=00" ++ "00" ** 63 ++ "\n"));
 }
 
 test "ctEql matches identical slices" {

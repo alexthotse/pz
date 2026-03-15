@@ -93,6 +93,7 @@ pub const Handler = struct {
         };
         defer env.deinit();
 
+        sandbox.scrubEnv(&env);
         for (args.env) |kv| {
             env.put(kv.key, kv.val) catch |put_err| {
                 return mapEnvErr(put_err);

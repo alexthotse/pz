@@ -46,7 +46,8 @@ pub const Writer = struct {
         const raw = try schema.encodeAlloc(self.alloc, ev);
         defer self.alloc.free(raw);
 
-        var file = try fs_secure.createFileAt(self.dir, path, .{
+        // Confined create: O_NOFOLLOW + hardlink check for .pz state.
+        var file = try fs_secure.createConfined(self.dir, path, .{
             .read = false,
             .truncate = false,
         });

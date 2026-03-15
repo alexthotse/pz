@@ -16,8 +16,8 @@ pub const File = struct {
         const owned = try alloc.dupe(u8, path);
         errdefer alloc.free(owned);
 
-        // Create the file to establish it on disk.
-        var f = try fs_secure.createFileAt(dir, owned, .{ .truncate = false });
+        // Confined create: O_NOFOLLOW + hardlink check for .pz state.
+        var f = try fs_secure.createConfined(dir, owned, .{ .truncate = false });
         errdefer dir.deleteFile(owned) catch {};
         f.close();
 

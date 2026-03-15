@@ -30,7 +30,7 @@ pub fn run(
     const src_path = try sid_path.sidJsonlAlloc(alloc, sid);
     defer alloc.free(src_path);
 
-    const in_file = try dir.openFile(src_path, .{ .mode = .read_only });
+    const in_file = try fs_secure.openConfined(dir, src_path, .{ .mode = .read_only });
     const in_bytes = try in_file.getEndPos();
     in_file.close();
 
@@ -40,7 +40,7 @@ pub fn run(
     var tmp = try session_file.createSessionFile(alloc, dir, sid, ".jsonl.compact.tmp");
     defer tmp.deinit();
 
-    var out_file = try fs_secure.createFileAt(dir, tmp.path, .{
+    var out_file = try fs_secure.createConfined(dir, tmp.path, .{
         .truncate = true,
     });
     defer out_file.close();
@@ -84,10 +84,13 @@ pub fn loadCheckpoint(
     const path = try sid_path.sidExtAlloc(alloc, sid, ".compact.json");
     defer alloc.free(path);
 
-    const raw = dir.readFileAlloc(alloc, path, 64 * 1024) catch |read_err| switch (read_err) {
+    // Confined read: O_NOFOLLOW + hardlink check.
+    const ck_file = fs_secure.openConfined(dir, path, .{ .mode = .read_only }) catch |read_err| switch (read_err) {
         error.FileNotFound => return null,
         else => return read_err,
     };
+    defer ck_file.close();
+    const raw = try ck_file.readToEndAlloc(alloc, 64 * 1024);
     defer alloc.free(raw);
     if (raw.len == 0 or raw[raw.len - 1] != '\n') return error.TornCheckpoint;
 
@@ -112,13 +115,10 @@ fn saveCheckpoint(
     const raw = try std.json.Stringify.valueAlloc(alloc, ck, .{});
     defer alloc.free(raw);
 
-    var file = try fs_secure.createFileAt(dir, path, .{
-        .truncate = true,
-    });
-    defer file.close();
-    try file.writeAll(raw);
-    try file.writeAll("\n");
-    try file.sync();
+    // Atomic: temp + fsync + rename.
+    const with_nl = try std.fmt.allocPrint(alloc, "{s}\n", .{raw});
+    defer alloc.free(with_nl);
+    try fs_secure.atomicWriteAt(dir, path, with_nl);
 }
 
 fn collectSemanticJson(
