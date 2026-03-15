@@ -65,7 +65,8 @@ Agents must report what they CHANGED (files, lines, insertions/deletions), not c
 
 ## Testing Rule
 
-Run `zig build test` with a 60-second timeout: `timeout 60 zig build test 2>&1`. Tests must complete within 1 minute.
+Run `timeout 60 zig build test 2>&1 | tail -5` ONCE. Never loop, retry, or run multiple grep variations.
+A useful test proves behavior the compiler cannot — error paths, edge cases, integration contracts, security boundaries. Skip tests that verify comptime-guaranteed behavior, constants, or type correctness.
 Run relevant tests before and after each fix or feature.
 Every bug fix must add or strengthen a test.
 Use `ohsnap` snapshots for struct/multi-field outputs and serialized payload checks.

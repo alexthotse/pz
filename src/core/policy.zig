@@ -251,6 +251,7 @@ pub const Resolved = struct {
     doc: Doc,
     hash_hex: [64]u8,
     has_files: bool,
+    locked: bool,
 
     pub fn bind(self: *const Resolved) ApprovalBind {
         return .{ .hash = self.hash_hex[0..] };
@@ -259,6 +260,26 @@ pub const Resolved = struct {
 
 fn trustedPolicyPk() !signing.PublicKey {
     return signing.PublicKey.parseHex(build_options.policy_pk_hex);
+}
+
+pub const VerifyError = error{
+    InvalidPolicy,
+    UntrustedSigner,
+    SigMismatch,
+    MissingSignature,
+    OutOfMemory,
+};
+
+/// Verify a signed policy bundle against the build-time trusted public key.
+/// Returns the parsed SignedDoc on success; caller must deinitSignedDoc.
+pub fn verifySignedPolicy(alloc: std.mem.Allocator, raw: []const u8) VerifyError!SignedDoc {
+    return parseSignedDoc(alloc, raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.MissingSignature => return error.MissingSignature,
+        error.UntrustedSigner => return error.UntrustedSigner,
+        error.SigMismatch => return error.SigMismatch,
+        else => return error.InvalidPolicy,
+    };
 }
 
 /// Parse a policy document from JSON.
@@ -568,6 +589,7 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
         .doc = merged,
         .hash_hex = hash_hex,
         .has_files = doc_n != 0,
+        .locked = doc_n != 0,
     };
 }
 
@@ -1145,6 +1167,101 @@ test "signed policy bundle rejects untrusted signer" {
     defer testing.allocator.free(json);
 
     try testing.expectError(error.UntrustedSigner, parseSignedDoc(testing.allocator, json));
+}
+
+test "verifySignedPolicy accepts valid bundle" {
+    const kp = try testKeyPair();
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const json = try encodeSignedDoc(testing.allocator, .{ .rules = &rules }, kp);
+    defer testing.allocator.free(json);
+
+    const doc = try verifySignedPolicy(testing.allocator, json);
+    defer deinitSignedDoc(testing.allocator, doc);
+
+    try testing.expectEqual(@as(usize, 1), doc.doc.rules.len);
+    try testing.expectEqualStrings("*", doc.doc.rules[0].pattern);
+}
+
+test "verifySignedPolicy rejects tampered bundle" {
+    const kp = try testKeyPair();
+    const rules = [_]Rule{.{ .pattern = "src/*", .effect = .allow }};
+    const json = try encodeSignedDoc(testing.allocator, .{ .rules = &rules }, kp);
+    defer testing.allocator.free(json);
+
+    const mut = try testing.allocator.dupe(u8, json);
+    defer testing.allocator.free(mut);
+    const idx = std.mem.indexOf(u8, mut, "src/*") orelse return error.TestUnexpectedResult;
+    mut[idx] = 'X';
+
+    try testing.expectError(error.SigMismatch, verifySignedPolicy(testing.allocator, mut));
+}
+
+test "verifySignedPolicy rejects unsigned doc" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const json = try encodeDoc(testing.allocator, .{ .rules = &rules });
+    defer testing.allocator.free(json);
+
+    try testing.expectError(error.MissingSignature, verifySignedPolicy(testing.allocator, json));
+}
+
+test "loadResolved sets locked when signed policy present" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("cwd/.pz");
+    const kp = try testKeyPair();
+    const raw = try encodeSignedDoc(testing.allocator, .{
+        .rules = &.{.{ .pattern = "*", .effect = .allow }},
+    }, kp);
+    defer testing.allocator.free(raw);
+    try tmp.dir.writeFile(.{ .sub_path = "cwd/.pz/policy.json", .data = raw });
+
+    const cwd = try tmp.dir.realpathAlloc(testing.allocator, "cwd");
+    defer testing.allocator.free(cwd);
+
+    const resolved = try loadResolved(testing.allocator, cwd, null);
+    defer deinitResolved(testing.allocator, resolved);
+
+    try testing.expect(resolved.locked);
+    try testing.expect(resolved.has_files);
+}
+
+test "loadResolved not locked without policy files" {
+    const resolved = try loadResolved(testing.allocator, null, null);
+    defer deinitResolved(testing.allocator, resolved);
+
+    try testing.expect(!resolved.locked);
+    try testing.expect(!resolved.has_files);
+}
+
+test "loadResolved rejects unsigned file in lock mode" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("cwd/.pz");
+
+    // Home has valid signed policy
+    const kp = try testKeyPair();
+    const signed = try encodeSignedDoc(testing.allocator, .{
+        .rules = &.{.{ .pattern = "*", .effect = .allow }},
+    }, kp);
+    defer testing.allocator.free(signed);
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pz/policy.json", .data = signed });
+
+    // Cwd has unsigned policy - should fail
+    const unsigned = try encodeDoc(testing.allocator, .{
+        .rules = &.{.{ .pattern = "*.md", .effect = .deny }},
+    });
+    defer testing.allocator.free(unsigned);
+    try tmp.dir.writeFile(.{ .sub_path = "cwd/.pz/policy.json", .data = unsigned });
+
+    const home = try tmp.dir.realpathAlloc(testing.allocator, "home");
+    defer testing.allocator.free(home);
+    const cwd = try tmp.dir.realpathAlloc(testing.allocator, "cwd");
+    defer testing.allocator.free(cwd);
+
+    try testing.expectError(error.InvalidPolicy, loadResolved(testing.allocator, cwd, home));
 }
 
 fn testKeyPair() !signing.KeyPair {
@@ -1746,4 +1863,73 @@ test "ApprovalBind version and hash are distinct" {
 
     try testing.expect(!ver.eql(.{ .hash = "1" }));
     try testing.expect(ver_same.eql(.{ .version = 7 }));
+}
+
+test "property: random byte mutations to signed policy payload fail verification" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { off: u8, val: u8 }) bool {
+            const kp = testKeyPair() catch return false;
+            const rules = [_]Rule{.{ .pattern = "src/*", .effect = .deny }};
+            const doc: Doc = .{ .rules = &rules, .lock = .{ .cfg = true } };
+            const payload = encodeDoc(testing.allocator, doc) catch return false;
+            defer testing.allocator.free(payload);
+
+            const sig = kp.sign(payload) catch return false;
+            const pk = kp.publicKey();
+
+            if (payload.len == 0) return false;
+            const idx = args.off % @as(u8, @intCast(@min(payload.len, 255)));
+
+            const mut = testing.allocator.dupe(u8, payload) catch return false;
+            defer testing.allocator.free(mut);
+
+            // Skip no-ops
+            if (mut[idx] == args.val) return true;
+            mut[idx] = args.val;
+
+            // Mutated payload must fail sig verification
+            _ = signing.verifyDetached(mut, sig, pk) catch return true;
+            return false;
+        }
+    }.prop, .{ .iterations = 2000 });
+}
+
+test "signed deny cannot be weakened by unsigned allow" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("cwd/.pz");
+
+    // Home: signed policy with deny *
+    const kp = try testKeyPair();
+    const signed = try encodeSignedDoc(testing.allocator, .{
+        .rules = &.{.{ .pattern = "*", .effect = .deny }},
+    }, kp);
+    defer testing.allocator.free(signed);
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pz/policy.json", .data = signed });
+
+    // Cwd: unsigned policy with allow * — should be rejected (unsigned in signed context)
+    const unsigned = try encodeDoc(testing.allocator, .{
+        .rules = &.{.{ .pattern = "*", .effect = .allow }},
+    });
+    defer testing.allocator.free(unsigned);
+    try tmp.dir.writeFile(.{ .sub_path = "cwd/.pz/policy.json", .data = unsigned });
+
+    const home = try tmp.dir.realpathAlloc(testing.allocator, "home");
+    defer testing.allocator.free(home);
+    const cwd = try tmp.dir.realpathAlloc(testing.allocator, "cwd");
+    defer testing.allocator.free(cwd);
+
+    // Unsigned cwd policy fails to load alongside signed home policy
+    try testing.expectError(error.InvalidPolicy, loadResolved(testing.allocator, cwd, home));
+
+    // Even if only home is loaded, deny * still denies everything
+    const resolved = try loadResolved(testing.allocator, null, home);
+    defer deinitResolved(testing.allocator, resolved);
+
+    try testing.expectEqual(Effect.deny, evaluate(resolved.doc.rules, "any/path.zig", null));
+    try testing.expectEqual(Effect.deny, evaluate(resolved.doc.rules, "src/main.zig", "read"));
+    try testing.expectEqual(Effect.deny, evaluate(resolved.doc.rules, "foo.txt", "write"));
 }

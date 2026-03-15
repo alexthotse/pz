@@ -4303,6 +4303,65 @@ test "property: CmdCache approval keys bind repo cwd policy and session" {
     }.prop, .{ .iterations = 1500 });
 }
 
+test "CmdCache containsAt rejects expired TTL entries" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const key: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "make test",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .expires_at_ms = 1000 },
+    };
+
+    try cache.add(key);
+
+    // Before expiry: found
+    try std.testing.expect(cache.containsAt(key, 500));
+    try std.testing.expect(cache.containsAt(key, 1000));
+
+    // After expiry: rejected and evicted
+    try std.testing.expect(!cache.containsAt(key, 1001));
+
+    // Entry was evicted — not found even without time check
+    try std.testing.expect(!cache.contains(key));
+}
+
+test "CmdCache containsAt with zero now_ms skips TTL check" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const key: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .expires_at_ms = 1 }, // expired long ago
+    };
+
+    try cache.add(key);
+    // now_ms=0 skips TTL check (used by tests calling contains())
+    try std.testing.expect(cache.containsAt(key, 0));
+}
+
+test "CmdCache session-scoped entries unaffected by TTL check" {
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+
+    const key: CmdCache.Key = .{
+        .tool = .bash,
+        .cmd = "echo hi",
+        .loc = .{ .cwd = "/tmp/pz" },
+        .policy = .{ .version = policy.ver_current },
+        .life = .{ .session = "sess-a" },
+    };
+
+    try cache.add(key);
+    // Large now_ms doesn't affect session-scoped entries
+    try std.testing.expect(cache.containsAt(key, 999999999));
+}
+
 test "parseCallArgs parses skill args" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};

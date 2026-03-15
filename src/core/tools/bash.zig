@@ -1517,3 +1517,14 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
         .final = res.final,
     });
 }
+
+test "deniesProtectedCmd denies on parse error (fail closed)" {
+    // Unterminated quote triggers tokenizer error — must be denied, not allowed.
+    const result = try deniesProtectedCmd(std.testing.allocator, "echo 'unterminated");
+    try std.testing.expect(result);
+}
+
+test "deniesProtectedCmd allows normal commands" {
+    const result = try deniesProtectedCmd(std.testing.allocator, "echo hello");
+    try std.testing.expect(!result);
+}

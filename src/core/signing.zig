@@ -441,3 +441,20 @@ test "signing property: signature mutation fails verification" {
         .seed = 0x5eed_51a9,
     });
 }
+
+test "ctEql matches identical slices" {
+    try testing.expect(ctEql("hello", "hello"));
+    try testing.expect(ctEql("", ""));
+    try testing.expect(ctEql(&[_]u8{ 0, 0xff }, &[_]u8{ 0, 0xff }));
+}
+
+test "ctEql rejects different slices" {
+    try testing.expect(!ctEql("hello", "world"));
+    try testing.expect(!ctEql("hello", "hellp"));
+    try testing.expect(!ctEql(&[_]u8{0x00}, &[_]u8{0x01}));
+}
+
+test "ctEql rejects different lengths" {
+    try testing.expect(!ctEql("abc", "ab"));
+    try testing.expect(!ctEql("", "a"));
+}

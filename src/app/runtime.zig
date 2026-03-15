@@ -177,6 +177,10 @@ const RuntimePolicy = struct {
         return self.resolved.has_files;
     }
 
+    fn locked(self: *const RuntimePolicy) bool {
+        return self.resolved.locked;
+    }
+
     fn allows(self: *const RuntimePolicy, path: []const u8, tool: ?[]const u8) bool {
         if (!self.enforced()) return true;
         return core.policy.evaluate(self.resolved.doc.rules, path, tool) == .allow;
