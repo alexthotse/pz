@@ -175,7 +175,7 @@ Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to val
 ### Content validation
 
 - Title: max 80 chars, must not contain `\n`, `\r`, ` | `, `#`, or `</` (prevents metadata/section/XML injection)
-- Body: max 4KB per task, lines matching `^## ` escaped on write (`\## `), unescaped on read
+- Body: max 4KB per task, lines matching `^## ` escaped on write (indent by 1 space: ` ## `), unescaped on read (strip leading space before `## `). Avoids lossy roundtrip — `\## ` escape would corrupt bodies already containing `\## `
 - Status: closed enum
 - Priority: `?i64` clamped to `u4` (0-9)
 - IDs: validated via `resolve()`, minimum 4 chars to prevent overly broad prefix matches
@@ -193,13 +193,14 @@ Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to val
 
 ### Registration in `builtin.zig`
 
-- `mask_todo: u16 = 1 << 10` in `mask_all`
-- Bump `entries`/`selected` `[10]` → `[11]`
-- Bump `PolicyToolRegistry` in `runtime.zig` (`PolicyToolRegistry` struct): `ctxs`/`entries` `[10]` → `[11]`
+- `mask_todo: u16 = 1 << 11` — `mask_web` is already `1 << 10`
+- Include in `mask_all` (becomes `0xFFF`, 12 bits)
+- Bump `entries`/`selected` `[11]` → `[12]` in `builtin.zig` — `web` is index 10, `todo` is index 11
+- Bump `PolicyToolRegistry` in `runtime.zig`: `ctxs`/`entries` `[10]` → `[12]` (existing latent bug: `[10]` already too small for 11 tools)
 - Add to `activeEntries()`, `maskForName`, `rebuildEntries()`
 - `schema_json` pattern (like `ask`)
 - `destructive = true`
-- Note: `web` has Kind variant but no entry; `[11]` = registered entries
+- 4 bits remaining in `u16` after todo
 
 ### Type changes in `tools.zig`
 
@@ -230,10 +231,10 @@ pub const Args = union(Kind) {
 
 **Exhaustive switch sites** (add `.todo` arm). Use function/type names as anchors — line numbers are approximate:
 - `loop.zig` `noteApproval` fn
-- `loop.zig` `approvalSummaryAlloc` fn — **RUNTIME CRASH** if missed: `else => unreachable`. Must add `.todo` arm: `"todo {action} {file}"`.
+- `loop.zig` `approvalSummaryAlloc` fn — `else =>` produces `"[unknown tool]"` (wrong UX, not crash). Must add `.todo` arm: `"todo {action} {file}"`.
 - `runtime.zig` `approvalSummaryFromKeyAlloc` fn — has `else =>` that produces wrong output. Must add `.todo` arm.
 - `loop.zig` `parseCallArgs` fn — must handle `TodoArgs` nested `[]const TaskItem` JSON deserialization
-- `runtime.zig` `toolPolicyPath` fn — return `"runtime/tool/todo"` (synthetic)
+- `runtime.zig` `toolPolicyPath` fn — return `args.todo.file orelse "runtime/tool/todo"`. Non-default files get their actual path for policy evaluation; only `.pz/tasks.md` gets the synthetic bypass.
 - `runtime.zig` `toolAuditInfo` fn — `.todo => .{ .res_kind = .cfg, .op = @tagName(action), .target = file, .argv = "todo" }`
 - `runtime.zig` `auditResKind` fn
 - `runtime.zig` `auditResOp` fn
@@ -269,7 +270,7 @@ pub const Args = union(Kind) {
 ```
 
 **action=read**: titles + status (no bodies). Warn if empty tasks array on update.
-**action=update**: patch statuses ONLY. `parent`, `body`, `title`, `priority` fields in `TaskItem` are silently ignored on update — `update` is status-only by design. This prevents bypassing `add()`'s cycle detection by smuggling parent changes through update.
+**action=update**: patch statuses ONLY. If non-status fields (`parent`, `body`, `title`, `priority`) are provided, return error: `"error: update only changes status; use add for other fields"`. Hard reject, not warning — prevents bypassing `add()`'s cycle detection by smuggling parent changes through update.
 **action=add**: create tasks, model cannot set `id`.
 
 ---
@@ -435,10 +436,10 @@ The task file IS a plan. Point the review-plan skill at `.pz/tasks.md` (or any t
    - Deps: steps 1-2
    - Tests: temp file CRUD, ID collision retry, short-ID ambiguity, slug sanitization, priority clamp, clear skips parents, reset writes backup
 
-4. **`tools.zig` + `builtin.zig`** — `.todo` Kind, `TodoArgs`, `mask_todo` in `mask_all`, `[11]`, `schema_json`, `destructive=true`
-   - Also: `PolicyToolRegistry` `[11]` in `runtime.zig`
+4. **`tools.zig` + `builtin.zig`** — `.todo` Kind, `TodoArgs`, `mask_todo = 1 << 11` in `mask_all`, `[12]`, `schema_json`, `destructive=true`
+   - Also: `PolicyToolRegistry` `[12]` in `runtime.zig`
    - Deps: step 3
-   - Tests: registry (count=11), mask roundtrip, ohsnap `parseCallArgs(.todo, ...)` with read/update/add payloads (null tasks, empty array, missing optionals), ohsnap `approvalSummaryAlloc(.todo, ...)`, `maskForName("todo") == mask_todo`, `activeEntries` with mask_todo set/unset
+   - Tests: registry (count=12), mask roundtrip, ohsnap `parseCallArgs(.todo, ...)` with read/update/add payloads (null tasks, empty array, missing optionals), ohsnap `approvalSummaryAlloc(.todo, ...)` — **blocking prereq for step 5** (destructive tool shows wrong approval text without it), `maskForName("todo") == mask_todo`, `activeEntries` with mask_todo set/unset
    - Grep all exhaustive `Kind`/`Args` switches (11+)
 
 5. **`todo.zig`** — handler `(self, Call, Sink) -> !Result`, path_guard for non-default files
@@ -462,7 +463,7 @@ The task file IS a plan. Point the review-plan skill at `.pz/tasks.md` (or any t
    - Deps: steps 7-8
    - Tests: integration
 
-10. **Context injection** — `buildReqMsgs`, `sys_part_ct`, warn on failure
+10. **Context injection** — `buildReqMsgs`, `sys_part_ct`, warn on failure. `Opts.task_file` must propagate through all `runtime.zig` run functions (`runPrint`, `runJson`, `runTui`, `runRpc`).
     - Deps: step 3
     - Tests: ohsnap content, no bodies, failure logs warning
 
@@ -482,17 +483,18 @@ New:
 
 Modified:
 - `src/core/tools.zig` — `.todo` Kind, `TodoArgs`, `Args`
-- `src/core/tools/builtin.zig` — `mask_todo`, `[11]`, `schema_json`, `destructive=true`
+- `src/core/tools/builtin.zig` — `mask_todo = 1 << 11`, `[12]`, `schema_json`, `destructive=true`
 - `src/core/loop.zig` — `ModeEv.todo_update`, `Opts.task_file`, post-tool emission, exhaustive switches incl `approvalSummaryAlloc`
 - `src/core.zig` — barrel import: `pub const tasks = @import("core/tasks/mod.zig")`
-- `src/app/runtime.zig` — `PolicyToolRegistry[11]`, 4 sinks (PrintSink needs pre-Formatter arm), post-tool ModeEv emission, `Cmd.todo`, `toolPolicyPath` synthetic, `toolAuditInfo`
+- `src/app/runtime.zig` — `PolicyToolRegistry[12]`, 4 sinks (PrintSink needs pre-Formatter arm), post-tool ModeEv emission, `Cmd.todo`, `toolPolicyPath` synthetic, `toolAuditInfo`
 - `src/app/cli.zig` — `pz todo import` subcommand dispatch (needs subcommand concept — `args.zig` exists but has no subcommand infra)
 - `src/core/session/schema.zig` — verify session deserialization handles new `.todo` Kind variant
 - `src/test/tool_snap.zig` — test infra may have Kind switches
 - `src/modes/tui/transcript.zig` — `.todo_update` Kind
 - `src/modes/tui/overlay.zig` — `.todo` Kind, `TodoOverlay`
 - `src/modes/tui/cmdpicker.zig` — `/todo` entry
-- `lean/PzProofs/Mask.lean` — `mask_all := 0x7FF` (was `0x3FF`), re-verify theorems
+- `lean/PzProofs/Mask.lean` — `mask_all := 0xFFF` (was `0x7FF`), re-verify theorems
+- `docs/LEAN-PROOF.md` — update mask_all to `0xFFF`, fix stale "web has no mask bit" claim
 
 ## Design Decisions
 
@@ -513,14 +515,14 @@ Modified:
 - **Tmp file in same dir.** `{path}.tmp` ensures same-filesystem rename.
 - **Concurrent mod detection.** `flush()` checks mtime before rename.
 - **Title sanitization.** Rejects `\n`, `\r`, ` | `, `#` — prevents metadata/section injection.
-- **Body escaping.** Lines matching `^## ` escaped on write to prevent section forgery.
+- **Body escaping.** Lines matching `^## ` indented by 1 space on write (` ## `), stripped on read. Avoids lossy `\## ` escape.
 - **Max 200 tasks.** `add()` errors when exceeded.
-- **toolPolicyPath returns synthetic.** `"runtime/tool/todo"` — bypasses `.pz/` self-protection for default file only.
+- **toolPolicyPath returns file or synthetic.** `args.todo.file orelse "runtime/tool/todo"` — non-default files get policy-evaluated, default bypasses `.pz/` self-protection.
 - **Handler constructs full `tools.Result`.** Reference `runAsk` pattern — not the simplified `.output` form.
 - **Post-tool ModeEv is a new pattern.** No existing precedent — add in `loop.zig` after `execTool`.
 - **PrintSink pre-Formatter.** `.todo_update` handled before `Formatter.push()` delegation.
-- **Lean proofs updated.** `mask_all` changes from `0x3FF` to `0x7FF`.
-- **u16 mask: 5 bits remaining.** Bit 10 = todo. Future tools may need `u32` migration.
+- **Lean proofs updated.** `mask_all` changes from `0x7FF` to `0xFFF`.
+- **u16 mask: 4 bits remaining.** Bit 11 = todo (bit 10 = web). Future tools may need `u32` migration.
 - **Deletion via update+clear.** Known social engineering risk. Approval gate shows status changes. Document as accepted tradeoff.
 - **Agent mask stripping.** Blocked on agent tool implementation — tracked as dependency.
 

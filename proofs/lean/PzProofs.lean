@@ -4,6 +4,7 @@ import PzProofs.Approval
 import PzProofs.Policy
 import PzProofs.PathGuard
 import PzProofs.Egress
+import PzProofs.Egress6
 import PzProofs.AgentOutput
 import PzProofs.CtEql
 import PzProofs.Evaluate

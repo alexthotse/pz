@@ -63,6 +63,23 @@ Only include files changed by the current agent/task. No broad staging.
 
 Agents must report what they CHANGED (files, lines, insertions/deletions), not claim things were "already done." If no changes needed, explain why with file:line evidence. Never declare victory without a diff.
 
+## Per-Dot Verification Gate (BLOCKING)
+
+NEVER merge a workspace without verification. After each agent completes:
+
+1. Launch a **verification agent** (Opus, fresh context) that receives:
+   - The plan item's acceptance criteria (from PLAN.md)
+   - The workspace diff (`jj diff -r <ws-commit>`)
+   - Full content of every file touched by the diff (not just hunks)
+   - Test results
+2. Verifier must:
+   - Check EACH acceptance criterion: PASS/FAIL with file:line evidence
+   - Name the specific test that exercises each criterion
+   - List at least ONE thing the diff does NOT address or could break
+   - Check for shortcuts: new `catch {}`, `catch return null`, `std.log.warn` replacing propagation, `unreachable`
+3. Merge only on full pass. On any fail: fix in workspace, re-verify.
+4. Batch verification (3-5 dots) is acceptable to amortize cost.
+
 ## Testing Rule
 
 Run `timeout 60 zig build test 2>&1 | tail -5` ONCE. Never loop, retry, or run multiple grep variations.
