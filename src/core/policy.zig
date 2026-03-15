@@ -11,6 +11,24 @@ pub const Effect = enum {
     deny,
 };
 
+/// Session persistence policy for headless modes (print/json).
+/// Headless modes default to `.off`; interactive modes (tui/rpc) to `.on`.
+pub const SessionPersist = enum {
+    off,
+    on,
+
+    /// Returns the default persistence policy for a given output mode.
+    /// Headless modes (print, json) disable durable session writes by
+    /// default -- the caller must opt in via explicit session selection
+    /// (--continue, --resume, or a session ID).
+    pub fn forMode(mode: anytype) SessionPersist {
+        return switch (mode) {
+            .print, .json => .off,
+            .tui, .rpc => .on,
+        };
+    }
+};
+
 pub const Rule = struct {
     pattern: []const u8,
     effect: Effect,
@@ -2033,4 +2051,12 @@ test "EgressPolicy proxy null returns null" {
     const ep: EgressPolicy = .{};
     const proxy = try ep.validatedProxy();
     try testing.expect(proxy == null);
+}
+
+test "SessionPersist defaults off for headless modes" {
+    const Mode = enum { tui, print, json, rpc };
+    try testing.expectEqual(SessionPersist.off, SessionPersist.forMode(Mode.print));
+    try testing.expectEqual(SessionPersist.off, SessionPersist.forMode(Mode.json));
+    try testing.expectEqual(SessionPersist.on, SessionPersist.forMode(Mode.tui));
+    try testing.expectEqual(SessionPersist.on, SessionPersist.forMode(Mode.rpc));
 }

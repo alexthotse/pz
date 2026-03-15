@@ -244,19 +244,94 @@ pub fn verifyDetached(msg: []const u8, sig: Signature, pk: PublicKey) VerifyErro
     return .{ .pk = pk, .sig = sig };
 }
 
+// ── Key identity and trust ──────────────────────────────────────────
+
+pub const key_id_len: usize = 8;
+pub const key_id_hex_len: usize = key_id_len * 2;
+
+/// Derive key ID from public key: first 8 bytes of SHA-256(pk).
+pub fn keyIdFromPk(pk: PublicKey) [key_id_len]u8 {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(pk.raw[0..], &digest, .{});
+    return digest[0..key_id_len].*;
+}
+
+pub const TrustAnchor = struct {
+    id: [key_id_len]u8,
+    pk: PublicKey,
+    revoked: bool = false,
+};
+
+pub const KeyRing = struct {
+    anchors: []const TrustAnchor,
+
+    pub fn resolve(self: KeyRing, kid: [key_id_len]u8) KeyRingError!PublicKey {
+        for (self.anchors) |a| {
+            if (std.mem.eql(u8, a.id[0..], kid[0..])) {
+                if (a.revoked) return error.KeyRevoked;
+                return a.pk;
+            }
+        }
+        return error.KeyNotFound;
+    }
+
+    pub fn fromSingle(anchor: *const TrustAnchor) KeyRing {
+        return .{ .anchors = @as(*const [1]TrustAnchor, @ptrCast(anchor)) };
+    }
+};
+
+pub const KeyRingError = error{
+    KeyNotFound,
+    KeyRevoked,
+};
+
+// ── Keyed redaction surrogates ──────────────────────────────────────
+//
+// HMAC-SHA256 based surrogates so redacted values are not globally
+// correlatable. Each session derives its own RedactKey from its sid.
+
+const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+
+pub const rkey_len: usize = HmacSha256.mac_length;
+
+pub const RedactKey = struct {
+    bytes: [rkey_len]u8,
+
+    /// Derive a redaction key from a session id using domain separation.
+    pub fn fromSid(sid: []const u8) RedactKey {
+        var out: [rkey_len]u8 = undefined;
+        HmacSha256.create(&out, sid, "pz-redact-v1");
+        return .{ .bytes = out };
+    }
+
+    /// Produce a 16-hex-char surrogate for `txt` under this key.
+    /// Returns the hex string written into `buf`.
+    pub fn surrogate(self: RedactKey, txt: []const u8, buf: *[16]u8) []const u8 {
+        var mac: [HmacSha256.mac_length]u8 = undefined;
+        HmacSha256.create(&mac, txt, &self.bytes);
+        // Truncate to 8 bytes, format as 16 hex chars.
+        const hex = std.fmt.bytesToHex(mac[0..8].*, .lower);
+        buf.* = hex;
+        return buf[0..16];
+    }
+};
+
 // ── Release manifest ────────────────────────────────────────────────
 //
-// A manifest binds (version, asset, sha256, url) to a signature so that
-// unsigned metadata cannot induce downgrade or content/version mismatch.
-// Wire format: "pz-manifest-v1\n" header followed by key=value lines
-// terminated by "\n", then 128 hex chars of Ed25519 signature over the
-// canonical text (header + fields, excluding the signature line itself).
+// A manifest binds (version, asset, sha256, url, key_id) to a signature
+// so that unsigned metadata cannot induce downgrade or content/version
+// mismatch. Wire format: "pz-manifest-v1\n" header followed by
+// key=value lines terminated by "\n", then 128 hex chars of Ed25519
+// signature over the canonical text (header + fields, excluding the
+// signature line itself).
 
 pub const Manifest = struct {
     version: []const u8,
     asset: []const u8,
     sha256: [64]u8, // hex-encoded SHA-256
     url: []const u8,
+    key_id: [key_id_hex_len]u8, // hex-encoded key ID
     sig: Signature,
 
     pub const header = "pz-manifest-v1\n";
@@ -278,6 +353,7 @@ pub const Manifest = struct {
         w.print("asset={s}\n", .{self.asset}) catch return error.Overflow;
         w.print("sha256={s}\n", .{self.sha256}) catch return error.Overflow;
         w.print("url={s}\n", .{self.url}) catch return error.Overflow;
+        w.print("key_id={s}\n", .{self.key_id}) catch return error.Overflow;
         return fbs.getWritten();
     }
 
@@ -288,6 +364,7 @@ pub const Manifest = struct {
         var asset: ?[]const u8 = null;
         var sha: ?[64]u8 = null;
         var url: ?[]const u8 = null;
+        var kid: ?[key_id_hex_len]u8 = null;
         var sig: ?Signature = null;
 
         var it = std.mem.splitScalar(u8, txt[header.len..], '\n');
@@ -303,6 +380,10 @@ pub const Manifest = struct {
                 sha = val[0..64].*;
             } else if (std.mem.startsWith(u8, line, "url=")) {
                 url = line["url=".len..];
+            } else if (std.mem.startsWith(u8, line, "key_id=")) {
+                const val = line["key_id=".len..];
+                if (val.len != key_id_hex_len) return error.BadField;
+                kid = val[0..key_id_hex_len].*;
             } else if (std.mem.startsWith(u8, line, "sig=")) {
                 const val = line["sig=".len..];
                 sig = try Signature.parseHex(std.mem.trim(u8, val, " \t\r"));
@@ -313,20 +394,22 @@ pub const Manifest = struct {
             .asset = asset orelse return error.MissingField,
             .sha256 = sha orelse return error.MissingField,
             .url = url orelse return error.MissingField,
+            .key_id = kid orelse return error.MissingField,
             .sig = sig orelse return error.MissingSig,
         };
     }
 };
 
-pub const ManifestVerifyError = VerifyError || Manifest.ParseError || SigError || error{
+pub const ManifestVerifyError = VerifyError || Manifest.ParseError || SigError || KeyRingError || error{
     Overflow,
     DigestMismatch,
     VersionMismatch,
     AssetMismatch,
+    Downgrade,
+    BadKeyId,
 };
 
-/// Verify a signed manifest against a public key then check that the
-/// claimed SHA-256 digest matches the actual archive content.
+/// Verify a signed manifest against a single public key.
 pub fn verifyManifest(
     txt: []const u8,
     pk: PublicKey,
@@ -334,23 +417,76 @@ pub fn verifyManifest(
     expected_ver: []const u8,
     expected_asset: []const u8,
 ) ManifestVerifyError!Manifest {
+    const kid = keyIdFromPk(pk);
+    const kid_hex = std.fmt.bytesToHex(kid, .lower);
+    const anchor = TrustAnchor{ .id = kid, .pk = pk };
+    return verifyManifestRing(txt, KeyRing.fromSingle(&anchor), archive, expected_ver, expected_asset, kid_hex);
+}
+
+/// Verify a signed manifest against a key ring. The manifest key_id
+/// selects the signing key; the ring enforces revocation.
+pub fn verifyManifestRing(
+    txt: []const u8,
+    ring: KeyRing,
+    archive: []const u8,
+    expected_ver: []const u8,
+    expected_asset: []const u8,
+    expected_kid_hex: ?[key_id_hex_len]u8,
+) ManifestVerifyError!Manifest {
     const m = try Manifest.parse(txt);
+
+    var kid_raw: [key_id_len]u8 = undefined;
+    _ = std.fmt.hexToBytes(kid_raw[0..], m.key_id[0..]) catch return error.BadKeyId;
+    const pk = try ring.resolve(kid_raw);
+
+    if (expected_kid_hex) |exp| {
+        if (!ctEql(exp[0..], m.key_id[0..])) return error.BadKeyId;
+    }
+
     var buf: [Manifest.max_len]u8 = undefined;
     const payload = try m.canonical(&buf);
     _ = try verifyDetached(payload, m.sig, pk);
 
-    // Verify archive digest.
     const Sha256 = std.crypto.hash.sha2.Sha256;
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(archive, &digest, .{});
     const actual_hex = std.fmt.bytesToHex(digest, .lower);
     if (!ctEql(actual_hex[0..], m.sha256[0..])) return error.DigestMismatch;
 
-    // Verify version and asset name match release metadata.
     if (!std.mem.eql(u8, m.version, expected_ver)) return error.VersionMismatch;
     if (!std.mem.eql(u8, m.asset, expected_asset)) return error.AssetMismatch;
 
     return m;
+}
+
+/// Anti-downgrade: manifest version must be strictly newer.
+pub fn checkNotDowngrade(manifest_ver: []const u8, current_ver: []const u8) error{Downgrade}!void {
+    const cur = parseSemver(current_ver) orelse return;
+    const mfst = parseSemver(manifest_ver) orelse return error.Downgrade;
+    if (!mfst.isNewer(cur)) return error.Downgrade;
+}
+
+const SimpleSemver = struct {
+    major: u16,
+    minor: u16,
+    patch: u16,
+
+    fn isNewer(self: SimpleSemver, other: SimpleSemver) bool {
+        if (self.major != other.major) return self.major > other.major;
+        if (self.minor != other.minor) return self.minor > other.minor;
+        return self.patch > other.patch;
+    }
+};
+
+fn parseSemver(raw: []const u8) ?SimpleSemver {
+    var s = raw;
+    if (s.len > 0 and s[0] == 'v') s = s[1..];
+    if (std.mem.indexOfScalar(u8, s, '-')) |i| s = s[0..i];
+    var it = std.mem.splitScalar(u8, s, '.');
+    const major = std.fmt.parseInt(u16, it.next() orelse return null, 10) catch return null;
+    const minor = std.fmt.parseInt(u16, it.next() orelse return null, 10) catch return null;
+    const patch = std.fmt.parseInt(u16, it.next() orelse return null, 10) catch return null;
+    return .{ .major = major, .minor = minor, .patch = patch };
 }
 
 pub fn signManifestAlloc(
@@ -366,11 +502,15 @@ pub fn signManifestAlloc(
     Sha256.hash(archive, &digest, .{});
     const sha_hex = std.fmt.bytesToHex(digest, .lower);
 
+    const kid = keyIdFromPk(kp.publicKey());
+    const kid_hex = std.fmt.bytesToHex(kid, .lower);
+
     const m = Manifest{
         .version = ver,
         .asset = asset,
         .sha256 = sha_hex,
         .url = url,
+        .key_id = kid_hex,
         .sig = undefined,
     };
     var buf: [Manifest.max_len]u8 = undefined;
@@ -672,13 +812,13 @@ test "manifest rejects wrong signing key" {
     );
     defer testing.allocator.free(txt);
 
-    // Different key.
+    // Different key -- manifest key_id won't match the other key's ring.
     const other_seed = seedFromParts(1, 2, 3, 4);
     const other_kp = try KeyPair.fromSeed(other_seed);
     const other_pk = other_kp.publicKey();
 
     const err = verifyManifest(txt, other_pk, archive, "v1.2.3", "pz-aarch64-macos.tar.gz");
-    try testing.expectError(error.SigMismatch, err);
+    try testing.expectError(error.KeyNotFound, err);
 }
 
 test "manifest parse rejects bad header" {
@@ -704,4 +844,187 @@ test "ctEql rejects different slices" {
 test "ctEql rejects different lengths" {
     try testing.expect(!ctEql("abc", "ab"));
     try testing.expect(!ctEql("", "a"));
+}
+
+test "keyIdFromPk is deterministic" {
+    const pk = try fixturePublicKey();
+    const id1 = keyIdFromPk(pk);
+    const id2 = keyIdFromPk(pk);
+    try testing.expectEqualSlices(u8, id1[0..], id2[0..]);
+    try testing.expectEqual(@as(usize, 8), id1.len);
+}
+
+test "keyIdFromPk differs for different keys" {
+    const pk1 = try fixturePublicKey();
+    const kp2 = try KeyPair.fromSeed(seedFromParts(1, 2, 3, 4));
+    const id1 = keyIdFromPk(pk1);
+    const id2 = keyIdFromPk(kp2.publicKey());
+    try testing.expect(!std.mem.eql(u8, id1[0..], id2[0..]));
+}
+
+test "key ring resolves known key" {
+    const pk = try fixturePublicKey();
+    const kid = keyIdFromPk(pk);
+    const anchor = TrustAnchor{ .id = kid, .pk = pk };
+    const ring = KeyRing.fromSingle(&anchor);
+    const got = try ring.resolve(kid);
+    try testing.expectEqualSlices(u8, pk.raw[0..], got.raw[0..]);
+}
+
+test "key ring rejects unknown key" {
+    const pk = try fixturePublicKey();
+    const kid = keyIdFromPk(pk);
+    const anchor = TrustAnchor{ .id = kid, .pk = pk };
+    const ring = KeyRing.fromSingle(&anchor);
+    var bad = kid;
+    bad[0] ^= 0xff;
+    try testing.expectError(error.KeyNotFound, ring.resolve(bad));
+}
+
+test "key ring rejects revoked key" {
+    const pk = try fixturePublicKey();
+    const kid = keyIdFromPk(pk);
+    const anchor = TrustAnchor{ .id = kid, .pk = pk, .revoked = true };
+    const ring = KeyRing.fromSingle(&anchor);
+    try testing.expectError(error.KeyRevoked, ring.resolve(kid));
+}
+
+test "manifest ring roundtrip with multi-key ring" {
+    const kp1 = try fixtureKeyPair();
+    const pk1 = kp1.publicKey();
+    const kid1 = keyIdFromPk(pk1);
+
+    const kp2 = try KeyPair.fromSeed(seedFromParts(10, 20, 30, 40));
+    const pk2 = kp2.publicKey();
+    const kid2 = keyIdFromPk(pk2);
+
+    const anchors = [_]TrustAnchor{
+        .{ .id = kid1, .pk = pk1 },
+        .{ .id = kid2, .pk = pk2 },
+    };
+    const ring = KeyRing{ .anchors = anchors[0..] };
+
+    const archive = "ring-test-content";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v2.0.0",
+        "pz-test.tar.gz",
+        archive,
+        "https://dl.example/pz2.tar.gz",
+        kp2,
+    );
+    defer testing.allocator.free(txt);
+
+    const m = try verifyManifestRing(txt, ring, archive, "v2.0.0", "pz-test.tar.gz", null);
+    try testing.expectEqualStrings("v2.0.0", m.version);
+}
+
+test "manifest ring rejects revoked signer" {
+    const kp = try fixtureKeyPair();
+    const pk = kp.publicKey();
+    const kid = keyIdFromPk(pk);
+
+    const anchor = TrustAnchor{ .id = kid, .pk = pk, .revoked = true };
+    const ring = KeyRing.fromSingle(&anchor);
+
+    const archive = "revoked-test";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v3.0.0",
+        "pz-test.tar.gz",
+        archive,
+        "https://dl.example/pz3.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+
+    try testing.expectError(
+        error.KeyRevoked,
+        verifyManifestRing(txt, ring, archive, "v3.0.0", "pz-test.tar.gz", null),
+    );
+}
+
+test "checkNotDowngrade allows newer version" {
+    try checkNotDowngrade("v2.0.0", "v1.0.0");
+    try checkNotDowngrade("v1.1.0", "v1.0.0");
+    try checkNotDowngrade("v1.0.1", "v1.0.0");
+}
+
+test "checkNotDowngrade rejects same or older" {
+    try testing.expectError(error.Downgrade, checkNotDowngrade("v1.0.0", "v1.0.0"));
+    try testing.expectError(error.Downgrade, checkNotDowngrade("v0.9.0", "v1.0.0"));
+    try testing.expectError(error.Downgrade, checkNotDowngrade("v1.0.0", "v2.0.0"));
+}
+
+test "checkNotDowngrade allows unparseable current" {
+    try checkNotDowngrade("v1.0.0", "dev");
+}
+
+test "checkNotDowngrade rejects unparseable manifest" {
+    try testing.expectError(error.Downgrade, checkNotDowngrade("bad", "v1.0.0"));
+}
+
+test "manifest key_id in canonical form" {
+    const kp = try fixtureKeyPair();
+    const archive = "canonical-test";
+    const txt = try signManifestAlloc(
+        testing.allocator,
+        "v1.0.0",
+        "test.tar.gz",
+        archive,
+        "https://dl.example/t.tar.gz",
+        kp,
+    );
+    defer testing.allocator.free(txt);
+    try testing.expect(std.mem.indexOf(u8, txt, "key_id=") != null);
+}
+
+test "manifest parse rejects missing key_id" {
+    const raw = "pz-manifest-v1\nversion=v1\nasset=a\nsha256=" ++ "aa" ** 32 ++ "\nurl=u\nsig=" ++ "00" ** 64 ++ "\n";
+    try testing.expectError(error.MissingField, Manifest.parse(raw));
+}
+
+test "manifest parse rejects bad key_id length" {
+    const raw = "pz-manifest-v1\nversion=v1\nasset=a\nsha256=" ++ "aa" ** 32 ++ "\nurl=u\nkey_id=short\nsig=" ++ "00" ** 64 ++ "\n";
+    try testing.expectError(error.BadField, Manifest.parse(raw));
+}
+
+test "redact key from sid is deterministic" {
+    const k1 = RedactKey.fromSid("sess-01");
+    const k2 = RedactKey.fromSid("sess-01");
+    try testing.expectEqualSlices(u8, k1.bytes[0..], k2.bytes[0..]);
+}
+
+test "redact key differs across sessions" {
+    const k1 = RedactKey.fromSid("sess-01");
+    const k2 = RedactKey.fromSid("sess-02");
+    try testing.expect(!std.mem.eql(u8, k1.bytes[0..], k2.bytes[0..]));
+}
+
+test "surrogate is deterministic under same key" {
+    const key = RedactKey.fromSid("sess-x");
+    var b1: [16]u8 = undefined;
+    var b2: [16]u8 = undefined;
+    _ = key.surrogate("secret", &b1);
+    _ = key.surrogate("secret", &b2);
+    try testing.expectEqualSlices(u8, b1[0..], b2[0..]);
+}
+
+test "surrogate differs across keys for same input" {
+    const k1 = RedactKey.fromSid("sess-a");
+    const k2 = RedactKey.fromSid("sess-b");
+    var b1: [16]u8 = undefined;
+    var b2: [16]u8 = undefined;
+    _ = k1.surrogate("secret", &b1);
+    _ = k2.surrogate("secret", &b2);
+    try testing.expect(!std.mem.eql(u8, b1[0..], b2[0..]));
+}
+
+test "surrogate differs for different inputs under same key" {
+    const key = RedactKey.fromSid("sess-z");
+    var b1: [16]u8 = undefined;
+    var b2: [16]u8 = undefined;
+    _ = key.surrogate("alpha", &b1);
+    _ = key.surrogate("beta", &b2);
+    try testing.expect(!std.mem.eql(u8, b1[0..], b2[0..]));
 }

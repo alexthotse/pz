@@ -1973,7 +1973,12 @@ fn execWithIoTuiHooks(
             continue :fsm;
         },
         .init_store => {
-            if (run_cmd.no_session) {
+            // Headless modes (print/json) disable durable session writes
+            // by default. The user must opt in via --continue, --resume,
+            // or an explicit session ID.  --no-session always wins.
+            const headless_default = run_cmd.session == .auto and
+                core.policy.SessionPersist.forMode(run_cmd.mode) == .off;
+            if (run_cmd.no_session or headless_default) {
                 sid = try newSid(alloc);
                 store = null_store_impl.asSessionStore();
             } else {
@@ -4077,6 +4082,7 @@ fn runLoginFlow(
             req.prov,
             callback,
             listener.redirect_uri,
+            flow.state,
             flow.verifier,
             hooks,
         ) catch |err| {
@@ -4141,6 +4147,7 @@ fn runRpcLogin(alloc: std.mem.Allocator, req: RpcReq, hooks: core.providers.auth
             auth_req.prov,
             callback,
             listener.redirect_uri,
+            flow.state,
             flow.verifier,
             hooks,
         );
@@ -8230,7 +8237,9 @@ fn jsonVisText(obj: std.json.ObjectMap, key: ?[]const u8) ?[]const u8 {
     };
 }
 
-test "runtime executes print mode and persists session events" {
+test "runtime print mode skips session persistence by default" {
+    // P29c: headless modes (print/json) use NullStore when session == .auto.
+    // No session file should be created on disk.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -8257,33 +8266,14 @@ test "runtime executes print mode and persists session events" {
     const sid = try execWithIo(std.testing.allocator, cfg, eofReader(), out_fbs.writer().any());
     defer std.testing.allocator.free(sid);
 
-    var session_dir = try std.fs.openDirAbsolute(sess_abs, .{});
-    defer session_dir.close();
-
-    var rdr = try core.session.ReplayReader.init(std.testing.allocator, session_dir, sid, .{});
-    defer rdr.deinit();
-
-    const ev0 = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    switch (ev0.data) {
-        .prompt => |out| try std.testing.expectEqualStrings("ping", out.text),
-        else => return error.TestUnexpectedResult,
-    }
-
-    const ev1 = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    switch (ev1.data) {
-        .text => |out| try std.testing.expectEqualStrings("pong", out.text),
-        else => return error.TestUnexpectedResult,
-    }
-
-    const ev2 = (try rdr.next()) orelse return error.TestUnexpectedResult;
-    switch (ev2.data) {
-        .stop => |out| try std.testing.expect(out.reason == .done),
-        else => return error.TestUnexpectedResult,
-    }
-
-    try std.testing.expect((try rdr.next()) == null);
-    // Non-verbose: only text output, no stop metadata
+    // Output still works
     try std.testing.expectEqualStrings("pong\n", out_fbs.getWritten());
+
+    // No session file should exist -- NullStore discards writes
+    var sess_dir = try std.fs.openDirAbsolute(sess_abs, .{ .iterate = true });
+    defer sess_dir.close();
+    var it = sess_dir.iterate();
+    try std.testing.expect((try it.next()) == null);
 }
 
 test "runtime executes tool calls through loop registry in print mode" {
@@ -8381,27 +8371,8 @@ test "runtime blocks tool dispatch under verified policy" {
     try std.testing.expect(std.mem.indexOf(u8, written, "tool_result id=\"call-1\" is_err=true out=\"blocked by policy\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "stop reason=done") != null);
 
-    const sess_dir = try tmp.dir.openDir("sess", .{});
-    var fs_store = try core.session.fs_store.Store.init(.{
-        .alloc = std.testing.allocator,
-        .dir = sess_dir,
-    });
-    defer fs_store.deinit();
-
-    var rdr = try fs_store.asSessionStore().replay(sid);
-    defer rdr.deinit();
-    var saw_blocked = false;
-    while (try rdr.next()) |ev| {
-        switch (ev.data) {
-            .tool_result => |tr| {
-                if (std.mem.eql(u8, tr.id, "call-1") and tr.is_err and std.mem.eql(u8, tr.output, "blocked by policy")) {
-                    saw_blocked = true;
-                }
-            },
-            else => {},
-        }
-    }
-    try std.testing.expect(saw_blocked);
+    // P29c: headless print mode uses NullStore by default -- no session
+    // replay to verify. Policy enforcement is validated via output above.
 }
 
 fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
@@ -9383,6 +9354,8 @@ test "runtime json mode errors on empty stdin when no prompt is supplied" {
 }
 
 test "execWithIo cleans orphan compact temp files on startup" {
+    // Use --continue to opt into durable session, which opens sess dir
+    // and cleans orphan temp files.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -9391,12 +9364,25 @@ test "execWithIo cleans orphan compact temp files on startup" {
         var f = try tmp.dir.createFile("sess/orphan.jsonl.compact.tmp", .{});
         f.close();
     }
+    // Need a real session file for --continue to latch onto
+    {
+        const sf = try tmp.dir.createFile("sess/100.jsonl", .{});
+        defer sf.close();
+        const ev = try core.session.encodeEventAlloc(std.testing.allocator, .{
+            .at_ms = 1,
+            .data = .{ .prompt = .{ .text = "old" } },
+        });
+        defer std.testing.allocator.free(ev);
+        try sf.writeAll(ev);
+        try sf.writeAll("\n");
+    }
     const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
     defer std.testing.allocator.free(sess_abs);
 
     var cfg = cli.Run{
         .mode = .print,
         .prompt = "ping",
+        .session = .cont,
         .cfg = .{
             .mode = .print,
             .model = try std.testing.allocator.dupe(u8, "m"),

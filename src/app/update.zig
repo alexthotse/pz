@@ -31,6 +31,7 @@ const update_policy_path = ".pz/upgrade";
 const update_policy_file = ".pz/policy.json";
 const update_policy_tool = "upgrade";
 const update_pk_hex = "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083";
+const dev_pk_hex = update_pk_hex;
 
 const HeaderMode = enum {
     full,
@@ -65,6 +66,8 @@ pub const UpdateError = error{
     UpdateHostDenied,
     InvalidPolicy,
     SignatureVerifyFailed,
+    DowngradeBlocked,
+    DefaultKeyRefused,
 };
 
 const HttpResult = union(enum) {
@@ -105,6 +108,7 @@ pub const AuditHooks = struct {
     install_binary: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void = installBinary,
     check_update_allowed: *const fn (std.mem.Allocator) anyerror!void = checkUpdateAllowed,
     check_update_host: *const fn (std.mem.Allocator, []const u8) anyerror!void = checkUpdateHostAllowed,
+    check_default_key: *const fn () bool = checkDefaultKeyRelease,
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
@@ -116,6 +120,24 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
+
+    // Enterprise fail-closed: reject default dev key in release builds.
+    if (hooks.check_default_key()) {
+        return try auditOutcome(
+            alloc,
+            hooks,
+            false,
+            .deny,
+            .err,
+            .{ .text = "default key refused", .vis = .@"pub" },
+            null,
+            try std.fmt.allocPrint(
+                alloc,
+                "upgrade refused: release build uses the default dev signing key\nnext: rebuild with -Dupdate-pk-hex=<your-key> or disable upgrade via policy\n",
+                .{},
+            ),
+        );
+    }
 
     try emitUpdateAudit(alloc, hooks, 1, .ok, .info, .{ .text = "upgrade start", .vis = .@"pub" }, null);
 
@@ -342,7 +364,7 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
             );
         },
     };
-    verifyArchiveManifest(archive, sig_raw, release.tag_name, asset_name) catch |err| {
+    verifyArchiveManifest(archive, sig_raw, release.tag_name, asset_name, cli.version) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
             alloc,
@@ -538,15 +560,44 @@ fn trustedUpdatePk() !core.signing.PublicKey {
     return core.signing.PublicKey.parseHex(update_pk_hex);
 }
 
+fn trustedUpdateRing() !core.signing.KeyRing {
+    const pk = trustedUpdatePk() catch return error.SignatureVerifyFailed;
+    const kid = core.signing.keyIdFromPk(pk);
+    const S = struct {
+        var anchor: core.signing.TrustAnchor = undefined;
+    };
+    S.anchor = .{ .id = kid, .pk = pk };
+    return core.signing.KeyRing.fromSingle(&S.anchor);
+}
+
+fn checkDefaultKeyRelease() bool {
+    if (builtin.mode == .Debug) return false;
+    return isDefaultDevKey();
+}
+
+fn isDefaultDevKey() bool {
+    return std.mem.eql(u8, update_pk_hex, dev_pk_hex);
+}
+
 fn verifyArchiveManifest(
     archive: []const u8,
     manifest_raw: []const u8,
     tag_name: []const u8,
     asset_name: []const u8,
+    current_ver: []const u8,
 ) !void {
-    const pk = trustedUpdatePk() catch return error.SignatureVerifyFailed;
-    _ = core.signing.verifyManifest(manifest_raw, pk, archive, tag_name, asset_name) catch
-        return error.SignatureVerifyFailed;
+    const ring = trustedUpdateRing() catch return error.SignatureVerifyFailed;
+    const m = core.signing.verifyManifestRing(
+        manifest_raw,
+        ring,
+        archive,
+        tag_name,
+        asset_name,
+        null,
+    ) catch return error.SignatureVerifyFailed;
+
+    core.signing.checkNotDowngrade(m.version, current_ver) catch
+        return error.DowngradeBlocked;
 }
 
 fn httpGetResult(
@@ -837,6 +888,16 @@ fn formatVerifyFailure(alloc: std.mem.Allocator, err: anyerror, asset_name: []co
             alloc,
             "upgrade failed: signature verification failed for {s}\nnext: retry later or install manually from https://github.com/joelreymont/pz/releases/latest\n",
             .{asset_name},
+        ),
+        error.DowngradeBlocked => std.fmt.allocPrint(
+            alloc,
+            "upgrade failed: manifest version is not newer than running version for {s}\nnext: this may indicate a replay attack; install manually if intended\n",
+            .{asset_name},
+        ),
+        error.DefaultKeyRefused => std.fmt.allocPrint(
+            alloc,
+            "upgrade refused: release build uses the default dev signing key\nnext: rebuild with -Dupdate-pk-hex=<your-key> or disable upgrade via policy\n",
+            .{},
         ),
         else => std.fmt.allocPrint(
             alloc,
@@ -2053,4 +2114,59 @@ fn joinRequestLinesAlloc(alloc: std.mem.Allocator, server: *const http_mock.Serv
         try lines.append(alloc, raw[0..line_end]);
     }
     return std.mem.join(alloc, "\n", lines.items);
+}
+
+test "checkDefaultKeyRelease returns false in debug mode" {
+    try std.testing.expect(!checkDefaultKeyRelease());
+}
+
+test "isDefaultDevKey detects the sentinel" {
+    try std.testing.expect(isDefaultDevKey());
+}
+
+test "formatVerifyFailure reports downgrade" {
+    const msg = try formatVerifyFailure(std.testing.allocator, error.DowngradeBlocked, "pz.tar.gz");
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "not newer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "replay") != null);
+}
+
+test "formatVerifyFailure reports default key refusal" {
+    const msg = try formatVerifyFailure(std.testing.allocator, error.DefaultKeyRefused, "pz.tar.gz");
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "default dev signing key") != null);
+}
+
+test "update blocks when check_default_key returns true" {
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .check_default_key = struct {
+            fn f() bool {
+                return true;
+            }
+        }.f,
+    });
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expect(!out.ok);
+    try std.testing.expect(std.mem.indexOf(u8, out.msg, "default dev signing key") != null);
+}
+
+test "verifyArchiveManifest rejects downgrade" {
+    const kp = try core.signing.KeyPair.fromSeed(
+        try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166"),
+    );
+    const archive = "downgrade-test";
+    const txt = try core.signing.signManifestAlloc(
+        std.testing.allocator,
+        "v0.0.1",
+        "pz-test.tar.gz",
+        archive,
+        "https://dl.example/pz.tar.gz",
+        kp,
+    );
+    defer std.testing.allocator.free(txt);
+
+    try std.testing.expectError(
+        error.DowngradeBlocked,
+        verifyArchiveManifest(archive, txt, "v0.0.1", "pz-test.tar.gz", "v0.1.8"),
+    );
 }

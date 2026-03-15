@@ -1,4 +1,9 @@
 //! Print mode execution loop.
+//!
+//! Session persistence is governed by the caller's store choice:
+//! the runtime passes a NullStore for headless-default (no durable
+//! writes) or an fs_store when the user explicitly opts in via
+//! --continue, --resume, or a session ID.  See core.policy.SessionPersist.
 const std = @import("std");
 const core = @import("../../core.zig");
 const mode = @import("../mode.zig");

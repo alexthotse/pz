@@ -164,10 +164,12 @@ pub fn looksLikeApiKey(provider: Provider, key: []const u8) bool {
 
 pub const OAuthStart = struct {
     url: []u8,
+    state: []u8,
     verifier: []u8,
 
     pub fn deinit(self: *OAuthStart, alloc: std.mem.Allocator) void {
         alloc.free(self.url);
+        alloc.free(self.state);
         alloc.free(self.verifier);
         self.* = undefined;
     }
@@ -376,6 +378,9 @@ fn beginOAuthWithSpec(
     const verifier = try pkceVerifier(alloc);
     errdefer alloc.free(verifier);
 
+    const state = try csrfToken(alloc);
+    errdefer alloc.free(state);
+
     const challenge = try pkceChallenge(alloc, verifier);
     defer alloc.free(challenge);
 
@@ -388,7 +393,7 @@ fn beginOAuthWithSpec(
     try appendQueryParam(alloc, &query, "scope", spec.scopes);
     try appendQueryParam(alloc, &query, "code_challenge", challenge);
     try appendQueryParam(alloc, &query, "code_challenge_method", "S256");
-    try appendQueryParam(alloc, &query, "state", verifier);
+    try appendQueryParam(alloc, &query, "state", state);
     for (spec.extra_authorize) |extra| {
         try appendQueryParam(alloc, &query, extra.key, extra.value);
     }
@@ -398,6 +403,7 @@ fn beginOAuthWithSpec(
 
     return .{
         .url = url,
+        .state = state,
         .verifier = verifier,
     };
 }
@@ -410,9 +416,10 @@ pub fn completeAnthropicOAuthFromLocalCallback(
     alloc: std.mem.Allocator,
     callback: oauth_callback.CodeState,
     oauth_redirect_uri: []const u8,
+    expected_state: []const u8,
     verifier: []const u8,
 ) !void {
-    return completeOAuthFromLocalCallback(alloc, .anthropic, callback, oauth_redirect_uri, verifier);
+    return completeOAuthFromLocalCallback(alloc, .anthropic, callback, oauth_redirect_uri, expected_state, verifier);
 }
 
 pub fn completeOpenAICodexOAuth(alloc: std.mem.Allocator, input: []const u8) !void {
@@ -423,9 +430,10 @@ pub fn completeOpenAICodexOAuthFromLocalCallback(
     alloc: std.mem.Allocator,
     callback: oauth_callback.CodeState,
     oauth_redirect_uri: []const u8,
+    expected_state: []const u8,
     verifier: []const u8,
 ) !void {
-    return completeOAuthFromLocalCallback(alloc, .openai, callback, oauth_redirect_uri, verifier);
+    return completeOAuthFromLocalCallback(alloc, .openai, callback, oauth_redirect_uri, expected_state, verifier);
 }
 
 pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []const u8) !void {
@@ -464,9 +472,10 @@ pub fn completeOAuthFromLocalCallback(
     provider: Provider,
     callback: oauth_callback.CodeState,
     oauth_redirect_uri: []const u8,
+    expected_state: []const u8,
     verifier: []const u8,
 ) !void {
-    return completeOAuthFromLocalCallbackWithHooks(alloc, provider, callback, oauth_redirect_uri, verifier, .{});
+    return completeOAuthFromLocalCallbackWithHooks(alloc, provider, callback, oauth_redirect_uri, expected_state, verifier, .{});
 }
 
 pub fn completeOAuthFromLocalCallbackWithHooks(
@@ -474,11 +483,12 @@ pub fn completeOAuthFromLocalCallbackWithHooks(
     provider: Provider,
     callback: oauth_callback.CodeState,
     oauth_redirect_uri: []const u8,
+    expected_state: []const u8,
     verifier: []const u8,
     hooks: Hooks,
 ) !void {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
-    if (!std.mem.eql(u8, callback.state, verifier)) return error.OAuthStateMismatch;
+    if (!std.mem.eql(u8, callback.state, expected_state)) return error.OAuthStateMismatch;
     try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
     const oauth = hooks.exchange_code(
@@ -556,11 +566,23 @@ pub fn parseOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeIn
     };
 }
 
+/// Launch URL in the user's default browser.
+/// Uses absolute paths to avoid PATH-resolved shellout attacks.
 pub fn openBrowser(alloc: std.mem.Allocator, url: []const u8) !void {
     const argv: []const []const u8 = switch (builtin.os.tag) {
-        .macos => &.{ "open", url },
-        .linux => &.{ "xdg-open", url },
-        .windows => &.{ "cmd", "/c", "start", "", url },
+        .macos => &.{ "/usr/bin/open", url },
+        .linux => blk: {
+            const candidates = [_][]const u8{
+                "/usr/bin/xdg-open",
+                "/usr/local/bin/xdg-open",
+            };
+            for (candidates) |path| {
+                if (std.fs.cwd().access(path, .{})) |_| {
+                    break :blk @as([]const []const u8, &.{ path, url });
+                } else |_| {}
+            }
+            return error.BrowserOpenFailed;
+        },
         else => return error.UnsupportedPlatform,
     };
 
@@ -582,6 +604,16 @@ pub fn openBrowser(alloc: std.mem.Allocator, url: []const u8) !void {
 
 fn pkceVerifier(alloc: std.mem.Allocator) ![]u8 {
     var raw: [32]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+    const enc_len = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
+    const out = try alloc.alloc(u8, enc_len);
+    _ = std.base64.url_safe_no_pad.Encoder.encode(out, &raw);
+    return out;
+}
+
+/// Independent CSRF token for OAuth state parameter (not reusing PKCE verifier).
+fn csrfToken(alloc: std.mem.Allocator) ![]u8 {
+    var raw: [16]u8 = undefined;
     std.crypto.random.bytes(&raw);
     const enc_len = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
     const out = try alloc.alloc(u8, enc_len);
@@ -813,6 +845,8 @@ fn exchangeAuthorizationCode(
     });
     defer req.deinit();
 
+    if (req.connection) |conn| setSocketDeadlines(conn);
+
     req.transfer_encoding = .{ .content_length = token_req.body.len };
     var bw = try req.sendBodyUnflushed(&send_buf);
     try bw.writer.writeAll(token_req.body);
@@ -833,11 +867,24 @@ fn exchangeAuthorizationCode(
     return parseOAuthTokenResponse(alloc, ar, resp_body, error.TokenExchangeFailed);
 }
 
+/// Bounded deadline for auth HTTP requests (send + receive), in seconds.
+const auth_http_deadline_s = 30;
+
 fn initHttpClient(alloc: std.mem.Allocator, ca_file: ?[]const u8) !std.http.Client {
     var http = std.http.Client{ .allocator = alloc };
     errdefer http.deinit();
     try core_tls.applyCaFile(&http, alloc, ca_file);
     return http;
+}
+
+/// Apply SO_SNDTIMEO and SO_RCVTIMEO to the underlying socket so auth
+/// HTTP requests cannot hang indefinitely.
+fn setSocketDeadlines(conn: *std.http.Client.Connection) void {
+    const fd = conn.stream_writer.getStream().handle;
+    const tv = std.posix.timeval{ .sec = auth_http_deadline_s, .usec = 0 };
+    const tv_bytes: []const u8 = std.mem.asBytes(&tv);
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.SNDTIMEO, tv_bytes) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.RCVTIMEO, tv_bytes) catch {};
 }
 
 fn decodeQueryValue(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
@@ -925,6 +972,8 @@ fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, 
         .keep_alive = false,
     });
     defer req.deinit();
+
+    if (req.connection) |conn| setSocketDeadlines(conn);
 
     req.transfer_encoding = .{ .content_length = req_body.body.len };
     var bw = try req.sendBodyUnflushed(&send_buf);
@@ -1669,7 +1718,7 @@ test "oauth helpers expose provider capabilities and metadata" {
     try std.testing.expect(oauthLoginInfo(.google) == null);
 }
 
-test "beginAnthropicOAuth builds authorization URL and verifier" {
+test "beginAnthropicOAuth builds authorization URL with separate state and verifier" {
     var flow = try beginAnthropicOAuth(std.testing.allocator);
     defer flow.deinit(std.testing.allocator);
 
@@ -1677,7 +1726,10 @@ test "beginAnthropicOAuth builds authorization URL and verifier" {
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge=") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
+    try std.testing.expect(flow.state.len > 0);
     try std.testing.expect(flow.verifier.len > 16);
+    // state and verifier are independent tokens
+    try std.testing.expect(!std.mem.eql(u8, flow.state, flow.verifier));
 }
 
 test "beginAnthropicOAuthWithRedirect encodes localhost callback URI" {
@@ -1812,6 +1864,7 @@ test "completeAnthropicOAuthFromLocalCallback rejects mismatched state" {
             cb,
             "http://127.0.0.1:1234/callback",
             "state-b",
+            "verifier-x",
         ),
     );
 }
@@ -1832,6 +1885,7 @@ test "completeOpenAICodexOAuthFromLocalCallback rejects mismatched state" {
             cb,
             "http://127.0.0.1:1234/auth/callback",
             "state-b",
+            "verifier-x",
         ),
     );
 }
@@ -1853,8 +1907,22 @@ test "completeOAuthFromLocalCallback rejects unsupported provider" {
             cb,
             "http://127.0.0.1:1234/callback",
             "state-a",
+            "verifier-x",
         ),
     );
+}
+
+test "separate OAuth state and PKCE verifier" {
+    var flow = try beginAnthropicOAuth(std.testing.allocator);
+    defer flow.deinit(std.testing.allocator);
+
+    // state and verifier must be distinct tokens
+    try std.testing.expect(!std.mem.eql(u8, flow.state, flow.verifier));
+    // state is shorter (16 bytes base64 = 22 chars) vs verifier (32 bytes = 43 chars)
+    try std.testing.expect(flow.state.len > 0);
+    try std.testing.expect(flow.verifier.len > flow.state.len);
+    // URL contains state= param
+    try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
 }
 
 test "tokenReqContentType maps oauth token body types" {

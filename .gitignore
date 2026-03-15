@@ -7,4 +7,4 @@ PLAN.md
 **/states/
 **/*_TTrace*
 **/*.st
-lean/.lake/
+**/.lake/

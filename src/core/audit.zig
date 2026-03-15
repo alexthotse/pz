@@ -3,7 +3,10 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const integrity = @import("audit_integrity.zig");
+const signing = @import("signing.zig");
 const syslog = @import("syslog.zig");
+
+pub const RedactKey = signing.RedactKey;
 
 pub const ver_current: u16 = 1;
 
@@ -815,6 +818,7 @@ pub fn sealAlloc(
 }
 
 pub fn writeEntry(w: anytype, ent: Entry) !void {
+    const rkey = RedactKey.fromSid(ent.sid);
     try w.writeByte('{');
     var first = true;
 
@@ -845,23 +849,23 @@ pub fn writeEntry(w: anytype, ent: Entry) !void {
     }
 
     try writeObjKey(w, &first, "actor");
-    try writeActor(w, ent.actor);
+    try writeActor(w, ent.actor, rkey);
 
     if (ent.res) |res| {
         try writeObjKey(w, &first, "res");
-        try writeRes(w, res);
+        try writeRes(w, res, rkey);
     }
 
     if (ent.msg) |msg| {
         try writeObjKey(w, &first, "msg");
-        try writeStr(w, msg);
+        try writeStr(w, msg, rkey);
     }
 
     try writeObjKey(w, &first, "data");
-    try writeData(w, ent.data);
+    try writeData(w, ent.data, rkey);
 
     try writeObjKey(w, &first, "attrs");
-    try writeAttrs(w, ent.attrs);
+    try writeAttrs(w, ent.attrs, rkey);
 
     try w.writeByte('}');
 }
@@ -926,7 +930,7 @@ fn writeSite(w: anytype, site: Site) !void {
     try w.writeByte('}');
 }
 
-fn writeActor(w: anytype, actor: Actor) !void {
+fn writeActor(w: anytype, actor: Actor, rkey: RedactKey) !void {
     try w.writeByte('{');
     var first = true;
 
@@ -935,7 +939,7 @@ fn writeActor(w: anytype, actor: Actor) !void {
 
     if (actor.id) |id| {
         try writeObjKey(w, &first, "id");
-        try writeStr(w, id);
+        try writeStr(w, id, rkey);
     }
     if (actor.role) |role| {
         try writeObjKey(w, &first, "role");
@@ -944,7 +948,7 @@ fn writeActor(w: anytype, actor: Actor) !void {
     try w.writeByte('}');
 }
 
-fn writeRes(w: anytype, res: Resource) !void {
+fn writeRes(w: anytype, res: Resource, rkey: RedactKey) !void {
     try w.writeByte('{');
     var first = true;
 
@@ -952,7 +956,7 @@ fn writeRes(w: anytype, res: Resource) !void {
     try writeJsonStr(w, @tagName(res.kind));
 
     try writeObjKey(w, &first, "name");
-    try writeStr(w, res.name);
+    try writeStr(w, res.name, rkey);
 
     if (res.op) |op| {
         try writeObjKey(w, &first, "op");
@@ -1045,51 +1049,75 @@ fn detectPubRedact(txt: []const u8) ?[]const u8 {
     return null;
 }
 
-fn taggedTextAlloc(alloc: Allocator, tag: []const u8, txt: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "[{s}:{x:0>16}]", .{ tag, std.hash.Wyhash.hash(0, txt) });
+/// Process-level ephemeral redaction key, initialized once.
+/// Used by callers of `redactTextAlloc` that lack session context.
+var proc_rkey: RedactKey = undefined;
+var proc_rkey_init = false;
+
+fn procKey() RedactKey {
+    if (!proc_rkey_init) {
+        var seed: [signing.rkey_len]u8 = undefined;
+        std.crypto.random.bytes(&seed);
+        proc_rkey = .{ .bytes = seed };
+        proc_rkey_init = true;
+    }
+    return proc_rkey;
 }
 
+fn taggedTextAlloc(alloc: Allocator, tag: []const u8, txt: []const u8, rkey: RedactKey) ![]u8 {
+    var hex: [16]u8 = undefined;
+    _ = rkey.surrogate(txt, &hex);
+    return std.fmt.allocPrint(alloc, "[{s}:{s}]", .{ tag, hex[0..] });
+}
+
+/// Redact text using the process-level ephemeral key.
+/// For session-scoped redaction, use `redactKeyedAlloc`.
 pub fn redactTextAlloc(alloc: Allocator, txt: []const u8, vis: Vis) ![]u8 {
+    return redactKeyedAlloc(alloc, txt, vis, procKey());
+}
+
+/// Redact text using a caller-supplied key (session-scoped).
+pub fn redactKeyedAlloc(alloc: Allocator, txt: []const u8, vis: Vis, rkey: RedactKey) ![]u8 {
     return switch (vis) {
         .@"pub" => if (detectPubRedact(txt)) |tag|
-            try taggedTextAlloc(alloc, tag, txt)
+            try taggedTextAlloc(alloc, tag, txt, rkey)
         else
             try alloc.dupe(u8, txt),
-        .mask => try taggedTextAlloc(alloc, "mask", txt),
-        .hash => try taggedTextAlloc(alloc, "hash", txt),
-        .secret => try taggedTextAlloc(alloc, "secret", txt),
+        .mask => try taggedTextAlloc(alloc, "mask", txt, rkey),
+        .hash => try taggedTextAlloc(alloc, "hash", txt, rkey),
+        .secret => try taggedTextAlloc(alloc, "secret", txt, rkey),
     };
 }
 
-fn writeTaggedJsonStr(w: anytype, tag: []const u8, txt: []const u8) !void {
-    var hash_buf: [16]u8 = undefined;
-    const hash_txt = try std.fmt.bufPrint(&hash_buf, "{x:0>16}", .{std.hash.Wyhash.hash(0, txt)});
+fn writeTaggedJsonStr(w: anytype, tag: []const u8, txt: []const u8, rkey: RedactKey) !void {
+    var hex: [16]u8 = undefined;
+    _ = rkey.surrogate(txt, &hex);
     var tag_buf: [32]u8 = undefined;
-    const out = try std.fmt.bufPrint(&tag_buf, "[{s}:{s}]", .{ tag, hash_txt });
+    const out = try std.fmt.bufPrint(&tag_buf, "[{s}:{s}]", .{ tag, hex[0..] });
     try writeJsonStr(w, out);
 }
 
-fn writeVisText(w: anytype, txt: []const u8, vis: Vis) !void {
+fn writeVisText(w: anytype, txt: []const u8, vis: Vis, rkey: RedactKey) !void {
     switch (vis) {
         .@"pub" => {
             if (detectPubRedact(txt)) |tag| {
-                try writeTaggedJsonStr(w, tag, txt);
+                try writeTaggedJsonStr(w, tag, txt, rkey);
             } else {
                 try writeJsonStr(w, txt);
             }
         },
-        .mask => try writeTaggedJsonStr(w, "mask", txt),
-        .hash => try writeTaggedJsonStr(w, "hash", txt),
-        .secret => try writeTaggedJsonStr(w, "secret", txt),
+        .mask => try writeTaggedJsonStr(w, "mask", txt, rkey),
+        .hash => try writeTaggedJsonStr(w, "hash", txt, rkey),
+        .secret => try writeTaggedJsonStr(w, "secret", txt, rkey),
     }
 }
 
-fn writeStr(w: anytype, s: Str) !void {
+fn writeStr(w: anytype, s: Str, rkey: RedactKey) !void {
     try w.writeByte('{');
     var first = true;
 
     try writeObjKey(w, &first, "text");
-    try writeVisText(w, s.text, s.vis);
+    try writeVisText(w, s.text, s.vis, rkey);
 
     try writeObjKey(w, &first, "vis");
     try writeJsonStr(w, @tagName(s.vis));
@@ -1097,16 +1125,16 @@ fn writeStr(w: anytype, s: Str) !void {
     try w.writeByte('}');
 }
 
-fn writeAttrs(w: anytype, attrs: []const Attribute) !void {
+fn writeAttrs(w: anytype, attrs: []const Attribute, rkey: RedactKey) !void {
     try w.writeByte('[');
     for (attrs, 0..) |attr, i| {
         if (i > 0) try w.writeByte(',');
-        try writeAttr(w, attr);
+        try writeAttr(w, attr, rkey);
     }
     try w.writeByte(']');
 }
 
-fn writeAttr(w: anytype, attr: Attribute) !void {
+fn writeAttr(w: anytype, attr: Attribute, rkey: RedactKey) !void {
     try w.writeByte('{');
     var first = true;
 
@@ -1121,7 +1149,7 @@ fn writeAttr(w: anytype, attr: Attribute) !void {
             try writeObjKey(w, &first, "ty");
             try writeJsonStr(w, "str");
             try writeObjKey(w, &first, "val");
-            try writeVisText(w, v, attr.vis);
+            try writeVisText(w, v, attr.vis, rkey);
         },
         .int => |v| {
             try writeObjKey(w, &first, "ty");
@@ -1146,7 +1174,7 @@ fn writeAttr(w: anytype, attr: Attribute) !void {
     try w.writeByte('}');
 }
 
-fn writeData(w: anytype, data: Data) !void {
+fn writeData(w: anytype, data: Data, rkey: RedactKey) !void {
     try w.writeByte('{');
     var first = true;
 
@@ -1160,7 +1188,7 @@ fn writeData(w: anytype, data: Data) !void {
 
             if (v.wd) |wd| {
                 try writeObjKey(w, &first, "wd");
-                try writeStr(w, wd);
+                try writeStr(w, wd, rkey);
             }
         },
         .turn => |v| {
@@ -1177,7 +1205,7 @@ fn writeData(w: anytype, data: Data) !void {
         },
         .tool => |v| {
             try writeObjKey(w, &first, "name");
-            try writeStr(w, v.name);
+            try writeStr(w, v.name, rkey);
 
             if (v.call_id) |call_id| {
                 try writeObjKey(w, &first, "call_id");
@@ -1185,7 +1213,7 @@ fn writeData(w: anytype, data: Data) !void {
             }
             if (v.argv) |argv| {
                 try writeObjKey(w, &first, "argv");
-                try writeStr(w, argv);
+                try writeStr(w, argv, rkey);
             }
             if (v.code) |code| {
                 try writeObjKey(w, &first, "code");
@@ -1215,7 +1243,7 @@ fn writeData(w: anytype, data: Data) !void {
 
             if (v.subject) |sub| {
                 try writeObjKey(w, &first, "sub");
-                try writeStr(w, sub);
+                try writeStr(w, sub, rkey);
             }
         },
         .forward => |v| {
@@ -1226,7 +1254,7 @@ fn writeData(w: anytype, data: Data) !void {
             try w.print("{d}", .{v.batch});
 
             try writeObjKey(w, &first, "dst");
-            try writeStr(w, v.dst);
+            try writeStr(w, v.dst, rkey);
 
             try writeObjKey(w, &first, "len");
             try w.print("{d}", .{v.len});
@@ -1237,11 +1265,11 @@ fn writeData(w: anytype, data: Data) !void {
 
             if (v.target) |t| {
                 try writeObjKey(w, &first, "target");
-                try writeStr(w, t);
+                try writeStr(w, t, rkey);
             }
             if (v.detail) |d| {
                 try writeObjKey(w, &first, "detail");
-                try writeStr(w, d);
+                try writeStr(w, d, rkey);
             }
         },
     }
@@ -1342,7 +1370,7 @@ test "snapshot: canonical tool entry encoding" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "kind=tool | redact=true | json={"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"[mask:2aa5dc7ee92f3807]","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"[secret:8c3b19aca7d7c3f8]","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"[mask:bdfd41dd2fcacdeb]"}]}"
+        \\  "kind=tool | redact=true | json={"v":1,"ts_ms":1731000000123,"sid":"sess-01","seq":7,"kind":"tool","sev":"warn","out":"fail","site":{"host":"mbp","app":"pz","pid":4242},"actor":{"kind":"agent","id":{"text":"codex","vis":"pub"},"role":"runner"},"res":{"kind":"file","name":{"text":"[mask:31b03db53031ba68]","vis":"mask"},"op":"write"},"msg":{"text":"tool failed","vis":"pub"},"data":{"name":{"text":"exec_command","vis":"pub"},"call_id":"toolu_01","argv":{"text":"[secret:261ac4eb2f8dea22]","vis":"secret"},"code":1,"ms":29},"attrs":[{"key":"cache_hit","vis":"pub","ty":"bool","val":false},{"key":"bytes","vis":"pub","ty":"uint","val":512},{"key":"stderr","vis":"mask","ty":"str","val":"[mask:a575177ce0d07786]"}]}"
     ).expectEqual(snap);
 }
 
@@ -1493,7 +1521,7 @@ test "snapshot: variant encodings stay canonical" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"[mask:47a56333843b7ed0]","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[secret:cb01a7199946da94]","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"[hash:ce3e6e686cd0c59f]","vis":"hash"}},"attrs":[]} | forward={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
+        \\  "sess={"v":1,"ts_ms":10,"sid":"sess-a","seq":1,"kind":"sess","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"op":"start","tty":true,"wd":{"text":"[mask:bfd73010ad3334a7]","vis":"mask"}},"attrs":[]} | policy={"v":1,"ts_ms":11,"sid":"sess-a","seq":2,"kind":"policy","sev":"info","out":"deny","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[secret:0075ed38fd9eb2c4]","vis":"secret"},"op":"read"},"data":{"eff":"deny","rule":"*.audit.log","scope":"path"},"attrs":[]} | auth={"v":1,"ts_ms":12,"sid":"sess-a","seq":3,"kind":"auth","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"data":{"mech":"oauth","sub":{"text":"[hash:a5291921179ec2a4]","vis":"hash"}},"attrs":[]} | forward={"v":1,"ts_ms":13,"sid":"sess-a","seq":4,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":8,"dst":{"text":"[mask:51581415926ae87a]","vis":"mask"},"len":1420},"attrs":[{"key":"retry","vis":"pub","ty":"uint","val":1}]}"
     ).expectEqual(snap);
 }
 
@@ -1572,7 +1600,7 @@ test "encoding escapes control bytes and stays stable" {
     try testing.expectEqualStrings(raw_a, raw_b);
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":77,"sid":"sess-b","seq":9,"kind":"turn","sev":"info","out":"ok","actor":{"kind":"sys"},"msg":{"text":"[mask:aba5f20f2fb92386]","vis":"mask"},"data":{"idx":3,"phase":"done","model":"gpt-5"},"attrs":[{"key":"ctrl","vis":"mask","ty":"str","val":"[mask:31310066477309fa]"},{"key":"delta","vis":"pub","ty":"int","val":-4}]}"
+        \\  "{"v":1,"ts_ms":77,"sid":"sess-b","seq":9,"kind":"turn","sev":"info","out":"ok","actor":{"kind":"sys"},"msg":{"text":"[mask:2dd706d1d652ef70]","vis":"mask"},"data":{"idx":3,"phase":"done","model":"gpt-5"},"attrs":[{"key":"ctrl","vis":"mask","ty":"str","val":"[mask:3a967bb5ff310f5e]"},{"key":"delta","vis":"pub","ty":"int","val":-4}]}"
     ).expectEqual(raw_a);
 }
 
@@ -1635,7 +1663,7 @@ test "snapshot: runtime control entries encode canonically" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "cfg={"v":1,"ts_ms":88,"sid":"runtime","seq":1,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"claude-opus-4-6","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"anthropic"}]} | sess={"v":1,"ts_ms":89,"sid":"runtime","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:bd710b2156a1699e]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:3208ed5235fe5d94]","vis":"mask"}},"attrs":[]}"
+        \\  "cfg={"v":1,"ts_ms":88,"sid":"runtime","seq":1,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"claude-opus-4-6","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"anthropic"}]} | sess={"v":1,"ts_ms":89,"sid":"runtime","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:a3d269af3f28886b]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:6e5d4487dda40bf0]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(snap);
 }
 
@@ -1681,7 +1709,7 @@ test "snapshot: audit payload ships through syslog canonically" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "<36>1 1970-01-01T00:00:00.123Z pz-host pz 17 audit [pz@32473 sid="sess-c" seq="7"] {"v":1,"ts_ms":123,"sid":"sess-c","seq":7,"kind":"tool","sev":"warn","out":"ok","actor":{"kind":"tool","id":{"text":"bash","vis":"pub"}},"res":{"kind":"cmd","name":{"text":"[mask:a3f737f3e5d8415e]","vis":"mask"},"op":"exec"},"data":{"name":{"text":"bash","vis":"pub"},"call_id":"call-7","argv":{"text":"[mask:a3f737f3e5d8415e]","vis":"mask"},"code":143,"ms":19},"attrs":[{"key":"cancel","vis":"pub","ty":"bool","val":true}]}"
+        \\  "<36>1 1970-01-01T00:00:00.123Z pz-host pz 17 audit [pz@32473 sid="sess-c" seq="7"] {"v":1,"ts_ms":123,"sid":"sess-c","seq":7,"kind":"tool","sev":"warn","out":"ok","actor":{"kind":"tool","id":{"text":"bash","vis":"pub"}},"res":{"kind":"cmd","name":{"text":"[mask:da6c048c4b4e0f06]","vis":"mask"},"op":"exec"},"data":{"name":{"text":"bash","vis":"pub"},"call_id":"call-7","argv":{"text":"[mask:da6c048c4b4e0f06]","vis":"mask"},"code":143,"ms":19},"attrs":[{"key":"cancel","vis":"pub","ty":"bool","val":true}]}"
     ).expectEqual(frame);
 }
 
@@ -1833,7 +1861,7 @@ test "syslog shipper buffers disconnect and flushes in order" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
+        \\  "queued=0 | dropped=0 | backoff_ms=10 | next_retry_ms=null | early_err=null | early_sent=0 | late_err=null | late_sent=2 | conn_calls=2 | one=<110>1 1970-01-01T00:00:00.001Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="1"] {"v":1,"ts_ms":1,"sid":"sess-r","seq":1,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:9b5a41fcc246a2f3]","vis":"mask"},"len":128},"attrs":[]} | two=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:9b5a41fcc246a2f3]","vis":"mask"},"len":128},"attrs":[]} | three=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:9b5a41fcc246a2f3]","vis":"mask"},"len":128},"attrs":[]}"
     ).expectEqual(snap);
 }
 
@@ -1883,7 +1911,7 @@ test "syslog shipper drops oldest on ring overflow" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:f0239d9bd7eeba5f]","vis":"mask"},"len":128},"attrs":[]}"
+        \\  "r3_dropped=1 | queued=0 | dropped=1 | fl_sent=2 | conn_calls=2 | first=<110>1 1970-01-01T00:00:00.002Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="2"] {"v":1,"ts_ms":2,"sid":"sess-r","seq":2,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:9b5a41fcc246a2f3]","vis":"mask"},"len":128},"attrs":[]} | second=<110>1 1970-01-01T00:00:00.003Z pz-host pz 17 audit [pz@32473 sid="sess-r" seq="3"] {"v":1,"ts_ms":3,"sid":"sess-r","seq":3,"kind":"forward","sev":"info","out":"ok","actor":{"kind":"sys"},"data":{"proto":"syslog+tls","batch":1,"dst":{"text":"[mask:9b5a41fcc246a2f3]","vis":"mask"},"len":128},"attrs":[]}"
     ).expectEqual(snap);
 }
 

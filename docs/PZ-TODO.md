@@ -166,7 +166,7 @@ Short-lived: open, mutate, close. Always reads fresh from disk.
 
 Default `.pz/tasks.md` is inside protected `.pz/`. Protection comes from policy rules (not path_guard). `toolPolicyPath` for `.todo` returns `"runtime/tool/todo"` (synthetic — like `ask`/`web`). The handler bypasses policy's `.pz/` self-protection by writing directly, acceptable because: (a) narrowly scoped to one file, (b) content validated, (c) gated by approval.
 
-Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to validate the path BEFORE `TaskList.open()`. Both must pass. Reject any `file` path ending in `.bak` (prevents reading backup files from `/todo reset`).
+Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to validate the path BEFORE `TaskList.open()`. Both must pass. Reject any `file` path ending in `.bak` or `.tmp` (prevents reading backup/temp files).
 
 ### Approval gate
 
@@ -269,7 +269,7 @@ pub const Args = union(Kind) {
 ```
 
 **action=read**: titles + status (no bodies). Warn if empty tasks array on update.
-**action=update**: patch statuses, per-item errors.
+**action=update**: patch statuses ONLY. `parent`, `body`, `title`, `priority` fields in `TaskItem` are silently ignored on update — `update` is status-only by design. This prevents bypassing `add()`'s cycle detection by smuggling parent changes through update.
 **action=add**: create tasks, model cannot set `id`.
 
 ---
@@ -398,7 +398,7 @@ Handler does NOT emit ModeEv — runtime does post-tool-result.
 
 **Session replay:** stored result used, tool not re-executed. `ModeEv` doesn't fire on replay. Task state authoritative in file.
 
-**Context injection:** task summary as LAST system part in `buildReqMsgs` (`loop.zig` `buildReqMsgs` fn). Order: `[pz_identity, system_prompt, task_summary]`. `sys_part_ct` adds `+ (task_summary ? 1 : 0)`. The `loop.zig` `Opts` struct needs a `task_file` field to thread the path. If `TaskList.open()` fails with file-not-found, omit (no tasks yet). If other error, log warning to mode sink (not silent skip). Format: titles + status only, wrapped with `wrapUntrustedNamed(alloc, "task-list", summary)` to prevent cross-session prompt injection. Cap 50 tasks; >50 filter done first, then cap by priority.
+**Context injection:** task summary as LAST system part in `buildReqMsgs` (`loop.zig` `buildReqMsgs` fn). Order: `[pz_identity, system_prompt, task_summary]`. `sys_part_ct` adds `+ (task_summary ? 1 : 0)`. The `loop.zig` `Opts` struct needs a `task_file` field to thread the path. If `TaskList.open()` fails with file-not-found, omit (no tasks yet). If other error, log warning to mode sink (not silent skip). Format: titles + status only, wrapped with `wrapUntrusted(alloc, "task-list", summary)` to prevent cross-session prompt injection. Cap 50 tasks; >50 filter done first, then cap by priority.
 
 **Concurrency:** single-writer. Orchestrator only. Subagents work and report; orchestrator checks off. `mask_todo` stripped from child agents. File atomicity via write-tmp-rename (tmp in same dir as target). All `/todo` commands and model tool calls serialized through event loop. Tool calls within a single model turn are dispatched sequentially by the agent loop — no concurrent `todo` execution possible.
 
@@ -505,11 +505,11 @@ Modified:
 - **Metadata split: first `: ` only.** Values with `: ` are safe. Values with ` | ` are forbidden.
 - **`clear` skips parents.** Done tasks with non-done children preserved. Cyclic done groups ARE clearable.
 - **Parent cycle rejection.** `add()` rejects parent if it would create a cycle.
-- **`.bak` files rejected.** `file` param cannot end in `.bak` — prevents reading reset backups.
-- **Title strips `</`.** Prevents `</untrusted-input>` breakout in `wrapUntrustedNamed` body. Note: the body-escape gap in `wrapUntrustedNamed` is a pre-existing codebase vulnerability (affects context.zig, loop.zig, compact.zig). Todo mitigates via title sanitization; a codebase-wide fix to escape `</` in the body is tracked separately.
+- **`.bak`/`.tmp` files rejected.** `file` param cannot end in `.bak` or `.tmp` — prevents reading reset backups or in-flight temp files.
+- **Title strips `</`.** Prevents `</untrusted-input>` breakout in `wrapUntrusted` body. Note: the body-escape gap in `wrapUntrusted`/`wrapUntrustedNamed` is a pre-existing codebase vulnerability (affects context.zig, loop.zig, compact.zig). Todo mitigates via title sanitization; codebase-wide fix tracked separately.
 - **`reset` writes backup.** `.pz/tasks.md.bak` before emptying.
 - **Context injection warns on failure.** Not silent skip — logs to mode sink. File-not-found is OK (no tasks yet).
-- **Context wrapped untrusted.** `wrapUntrustedNamed("task-list", ...)` prevents cross-session prompt injection.
+- **Context wrapped untrusted.** `wrapUntrusted(alloc, "task-list", summary)` prevents cross-session prompt injection.
 - **Tmp file in same dir.** `{path}.tmp` ensures same-filesystem rename.
 - **Concurrent mod detection.** `flush()` checks mtime before rename.
 - **Title sanitization.** Rejects `\n`, `\r`, ` | `, `#` — prevents metadata/section injection.

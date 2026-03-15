@@ -5,6 +5,8 @@ pub const Opts = struct {
     bind_ip: []const u8 = "127.0.0.1",
     redirect_host: []const u8 = "127.0.0.1",
     path: []const u8 = "/callback",
+    /// Per-connection read deadline in milliseconds.
+    read_deadline_ms: u32 = 5_000,
 };
 
 pub const CodeState = struct {
@@ -23,6 +25,7 @@ pub const Listener = struct {
     server: std.net.Server,
     redirect_uri: []u8,
     path: []u8,
+    read_deadline_ms: u32,
 
     pub fn init(alloc: std.mem.Allocator, opts: Opts) !Listener {
         const addr = try std.net.Address.parseIp(opts.bind_ip, 0);
@@ -45,6 +48,7 @@ pub const Listener = struct {
             .server = server,
             .redirect_uri = redirect_uri,
             .path = path,
+            .read_deadline_ms = opts.read_deadline_ms,
         };
     }
 
@@ -75,10 +79,19 @@ pub const Listener = struct {
         var conn = try self.server.accept();
         defer conn.stream.close();
 
+        // Reject non-loopback peers.
+        if (!isLoopback(conn.address)) return error.NonLoopbackPeer;
+
+        // Set per-connection read deadline to abort trickle/stalled clients.
+        setRecvTimeout(conn.stream.handle, self.read_deadline_ms);
+
         var req_buf: [8192]u8 = undefined;
         var req_len: usize = 0;
         while (req_len < req_buf.len) {
-            const n = try std.posix.read(conn.stream.handle, req_buf[req_len..]);
+            const n = std.posix.read(conn.stream.handle, req_buf[req_len..]) catch |err| switch (err) {
+                error.WouldBlock => return error.OAuthReadTimeout,
+                else => return err,
+            };
             if (n == 0) break;
             req_len += n;
             if (std.mem.indexOf(u8, req_buf[0..req_len], "\r\n\r\n") != null) break;
@@ -183,6 +196,25 @@ fn fromHex(c: u8) ?u8 {
     return null;
 }
 
+/// True if the peer address is IPv4 127.0.0.0/8 or IPv6 ::1.
+fn isLoopback(addr: std.net.Address) bool {
+    return switch (addr.any.family) {
+        std.posix.AF.INET => std.mem.asBytes(&addr.in.sa.addr)[0] == 127,
+        std.posix.AF.INET6 => std.mem.eql(u8, &addr.in6.sa.addr, &[_]u8{0} ** 15 ++ [_]u8{1}),
+        else => false,
+    };
+}
+
+/// Set SO_RCVTIMEO on fd. Best-effort; failure is non-fatal since poll
+/// already bounds the overall wait.
+fn setRecvTimeout(fd: std.posix.fd_t, ms: u32) void {
+    const tv = std.posix.timeval{
+        .sec = @intCast(ms / 1000),
+        .usec = @intCast(@as(u32, ms % 1000) * 1000),
+    };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+}
+
 fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) void {
     var header: [256]u8 = undefined;
     const hdr = std.fmt.bufPrint(
@@ -263,4 +295,47 @@ test "listener rejects callback missing state param" {
     defer t.join();
 
     try std.testing.expectError(error.InvalidOAuthCallbackRequest, listener.waitForCodeState(std.testing.allocator, 3000));
+}
+
+test "isLoopback accepts 127.x.x.x" {
+    const lo = try std.net.Address.parseIp("127.0.0.1", 0);
+    try std.testing.expect(isLoopback(lo));
+    const lo2 = try std.net.Address.parseIp("127.255.0.1", 0);
+    try std.testing.expect(isLoopback(lo2));
+}
+
+test "isLoopback rejects non-loopback IPv4" {
+    const ext = try std.net.Address.parseIp("192.168.1.1", 0);
+    try std.testing.expect(!isLoopback(ext));
+}
+
+test "isLoopback accepts ::1" {
+    const lo6 = try std.net.Address.parseIp("::1", 0);
+    try std.testing.expect(isLoopback(lo6));
+}
+
+test "isLoopback rejects non-loopback IPv6" {
+    const ext6 = try std.net.Address.parseIp("::2", 0);
+    try std.testing.expect(!isLoopback(ext6));
+}
+
+test "listener stalled client triggers read timeout" {
+    var listener = try Listener.init(std.testing.allocator, .{ .read_deadline_ms = 100 });
+    defer listener.deinit();
+
+    // Connect but send nothing; read deadline should abort.
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(p: u16) void {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            const addr = std.net.Address.parseIp("127.0.0.1", p) catch return;
+            var stream = std.net.tcpConnectToAddress(addr) catch return;
+            // Hold connection open without sending.
+            std.Thread.sleep(2 * std.time.ns_per_s);
+            stream.close();
+        }
+    }.run, .{listener.port()});
+    defer t.join();
+
+    const err = listener.waitForCodeState(std.testing.allocator, 10_000);
+    try std.testing.expectError(error.OAuthReadTimeout, err);
 }

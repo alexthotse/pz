@@ -125,3 +125,35 @@ Model selector overlay renders directly onto the frame buffer after normal TUI c
 
 ### ESC cancellation needs raw mode + dedicated thread
 Detecting ESC during streaming requires a dedicated InputWatcher thread (mirrors pi's CancellableLoader + AbortController pattern). The thread uses `poll()` with 100ms timeout + `read()` on stdin, setting an atomic bool when ESC (0x1b) is received. Critical: raw mode (`enableRaw`) MUST be set before starting the thread — in canonical mode, `poll()` POLLIN only fires on complete lines, so bare ESC never triggers it. The `enableRaw` call was moved before the `-p` prompt path for this reason. Non-blocking approaches (`fcntl O_NONBLOCK`, inline `pollCancel` in push callback) failed on macOS due to Zig's `read()` wrapper returning `WouldBlock` even when `std.c.read()` returns 0.
+
+## Session Notes (2026-03-15)
+
+### Formal Verification
+
+#### TLA+ Lessons
+- State space explodes with `SUBSET` — use fixed ownership sets, not `SUBSET Files`
+- `Reset` with fresh budget creates infinite loops — bound with `MaxRounds`
+- Terminal states need `CHECK_DEADLOCK FALSE` in cfg
+- TLC runs natively on ARM via `tla2tools.jar` + homebrew openjdk (no Rosetta)
+- `.lake/` and TLC `states/` dirs must be gitignored with `**/` prefix, not path-specific
+
+#### Lean Lessons
+- `bv_decide` can't unfold `def` with `~~~` (complement) — use literal hex values or `@[reducible]`
+- `bv_decide` can't handle variable `Fin` indices into `BitVec` — use concrete positions
+- `lake build` needs `lake update` first when adding dependencies
+- If `.lake/packages/` has corrupt git clones, `rm -rf .lake && lake update` is the only fix
+- Mathlib isn't needed for `bv_decide` (it's in `Std.Tactic.BVDecide`) — avoid mathlib for bitvector-only proofs
+- Adversarial review of proof PLANS finds real code bugs (3 this session: CmdCache TTL, timing oracle, bash fail-open)
+- The review process for writing proofs is as valuable as the proofs themselves — modeling forces you to read the code carefully
+
+### Do More
+- Review proof plans adversarially before writing proofs — the code-model gap analysis catches bugs
+- Run `std.mem.eql` audit across all crypto/security comparisons — it's never constant-time
+- Always gitignore generated artifacts with `**/` glob, not path-specific entries
+- Benchmark episodes at 1M context before implementing — may not be needed
+
+### Do Not Do
+- Don't move directories while agents are writing to them — files land in wrong location
+- Don't assume `generateSummary` can be reused for different output shapes — verify the actual struct
+- Don't use `tool_result` events for non-tool data — Anthropic API validates tool_use pairing
+- Don't claim proofs verify "existing code" when they model planned code — label clearly
