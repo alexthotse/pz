@@ -4944,10 +4944,27 @@ fn maybeShowVersionUpdate(
     if (check.isDone()) done.* = true;
 }
 
+/// Resolve a command to an absolute path from hardcoded candidates only.
+/// Never consults PATH. Caller must free the returned slice.
+fn resolveAbsCmd(alloc: std.mem.Allocator, candidates: []const []const u8) ![]const u8 {
+    for (candidates) |p| {
+        std.fs.accessAbsolute(p, .{}) catch continue;
+        return try alloc.dupe(u8, p);
+    }
+    return error.CmdNotFound;
+}
+
+const gh_paths = if (builtin.target.os.tag == .macos)
+    &[_][]const u8{ "/opt/homebrew/bin/gh", "/usr/local/bin/gh" }
+else
+    &[_][]const u8{ "/usr/bin/gh", "/usr/local/bin/gh" };
+
 fn shareGist(alloc: std.mem.Allocator, md_path: []const u8) ![]u8 {
+    const gh = try resolveAbsCmd(alloc, gh_paths);
+    defer alloc.free(gh);
     const result = try std.process.Child.run(.{
         .allocator = alloc,
-        .argv = &.{ "gh", "gist", "create", "--public=false", md_path },
+        .argv = &.{ gh, "gist", "create", "--public=false", md_path },
     });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
@@ -6258,13 +6275,17 @@ fn showCost(_: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     try ui.tr.infoText(fbs.getWritten());
 }
 
+const clip_paths = if (builtin.target.os.tag == .macos)
+    &[_][]const u8{"/usr/bin/pbcopy"}
+else
+    &[_][]const u8{ "/usr/bin/xclip", "/usr/bin/xsel", "/usr/bin/wl-copy" };
+
 fn copyLastResponse(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     const text = ui.lastResponseText() orelse {
         try ui.tr.infoText("[nothing to copy]");
         return;
     };
-    const clip_cmds = [_][]const u8{ "pbcopy", "xclip", "xsel", "wl-copy" };
-    for (clip_cmds) |cmd| {
+    for (clip_paths) |cmd| {
         if (try pipeToCmd(alloc, cmd, text)) {
             try ui.tr.infoText("[copied to clipboard]");
             return;
@@ -6770,7 +6791,24 @@ fn runBashMode(
 }
 
 fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
-    const ed = std.posix.getenv("EDITOR") orelse std.posix.getenv("VISUAL") orelse "vi";
+    const raw_ed = std.posix.getenv("EDITOR") orelse std.posix.getenv("VISUAL") orelse "/usr/bin/vi";
+
+    // Reject relative paths — require absolute path to editor
+    const ed = if (!std.fs.path.isAbsolute(raw_ed)) blk: {
+        // Resolve bare command name against known safe dirs
+        const safe_dirs = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin" };
+        var found: ?[]const u8 = null;
+        for (safe_dirs) |dir| {
+            const full = try std.fs.path.join(alloc, &.{ dir, raw_ed });
+            std.fs.accessAbsolute(full, .{}) catch {
+                alloc.free(full);
+                continue;
+            };
+            found = full;
+            break;
+        }
+        break :blk found orelse return error.EditorNotFound;
+    } else raw_ed;
 
     // Write current text to unique temp file
     var tmp_buf: [64]u8 = undefined;
@@ -6813,7 +6851,7 @@ fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
 fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     // macOS: check clipboard for image via osascript
     const argv = [_][]const u8{
-        "osascript",                                                                                                     "-e",
+        "/usr/bin/osascript",                                                                                            "-e",
         "try\nset theType to (clipboard info for «class PNGf»)\nreturn \"image\"\non error\nreturn \"none\"\nend try",
     };
     const result = std.process.Child.run(.{
@@ -6843,7 +6881,7 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     const script = try std.fmt.allocPrint(alloc, "set imgData to the clipboard as «class PNGf»\nset fp to open for access POSIX file \"{s}\" with write permission\nwrite imgData to fp\nclose access fp", .{tmp_path});
     defer alloc.free(script);
 
-    const save_argv = [_][]const u8{ "osascript", "-e", script };
+    const save_argv = [_][]const u8{ "/usr/bin/osascript", "-e", script };
     const save_result = std.process.Child.run(.{
         .allocator = alloc,
         .argv = save_argv[0..],
@@ -6863,7 +6901,7 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
 }
 
 fn pasteText(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
-    const argv = [_][]const u8{"pbpaste"};
+    const argv = [_][]const u8{"/usr/bin/pbpaste"};
     const result = std.process.Child.run(.{
         .allocator = alloc,
         .argv = argv[0..],
@@ -13399,4 +13437,21 @@ test "autoCompact reports summary budget stop metadata" {
         \\[auto-compact stopped: summary input over budget bytes=90210/65536 tokens=8192/4096 kept=3 dropped=17]"
     ).expectEqual(snap_txt);
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "[compacting...]") != null);
+}
+
+test "resolveAbsCmd rejects PATH-only commands" {
+    const alloc = std.testing.allocator;
+    // Candidates that do not exist as absolute paths.
+    const bogus = &[_][]const u8{ "/nonexistent/bin/xyz123", "/also/missing/xyz123" };
+    // Must fail — PATH is never consulted.
+    try std.testing.expectError(error.CmdNotFound, resolveAbsCmd(alloc, bogus));
+}
+
+test "resolveAbsCmd finds existing absolute path" {
+    const alloc = std.testing.allocator;
+    // /bin/sh exists on all POSIX systems.
+    const candidates = &[_][]const u8{ "/nonexistent/bin/nope", "/bin/sh" };
+    const result = try resolveAbsCmd(alloc, candidates);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("/bin/sh", result);
 }

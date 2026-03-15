@@ -451,7 +451,10 @@ const Ring = struct {
         var name_buf: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{self.spool_seq}) catch return;
         self.spool_seq += 1;
-        const f = dir.createFile(name, .{ .truncate = true }) catch return;
+        const f = dir.createFile(name, .{ .truncate = true }) catch |err| {
+            std.log.warn("audit spool create failed: {}", .{err});
+            return;
+        };
         defer f.close();
         f.writeAll(raw) catch |err| {
             std.log.warn("audit spool write failed: {}", .{err});
@@ -470,7 +473,7 @@ const Ring = struct {
         const seq = base_seq + age;
         var name_buf: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{seq}) catch return;
-        dir.deleteFile(name) catch {};
+        dir.deleteFile(name) catch {}; // cleanup: propagation impossible
     }
 
     fn restoreSpool(self: *Ring) void {

@@ -141,8 +141,8 @@ pub const Manager = struct {
             if (job.state == .running) {
                 const p: std.posix.pid_t = @intCast(job.pid);
                 const tgt: std.posix.pid_t = if (builtin.os.tag != .windows and builtin.os.tag != .wasi) -p else p;
-                _ = std.posix.kill(tgt, std.posix.SIG.KILL) catch {};
-                self.journal.appendCleanup(job.id, "shutdown_kill") catch {};
+                _ = std.posix.kill(tgt, std.posix.SIG.KILL) catch {}; // cleanup: propagation impossible
+                self.journal.appendCleanup(job.id, "shutdown_kill") catch {}; // cleanup: propagation impossible
             }
         }
         self.mu.unlock();
@@ -304,9 +304,9 @@ pub const Manager = struct {
             .ctx = ctx,
         }) catch |append_err| {
             self.mu.unlock();
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            self.journal.appendCleanup(id, "start_append_fail") catch {};
+            _ = child.kill() catch {}; // cleanup: propagation impossible
+            _ = child.wait() catch {}; // cleanup: propagation impossible
+            self.journal.appendCleanup(id, "start_append_fail") catch {}; // cleanup: propagation impossible
             self.alloc.destroy(ctx);
             self.alloc.free(cmd_dup);
             self.alloc.free(log_path);
@@ -323,9 +323,9 @@ pub const Manager = struct {
         self.mu.unlock();
 
         const thr = std.Thread.spawn(.{}, waitThread, .{ctx}) catch |spawn_err| {
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            self.journal.appendCleanup(id, "start_spawn_fail") catch {};
+            _ = child.kill() catch {}; // cleanup: propagation impossible
+            _ = child.wait() catch {}; // cleanup: propagation impossible
+            self.journal.appendCleanup(id, "start_spawn_fail") catch {}; // cleanup: propagation impossible
 
             self.mu.lock();
             if (idx < self.jobs.items.len and self.jobs.items[idx].id == id) {
@@ -354,7 +354,7 @@ pub const Manager = struct {
         } else {
             self.mu.unlock();
             thr.join();
-            self.journal.appendCleanup(id, "start_internal_error") catch {};
+            self.journal.appendCleanup(id, "start_internal_error") catch {}; // cleanup: propagation impossible
             try self.emitControlAudit(.{
                 .op = "start",
                 .outcome = .fail,
@@ -645,9 +645,13 @@ pub const Manager = struct {
             job.code,
             ended_at_ms,
             job.err_name,
-        ) catch {};
+        ) catch |err| {
+            std.log.warn("bg: journal appendExit failed for job {}: {}", .{ id, err });
+        };
 
-        self.done.append(self.alloc, job.id) catch {};
+        self.done.append(self.alloc, job.id) catch |err| {
+            std.log.warn("bg: done tracking append failed for job {}: {}", .{ id, err });
+        };
         const b = [_]u8{1};
         _ = std.posix.write(self.wake_w, &b) catch {};
     }
@@ -661,7 +665,7 @@ pub const Manager = struct {
             // Send TERM, then poll with WNOHANG up to ~150ms.
             std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
                 error.ProcessNotFound => {
-                    self.journal.appendCleanup(job.id, "startup_reap") catch {};
+                    self.journal.appendCleanup(job.id, "startup_reap") catch {}; // cleanup: propagation impossible
                     continue;
                 },
                 else => {
@@ -690,7 +694,7 @@ pub const Manager = struct {
                 // Final blocking reap after KILL.
                 _ = std.posix.waitpid(pid, 0);
             }
-            self.journal.appendCleanup(job.id, "startup_reap") catch {};
+            self.journal.appendCleanup(job.id, "startup_reap") catch {}; // cleanup: propagation impossible
         }
     }
 

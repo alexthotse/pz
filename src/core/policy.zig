@@ -33,6 +33,7 @@ pub const Rule = struct {
     pattern: []const u8,
     effect: Effect,
     tool: ?[]const u8 = null,
+    kind: ?[]const u8 = null,
 };
 
 pub const Lock = struct {
@@ -94,6 +95,10 @@ pub const Policy = struct {
 
     pub fn eval(self: Policy, path: []const u8, tool: ?[]const u8) Effect {
         return evaluate(self.rules, path, tool);
+    }
+
+    pub fn evalKind(self: Policy, path: []const u8, tool: ?[]const u8, kind: ?[]const u8) Effect {
+        return evaluateKind(self.rules, path, tool, kind);
     }
 };
 
@@ -185,6 +190,11 @@ pub fn matchEnv(pattern: []const u8, key: []const u8, val: []const u8) bool {
 /// First-match-wins. Falls through to deny if no rule matches.
 /// Protected paths are always denied.
 pub fn evaluate(rules: []const Rule, path: []const u8, tool: ?[]const u8) Effect {
+    return evaluateKind(rules, path, tool, null);
+}
+
+/// Like evaluate, but also checks the `kind` filter on rules.
+pub fn evaluateKind(rules: []const Rule, path: []const u8, tool: ?[]const u8, kind: ?[]const u8) Effect {
     // Self-protection override
     if (isProtectedPath(path)) return .deny;
     for (rules) |r| {
@@ -192,6 +202,11 @@ pub fn evaluate(rules: []const Rule, path: []const u8, tool: ?[]const u8) Effect
         if (r.tool) |rt| {
             if (tool == null) continue;
             if (!std.mem.eql(u8, rt, tool.?)) continue;
+        }
+        // Kind filter: skip rule if kind doesn't match
+        if (r.kind) |rk| {
+            if (kind == null) continue;
+            if (!std.mem.eql(u8, rk, kind.?)) continue;
         }
         if (matchPath(r.pattern, path)) return r.effect;
     }
@@ -388,6 +403,7 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         for (rules[0..init_n]) |rule| {
             if (rule.pattern.len > 0) alloc.free(rule.pattern);
             if (rule.tool) |t| alloc.free(t);
+            if (rule.kind) |k| alloc.free(k);
         }
     }
 
@@ -412,6 +428,11 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         if (item.object.get("tool")) |t| {
             if (t != .string) return error.UnexpectedToken;
             rule.tool = try alloc.dupe(u8, t.string);
+        }
+
+        if (item.object.get("kind")) |k| {
+            if (k != .string) return error.UnexpectedToken;
+            rule.kind = try alloc.dupe(u8, k.string);
         }
 
         rules[i] = rule;
@@ -549,6 +570,10 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
         if (rule.tool) |t| {
             try w.writeAll(",\"tool\":");
             try writeJsonStr(w, t);
+        }
+        if (rule.kind) |k| {
+            try w.writeAll(",\"kind\":");
+            try writeJsonStr(w, k);
         }
         try w.writeByte('}');
     }
@@ -773,6 +798,7 @@ pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {
     for (doc.rules) |rule| {
         if (rule.pattern.len > 0) alloc.free(rule.pattern);
         if (rule.tool) |t| alloc.free(t);
+        if (rule.kind) |k| alloc.free(k);
     }
     if (doc.ca_file) |v| alloc.free(v);
     alloc.free(doc.rules);
@@ -2059,4 +2085,65 @@ test "SessionPersist defaults off for headless modes" {
     try testing.expectEqual(SessionPersist.off, SessionPersist.forMode(Mode.json));
     try testing.expectEqual(SessionPersist.on, SessionPersist.forMode(Mode.tui));
     try testing.expectEqual(SessionPersist.on, SessionPersist.forMode(Mode.rpc));
+}
+
+test "evaluateKind denied skill is blocked" {
+    const rules = [_]Rule{
+        .{ .pattern = "*", .effect = .deny, .kind = "skill" },
+        .{ .pattern = "*", .effect = .allow },
+    };
+    // Skill invocation blocked by kind=skill deny rule
+    try testing.expectEqual(Effect.deny, evaluateKind(&rules, "any.zig", null, "skill"));
+    // Non-skill invocation falls through to allow-all
+    try testing.expectEqual(Effect.allow, evaluateKind(&rules, "any.zig", null, null));
+    // Different kind falls through to allow-all
+    try testing.expectEqual(Effect.allow, evaluateKind(&rules, "any.zig", null, "tool"));
+}
+
+test "evaluateKind allows skill by default" {
+    const rules = [_]Rule{
+        .{ .pattern = "*", .effect = .allow },
+    };
+    // No kind filter on rule — allows any kind including skill
+    try testing.expectEqual(Effect.allow, evaluateKind(&rules, "any.zig", null, "skill"));
+    try testing.expectEqual(Effect.allow, evaluateKind(&rules, "any.zig", null, null));
+}
+
+test "evaluateKind skill + tool combined filter" {
+    const rules = [_]Rule{
+        .{ .pattern = "*", .effect = .deny, .tool = "bash", .kind = "skill" },
+        .{ .pattern = "*", .effect = .allow },
+    };
+    // Both tool and kind must match for the deny rule
+    try testing.expectEqual(Effect.deny, evaluateKind(&rules, "f.zig", "bash", "skill"));
+    // Wrong tool — deny skipped
+    try testing.expectEqual(Effect.allow, evaluateKind(&rules, "f.zig", "read", "skill"));
+    // Wrong kind — deny skipped
+    try testing.expectEqual(Effect.allow, evaluateKind(&rules, "f.zig", "bash", null));
+}
+
+test "parseDoc with kind filter" {
+    const json =
+        \\{"version":1,"rules":[{"pattern":"*","effect":"deny","kind":"skill"}]}
+    ;
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(@as(usize, 1), doc.rules.len);
+    try testing.expect(std.mem.eql(u8, "skill", doc.rules[0].kind.?));
+    try testing.expectEqual(Effect.deny, doc.rules[0].effect);
+}
+
+test "encodeDoc roundtrips kind field" {
+    const rules = [_]Rule{
+        .{ .pattern = "*.zig", .effect = .deny, .kind = "skill" },
+    };
+    const doc = Doc{ .version = ver_current, .rules = &rules };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+    const parsed = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, parsed);
+    try testing.expectEqual(@as(usize, 1), parsed.rules.len);
+    try testing.expect(std.mem.eql(u8, "skill", parsed.rules[0].kind.?));
+    try testing.expect(std.mem.eql(u8, "*.zig", parsed.rules[0].pattern));
+    try testing.expectEqual(Effect.deny, parsed.rules[0].effect);
 }
