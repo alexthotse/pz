@@ -27,7 +27,23 @@ pub const Request = struct {
     max_redirects: u8 = 5,
 };
 
+pub fn hasCredentialHeaders(req: Request) bool {
+    const cred_names = [_][]const u8{
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+    };
+    for (req.headers) |hdr| {
+        for (cred_names) |name| {
+            if (std.ascii.eqlIgnoreCase(hdr.name, name)) return true;
+        }
+    }
+    return false;
+}
+
 pub fn requiresEscalationApproval(req: Request) bool {
+    if (hasCredentialHeaders(req)) return true;
     return switch (req.method) {
         .GET, .HEAD, .OPTIONS => req.body != null,
         .POST, .PUT, .PATCH, .DELETE => true,
@@ -523,6 +539,40 @@ test "parseUrl returns normalized fields for request targets" {
         .path = url.path,
         .query = url.query.?,
     });
+}
+
+test "hasCredentialHeaders detects auth-bearing headers" {
+    try std.testing.expect(!hasCredentialHeaders(.{
+        .url = "https://example.test/page",
+    }));
+    try std.testing.expect(!hasCredentialHeaders(.{
+        .url = "https://example.test/page",
+        .headers = &.{.{ .name = "Accept", .value = "text/html" }},
+    }));
+    try std.testing.expect(hasCredentialHeaders(.{
+        .url = "https://example.test/page",
+        .headers = &.{.{ .name = "Authorization", .value = "Bearer tok" }},
+    }));
+    try std.testing.expect(hasCredentialHeaders(.{
+        .url = "https://example.test/page",
+        .headers = &.{.{ .name = "cookie", .value = "sid=abc" }},
+    }));
+    try std.testing.expect(hasCredentialHeaders(.{
+        .url = "https://example.test/page",
+        .headers = &.{.{ .name = "X-API-KEY", .value = "secret" }},
+    }));
+    try std.testing.expect(hasCredentialHeaders(.{
+        .url = "https://example.test/page",
+        .headers = &.{.{ .name = "Proxy-Authorization", .value = "Basic x" }},
+    }));
+}
+
+test "requiresEscalationApproval escalates on credential headers" {
+    try std.testing.expect(requiresEscalationApproval(.{
+        .method = .GET,
+        .url = "https://example.test/page",
+        .headers = &.{.{ .name = "Authorization", .value = "Bearer tok" }},
+    }));
 }
 
 test "requiresEscalationApproval only allows silent safe reads" {

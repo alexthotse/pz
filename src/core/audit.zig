@@ -39,6 +39,7 @@ pub const EventKind = enum {
     policy,
     auth,
     forward,
+    ctrl,
 };
 
 /// Text with visibility annotation for redaction.
@@ -153,6 +154,22 @@ pub const ForwardData = struct {
     len: u32,
 };
 
+pub const CtrlOp = enum {
+    model,
+    @"resume",
+    @"export",
+    compact,
+    subagent,
+    editor,
+    clipboard,
+};
+
+pub const CtrlData = struct {
+    op: CtrlOp,
+    target: ?Str = null,
+    detail: ?Str = null,
+};
+
 pub const Data = union(EventKind) {
     sess: SessionData,
     turn: TurnData,
@@ -160,6 +177,7 @@ pub const Data = union(EventKind) {
     policy: PolicyData,
     auth: AuthData,
     forward: ForwardData,
+    ctrl: CtrlData,
 };
 
 pub const Entry = struct {
@@ -275,11 +293,18 @@ pub const Connector = struct {
     }
 };
 
+pub const OverflowPolicy = enum {
+    drop_oldest,
+    fail_closed,
+};
+
 pub const ForwardOpts = struct {
     connector: Connector,
     buf_cap: usize = 64,
     backoff_min_ms: u32 = 100,
     backoff_max_ms: u32 = 5_000,
+    overflow: OverflowPolicy = .drop_oldest,
+    spool_dir: ?std.fs.Dir = null,
 };
 
 pub const SendState = enum {
@@ -328,27 +353,49 @@ const Ring = struct {
     head: usize = 0,
     len: usize = 0,
     dropped: u64 = 0,
+    overflow: OverflowPolicy = .drop_oldest,
+    spool_dir: ?std.fs.Dir = null,
+    spool_seq: u64 = 0,
 
-    fn init(alloc: Allocator, cap: usize) !Ring {
+    fn init(alloc: Allocator, cap: usize, overflow: OverflowPolicy, spool_dir: ?std.fs.Dir) !Ring {
         if (cap == 0) {
             return .{
                 .alloc = alloc,
                 .slots = &[_]?[]u8{},
+                .overflow = overflow,
+                .spool_dir = spool_dir,
             };
         }
 
         const slots = try alloc.alloc(?[]u8, cap);
         @memset(slots, null);
-        return .{
+        var ring = Ring{
             .alloc = alloc,
             .slots = slots,
+            .overflow = overflow,
+            .spool_dir = spool_dir,
         };
+
+        // Restore from spool if available
+        if (spool_dir != null) ring.restoreSpool();
+
+        return ring;
     }
 
     fn deinit(self: *Ring) void {
-        while (self.len > 0) self.pop();
+        // Free memory but preserve spool files for durability
+        while (self.len > 0) self.drop();
         if (self.slots.len > 0) self.alloc.free(self.slots);
         self.* = undefined;
+    }
+
+    /// Free slot memory without removing spool file.
+    fn drop(self: *Ring) void {
+        const idx = self.head;
+        self.alloc.free(self.slots[idx].?);
+        self.slots[idx] = null;
+        self.head = nextIdx(self.slots.len, idx);
+        self.len -= 1;
     }
 
     fn push(self: *Ring, raw: []const u8) !BufPush {
@@ -357,19 +404,28 @@ const Ring = struct {
             return .{ .dropped = 1 };
         }
 
-        const dup = try self.alloc.dupe(u8, raw);
         if (self.len == self.slots.len) {
-            const idx = self.head;
-            self.alloc.free(self.slots[idx].?);
-            self.slots[idx] = dup;
-            self.head = nextIdx(self.slots.len, idx);
-            self.dropped += 1;
-            return .{ .dropped = 1 };
+            switch (self.overflow) {
+                .drop_oldest => {
+                    const dup = try self.alloc.dupe(u8, raw);
+                    const idx = self.head;
+                    self.removeSpool(idx);
+                    self.alloc.free(self.slots[idx].?);
+                    self.slots[idx] = dup;
+                    self.head = nextIdx(self.slots.len, idx);
+                    self.dropped += 1;
+                    self.writeSpool(raw);
+                    return .{ .dropped = 1 };
+                },
+                .fail_closed => return error.SpoolFull,
+            }
         }
 
+        const dup = try self.alloc.dupe(u8, raw);
         const idx = (self.head + self.len) % self.slots.len;
         self.slots[idx] = dup;
         self.len += 1;
+        self.writeSpool(raw);
         return .{};
     }
 
@@ -380,10 +436,73 @@ const Ring = struct {
 
     fn pop(self: *Ring) void {
         const idx = self.head;
+        self.removeSpool(idx);
         self.alloc.free(self.slots[idx].?);
         self.slots[idx] = null;
         self.head = nextIdx(self.slots.len, idx);
         self.len -= 1;
+    }
+
+    fn writeSpool(self: *Ring, raw: []const u8) void {
+        const dir = self.spool_dir orelse return;
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{self.spool_seq}) catch return;
+        self.spool_seq += 1;
+        const f = dir.createFile(name, .{ .truncate = true }) catch return;
+        defer f.close();
+        f.writeAll(raw) catch {};
+    }
+
+    fn removeSpool(self: *Ring, slot_idx: usize) void {
+        const dir = self.spool_dir orelse return;
+        // Compute spool seq from slot index relative to current state
+        // The oldest spool file corresponds to head's sequence
+        const age = if (slot_idx >= self.head)
+            slot_idx - self.head
+        else
+            self.slots.len - self.head + slot_idx;
+        const base_seq = if (self.spool_seq >= self.len) self.spool_seq - self.len else 0;
+        const seq = base_seq + age;
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{seq}) catch return;
+        dir.deleteFile(name) catch {};
+    }
+
+    fn restoreSpool(self: *Ring) void {
+        const dir = self.spool_dir orelse return;
+        // Scan for .spool files and load them in order
+        var it = dir.iterate();
+        var names: [256]struct { seq: u64, name: [32]u8, len: usize } = undefined;
+        var count: usize = 0;
+        while (it.next() catch null) |ent| {
+            if (!std.mem.endsWith(u8, ent.name, ".spool")) continue;
+            if (count >= names.len) break;
+            const stem = ent.name[0 .. ent.name.len - 6];
+            const seq = std.fmt.parseInt(u64, stem, 10) catch continue;
+            var entry = &names[count];
+            entry.seq = seq;
+            entry.len = ent.name.len;
+            @memcpy(entry.name[0..ent.name.len], ent.name);
+            count += 1;
+        }
+
+        // Sort by seq
+        const items = names[0..count];
+        std.mem.sort(@TypeOf(items[0]), items, {}, struct {
+            fn cmp(_: void, a: @TypeOf(items[0]), b: @TypeOf(items[0])) bool {
+                return a.seq < b.seq;
+            }
+        }.cmp);
+
+        for (items) |item| {
+            if (self.len >= self.slots.len) break;
+            const name = item.name[0..item.len];
+            const data = dir.readFileAlloc(self.alloc, name, 64 * 1024) catch continue;
+            const idx = (self.head + self.len) % self.slots.len;
+            self.slots[idx] = data;
+            self.len += 1;
+            if (item.seq >= self.spool_seq) self.spool_seq = item.seq + 1;
+        }
     }
 };
 
@@ -405,7 +524,7 @@ pub const ReconnSender = struct {
         return .{
             .alloc = alloc,
             .connr = opts.connector,
-            .ring = try Ring.init(alloc, opts.buf_cap),
+            .ring = try Ring.init(alloc, opts.buf_cap, opts.overflow, opts.spool_dir),
             .backoff_min_ms = opts.backoff_min_ms,
             .backoff_max_ms = opts.backoff_max_ms,
             .backoff_ms = opts.backoff_min_ms,
@@ -761,6 +880,11 @@ fn dataNeedsRedact(data: Data) bool {
         .policy => false,
         .auth => |v| if (v.subject) |sub| sub.vis != .@"pub" else false,
         .forward => |v| v.dst.vis != .@"pub",
+        .ctrl => |v| blk: {
+            if (v.target) |t| if (t.vis != .@"pub") break :blk true;
+            if (v.detail) |d| if (d.vis != .@"pub") break :blk true;
+            break :blk false;
+        },
     };
 }
 
@@ -1106,6 +1230,19 @@ fn writeData(w: anytype, data: Data) !void {
 
             try writeObjKey(w, &first, "len");
             try w.print("{d}", .{v.len});
+        },
+        .ctrl => |v| {
+            try writeObjKey(w, &first, "op");
+            try writeJsonStr(w, @tagName(v.op));
+
+            if (v.target) |t| {
+                try writeObjKey(w, &first, "target");
+                try writeStr(w, t);
+            }
+            if (v.detail) |d| {
+                try writeObjKey(w, &first, "detail");
+                try writeStr(w, d);
+            }
         },
     }
 
@@ -1828,4 +1965,169 @@ test "syslog shipper bounds reconnect backoff and resets after connect" {
         .s2 = s2,
         .s3 = s3,
     });
+}
+
+test "snapshot: ctrl event encoding for privileged actions" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const talloc = testing.allocator;
+
+    const model_raw = try encodeAlloc(talloc, .{
+        .ts_ms = 100,
+        .sid = "sess-ctrl",
+        .seq = 1,
+        .severity = .notice,
+        .actor = .{ .kind = .user, .id = .{ .text = "joel", .vis = .@"pub" } },
+        .res = .{
+            .kind = .cfg,
+            .name = .{ .text = "runtime", .vis = .@"pub" },
+            .op = "model",
+        },
+        .msg = .{ .text = "model switch", .vis = .@"pub" },
+        .data = .{
+            .ctrl = .{
+                .op = .model,
+                .target = .{ .text = "claude-opus-4-6", .vis = .@"pub" },
+            },
+        },
+    });
+    defer talloc.free(model_raw);
+
+    const export_raw = try encodeAlloc(talloc, .{
+        .ts_ms = 101,
+        .sid = "sess-ctrl",
+        .seq = 2,
+        .severity = .info,
+        .actor = .{ .kind = .sys },
+        .res = .{
+            .kind = .file,
+            .name = .{ .text = "/tmp/out.md", .vis = .mask },
+            .op = "write",
+        },
+        .data = .{
+            .ctrl = .{
+                .op = .clipboard,
+                .detail = .{ .text = "/tmp/out.md", .vis = .mask },
+            },
+        },
+    });
+    defer talloc.free(export_raw);
+
+    const subagent_raw = try encodeAlloc(talloc, .{
+        .ts_ms = 102,
+        .sid = "sess-ctrl",
+        .seq = 3,
+        .severity = .warn,
+        .outcome = .deny,
+        .actor = .{ .kind = .agent, .id = .{ .text = "sub-1", .vis = .@"pub" } },
+        .data = .{
+            .ctrl = .{
+                .op = .subagent,
+                .target = .{ .text = "sub-1", .vis = .@"pub" },
+                .detail = .{ .text = "policy denied", .vis = .@"pub" },
+            },
+        },
+    });
+    defer talloc.free(subagent_raw);
+
+    const snap = try std.fmt.allocPrint(talloc, "model={s} | export={s} | subagent={s}", .{
+        model_raw,
+        export_raw,
+        subagent_raw,
+    });
+    defer talloc.free(snap);
+
+    try oh.snap(@src(),
+        \\[]u8
+        \\  "model={"v":1,"ts_ms":100,"sid":"sess-ctrl","seq":1,"kind":"ctrl","sev":"notice","out":"ok","actor":{"kind":"user","id":{"text":"joel","vis":"pub"}},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"model switch","vis":"pub"},"data":{"op":"model","target":{"text":"claude-opus-4-6","vis":"pub"}},"attrs":[]} | export={"v":1,"ts_ms":101,"sid":"sess-ctrl","seq":2,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:b0f124717560541c]","vis":"mask"},"op":"write"},"data":{"op":"clipboard","detail":{"text":"[mask:b0f124717560541c]","vis":"mask"}},"attrs":[]} | subagent={"v":1,"ts_ms":102,"sid":"sess-ctrl","seq":3,"kind":"ctrl","sev":"warn","out":"deny","actor":{"kind":"agent","id":{"text":"sub-1","vis":"pub"}},"data":{"op":"subagent","target":{"text":"sub-1","vis":"pub"},"detail":{"text":"policy denied","vis":"pub"}},"attrs":[]}"
+    ).expectEqual(snap);
+}
+
+test "ctrl needsRedact detects masked target and detail" {
+    try testing.expect(!needsRedact(.{
+        .ts_ms = 1,
+        .sid = "s",
+        .seq = 1,
+        .data = .{ .ctrl = .{ .op = .model, .target = .{ .text = "pub", .vis = .@"pub" } } },
+    }));
+    try testing.expect(needsRedact(.{
+        .ts_ms = 1,
+        .sid = "s",
+        .seq = 1,
+        .data = .{ .ctrl = .{ .op = .model, .target = .{ .text = "secret", .vis = .mask } } },
+    }));
+    try testing.expect(needsRedact(.{
+        .ts_ms = 1,
+        .sid = "s",
+        .seq = 1,
+        .data = .{ .ctrl = .{ .op = .@"export", .detail = .{ .text = "/tmp/x", .vis = .secret } } },
+    }));
+}
+
+test "fail_closed overflow rejects push when ring full" {
+    var ring = try Ring.init(testing.allocator, 2, .fail_closed, null);
+    defer ring.deinit();
+
+    const r1 = try ring.push("a");
+    try testing.expectEqual(@as(usize, 0), r1.dropped);
+    const r2 = try ring.push("b");
+    try testing.expectEqual(@as(usize, 0), r2.dropped);
+
+    try testing.expectError(error.SpoolFull, ring.push("c"));
+    try testing.expectEqual(@as(usize, 2), ring.len);
+    try testing.expectEqual(@as(u64, 0), ring.dropped);
+}
+
+test "durable spool persists and restores events" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Write events into a ring with spool
+    {
+        var ring = try Ring.init(testing.allocator, 4, .drop_oldest, tmp.dir);
+        defer ring.deinit();
+
+        _ = try ring.push("event-0");
+        _ = try ring.push("event-1");
+        _ = try ring.push("event-2");
+        try testing.expectEqual(@as(usize, 3), ring.len);
+    }
+
+    // Restore into a new ring from same spool dir
+    {
+        var ring = try Ring.init(testing.allocator, 4, .drop_oldest, tmp.dir);
+        defer ring.deinit();
+
+        try testing.expectEqual(@as(usize, 3), ring.len);
+        try testing.expectEqualStrings("event-0", ring.peek().?);
+        ring.pop();
+        try testing.expectEqualStrings("event-1", ring.peek().?);
+        ring.pop();
+        try testing.expectEqualStrings("event-2", ring.peek().?);
+        ring.pop();
+        try testing.expectEqual(@as(usize, 0), ring.len);
+    }
+}
+
+test "fail_closed propagates through ReconnSender" {
+    var net = MockNet{
+        .alloc = testing.allocator,
+        .conn_steps = &.{ .fail, .fail, .fail },
+        .send_steps = &.{},
+    };
+    defer net.deinit();
+
+    var rs = try ReconnSender.init(testing.allocator, .{
+        .connector = net.connector(),
+        .buf_cap = 2,
+        .backoff_min_ms = 5,
+        .backoff_max_ms = 20,
+        .overflow = .fail_closed,
+    });
+    defer rs.deinit();
+
+    _ = try rs.sendRaw("a", 0);
+    _ = try rs.sendRaw("b", 1);
+    try testing.expectError(error.SpoolFull, rs.sendRaw("c", 2));
+    try testing.expectEqual(@as(usize, 2), rs.ring.len);
 }

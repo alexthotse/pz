@@ -124,10 +124,10 @@ fn toMarkdownWith(
         },
         .msg = .{ .text = "export start", .vis = .@"pub" },
         .data = .{
-            .tool = .{
-                .name = .{ .text = "export", .vis = .@"pub" },
-                .call_id = sid,
-                .argv = .{ .text = dest, .vis = .mask },
+            .ctrl = .{
+                .op = .@"export",
+                .target = .{ .text = sid, .vis = .@"pub" },
+                .detail = .{ .text = dest, .vis = .mask },
             },
         },
     });
@@ -242,10 +242,10 @@ fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.
         },
         .msg = .{ .text = if (out == .ok) "export complete" else err_name.?, .vis = if (out == .ok) .@"pub" else .mask },
         .data = .{
-            .tool = .{
-                .name = .{ .text = "export", .vis = .@"pub" },
-                .call_id = sid,
-                .argv = .{ .text = dest, .vis = .mask },
+            .ctrl = .{
+                .op = .@"export",
+                .target = .{ .text = sid, .vis = .@"pub" },
+                .detail = .{ .text = dest, .vis = .mask },
             },
         },
     };
@@ -555,8 +555,8 @@ test "export audit emits start and success entries" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":123,"sid":"ex2","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":123,"sid":"ex2","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex2","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
+        \\  "{"v":1,"ts_ms":123,"sid":"ex2","seq":1,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"op":"export","target":{"text":"ex2","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":123,"sid":"ex2","seq":2,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"op":"export","target":{"text":"ex2","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(scrubbed);
 }
 
@@ -612,8 +612,8 @@ test "export audit emits failure entry on write failure" {
 
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":456,"sid":"ex3","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"[mask:e0d43158cc95b24d]","vis":"mask"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"ex3","argv":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
+        \\  "{"v":1,"ts_ms":456,"sid":"ex3","seq":1,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"op":"export","target":{"text":"ex3","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"ctrl","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"[mask:e0d43158cc95b24d]","vis":"mask"},"data":{"op":"export","target":{"text":"ex3","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(scrubbed);
 }
 
@@ -621,7 +621,7 @@ fn scrubExportAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     var cur = try alloc.dupe(u8, raw);
     const pats = [_][]const u8{
         "\"res\":{\"kind\":\"file\",\"name\":{\"text\":\"",
-        "\"argv\":{\"text\":\"",
+        "\"detail\":{\"text\":\"",
     };
     for (pats) |pat| {
         var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -646,25 +646,24 @@ test "scrubExportAudit property: targeted paths normalize to mask" {
     try zc.check(struct {
         fn prop(args: struct {
             sid: zc.Id,
-            call_id: zc.Id,
             file: zc.Id,
-            argv: zc.Id,
+            detail: zc.Id,
         }) bool {
             const alloc = std.testing.allocator;
             const file_path = std.fmt.allocPrint(alloc, "/tmp/{s}", .{args.file.slice()}) catch return false;
             defer alloc.free(file_path);
-            const argv_path = std.fmt.allocPrint(alloc, "/bin/{s}", .{args.argv.slice()}) catch return false;
-            defer alloc.free(argv_path);
+            const detail_path = std.fmt.allocPrint(alloc, "/bin/{s}", .{args.detail.slice()}) catch return false;
+            defer alloc.free(detail_path);
             const raw = std.fmt.allocPrint(
                 alloc,
-                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"{s}\",\"vis\":\"sec\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"call_id\":\"{s}\",\"argv\":{{\"text\":\"{s}\",\"vis\":\"sec\"}}}},\"attrs\":[]}}",
-                .{ args.sid.slice(), file_path, args.call_id.slice(), argv_path },
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"ctrl\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"{s}\",\"vis\":\"sec\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"op\":\"export\",\"target\":{{\"text\":\"{s}\",\"vis\":\"pub\"}},\"detail\":{{\"text\":\"{s}\",\"vis\":\"sec\"}}}},\"attrs\":[]}}",
+                .{ args.sid.slice(), file_path, args.sid.slice(), detail_path },
             ) catch return false;
             defer alloc.free(raw);
             const want = std.fmt.allocPrint(
                 alloc,
-                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"[mask:PATH]\",\"vis\":\"sec\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"call_id\":\"{s}\",\"argv\":{{\"text\":\"[mask:PATH]\",\"vis\":\"sec\"}}}},\"attrs\":[]}}",
-                .{ args.sid.slice(), args.call_id.slice() },
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"ctrl\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"[mask:PATH]\",\"vis\":\"sec\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"op\":\"export\",\"target\":{{\"text\":\"{s}\",\"vis\":\"pub\"}},\"detail\":{{\"text\":\"[mask:PATH]\",\"vis\":\"sec\"}}}},\"attrs\":[]}}",
+                .{ args.sid.slice(), args.sid.slice() },
             ) catch return false;
             defer alloc.free(want);
             const got = scrubExportAudit(alloc, raw) catch return false;
@@ -672,7 +671,7 @@ test "scrubExportAudit property: targeted paths normalize to mask" {
             return std.mem.eql(u8, got, want) and
                 std.mem.count(u8, got, "[mask:PATH]") == 2 and
                 std.mem.indexOf(u8, got, file_path) == null and
-                std.mem.indexOf(u8, got, argv_path) == null;
+                std.mem.indexOf(u8, got, detail_path) == null;
         }
     }.prop, .{ .iterations = 200 });
 }
@@ -680,12 +679,12 @@ test "scrubExportAudit property: targeted paths normalize to mask" {
 test "scrubExportAudit property: masked targeted rows stay stable" {
     const zc = @import("zcheck");
     try zc.check(struct {
-        fn prop(args: struct { sid: zc.Id, call_id: zc.Id }) bool {
+        fn prop(args: struct { sid: zc.Id }) bool {
             const alloc = std.testing.allocator;
             const raw = std.fmt.allocPrint(
                 alloc,
-                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"[mask:PATH]\",\"vis\":\"mask\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"call_id\":\"{s}\",\"argv\":{{\"text\":\"[mask:PATH]\",\"vis\":\"mask\"}}}},\"attrs\":[]}}",
-                .{ args.sid.slice(), args.call_id.slice() },
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"ctrl\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"file\",\"name\":{{\"text\":\"[mask:PATH]\",\"vis\":\"mask\"}},\"op\":\"write\"}},\"msg\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"data\":{{\"op\":\"export\",\"target\":{{\"text\":\"{s}\",\"vis\":\"pub\"}},\"detail\":{{\"text\":\"[mask:PATH]\",\"vis\":\"mask\"}}}},\"attrs\":[]}}",
+                .{ args.sid.slice(), args.sid.slice() },
             ) catch return false;
             defer alloc.free(raw);
             const got = scrubExportAudit(alloc, raw) catch return false;
@@ -701,17 +700,17 @@ test "scrubExportAudit property: safe rows stay stable" {
         fn prop(args: struct {
             sid: zc.Id,
             file: zc.Id,
-            argv: zc.Id,
+            detail: zc.Id,
         }) bool {
             const alloc = std.testing.allocator;
             const file_path = std.fmt.allocPrint(alloc, "/tmp/{s}", .{args.file.slice()}) catch return false;
             defer alloc.free(file_path);
-            const argv_path = std.fmt.allocPrint(alloc, "/bin/{s}", .{args.argv.slice()}) catch return false;
-            defer alloc.free(argv_path);
+            const detail_path = std.fmt.allocPrint(alloc, "/bin/{s}", .{args.detail.slice()}) catch return false;
+            defer alloc.free(detail_path);
             const raw = std.fmt.allocPrint(
                 alloc,
-                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"tool\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"cmd\",\"name\":{{\"text\":\"{s}\",\"vis\":\"sec\"}},\"op\":\"run\"}},\"msg\":{{\"text\":\"run {s}\",\"vis\":\"sec\"}},\"data\":{{\"name\":{{\"text\":\"export\",\"vis\":\"pub\"}},\"argv\":\"{s}\"}},\"attrs\":[]}}",
-                .{ args.sid.slice(), file_path, argv_path, argv_path },
+                "{{\"v\":1,\"ts_ms\":1,\"sid\":\"{s}\",\"seq\":1,\"kind\":\"ctrl\",\"sev\":\"info\",\"out\":\"ok\",\"actor\":{{\"kind\":\"sys\"}},\"res\":{{\"kind\":\"cmd\",\"name\":{{\"text\":\"{s}\",\"vis\":\"sec\"}},\"op\":\"run\"}},\"msg\":{{\"text\":\"run {s}\",\"vis\":\"sec\"}},\"data\":{{\"op\":\"export\",\"detail\":\"{s}\"}},\"attrs\":[]}}",
+                .{ args.sid.slice(), file_path, detail_path, detail_path },
             ) catch return false;
             defer alloc.free(raw);
             const got = scrubExportAudit(alloc, raw) catch return false;

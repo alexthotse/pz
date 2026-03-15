@@ -11,6 +11,7 @@ const ls = @import("ls.zig");
 const agent_tool = @import("agent.zig");
 const path_guard = @import("path_guard.zig");
 const skill = @import("skill.zig");
+const web = @import("web.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 
 const default_max_bytes: usize = 64 * 1024;
@@ -24,6 +25,7 @@ pub const mask_ls: u16 = 1 << 6;
 pub const mask_agent: u16 = 1 << 7;
 pub const mask_ask: u16 = 1 << 8;
 pub const mask_skill: u16 = 1 << 9;
+pub const mask_web: u16 = 1 << 10;
 pub const mask_all: u16 =
     mask_read |
     mask_write |
@@ -34,7 +36,8 @@ pub const mask_all: u16 =
     mask_ls |
     mask_agent |
     mask_ask |
-    mask_skill;
+    mask_skill |
+    mask_web;
 
 const read_params = [_]tools.Tool.Param{
     .{ .name = "path", .ty = .string, .required = true, .desc = "File path" },
@@ -87,6 +90,12 @@ const agent_params = [_]tools.Tool.Param{
 const skill_params = [_]tools.Tool.Param{
     .{ .name = "name", .ty = .string, .required = true, .desc = "Skill directory name" },
     .{ .name = "args", .ty = .string, .required = false, .desc = "Optional user arguments appended to the skill body" },
+};
+
+const web_params = [_]tools.Tool.Param{
+    .{ .name = "url", .ty = .string, .required = true, .desc = "Target URL (https only)" },
+    .{ .name = "method", .ty = .string, .required = false, .desc = "HTTP method (default GET)" },
+    .{ .name = "body", .ty = .string, .required = false, .desc = "Request body" },
 };
 
 const ask_schema =
@@ -163,8 +172,8 @@ pub const Runtime = struct {
     agent_hook: ?agent_tool.Hook,
     ask_hook: ?AskHook,
     skill_cache: skill.Cache = .{},
-    entries: [10]tools.Entry = undefined,
-    selected: [10]tools.Entry = undefined,
+    entries: [11]tools.Entry = undefined,
+    selected: [11]tools.Entry = undefined,
 
     pub fn init(opts: Opts) Runtime {
         return .{
@@ -356,6 +365,22 @@ pub const Runtime = struct {
                 },
                 .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runSkill),
             },
+            .{
+                .name = "web",
+                .kind = .web,
+                .spec = .{
+                    .kind = .web,
+                    .desc = "Fetch a URL over HTTPS",
+                    .params = web_params[0..],
+                    .out = .{
+                        .max_bytes = @intCast(self.max_bytes),
+                        .stream = false,
+                    },
+                    .timeout_ms = 30000,
+                    .destructive = false,
+                },
+                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runWeb),
+            },
         };
     }
 
@@ -401,6 +426,10 @@ pub const Runtime = struct {
         }
         if ((self.tool_mask & mask_skill) != 0) {
             self.selected[len] = self.entries[9];
+            len += 1;
+        }
+        if ((self.tool_mask & mask_web) != 0) {
+            self.selected[len] = self.entries[10];
             len += 1;
         }
         return self.selected[0..len];
@@ -550,6 +579,40 @@ pub const Runtime = struct {
         };
     }
 
+    fn runWeb(self: *Runtime, call: tools.Call, _: tools.Sink) !tools.Result {
+        if (call.kind != .web or std.meta.activeTag(call.args) != .web) return error.InvalidArgs;
+        const req = call.args.web;
+
+        const needs_approval = web.requiresEscalationApproval(req);
+        const summary = try web.approvalSummaryAlloc(self.alloc, req);
+        defer self.alloc.free(summary);
+
+        const msg = if (needs_approval)
+            try std.fmt.allocPrint(self.alloc, "approval_required: {s}", .{summary})
+        else
+            try std.fmt.allocPrint(self.alloc, "ready: {s}", .{summary});
+        errdefer self.alloc.free(msg);
+
+        const out = try self.alloc.alloc(tools.Output, 1);
+        out[0] = .{
+            .call_id = call.id,
+            .seq = 0,
+            .at_ms = call.at_ms,
+            .stream = .stdout,
+            .chunk = msg,
+            .owned = true,
+            .truncated = false,
+        };
+        return .{
+            .call_id = call.id,
+            .started_at_ms = call.at_ms,
+            .ended_at_ms = call.at_ms,
+            .out = out,
+            .out_owned = true,
+            .final = .{ .ok = .{ .code = 0 } },
+        };
+    }
+
     fn runSkill(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
         const h = skill.Handler.init(.{
             .alloc = self.alloc,
@@ -586,6 +649,7 @@ pub fn maskForName(name: []const u8) ?u16 {
         .{ "agent", mask_agent },
         .{ "ask", mask_ask },
         .{ "skill", mask_skill },
+        .{ "web", mask_web },
     });
     return map.get(name);
 }
@@ -678,6 +742,7 @@ test "builtin runtime registry exposes all core tools" {
     try std.testing.expect(reg.byName("ls") != null);
     try std.testing.expect(reg.byName("agent") != null);
     try std.testing.expect(reg.byName("ask") != null);
+    try std.testing.expect(reg.byName("web") != null);
 
     try std.testing.expect(reg.byKind(.read) != null);
     try std.testing.expect(reg.byKind(.write) != null);
@@ -688,6 +753,7 @@ test "builtin runtime registry exposes all core tools" {
     try std.testing.expect(reg.byKind(.ls) != null);
     try std.testing.expect(reg.byKind(.agent) != null);
     try std.testing.expect(reg.byKind(.ask) != null);
+    try std.testing.expect(reg.byKind(.web) != null);
 }
 
 test "builtin runtime uses call timestamp in result envelope" {
@@ -1236,5 +1302,6 @@ test "maskForName validates builtin tool names" {
     try std.testing.expect(maskForName("agent") != null);
     try std.testing.expect(maskForName("ask") != null);
     try std.testing.expect(maskForName("skill") != null);
+    try std.testing.expect(maskForName("web") != null);
     try std.testing.expect(maskForName("wat") == null);
 }

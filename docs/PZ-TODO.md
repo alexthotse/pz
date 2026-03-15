@@ -141,7 +141,7 @@ pub const TaskList = struct {
     pub fn reopen(self: *TaskList, id: []const u8) !void;
 
     // Lifecycle
-    pub fn clear(self: *TaskList) !usize;   // remove done tasks (skip if parent of non-done), return count
+    pub fn clear(self: *TaskList) !usize;   // remove done tasks (skip if parent of non-done; cyclic done groups ARE clearable), return count
     pub fn reset(self: *TaskList) !void;     // remove all tasks (writes backup to .pz/tasks.md.bak first)
 
     // Queries — returned slices are borrowed from TaskList, invalid after deinit()
@@ -166,7 +166,7 @@ Short-lived: open, mutate, close. Always reads fresh from disk.
 
 Default `.pz/tasks.md` is inside protected `.pz/`. Protection comes from policy rules (not path_guard). `toolPolicyPath` for `.todo` returns `"runtime/tool/todo"` (synthetic — like `ask`/`web`). The handler bypasses policy's `.pz/` self-protection by writing directly, acceptable because: (a) narrowly scoped to one file, (b) content validated, (c) gated by approval.
 
-Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to validate the path BEFORE `TaskList.open()`. Both must pass.
+Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to validate the path BEFORE `TaskList.open()`. Both must pass. Reject any `file` path ending in `.bak` (prevents reading backup files from `/todo reset`).
 
 ### Approval gate
 
@@ -174,7 +174,7 @@ Non-default files: handler MUST call `path_guard` AND `isProtectedPath()` to val
 
 ### Content validation
 
-- Title: max 80 chars, must not contain `\n`, `\r`, ` | `, or `#` (prevents metadata/section injection)
+- Title: max 80 chars, must not contain `\n`, `\r`, ` | `, `#`, or `</` (prevents metadata/section/XML injection)
 - Body: max 4KB per task, lines matching `^## ` escaped on write (`\## `), unescaped on read
 - Status: closed enum
 - Priority: `?i64` clamped to `u4` (0-9)
@@ -230,13 +230,15 @@ pub const Args = union(Kind) {
 
 **Exhaustive switch sites** (add `.todo` arm). Use function/type names as anchors — line numbers are approximate:
 - `loop.zig` `noteApproval` fn
-- `loop.zig` `approvalSummaryAlloc` fn — **CRITICAL**: currently `else => unreachable`. Must add `.todo` arm with format string `"todo {action} {file}"` or runtime crash on first approval.
+- `loop.zig` `approvalSummaryAlloc` fn — **RUNTIME CRASH** if missed: `else => unreachable`. Must add `.todo` arm: `"todo {action} {file}"`.
+- `runtime.zig` `approvalSummaryFromKeyAlloc` fn — has `else =>` that produces wrong output. Must add `.todo` arm.
 - `loop.zig` `parseCallArgs` fn — must handle `TodoArgs` nested `[]const TaskItem` JSON deserialization
 - `runtime.zig` `toolPolicyPath` fn — return `"runtime/tool/todo"` (synthetic)
 - `runtime.zig` `toolAuditInfo` fn — `.todo => .{ .res_kind = .cfg, .op = @tagName(action), .target = file, .argv = "todo" }`
 - `runtime.zig` `auditResKind` fn
 - `runtime.zig` `auditResOp` fn
-- Plus session serialization, test infra, and any others. Grep `switch.*Kind` and `switch.*Args` for full list (expect 9+).
+- Plus session serialization (`session/schema.zig`), test infra (`test/tool_snap.zig`), and any others. Grep `switch.*Kind` and `switch.*Args` for full list (expect 11+).
+- Distinguish: exhaustive switches (compile error if missed — safe) vs `else => unreachable` (runtime crash — dangerous) vs `else => {}` (silent skip).
 
 ### Tool schema (`schema_json`)
 
@@ -311,7 +313,7 @@ Built-in slash command in `runtime.zig`:
 - `.todo` in `Cmd` enum
 - `"todo"` in `cmd_map` StaticStringMap
 - `.todo` case in dispatch switch
-- `{ .name = "todo", .desc = "Manage tasks" }` in `cmdpicker.zig` (sorted, between `"tree"` and `"upgrade"`)
+- `{ .name = "todo", .desc = "Manage tasks" }` in `cmdpicker.zig` (list is not perfectly sorted — `bg` at end breaks order. Append `todo` after `tree`)
 
 ```
 /todo                        — show task list (overlay)
@@ -396,7 +398,7 @@ Handler does NOT emit ModeEv — runtime does post-tool-result.
 
 **Session replay:** stored result used, tool not re-executed. `ModeEv` doesn't fire on replay. Task state authoritative in file.
 
-**Context injection:** task summary as LAST system part in `buildReqMsgs` (`loop.zig` `buildReqMsgs` fn). Order: `[pz_identity, system_prompt, task_summary]`. `sys_part_ct` adds `+ (task_summary ? 1 : 0)`. The `loop.zig` `Opts` struct needs a `task_file` field to thread the path. If `TaskList.open()` fails with file-not-found, omit (no tasks yet). If other error, log warning to mode sink (not silent skip). Format: titles + status only, wrapped with `wrapUntrusted(alloc, "task-list", summary)` to prevent cross-session prompt injection. Cap 50 tasks; >50 filter done first, then cap by priority.
+**Context injection:** task summary as LAST system part in `buildReqMsgs` (`loop.zig` `buildReqMsgs` fn). Order: `[pz_identity, system_prompt, task_summary]`. `sys_part_ct` adds `+ (task_summary ? 1 : 0)`. The `loop.zig` `Opts` struct needs a `task_file` field to thread the path. If `TaskList.open()` fails with file-not-found, omit (no tasks yet). If other error, log warning to mode sink (not silent skip). Format: titles + status only, wrapped with `wrapUntrustedNamed(alloc, "task-list", summary)` to prevent cross-session prompt injection. Cap 50 tasks; >50 filter done first, then cap by priority.
 
 **Concurrency:** single-writer. Orchestrator only. Subagents work and report; orchestrator checks off. `mask_todo` stripped from child agents. File atomicity via write-tmp-rename (tmp in same dir as target). All `/todo` commands and model tool calls serialized through event loop. Tool calls within a single model turn are dispatched sequentially by the agent loop — no concurrent `todo` execution possible.
 
@@ -436,12 +438,13 @@ The task file IS a plan. Point the review-plan skill at `.pz/tasks.md` (or any t
 4. **`tools.zig` + `builtin.zig`** — `.todo` Kind, `TodoArgs`, `mask_todo` in `mask_all`, `[11]`, `schema_json`, `destructive=true`
    - Also: `PolicyToolRegistry` `[11]` in `runtime.zig`
    - Deps: step 3
-   - Tests: registry (count=11), mask roundtrip, ohsnap `parseCallArgs(.todo, ...)` with read/update/add payloads (null tasks, empty array, missing optionals)
-   - Grep all exhaustive `Kind`/`Args` switches (9+)
+   - Tests: registry (count=11), mask roundtrip, ohsnap `parseCallArgs(.todo, ...)` with read/update/add payloads (null tasks, empty array, missing optionals), ohsnap `approvalSummaryAlloc(.todo, ...)`, `maskForName("todo") == mask_todo`, `activeEntries` with mask_todo set/unset
+   - Grep all exhaustive `Kind`/`Args` switches (11+)
 
 5. **`todo.zig`** — handler `(self, Call, Sink) -> !Result`, path_guard for non-default files
    - Deps: steps 3-4
    - Tests: ohsnap results, per-item errors, priority clamp, empty update error
+   - Note: parsed `TodoArgs` fields are arena-scoped (`parse_arena`). Handler must copy any data it needs to outlive the arena. Follow `runAsk` pattern.
 
 6. **Event plumbing** — `ModeEv.todo_update`, post-tool emission, 4 sink arms
    - Deps: step 5
@@ -483,7 +486,9 @@ Modified:
 - `src/core/loop.zig` — `ModeEv.todo_update`, `Opts.task_file`, post-tool emission, exhaustive switches incl `approvalSummaryAlloc`
 - `src/core.zig` — barrel import: `pub const tasks = @import("core/tasks/mod.zig")`
 - `src/app/runtime.zig` — `PolicyToolRegistry[11]`, 4 sinks (PrintSink needs pre-Formatter arm), post-tool ModeEv emission, `Cmd.todo`, `toolPolicyPath` synthetic, `toolAuditInfo`
-- `src/app/cli.zig` — `pz todo import` subcommand dispatch (needs subcommand concept — not trivial)
+- `src/app/cli.zig` — `pz todo import` subcommand dispatch (needs subcommand concept — `args.zig` exists but has no subcommand infra)
+- `src/core/session/schema.zig` — verify session deserialization handles new `.todo` Kind variant
+- `src/test/tool_snap.zig` — test infra may have Kind switches
 - `src/modes/tui/transcript.zig` — `.todo_update` Kind
 - `src/modes/tui/overlay.zig` — `.todo` Kind, `TodoOverlay`
 - `src/modes/tui/cmdpicker.zig` — `/todo` entry
@@ -498,10 +503,13 @@ Modified:
 - **No auto-cleanup.** Done tasks stay until `/todo clear` or `/todo reset`.
 - **Section boundary = `## ` + `id:` on next line.** Prevents body `## ` from breaking parser.
 - **Metadata split: first `: ` only.** Values with `: ` are safe. Values with ` | ` are forbidden.
-- **`clear` skips parents.** Done tasks with non-done children are preserved.
+- **`clear` skips parents.** Done tasks with non-done children preserved. Cyclic done groups ARE clearable.
+- **Parent cycle rejection.** `add()` rejects parent if it would create a cycle.
+- **`.bak` files rejected.** `file` param cannot end in `.bak` — prevents reading reset backups.
+- **Title strips `</`.** Prevents `</untrusted-input>` breakout in `wrapUntrustedNamed` body. Note: the body-escape gap in `wrapUntrustedNamed` is a pre-existing codebase vulnerability (affects context.zig, loop.zig, compact.zig). Todo mitigates via title sanitization; a codebase-wide fix to escape `</` in the body is tracked separately.
 - **`reset` writes backup.** `.pz/tasks.md.bak` before emptying.
 - **Context injection warns on failure.** Not silent skip — logs to mode sink. File-not-found is OK (no tasks yet).
-- **Context wrapped untrusted.** `wrapUntrusted("task-list", ...)` prevents cross-session prompt injection.
+- **Context wrapped untrusted.** `wrapUntrustedNamed("task-list", ...)` prevents cross-session prompt injection.
 - **Tmp file in same dir.** `{path}.tmp` ensures same-filesystem rename.
 - **Concurrent mod detection.** `flush()` checks mtime before rename.
 - **Title sanitization.** Rejects `\n`, `\r`, ` | `, `#` — prevents metadata/section injection.

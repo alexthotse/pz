@@ -146,6 +146,24 @@ Based on the EPISODES-PLAN.md analysis (100KB raw traces → 5KB episodes):
 
 The critical prediction: **Treatment enables tasks that Control cannot complete** due to context degradation past turn 80.
 
+## Impact of 1M Context Window
+
+With 1M context (vs 200K), the degradation threshold moves but doesn't disappear:
+
+| Context window | Usable tokens (~40% of window) | Turns before degradation | With episodes |
+|---|---|---|---|
+| 200K | ~80K | ~40 turns | ~800 turns |
+| 1M | ~400K | ~200 turns | ~4000 turns |
+
+Episodes shift from "necessary for medium tasks" to "efficiency optimization for medium tasks, necessary for long tasks."
+
+The benchmark must test at BOTH scales:
+- **Short tasks (30-50 turns)**: episodes may show no advantage at 1M — important to know
+- **Medium tasks (80-150 turns)**: episodes should show token savings but both conditions may succeed
+- **Long tasks (200+ turns)**: episodes should enable tasks that fail without them even at 1M
+
+If episodes show NO advantage for any task at 1M context, they're not worth the complexity. The benchmark answers this.
+
 ## Open Questions
 
 1. **Episode generation cost**: How many tokens does a single episode generation call use? If it's 2K tokens per thread, and a task uses 10 threads, that's 20K tokens of overhead. Is the context savings worth it?

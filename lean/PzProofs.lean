@@ -5,3 +5,5 @@ import PzProofs.Policy
 import PzProofs.PathGuard
 import PzProofs.Egress
 import PzProofs.AgentOutput
+import PzProofs.CtEql
+import PzProofs.Evaluate
