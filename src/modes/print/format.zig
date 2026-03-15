@@ -139,7 +139,9 @@ pub const Formatter = struct {
         if (text.len == 0) return;
         self.text_seen = true;
         self.text_ended_nl = text[text.len - 1] == '\n';
-        try self.out.writeAll(text);
+        const safe = try sanitizeOutput(self.alloc, text);
+        defer if (safe.ptr != text.ptr) self.alloc.free(safe);
+        try self.out.writeAll(safe);
     }
 
     fn pushThinking(self: *Formatter, text: []const u8) !void {
@@ -284,6 +286,69 @@ fn hexNibble(n: u8) u8 {
     return "0123456789abcdef"[n];
 }
 
+/// Strip ANSI escape sequences (CSI, OSC) and replace control bytes (except
+/// \n, \r, \t) with U+FFFD for safe pipeline/stdout output.
+pub fn sanitizeOutput(alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
+    // Quick check: no ESC and no control bytes -> return original
+    var needs_work = false;
+    for (text) |ch| {
+        if (ch == 0x1b or (ch < 0x20 and ch != '\n' and ch != '\r' and ch != '\t') or ch == 0x7f) {
+            needs_work = true;
+            break;
+        }
+    }
+    if (!needs_work) return text;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, text.len);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            i += 1;
+            if (i >= text.len) break;
+            if (text[i] == '[') {
+                // CSI sequence: ESC [ ... <final byte 0x40-0x7e>
+                i += 1;
+                while (i < text.len) {
+                    if (text[i] >= 0x40 and text[i] <= 0x7e) {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else if (text[i] == ']') {
+                // OSC sequence: ESC ] ... ST (ESC \ or BEL)
+                i += 1;
+                while (i < text.len) {
+                    if (text[i] == 0x07) { // BEL
+                        i += 1;
+                        break;
+                    }
+                    if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                // Other ESC+char: skip both
+                i += 1;
+            }
+        } else if (text[i] == 0x7f or (text[i] < 0x20 and text[i] != '\n' and text[i] != '\r' and text[i] != '\t')) {
+            // Replace control byte with replacement char
+            try out.appendSlice(alloc, "\xef\xbf\xbd"); // U+FFFD
+            i += 1;
+        } else {
+            try out.append(alloc, text[i]);
+            i += 1;
+        }
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
 fn expectFormatted(evs: []const core.providers.Event, want: []const u8) !void {
     var buf: [2048]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -361,4 +426,50 @@ test "formatter escapes control characters in quoted fields" {
     };
 
     try expectFormatted(evs[0..], "err \"a\\tb\\n\\\"c\\\"\\\\d\\u0001\"\n");
+}
+
+test "sanitizeOutput strips CSI sequences" {
+    const alloc = std.testing.allocator;
+    const input = "hello\x1b[31m red \x1b[0mworld";
+    const result = try sanitizeOutput(alloc, input);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello red world", result);
+}
+
+test "sanitizeOutput strips OSC sequences" {
+    const alloc = std.testing.allocator;
+    // OSC with BEL terminator
+    const input_bel = "before\x1b]0;title\x07after";
+    const r1 = try sanitizeOutput(alloc, input_bel);
+    defer alloc.free(r1);
+    try std.testing.expectEqualStrings("beforeafter", r1);
+
+    // OSC with ST terminator (ESC \)
+    const input_st = "before\x1b]0;title\x1b\\after";
+    const r2 = try sanitizeOutput(alloc, input_st);
+    defer alloc.free(r2);
+    try std.testing.expectEqualStrings("beforeafter", r2);
+}
+
+test "sanitizeOutput replaces control bytes with replacement char" {
+    const alloc = std.testing.allocator;
+    const input = "a\x01b\x7fc";
+    const result = try sanitizeOutput(alloc, input);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("a\xef\xbf\xbdb\xef\xbf\xbdc", result);
+}
+
+test "sanitizeOutput preserves tabs newlines and clean text" {
+    const alloc = std.testing.allocator;
+    const input = "hello\tworld\nok\r\n";
+    const result = try sanitizeOutput(alloc, input);
+    // Should return original pointer (no alloc)
+    try std.testing.expectEqual(@intFromPtr(input.ptr), @intFromPtr(result.ptr));
+}
+
+test "formatter sanitizes ANSI in text output" {
+    const evs = [_]core.providers.Event{
+        .{ .text = "hi\x1b[31m red\x1b[0m" },
+    };
+    try expectFormatted(evs[0..], "hi red");
 }

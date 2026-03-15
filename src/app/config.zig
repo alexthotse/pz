@@ -931,6 +931,33 @@ test "config cli --models overrides file models" {
     try std.testing.expectEqualStrings("cli-model", cfg.enabled_models.?[0]);
 }
 
+test "config works with null HOME (env isolation)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const parsed = try args.parse(&.{});
+    // Explicitly pass null home to prove no $HOME dependency
+    var cfg = try discover(std.testing.allocator, tmp.dir, parsed, .{ .home = null });
+    defer cfg.deinit(std.testing.allocator);
+
+    // Should produce valid defaults without touching filesystem HOME
+    try std.testing.expect(cfg.mode == .tui);
+    try std.testing.expectEqualStrings(model_default, cfg.model);
+    try std.testing.expectEqualStrings(provider_default, cfg.provider);
+    try std.testing.expectEqualStrings(session_dir_default, cfg.session_dir);
+    try std.testing.expect(cfg.theme == null);
+    try std.testing.expect(cfg.provider_cmd == null);
+    try std.testing.expect(cfg.ca_file == null);
+}
+
+test "PzState works with null HOME (env isolation)" {
+    // load returns null, save is a no-op
+    try std.testing.expect(PzState.loadForHome(std.testing.allocator, null) == null);
+
+    var state = PzState{ .last_hash = null };
+    state.saveForHome(std.testing.allocator, null); // should not crash
+}
+
 fn testPolicyKeyPair() !core.signing.KeyPair {
     const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     return core.signing.KeyPair.fromSeed(seed);

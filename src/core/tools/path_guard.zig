@@ -347,6 +347,181 @@ fn sameFile(a: posix.Stat, b: posix.Stat) bool {
     return a.dev == b.dev and a.ino == b.ino;
 }
 
+/// Resolve `path` component-by-component under `root`, following symlinks at
+/// each step via readlinkat, and verify the final resolved path stays within
+/// `root`. Returns error.AccessDenied if any symlink resolves outside root.
+pub fn resolveConfined(
+    alloc: std.mem.Allocator,
+    root: []const u8,
+    path: []const u8,
+) ![]u8 {
+    if (native_os == .windows) return error.AccessDenied;
+
+    // Normalize root to realpath
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_root = try std.fs.cwd().realpath(root, &root_buf);
+
+    // Build resolved path component by component
+    var resolved: std.ArrayListUnmanaged(u8) = .empty;
+    defer resolved.deinit(alloc);
+    try resolved.appendSlice(alloc, real_root);
+
+    var it = try std.fs.path.componentIterator(path);
+    var hops: usize = 0;
+    const max_hops: usize = 40; // symlink follow limit
+
+    while (it.next()) |part| {
+        if (isDot(part.name)) continue;
+        if (isDotDot(part.name)) {
+            // Walk up, but not above root
+            if (resolved.items.len > real_root.len) {
+                // Strip last component
+                while (resolved.items.len > real_root.len and
+                    !std.fs.path.isSep(resolved.items[resolved.items.len - 1]))
+                {
+                    _ = resolved.pop();
+                }
+                // Strip trailing sep (but keep root)
+                while (resolved.items.len > real_root.len and
+                    std.fs.path.isSep(resolved.items[resolved.items.len - 1]))
+                {
+                    _ = resolved.pop();
+                }
+            }
+            continue;
+        }
+
+        // Append separator + component
+        try resolved.append(alloc, '/');
+        try resolved.appendSlice(alloc, part.name);
+
+        // Check if this component is a symlink
+        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const link_target = posix.readlinkat(
+            posix.AT.FDCWD,
+            resolved.items,
+            &link_buf,
+        ) catch |err| switch (err) {
+            error.NotLink => continue, // regular file/dir, keep going
+            else => return error.AccessDenied,
+        };
+
+        hops += 1;
+        if (hops > max_hops) return error.AccessDenied;
+
+        if (std.fs.path.isAbsolute(link_target)) {
+            // Absolute symlink: replace resolved entirely
+            resolved.clearRetainingCapacity();
+            try resolved.appendSlice(alloc, link_target);
+        } else {
+            // Relative symlink: pop component, append target
+            while (resolved.items.len > 0 and
+                !std.fs.path.isSep(resolved.items[resolved.items.len - 1]))
+            {
+                _ = resolved.pop();
+            }
+            // Keep the separator
+            try resolved.appendSlice(alloc, link_target);
+        }
+
+        // Re-resolve to realpath to canonicalize
+        var canon_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const canon = std.fs.cwd().realpath(resolved.items, &canon_buf) catch
+            return error.AccessDenied;
+        resolved.clearRetainingCapacity();
+        try resolved.appendSlice(alloc, canon);
+
+        // Confinement check
+        if (!isConfined(resolved.items, real_root))
+            return error.AccessDenied;
+    }
+
+    // Final confinement check
+    var final_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const final_path = std.fs.cwd().realpath(resolved.items, &final_buf) catch
+        return error.AccessDenied;
+
+    if (!isConfined(final_path, real_root))
+        return error.AccessDenied;
+
+    return try alloc.dupe(u8, final_path);
+}
+
+fn isConfined(path: []const u8, root: []const u8) bool {
+    if (path.len < root.len) return false;
+    if (!std.mem.eql(u8, path[0..root.len], root)) return false;
+    if (path.len == root.len) return true;
+    return std.fs.path.isSep(path[root.len]);
+}
+
+test "resolveConfined allows path within root" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sub/deep");
+    try tmp.dir.writeFile(.{ .sub_path = "sub/deep/file.txt", .data = "ok" });
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+
+    const resolved = try resolveConfined(std.testing.allocator, root, "sub/deep/file.txt");
+    defer std.testing.allocator.free(resolved);
+
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ root, "sub/deep/file.txt" });
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, resolved);
+}
+
+test "resolveConfined denies symlink chain escaping root" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create root/jail and an outside directory
+    try tmp.dir.makePath("jail/sub");
+    try tmp.dir.makePath("outside");
+    try tmp.dir.writeFile(.{ .sub_path = "outside/secret.txt", .data = "stolen" });
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, "jail");
+    defer std.testing.allocator.free(root);
+
+    const outside_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "outside");
+    defer std.testing.allocator.free(outside_abs);
+
+    // Create symlink chain: jail/sub/link1 -> link2, jail/sub/link2 -> /outside
+    try tmp.dir.symLink(outside_abs, "jail/sub/escape", .{});
+
+    // Attempt to resolve through symlink that escapes
+    try std.testing.expectError(
+        error.AccessDenied,
+        resolveConfined(std.testing.allocator, root, "sub/escape/secret.txt"),
+    );
+}
+
+test "resolveConfined denies dotdot escape" {
+    if (native_os == .windows or native_os == .wasi) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("jail/sub");
+    try tmp.dir.writeFile(.{ .sub_path = "outside.txt", .data = "secret" });
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, "jail");
+    defer std.testing.allocator.free(root);
+
+    // ../../outside.txt should be confined to root (dotdot stops at root)
+    // The resolved path would be jail/outside.txt which doesn't exist
+    try std.testing.expectError(
+        error.AccessDenied,
+        resolveConfined(std.testing.allocator, root, "sub/../../outside.txt"),
+    );
+}
+
 test "openFile denies hardlinked leaf" {
     if (native_os == .windows or native_os == .wasi) return;
 
