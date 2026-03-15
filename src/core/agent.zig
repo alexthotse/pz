@@ -1,6 +1,8 @@
 //! Child agent RPC protocol: spawn, message framing, version negotiation.
 const std = @import("std");
 const signing = @import("signing.zig");
+const event_loop = @import("event_loop.zig");
+const EventLoop = event_loop.EventLoop;
 const testing = std.testing;
 
 pub const protocol_version: u16 = 1;
@@ -291,6 +293,7 @@ pub const ChildProc = struct {
     rpc_file: std.fs.File,
     stdin_writer: std.fs.File.Writer,
     rpc_reader: std.fs.File.Reader,
+    el: EventLoop,
     stub: Stub,
     in_buf: [4096]u8 = undefined,
     rpc_buf: [4096]u8 = undefined,
@@ -362,6 +365,11 @@ pub const ChildProc = struct {
         proc.stdin = null;
         proc.stdout = null;
         const rpc_file: std.fs.File = .{ .handle = rpc_r };
+
+        var el = try EventLoop.init();
+        errdefer el.deinit();
+        try el.register(rpc_r, .read);
+
         var out: ChildProc = undefined;
         out.alloc = alloc;
         out.arena = arena;
@@ -371,11 +379,13 @@ pub const ChildProc = struct {
         out.rpc_file = rpc_file;
         out.stdin_writer = stdin_file.writerStreaming(&out.in_buf);
         out.rpc_reader = rpc_file.readerStreaming(&out.rpc_buf);
+        out.el = el;
         out.stub = try Stub.init(agent_id, policy_hash);
         return out;
     }
 
     pub fn deinit(self: *ChildProc) void {
+        self.el.deinit();
         self.stdin_file.close();
         self.stdout_file.close();
         self.rpc_file.close();
@@ -448,11 +458,25 @@ pub const ChildProc = struct {
     }
 
     fn recv(self: *ChildProc) !Frame {
+        // Notify the event loop that we need the RPC fd, then perform
+        // the blocking read. The event loop is available for callers to
+        // integrate with a broader readiness loop (e.g., cancel pipe).
+        if (self.rpc_reader.interface.bufferedLen() == 0) {
+            self.waitRpc() catch {};
+        }
         const line = try self.rpc_reader.interface.takeDelimiter('\n');
         const raw = line orelse return error.EndOfStream;
         if (raw.len > max_frame_len) return error.FrameTooLarge;
         const parsed = try decodeSlice(self.arena.allocator(), raw);
         return parsed.value;
+    }
+
+    fn waitRpc(self: *ChildProc) !void {
+        var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
+        const events = try self.el.wait(100, &ev_buf);
+        for (events) |ev| {
+            if (ev.fd == self.rpc_file.handle and ev.readable) return;
+        }
     }
 };
 
@@ -632,6 +656,207 @@ fn mutateValidHash(buf: *[hash_hex_len]u8, flip: u8) void {
 fn mutateInvalidHash(buf: *[hash_hex_len]u8, flip: u8) void {
     const idx: usize = @intCast(flip % hash_hex_len);
     buf[idx] = 'x';
+}
+
+/// Status of an individual agent execution.
+pub const AgentStatus = enum {
+    running,
+    done,
+    err,
+    canceled,
+
+    pub fn fromEvent(ev: Event) AgentStatus {
+        return switch (ev) {
+            .out => .running,
+            .done => |d| switch (d.stop) {
+                .done => .done,
+                .canceled => .canceled,
+                .err => .err,
+            },
+            .err => .err,
+            .ready => .running,
+        };
+    }
+
+    pub fn terminal(self: AgentStatus) bool {
+        return self != .running;
+    }
+};
+
+/// Per-agent tracking entry for parallel execution.
+pub const AgentEntry = struct {
+    id: []const u8,
+    status: AgentStatus = .running,
+    out_bytes: usize = 0,
+    last_line: ?[]const u8 = null,
+    started_ms: i64 = 0,
+    ended_ms: i64 = 0,
+};
+
+/// Progress event emitted by `ProgressStream`.
+pub const ProgressEvent = union(ProgressTag) {
+    out: ProgressOut,
+    done: ProgressDone,
+    err: ProgressErr,
+
+    pub const ProgressOut = struct {
+        agent_id: []const u8,
+        text: []const u8,
+    };
+
+    pub const ProgressDone = struct {
+        agent_id: []const u8,
+        status: AgentStatus,
+    };
+
+    pub const ProgressErr = struct {
+        agent_id: []const u8,
+        code: []const u8,
+        message: []const u8,
+    };
+};
+
+pub const ProgressTag = enum {
+    out,
+    done,
+    err,
+};
+
+/// Callback type for progress events.
+pub const ProgressCb = struct {
+    ctx: *anyopaque,
+    push_fn: *const fn (ctx: *anyopaque, ev: ProgressEvent) void,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime push_fn: fn (ctx: *T, ev: ProgressEvent) void,
+    ) ProgressCb {
+        const Wrap = struct {
+            fn call(raw: *anyopaque, ev: ProgressEvent) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                push_fn(typed, ev);
+            }
+        };
+        return .{ .ctx = ctx, .push_fn = Wrap.call };
+    }
+
+    pub fn push(self: ProgressCb, ev: ProgressEvent) void {
+        self.push_fn(self.ctx, ev);
+    }
+};
+
+/// Non-blocking progress stream that wraps a `Stub` and forwards
+/// decoded RPC events to a `ProgressCb`. Designed for use by the
+/// agent tool handler to emit incremental status while the child runs.
+pub const ProgressStream = struct {
+    stub: *Stub,
+    agent_id: []const u8,
+    cb: ProgressCb,
+    status: AgentStatus = .running,
+
+    pub fn init(stub: *Stub, agent_id: []const u8, cb: ProgressCb) ProgressStream {
+        return .{
+            .stub = stub,
+            .agent_id = agent_id,
+            .cb = cb,
+        };
+    }
+
+    /// Feed a decoded RPC event into the stream. Updates status and
+    /// emits to the callback. Returns the new status.
+    pub fn feed(self: *ProgressStream, ev: Event) AgentStatus {
+        self.status = AgentStatus.fromEvent(ev);
+        switch (ev) {
+            .out => |o| self.cb.push(.{ .out = .{
+                .agent_id = self.agent_id,
+                .text = o.text,
+            } }),
+            .done => |d| self.cb.push(.{ .done = .{
+                .agent_id = self.agent_id,
+                .status = AgentStatus.fromEvent(.{ .done = d }),
+            } }),
+            .err => |e| self.cb.push(.{ .err = .{
+                .agent_id = self.agent_id,
+                .code = e.code,
+                .message = e.message,
+            } }),
+            .ready => {},
+        }
+        return self.status;
+    }
+
+    pub fn isDone(self: *const ProgressStream) bool {
+        return self.status.terminal();
+    }
+};
+
+/// Tracks multiple concurrent agents and aggregates their status.
+pub const MultiTracker = struct {
+    entries: [max_agents]AgentEntry = undefined,
+    len: u8 = 0,
+
+    pub const max_agents: u8 = 8;
+
+    pub fn add(self: *MultiTracker, id: []const u8, now_ms: i64) error{Overflow}!u8 {
+        if (self.len >= max_agents) return error.Overflow;
+        const idx = self.len;
+        self.entries[idx] = .{
+            .id = id,
+            .started_ms = now_ms,
+        };
+        self.len += 1;
+        return idx;
+    }
+
+    pub fn update(self: *MultiTracker, idx: u8, ev: ProgressEvent, now_ms: i64) void {
+        if (idx >= self.len) return;
+        var e = &self.entries[idx];
+        switch (ev) {
+            .out => |o| {
+                e.out_bytes += o.text.len;
+                e.last_line = lastLine(o.text);
+            },
+            .done => |d| {
+                e.status = d.status;
+                e.ended_ms = now_ms;
+            },
+            .err => {
+                e.status = .err;
+                e.ended_ms = now_ms;
+            },
+        }
+    }
+
+    pub fn allDone(self: *const MultiTracker) bool {
+        for (self.entries[0..self.len]) |e| {
+            if (!e.status.terminal()) return false;
+        }
+        return self.len > 0;
+    }
+
+    pub fn countByStatus(self: *const MultiTracker, s: AgentStatus) u8 {
+        var n: u8 = 0;
+        for (self.entries[0..self.len]) |e| {
+            if (e.status == s) n += 1;
+        }
+        return n;
+    }
+
+    pub fn get(self: *const MultiTracker, idx: u8) ?AgentEntry {
+        if (idx >= self.len) return null;
+        return self.entries[idx];
+    }
+};
+
+fn lastLine(text: []const u8) ?[]const u8 {
+    if (text.len == 0) return null;
+    const trimmed = std.mem.trimRight(u8, text, "\n");
+    if (trimmed.len == 0) return null;
+    if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |pos| {
+        return trimmed[pos + 1 ..];
+    }
+    return trimmed;
 }
 
 test "frame hello roundtrip enforces protocol version" {
@@ -1338,4 +1563,132 @@ test "oversized RPC frame is rejected" {
         .prompt = "overflow",
     });
     try testing.expectError(error.FrameTooLarge, err);
+}
+
+test "progress stream fires callback on child output" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var stub = try Stub.init("parent", hash);
+    _ = try stub.hello();
+    _ = try stub.recv(Frame.init(1, .{
+        .hello = .{ .role = .child, .agent_id = "child", .policy_hash = hash },
+    }));
+    _ = try stub.run(.{ .id = "j1", .prompt = "go" });
+
+    const Collector = struct {
+        events: [8]ProgressTag = undefined,
+        n: u8 = 0,
+
+        fn push(self: *@This(), ev: ProgressEvent) void {
+            if (self.n < 8) {
+                self.events[self.n] = std.meta.activeTag(ev);
+                self.n += 1;
+            }
+        }
+    };
+
+    var col = Collector{};
+    var ps = ProgressStream.init(&stub, "child", ProgressCb.from(Collector, &col, Collector.push));
+
+    const ev_out = try stub.recv(Frame.init(2, .{
+        .out = .{ .id = "j1", .kind = .text, .text = "hello" },
+    }));
+    _ = ps.feed(ev_out);
+    try testing.expect(!ps.isDone());
+
+    const ev_done = try stub.recv(Frame.init(3, .{
+        .done = .{ .id = "j1", .stop = .done },
+    }));
+    _ = ps.feed(ev_done);
+    try testing.expect(ps.isDone());
+    try testing.expectEqual(@as(u8, 2), col.n);
+
+    const Snap = struct { e0: ProgressTag, e1: ProgressTag };
+    try oh.snap(@src(),
+        \\core.agent.test.progress stream fires callback on child output.Snap
+        \\  .e0: core.agent.ProgressTag
+        \\    .out
+        \\  .e1: core.agent.ProgressTag
+        \\    .done
+    ).expectEqual(Snap{ .e0 = col.events[0], .e1 = col.events[1] });
+}
+
+test "multi tracker aggregates parallel agent status" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var mt = MultiTracker{};
+    const idx0 = try mt.add("scout", 100);
+    const idx1 = try mt.add("critic", 100);
+
+    try testing.expect(!mt.allDone());
+    try testing.expectEqual(@as(u8, 2), mt.countByStatus(.running));
+
+    mt.update(idx0, .{ .out = .{ .agent_id = "scout", .text = "line1\nline2\n" } }, 110);
+    mt.update(idx0, .{ .done = .{ .agent_id = "scout", .status = .done } }, 120);
+
+    try testing.expect(!mt.allDone());
+    try testing.expectEqual(@as(u8, 1), mt.countByStatus(.done));
+
+    mt.update(idx1, .{ .err = .{ .agent_id = "critic", .code = "fail", .message = "boom" } }, 130);
+    try testing.expect(mt.allDone());
+
+    const e0 = mt.get(idx0).?;
+    const e1 = mt.get(idx1).?;
+
+    const Snap = struct {
+        s0: AgentStatus,
+        bytes0: usize,
+        last0: ?[]const u8,
+        s1: AgentStatus,
+    };
+    try oh.snap(@src(),
+        \\core.agent.test.multi tracker aggregates parallel agent status.Snap
+        \\  .s0: core.agent.AgentStatus
+        \\    .done
+        \\  .bytes0: usize = 12
+        \\  .last0: ?[]const u8
+        \\    "line2"
+        \\  .s1: core.agent.AgentStatus
+        \\    .err
+    ).expectEqual(Snap{
+        .s0 = e0.status,
+        .bytes0 = e0.out_bytes,
+        .last0 = e0.last_line,
+        .s1 = e1.status,
+    });
+}
+
+test "agent status fromEvent maps correctly" {
+    try testing.expectEqual(AgentStatus.running, AgentStatus.fromEvent(.{
+        .out = .{ .id = "x", .text = "hi" },
+    }));
+    try testing.expectEqual(AgentStatus.done, AgentStatus.fromEvent(.{
+        .done = .{ .id = "x", .stop = .done },
+    }));
+    try testing.expectEqual(AgentStatus.canceled, AgentStatus.fromEvent(.{
+        .done = .{ .id = "x", .stop = .canceled },
+    }));
+    try testing.expectEqual(AgentStatus.err, AgentStatus.fromEvent(.{
+        .err = .{ .code = "e", .message = "m" },
+    }));
+}
+
+test "multi tracker overflow at max agents" {
+    var mt = MultiTracker{};
+    var i: u8 = 0;
+    while (i < MultiTracker.max_agents) : (i += 1) {
+        _ = try mt.add("a", 0);
+    }
+    try testing.expectError(error.Overflow, mt.add("overflow", 0));
+}
+
+test "lastLine extracts final line" {
+    try testing.expectEqualStrings("c", lastLine("a\nb\nc\n").?);
+    try testing.expectEqualStrings("only", lastLine("only").?);
+    try testing.expect(lastLine("") == null);
+    try testing.expect(lastLine("\n") == null);
+    try testing.expectEqualStrings("b", lastLine("a\nb").?);
 }

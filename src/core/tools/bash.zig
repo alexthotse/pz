@@ -6,6 +6,8 @@ const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const tools = @import("../tools.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
+const event_loop = @import("../event_loop.zig");
+const EventLoop = event_loop.EventLoop;
 
 pub const Err = error{
     KindMismatch,
@@ -290,6 +292,12 @@ fn runChild(
     setNonblock(stdout_file.handle) catch |set_err| return mapProcErr(set_err);
     setNonblock(stderr_file.handle) catch |set_err| return mapProcErr(set_err);
 
+    var el = EventLoop.init() catch return error.Io;
+    defer el.deinit();
+
+    el.register(stdout_file.handle, .read) catch return error.Io;
+    el.register(stderr_file.handle, .read) catch return error.Io;
+
     var stdout_buf = std.ArrayList(u8).empty;
     errdefer stdout_buf.deinit(self.alloc);
     var stderr_buf = std.ArrayList(u8).empty;
@@ -317,31 +325,18 @@ fn runChild(
             }
         }
 
-        var fds: [2]std.posix.pollfd = undefined;
-        var n_fds: usize = 0;
-        if (stdout_open) {
-            fds[n_fds] = .{
-                .fd = stdout_file.handle,
-                .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
-                .revents = 0,
-            };
-            n_fds += 1;
+        if (!stdout_open and !stderr_open) {
+            // Pipes drained; sleep briefly while waiting for child exit.
+            var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
+            _ = el.wait(@intCast(wait_poll_ms), &ev_buf) catch {};
+            continue;
         }
-        if (stderr_open) {
-            fds[n_fds] = .{
-                .fd = stderr_file.handle,
-                .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR,
-                .revents = 0,
-            };
-            n_fds += 1;
-        }
-        if (n_fds != 0) {
-            _ = std.posix.poll(fds[0..n_fds], @intCast(wait_poll_ms)) catch |poll_err| {
-                return mapCollectErr(poll_err);
-            };
-            var idx: usize = 0;
-            if (stdout_open) {
-                stdout_open = readReady(
+
+        var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
+        const events = el.wait(@intCast(wait_poll_ms), &ev_buf) catch return error.Io;
+        for (events) |ev| {
+            if (ev.fd == stdout_file.handle and stdout_open and ev.readable) {
+                stdout_open = readFd(
                     self.alloc,
                     stdout_file.handle,
                     call_id,
@@ -352,12 +347,11 @@ fn runChild(
                     &stdout_full,
                     sink,
                     &seq,
-                    fds[idx].revents,
                 ) catch |read_err| return mapCollectErr(read_err);
-                idx += 1;
+                if (!stdout_open) el.unregister(stdout_file.handle) catch {};
             }
-            if (stderr_open) {
-                stderr_open = readReady(
+            if (ev.fd == stderr_file.handle and stderr_open and ev.readable) {
+                stderr_open = readFd(
                     self.alloc,
                     stderr_file.handle,
                     call_id,
@@ -368,8 +362,8 @@ fn runChild(
                     &stderr_full,
                     sink,
                     &seq,
-                    fds[idx].revents,
                 ) catch |read_err| return mapCollectErr(read_err);
+                if (!stderr_open) el.unregister(stderr_file.handle) catch {};
             }
         }
     }
@@ -410,7 +404,8 @@ fn setNonblock(fd: std.posix.fd_t) !void {
     _ = try std.posix.fcntl(fd, std.posix.F.SETFL, want);
 }
 
-fn readReady(
+/// Read all available data from a ready fd. Returns false when EOF.
+fn readFd(
     alloc: std.mem.Allocator,
     fd: std.posix.fd_t,
     call_id: []const u8,
@@ -421,10 +416,7 @@ fn readReady(
     full_bytes: *usize,
     sink: tools.Sink,
     seq: *u32,
-    revents: i16,
 ) !bool {
-    if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) == 0) return true;
-
     var scratch: [4096]u8 = undefined;
     while (true) {
         const n = std.posix.read(fd, &scratch) catch |read_err| switch (read_err) {

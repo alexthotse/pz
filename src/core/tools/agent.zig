@@ -37,11 +37,48 @@ pub const Hook = struct {
     }
 };
 
+/// Hook that yields incremental progress events while running.
+pub const StreamHook = struct {
+    ctx: *anyopaque,
+    run_fn: *const fn (
+        ctx: *anyopaque,
+        args: tools.Call.AgentArgs,
+        cb: rpc.ProgressCb,
+    ) anyerror!rpc.ChildProc.RunResult,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime run_fn: fn (
+            ctx: *T,
+            args: tools.Call.AgentArgs,
+            cb: rpc.ProgressCb,
+        ) anyerror!rpc.ChildProc.RunResult,
+    ) StreamHook {
+        const Wrap = struct {
+            fn call(
+                raw: *anyopaque,
+                args: tools.Call.AgentArgs,
+                cb: rpc.ProgressCb,
+            ) anyerror!rpc.ChildProc.RunResult {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                return run_fn(typed, args, cb);
+            }
+        };
+        return .{ .ctx = ctx, .run_fn = Wrap.call };
+    }
+
+    pub fn run(self: StreamHook, args: tools.Call.AgentArgs, cb: rpc.ProgressCb) !rpc.ChildProc.RunResult {
+        return self.run_fn(self.ctx, args, cb);
+    }
+};
+
 pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64 = 0,
     hook: ?Hook = null,
+    stream_hook: ?StreamHook = null,
     /// Parent's verified policy hash. Child must match or spawn fails.
     policy_hash: ?[]const u8 = null,
 };
@@ -51,6 +88,7 @@ pub const Handler = struct {
     max_bytes: usize,
     now_ms: i64,
     hook: ?Hook,
+    stream_hook: ?StreamHook,
     policy_hash: ?[]const u8,
 
     pub fn init(opts: Opts) Handler {
@@ -59,11 +97,12 @@ pub const Handler = struct {
             .max_bytes = opts.max_bytes,
             .now_ms = opts.now_ms,
             .hook = opts.hook,
+            .stream_hook = opts.stream_hook,
             .policy_hash = opts.policy_hash,
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, _: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, sink: tools.Sink) Err!tools.Result {
         if (call.kind != .agent) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .agent) return error.KindMismatch;
 
@@ -75,6 +114,17 @@ pub const Handler = struct {
         // verified policy hash, and the hook receives it for the child
         // to validate during the hello handshake.
         if (self.policy_hash == null) return error.PolicyMismatch;
+
+        // Prefer streaming hook for incremental progress.
+        if (self.stream_hook) |sh| {
+            var bridge = SinkBridge{ .sink = sink, .call_id = call.id, .at_ms = self.now_ms };
+            const cb = rpc.ProgressCb.from(SinkBridge, &bridge, SinkBridge.push);
+            const run_res = sh.run(args, cb) catch |run_err| switch (run_err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return fail(call, .io, @errorName(run_err)),
+            };
+            return finish(self, call, args.agent_id, run_res);
+        }
 
         const hook = self.hook orelse return fail(call, .internal, "agent tool unavailable");
         const run_res = hook.run(args) catch |run_err| switch (run_err) {
@@ -90,6 +140,37 @@ pub const Handler = struct {
             if (out.owned) self.alloc.free(out.chunk);
         }
         self.alloc.free(res.out);
+    }
+};
+
+/// Bridges `ProgressEvent`s from a streaming hook into the tool `Sink`,
+/// emitting incremental `output` events so the TUI can render progress.
+const SinkBridge = struct {
+    sink: tools.Sink,
+    call_id: []const u8,
+    at_ms: i64,
+    seq: u32 = 0,
+
+    fn push(self: *SinkBridge, ev: rpc.ProgressEvent) void {
+        const chunk: []const u8 = switch (ev) {
+            .out => |o| o.text,
+            .done => |d| @tagName(d.status),
+            .err => |e| e.message,
+        };
+        const stream: tools.Output.Stream = switch (ev) {
+            .out => .stdout,
+            .done => .meta,
+            .err => .stderr,
+        };
+        const out: tools.Output = .{
+            .call_id = self.call_id,
+            .seq = self.seq,
+            .at_ms = self.at_ms,
+            .stream = stream,
+            .chunk = chunk,
+        };
+        self.seq += 1;
+        self.sink.push(.{ .output = out }) catch {};
     }
 };
 
@@ -435,4 +516,82 @@ test "agent handler rejects missing policy hash" {
         .at_ms = 47,
     };
     try std.testing.expectError(error.PolicyMismatch, h.run(call, noopSink()));
+}
+
+test "stream hook emits progress via sink bridge" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    const StreamImpl = struct {
+        fn run(_: *@This(), args: tools.Call.AgentArgs, cb: rpc.ProgressCb) !rpc.ChildProc.RunResult {
+            // Simulate incremental progress events.
+            cb.push(.{ .out = .{ .agent_id = "s1", .text = args.prompt } });
+            cb.push(.{ .done = .{ .agent_id = "s1", .status = .done } });
+            return .{
+                .out = .{ .id = "req-s", .kind = .text, .text = args.prompt },
+                .done = .{ .id = "req-s", .stop = .done },
+            };
+        }
+    };
+
+    const SinkCollector = struct {
+        n: u8 = 0,
+        streams: [4]tools.Output.Stream = undefined,
+
+        fn push(self: *@This(), ev: tools.Event) !void {
+            switch (ev) {
+                .output => |o| {
+                    if (self.n < 4) {
+                        self.streams[self.n] = o.stream;
+                        self.n += 1;
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+
+    var stream_impl = StreamImpl{};
+    var col = SinkCollector{};
+    const sink = tools.Sink.from(SinkCollector, &col, SinkCollector.push);
+
+    const h = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+        .now_ms = 50,
+        .stream_hook = StreamHook.from(StreamImpl, &stream_impl, StreamImpl.run),
+        .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    const call: tools.Call = .{
+        .id = "agent-s",
+        .kind = .agent,
+        .args = .{ .agent = .{ .agent_id = "s1", .prompt = "streaming" } },
+        .src = .model,
+        .at_ms = 50,
+    };
+
+    const res = try h.run(call, sink);
+    defer h.deinitResult(res);
+
+    // Verify 2 progress events were pushed through the sink bridge.
+    try std.testing.expectEqual(@as(u8, 2), col.n);
+
+    const Snap = struct {
+        s0: tools.Output.Stream,
+        s1: tools.Output.Stream,
+        final: tools.Result.Tag,
+    };
+    try oh.snap(@src(),
+        \\core.tools.agent.test.stream hook emits progress via sink bridge.Snap
+        \\  .s0: core.tools.Output.Stream
+        \\    .stdout
+        \\  .s1: core.tools.Output.Stream
+        \\    .meta
+        \\  .final: core.tools.Result.Tag
+        \\    .ok
+    ).expectEqual(Snap{
+        .s0 = col.streams[0],
+        .s1 = col.streams[1],
+        .final = std.meta.activeTag(res.final),
+    });
 }

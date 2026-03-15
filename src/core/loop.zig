@@ -649,52 +649,82 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
         opts.alloc.free(req_tools);
     }
 
+    const TurnState = enum {
+        idle,
+        streaming,
+        tool_dispatch,
+        compacting,
+        done,
+    };
+
     var turns: u16 = 0;
     var tool_calls: u32 = 0;
+    var turn_arena = std.heap.ArenaAllocator.init(opts.alloc);
+    defer turn_arena.deinit();
+    var stream: ?providers.Stream = null;
+    defer if (stream != null) stream.?.deinit();
+    var saw_tool_call = false;
+    var pending_tc: ?providers.ToolCall = null;
 
-    while (opts.max_turns == 0 or turns < opts.max_turns) : (turns +|= 1) {
-        if (isCanceled(opts)) {
-            emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
-                return failWithReport(opts, .mode_push, cancel_err);
-            };
-            return .{
-                .turns = turns,
-                .tool_calls = tool_calls,
-            };
-        }
-
-        var turn_arena = std.heap.ArenaAllocator.init(opts.alloc);
-        defer turn_arena.deinit();
-        const turn_alloc = turn_arena.allocator();
-
-        const req_msgs = buildReqMsgs(turn_alloc, hist.items.items, opts.system_prompt) catch |msg_err| {
-            return failWithReport(opts, .provider_start, msg_err);
-        };
-
-        var stream = opts.provider.start(.{
-            .model = opts.model,
-            .provider = opts.provider_label,
-            .msgs = req_msgs,
-            .tools = req_tools,
-            .opts = opts.provider_opts,
-        }) catch |start_err| {
-            return failWithReport(opts, .provider_start, start_err);
-        };
-        defer stream.deinit();
-        if (opts.abort_slot) |slot| slot.set(stream.aborter());
-        defer if (opts.abort_slot) |slot| slot.set(null);
-
-        var saw_tool_call = false;
-        while (stream.next() catch |next_err| return failWithReport(opts, .stream_next, next_err)) |ev| {
+    var turn_state: TurnState = .idle;
+    turn_state = state: switch (turn_state) {
+        .idle => {
+            if (opts.max_turns != 0 and turns >= opts.max_turns) {
+                continue :state .done;
+            }
             if (isCanceled(opts)) {
                 emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
                     return failWithReport(opts, .mode_push, cancel_err);
                 };
-                return .{
-                    .turns = turns,
-                    .tool_calls = tool_calls,
-                };
+                continue :state .done;
             }
+
+            _ = turn_arena.reset(.retain_capacity);
+            const turn_alloc = turn_arena.allocator();
+
+            const req_msgs = buildReqMsgs(turn_alloc, hist.items.items, opts.system_prompt) catch |msg_err| {
+                return failWithReport(opts, .provider_start, msg_err);
+            };
+
+            if (stream) |*s| s.deinit();
+            stream = opts.provider.start(.{
+                .model = opts.model,
+                .provider = opts.provider_label,
+                .msgs = req_msgs,
+                .tools = req_tools,
+                .opts = opts.provider_opts,
+            }) catch |start_err| {
+                return failWithReport(opts, .provider_start, start_err);
+            };
+            if (opts.abort_slot) |slot| slot.set(stream.?.aborter());
+            saw_tool_call = false;
+            continue :state .streaming;
+        },
+        .streaming => {
+            if (isCanceled(opts)) {
+                if (opts.abort_slot) |slot| slot.set(null);
+                emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
+                    return failWithReport(opts, .mode_push, cancel_err);
+                };
+                continue :state .done;
+            }
+
+            const ev = (stream.?.next() catch |next_err| return failWithReport(opts, .stream_next, next_err)) orelse {
+                // Stream exhausted — end of turn
+                if (opts.abort_slot) |slot| slot.set(null);
+                if (isCanceled(opts)) {
+                    emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
+                        return failWithReport(opts, .mode_push, cancel_err);
+                    };
+                    continue :state .done;
+                }
+                if (!saw_tool_call) {
+                    turns +|= 1;
+                    continue :state .done;
+                }
+                turns +|= 1;
+                continue :state .idle;
+            };
 
             opts.mode.push(.{ .provider = ev }) catch |mode_err| {
                 return failWithReport(opts, .mode_push, mode_err);
@@ -720,64 +750,60 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
 
             switch (ev) {
                 .tool_call => |tc| {
-                    saw_tool_call = true;
-                    tool_calls += 1;
-
-                    const tr = runTool(opts, tc) catch |tool_err| {
-                        return failWithReport(opts, .tool_run, tool_err);
-                    };
-                    hist.pushToolResultOwned(tr) catch |hist_err| {
-                        return failWithReport(opts, .tool_run, hist_err);
-                    };
-
-                    const tr_ev: providers.Event = .{
-                        .tool_result = tr,
-                    };
-                    opts.mode.push(.{ .provider = tr_ev }) catch |mode_err| {
-                        return failWithReport(opts, .mode_push, mode_err);
-                    };
-
-                    const tr_sess_ev = mapProviderEv(tr_ev, nowMs(opts));
-                    const tr_stored = blk: {
-                        opts.store.append(opts.sid, tr_sess_ev) catch |append_err| {
-                            try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
-                            break :blk false;
-                        };
-                        break :blk true;
-                    };
-                    onSessionAppend(opts, &append_ct, &hist, tr_stored) catch |compact_err| {
-                        return failWithReport(opts, .compact, compact_err);
-                    };
-                    opts.mode.push(.{ .session = tr_sess_ev }) catch |mode_err| {
-                        return failWithReport(opts, .mode_push, mode_err);
-                    };
+                    pending_tc = tc;
+                    continue :state .tool_dispatch;
                 },
-                else => {},
+                else => continue :state .streaming,
             }
-        }
+        },
+        .tool_dispatch => {
+            const tc = pending_tc.?;
+            pending_tc = null;
+            saw_tool_call = true;
+            tool_calls += 1;
 
-        if (isCanceled(opts)) {
-            emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
-                return failWithReport(opts, .mode_push, cancel_err);
+            const tr = runTool(opts, tc) catch |tool_err| {
+                return failWithReport(opts, .tool_run, tool_err);
             };
+            hist.pushToolResultOwned(tr) catch |hist_err| {
+                return failWithReport(opts, .tool_run, hist_err);
+            };
+
+            const tr_ev: providers.Event = .{
+                .tool_result = tr,
+            };
+            opts.mode.push(.{ .provider = tr_ev }) catch |mode_err| {
+                return failWithReport(opts, .mode_push, mode_err);
+            };
+
+            const tr_sess_ev = mapProviderEv(tr_ev, nowMs(opts));
+            const tr_stored = blk: {
+                opts.store.append(opts.sid, tr_sess_ev) catch |append_err| {
+                    try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                    break :blk false;
+                };
+                break :blk true;
+            };
+            onSessionAppend(opts, &append_ct, &hist, tr_stored) catch |compact_err| {
+                return failWithReport(opts, .compact, compact_err);
+            };
+            opts.mode.push(.{ .session = tr_sess_ev }) catch |mode_err| {
+                return failWithReport(opts, .mode_push, mode_err);
+            };
+
+            continue :state .streaming;
+        },
+        .compacting => {
+            // Reserved for async compaction; currently handled inline via onSessionAppend.
+            continue :state .streaming;
+        },
+        .done => {
+            if (opts.abort_slot) |slot| slot.set(null);
             return .{
                 .turns = turns,
                 .tool_calls = tool_calls,
             };
-        }
-
-        if (!saw_tool_call) {
-            return .{
-                .turns = turns + 1,
-                .tool_calls = tool_calls,
-            };
-        }
-    }
-
-    // max_turns > 0 and exhausted
-    return .{
-        .turns = turns,
-        .tool_calls = tool_calls,
+        },
     };
 }
 

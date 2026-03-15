@@ -16,9 +16,11 @@ pub const Rect = struct {
 
 const image = @import("image.zig");
 
-const Kind = enum { text, user, thinking, tool, err, meta, image };
+const Kind = enum { text, user, thinking, tool, err, meta, image, agent };
 
 const ToolPhase = enum { none, call, result };
+
+const AgentPhase = enum { none, running, done, err, canceled };
 
 const LineMode = enum { wrap, ellipsis };
 
@@ -36,6 +38,7 @@ const Block = struct {
     spans: std.ArrayListUnmanaged(Span) = .empty,
     tool_gid: u64 = 0,
     tool_phase: ToolPhase = .none,
+    agent_phase: AgentPhase = .none,
     line_mode: LineMode = .wrap,
 
     pub fn deinit(self: *Block, alloc: std.mem.Allocator) void {
@@ -202,6 +205,63 @@ pub const Transcript = struct {
 
     pub fn pushAnsiText(self: *Transcript, ansi_text: []const u8) AppendError!void {
         _ = try self.pushAnsi(self.takeSeq(), .meta, "", .{}, ansi_text, .{});
+    }
+
+    /// Push an agent status block (collapsed one-liner with status indicator).
+    pub fn agentBlock(self: *Transcript, agent_id: []const u8, phase: AgentPhase) AppendError!void {
+        const prefix = switch (phase) {
+            .running => "~ ",
+            .done => "* ",
+            .err => "! ",
+            .canceled => "x ",
+            .none => "  ",
+        };
+        const st: frame.Style = switch (phase) {
+            .running => .{ .fg = theme.get().thinking_fg, .bg = theme.get().tool_pending_bg },
+            .done => .{ .fg = theme.get().tool_output, .bg = theme.get().tool_success_bg },
+            .err => .{ .fg = theme.get().err, .bg = theme.get().tool_error_bg },
+            .canceled => .{ .fg = theme.get().dim },
+            .none => .{ .fg = theme.get().dim },
+        };
+        const label = try std.fmt.allocPrint(self.alloc, "{s}agent:{s}", .{ prefix, agent_id });
+        defer self.alloc.free(label);
+        const idx = try self.pushBlock(self.takeSeq(), .agent, label, st);
+        self.blocks.items[idx].agent_phase = phase;
+        self.blocks.items[idx].line_mode = .ellipsis;
+    }
+
+    /// Update the most recent agent block matching `agent_id` to a new phase.
+    pub fn updateAgent(self: *Transcript, agent_id: []const u8, phase: AgentPhase) void {
+        const needle = std.fmt.allocPrint(self.alloc, "agent:{s}", .{agent_id}) catch return;
+        defer self.alloc.free(needle);
+        var i = self.blocks.items.len;
+        while (i > 0) {
+            i -= 1;
+            var b = &self.blocks.items[i];
+            if (b.kind != .agent) continue;
+            if (std.mem.indexOf(u8, b.text(), needle) == null) continue;
+            b.agent_phase = phase;
+            // Update display text prefix.
+            const prefix = switch (phase) {
+                .running => "~ ",
+                .done => "* ",
+                .err => "! ",
+                .canceled => "x ",
+                .none => "  ",
+            };
+            b.st = switch (phase) {
+                .running => .{ .fg = theme.get().thinking_fg, .bg = theme.get().tool_pending_bg },
+                .done => .{ .fg = theme.get().tool_output, .bg = theme.get().tool_success_bg },
+                .err => .{ .fg = theme.get().err, .bg = theme.get().tool_error_bg },
+                .canceled => .{ .fg = theme.get().dim },
+                .none => .{ .fg = theme.get().dim },
+            };
+            if (b.buf.items.len >= 2) {
+                b.buf.items[0] = prefix[0];
+                b.buf.items[1] = prefix[1];
+            }
+            return;
+        }
     }
 
     pub fn render(self: *Transcript, frm: *frame.Frame, rect: Rect) RenderError!void {
@@ -2648,4 +2708,57 @@ test "scroll offset clamped to max" {
     try std.testing.expect(std.mem.indexOf(u8, r0, "A") != null);
     const r2 = try rowAscii(&frm, 2, raw[0..]);
     try std.testing.expect(std.mem.indexOf(u8, r2, "B") != null);
+}
+
+test "agent block renders collapsed with status prefix" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.agentBlock("scout", .running);
+    try tr.agentBlock("critic", .done);
+
+    try std.testing.expectEqual(@as(usize, 2), tr.count());
+
+    var frm = try frame.Frame.init(std.testing.allocator, 30, 4);
+    defer frm.deinit(std.testing.allocator);
+    try tr.render(&frm, .{ .x = 0, .y = 0, .w = 30, .h = 4 });
+
+    var raw: [30]u8 = undefined;
+    const r0 = try rowAscii(&frm, 0, raw[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, r0, "~ agent:scout") != null);
+    const r2 = try rowAscii(&frm, 2, raw[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, r2, "* agent:critic") != null);
+}
+
+test "updateAgent changes phase and style" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.agentBlock("scout", .running);
+    try std.testing.expectEqual(AgentPhase.running, tr.blocks.items[0].agent_phase);
+
+    // Transition to done.
+    tr.updateAgent("scout", .done);
+    try std.testing.expectEqual(AgentPhase.done, tr.blocks.items[0].agent_phase);
+
+    // Prefix should now be "* ".
+    const txt = tr.blocks.items[0].text();
+    try std.testing.expect(std.mem.startsWith(u8, txt, "* agent:scout"));
+
+    // Style should reflect success.
+    const t = theme.get();
+    try std.testing.expect(frame.Color.eql(tr.blocks.items[0].st.bg, t.tool_success_bg));
+}
+
+test "updateAgent error phase gets error style" {
+    var tr = Transcript.init(std.testing.allocator);
+    defer tr.deinit();
+
+    try tr.agentBlock("critic", .running);
+    tr.updateAgent("critic", .err);
+
+    try std.testing.expectEqual(AgentPhase.err, tr.blocks.items[0].agent_phase);
+    const t = theme.get();
+    try std.testing.expect(frame.Color.eql(tr.blocks.items[0].st.bg, t.tool_error_bg));
+    try std.testing.expect(frame.Color.eql(tr.blocks.items[0].st.fg, t.err));
 }

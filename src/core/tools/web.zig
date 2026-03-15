@@ -1,6 +1,8 @@
 //! Web fetch tool: HTTP requests with policy enforcement.
 const std = @import("std");
 const policy_mod = @import("../policy.zig");
+const event_loop = @import("../event_loop.zig");
+const EventLoop = event_loop.EventLoop;
 const http_mock = @import("../../test/http_mock.zig");
 
 pub const Method = enum {
@@ -445,6 +447,14 @@ fn sendLocalRequestAlloc(
     defer (std.net.Stream{ .handle = fd }).close();
     try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
 
+    // Set nonblocking for event-loop-driven reads.
+    const cur = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, cur | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+    var el = try EventLoop.init();
+    defer el.deinit();
+    try el.register(fd, .read);
+
     const target = if (parsed.query) |query|
         try std.fmt.allocPrint(alloc, "{s}?{s}", .{ parsed.path, query })
     else
@@ -463,12 +473,22 @@ fn sendLocalRequestAlloc(
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     var buf: [1024]u8 = undefined;
+    var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
     while (true) {
-        const got = try std.posix.read(fd, buf[0..]);
-        if (got == 0) break;
-        try out.appendSlice(alloc, buf[0..got]);
+        const events = try el.wait(5000, &ev_buf);
+        for (events) |ev| {
+            if (ev.fd == fd and ev.readable) {
+                while (true) {
+                    const got = std.posix.read(fd, buf[0..]) catch |err| switch (err) {
+                        error.WouldBlock => break,
+                        else => return err,
+                    };
+                    if (got == 0) return try out.toOwnedSlice(alloc);
+                    try out.appendSlice(alloc, buf[0..got]);
+                }
+            }
+        }
     }
-    return try out.toOwnedSlice(alloc);
 }
 
 fn parseHttpResponseAlloc(alloc: std.mem.Allocator, raw: []const u8) !Response {

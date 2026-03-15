@@ -15,6 +15,7 @@ pub const Client = struct {
     auth: auth_mod.Result,
     http: std.http.Client,
     ca_file: ?[]u8,
+    el: ?*hc.EventLoop = null,
 
     pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Client {
         var auth_res = try auth_mod.loadForProviderWithHooks(alloc, .openai, hooks);
@@ -46,6 +47,7 @@ pub const Client = struct {
     fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
         const stream = try self.alloc.create(SseStream);
         stream.* = SseStream.initFields(self.alloc);
+        stream.el = self.el;
         errdefer {
             stream.arena.deinit();
             self.alloc.destroy(stream);
@@ -64,13 +66,17 @@ pub const Client = struct {
             .path = .{ .raw = api_path },
         };
 
-        var slp = hc.RealSleeper{};
+        var slp = hc.RealSleeper{ .el = self.el };
         try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .openai, self.ca_file, ar, &slp, buildAuthHeaders, null);
 
         if (stream.response.head.status != .ok) {
             try hc.formatErrBody(stream, ar, null);
         } else {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
+            stream.conn_fd = hc.connFd(stream);
+            if (stream.el) |el| {
+                if (stream.conn_fd) |fd| el.register(fd, .read) catch {};
+            }
         }
 
         return providers.Stream.fromAbortable(SseStream, stream, SseStream.next, SseStream.deinit, SseStream.abort);
@@ -103,6 +109,10 @@ const SseStream = struct {
     redir_buf: [0]u8,
     body_rdr: ?*std.Io.Reader,
 
+    // Event loop integration
+    el: ?*hc.EventLoop,
+    conn_fd: ?std.posix.fd_t,
+
     in_tok: u64,
     out_tok: u64,
     cache_read: u64,
@@ -126,6 +136,8 @@ const SseStream = struct {
             .transfer_buf = undefined,
             .redir_buf = .{},
             .body_rdr = null,
+            .el = null,
+            .conn_fd = null,
             .in_tok = 0,
             .out_tok = 0,
             .cache_read = 0,
@@ -326,6 +338,9 @@ const SseStream = struct {
     }
 
     fn deinit(self: *SseStream) void {
+        if (self.el) |el| {
+            if (self.conn_fd) |fd| el.unregister(fd) catch {};
+        }
         const alloc = self.alloc;
         self.tool_call_id.deinit(alloc);
         self.tool_name.deinit(alloc);

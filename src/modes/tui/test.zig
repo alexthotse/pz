@@ -667,3 +667,170 @@ test "golden: wide CJK in editor clips correctly" {
     // Editor has 1-col padding, then "中文A" = 2+2+1 = 5 cols
     try std.testing.expect(std.mem.indexOf(u8, row, "A") != null);
 }
+
+// ── T7d: mock-terminal walkthrough coverage ──
+
+test "T7d settings toggle persistence across re-render" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var ui = try Ui.init(std.testing.allocator, 40, 12, "m", "p");
+    defer ui.deinit();
+
+    // Build settings overlay with heap-allocated toggles (overlay.deinit frees them)
+    const labels = [_][]const u8{ "Show tools", "Show thinking", "Auto-compact" };
+    const toggles = try std.testing.allocator.alloc(bool, 3);
+    toggles[0] = true;
+    toggles[1] = true;
+    toggles[2] = false;
+    ui.ov = .{
+        .items = &labels,
+        .title = "Settings",
+        .kind = .settings,
+        .toggles = toggles,
+    };
+
+    var vs = try VScreen.init(std.testing.allocator, 40, 12);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Toggle first item (Show tools: true -> false)
+    ui.ov.?.toggle();
+
+    // Re-render after toggle
+    try renderToVs(&ui, &vs);
+
+    const Snap = struct {
+        show_tools: bool,
+        show_thinking: bool,
+        auto_compact: bool,
+    };
+    try oh.snap(@src(),
+        \\modes.tui.test.test.T7d settings toggle persistence across re-render.Snap
+        \\  .show_tools: bool = false
+        \\  .show_thinking: bool = true
+        \\  .auto_compact: bool = false
+    ).expectEqual(Snap{
+        .show_tools = ui.ov.?.getToggle(0).?,
+        .show_thinking = ui.ov.?.getToggle(1).?,
+        .auto_compact = ui.ov.?.getToggle(2).?,
+    });
+
+    // Overlay still visible after re-render
+    try std.testing.expect(ui.ov != null);
+}
+
+test "T7d compact notice appears in transcript" {
+    var ui = try Ui.init(std.testing.allocator, 40, 10, "m", "p");
+    defer ui.deinit();
+
+    try ui.tr.infoText("compacted in=5 out=2");
+
+    var vs = try VScreen.init(std.testing.allocator, 40, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // tx_h=5 (rows 0..4) — look for compacted text
+    var found = false;
+    var r: usize = 0;
+    while (r < 5) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "compacted in=5 out=2") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "T7d copy output renders nothing-to-copy notice" {
+    var ui = try Ui.init(std.testing.allocator, 40, 10, "m", "p");
+    defer ui.deinit();
+
+    // No response text yet — lastResponseText returns null
+    try std.testing.expect(ui.lastResponseText() == null);
+
+    // Simulate what runtime does when copy finds nothing
+    try ui.tr.infoText("[nothing to copy]");
+
+    var vs = try VScreen.init(std.testing.allocator, 40, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    var found = false;
+    var r: usize = 0;
+    while (r < 5) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "[nothing to copy]") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "T7d copy finds last response text" {
+    var ui = try Ui.init(std.testing.allocator, 40, 10, "m", "p");
+    defer ui.deinit();
+
+    try ui.onProvider(.{ .text = "first response" });
+    try ui.onProvider(.{ .tool_call = .{ .id = "c1", .name = "read", .args = "{}" } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .output = "ok", .is_err = false } });
+    try ui.onProvider(.{ .text = "second response" });
+
+    // lastResponseText should find the most recent text block
+    const last = ui.lastResponseText();
+    try std.testing.expect(last != null);
+    try std.testing.expect(std.mem.indexOf(u8, last.?, "second response") != null);
+}
+
+test "T7d share blocked by policy renders denial notice" {
+    var ui = try Ui.init(std.testing.allocator, 50, 10, "m", "p");
+    defer ui.deinit();
+
+    // Simulate what runtime emits when policy denies /share
+    try ui.tr.infoText("blocked by policy: /share");
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    var found = false;
+    var r: usize = 0;
+    while (r < 5) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "blocked by policy: /share") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "T7d subagent progress indicator in footer" {
+    var ui = try Ui.init(std.testing.allocator, 50, 10, "m", "p");
+    defer ui.deinit();
+
+    // Simulate bg task progress
+    ui.panels.setBgStatus(2, 1, 1);
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Footer at rows 8-9 for h=10 — check bg status appears
+    var found_bg = false;
+    var r: usize = 7;
+    while (r < 10) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "bg") != null) {
+            found_bg = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_bg);
+}

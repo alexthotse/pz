@@ -8,6 +8,9 @@ const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
 const audit = @import("../audit.zig");
 const utf8 = @import("../utf8.zig");
+const el_mod = @import("../event_loop.zig");
+pub const EventLoop = el_mod.EventLoop;
+const ElEvent = el_mod.Event;
 
 const max_retries = 3;
 const base_delay_ms: u64 = 2000;
@@ -111,17 +114,30 @@ pub fn tryProactiveRefresh(
 
 // ── Retry loop ─────────────────────────────────────────────────────────
 
-/// Interruptible sleeper using poll on a cancel pipe.
-/// When the cancel fd becomes readable, poll returns immediately,
-/// giving sub-millisecond cancel responsiveness vs bounded sleep.
+/// Interruptible sleeper backed by EventLoop.
+/// Registers a cancel pipe fd and uses EventLoop.wait with timeout
+/// for both backoff delays and cancel responsiveness.
 pub const RealSleeper = struct {
     cancel_fd: std.posix.fd_t = -1,
+    el: ?*EventLoop = null,
 
-    /// Poll the cancel pipe fd with the given timeout.
-    /// Returns immediately if the pipe becomes readable (canceled)
-    /// or after timeout_ms elapses (normal backoff).
-    /// Falls back to Thread.sleep when no cancel fd is set.
+    /// Wait using EventLoop with timeout. The cancel fd (if set) is
+    /// already registered with the event loop, so a cancel signal
+    /// will interrupt the wait immediately.
+    /// Falls back to poll when no event loop is available.
     pub fn sleep(self: *RealSleeper, ms: u64) void {
+        const timeout: i32 = if (ms > std.math.maxInt(i32))
+            std.math.maxInt(i32)
+        else
+            @intCast(ms);
+
+        if (self.el) |el| {
+            var buf: [el_mod.max_events]ElEvent = undefined;
+            _ = el.wait(timeout, &buf) catch return;
+            return;
+        }
+
+        // Fallback: poll on cancel fd or sleep.
         if (self.cancel_fd < 0) {
             std.Thread.sleep(ms * std.time.ns_per_ms);
             return;
@@ -131,12 +147,7 @@ pub const RealSleeper = struct {
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        const timeout: i32 = if (ms > std.math.maxInt(i32))
-            std.math.maxInt(i32)
-        else
-            @intCast(ms);
         _ = std.posix.poll(&fds, timeout) catch {
-            // poll error — fall back to Thread.sleep
             std.Thread.sleep(ms * std.time.ns_per_ms);
         };
     }
@@ -277,6 +288,31 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
             self.done = true;
             return null;
         };
+
+        // If we have an event loop and connection fd, wait for read
+        // readiness. The event loop multiplexes the connection fd with
+        // the wake pipe, giving cancel responsiveness during long SSE
+        // waits between server-sent chunks.
+        if (self.el) |el| {
+            if (self.conn_fd) |fd| {
+                var buf: [el_mod.max_events]ElEvent = undefined;
+                // Block until fd is readable or wake pipe fires.
+                const evs = el.wait(-1, &buf) catch {
+                    self.done = true;
+                    return null;
+                };
+                var fd_ready = false;
+                for (evs) |ev| {
+                    if (ev.fd == fd and ev.readable) fd_ready = true;
+                }
+                // Wake with no fd readiness means cancel/interrupt.
+                if (!fd_ready) {
+                    self.done = true;
+                    return null;
+                }
+            }
+        }
+
         const line = rdr.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => {
                 self.done = true;
@@ -308,6 +344,13 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
         const ev = self.parseSseData(data_copy) catch continue;
         if (ev) |e| return e;
     }
+}
+
+/// Extract the connection fd from an SseStream's HTTP request.
+/// Returns null if no connection is available.
+pub fn connFd(stream: anytype) ?std.posix.fd_t {
+    const conn = stream.req.connection orelse return null;
+    return conn.stream_reader.getStream().handle;
 }
 
 // ── Test helpers ───────────────────────────────────────────────────────

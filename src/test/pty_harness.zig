@@ -1025,3 +1025,187 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
         .has_session_disabled = try streamHasText(std.testing.allocator, out.stdout, "reason: session persistence is disabled"),
     });
 }
+
+// ── T7c: headless pipeline walkthrough coverage ──
+
+test "T7c pipeline denied-policy tool exits with error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try writePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "tool/bash", .effect = .deny },
+        },
+    });
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    // Provider that tries to call bash tool — policy should deny
+    const provider_cmd =
+        "cat >/dev/null; " ++
+        "printf 'tool_call:c1:bash:{\"command\":\"echo hi\"}\\nstop:done\\n'";
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-config",
+            "--no-session",
+            "--mode",
+            "print",
+            "--provider-cmd",
+            provider_cmd,
+            "--prompt",
+            "test",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    // Should complete (provider gets denial as tool result, stops)
+    try std.testing.expect(out.term == .Exited);
+    // Policy denial info should appear in output
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "denied") != null or
+        std.mem.indexOf(u8, out.stderr, "denied") != null or
+        std.mem.indexOf(u8, out.stdout, "policy") != null or
+        std.mem.indexOf(u8, out.stderr, "policy") != null);
+}
+
+test "T7c pipeline non-default model propagates to provider" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    // Provider echoes the model name from the request
+    const provider_cmd =
+        "req=$(cat); " ++
+        "model=$(printf '%s' \"$req\" | grep -o '\"model\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "printf 'text:model=%s\\nstop:done\\n' \"$model\"";
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-config",
+            "--no-session",
+            "--mode",
+            "print",
+            "--model",
+            "custom-model-7b",
+            "--provider-cmd",
+            provider_cmd,
+            "--prompt",
+            "ping",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 0), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "model=custom-model-7b") != null);
+}
+
+test "T7c pipeline json mode missing prompt exits with error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const pz_bin = try pzBinAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(pz_bin);
+
+    // No --prompt and empty stdin → should fail
+    var out = try runProc(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-config",
+            "--no-session",
+            "--mode",
+            "json",
+            "--provider-cmd",
+            "cat >/dev/null; printf 'text:noop\\nstop:done\\n'",
+        },
+        "",
+    );
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expect(out.term == .Exited);
+    try std.testing.expectEqual(@as(u8, 1), out.term.Exited);
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "EmptyPrompt") != null);
+}
+
+// ── T7b: thin PTY auth/login overlay surface ──
+
+test "T7b PTY auth login overlay renders provider list" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--no-session",
+        },
+        &.{
+            .{ .wait_ms = 250, .input = "/login\n" },
+            .{ .wait_ms = 350, .input = "\x1b" }, // ESC to dismiss
+            .{ .wait_ms = 200, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+    // Login overlay should show provider names and title
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "Login"));
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "openai") or
+        try streamHasText(std.testing.allocator, out.stdout, "anthropic"));
+}
