@@ -22,33 +22,64 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOption([]const u8, "version", pkg.version);
 
-    var code: u8 = 0;
-    const vcs_hash_raw = b.runAllowFail(
-        &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short()" },
-        &code,
-        .Ignore,
-    ) catch "unknown";
-    const vcs_hash = std.mem.trimRight(u8, vcs_hash_raw, "\n\r ");
-    options.addOption([]const u8, "git_hash", vcs_hash);
-    test_options.addOption([]const u8, "git_hash", vcs_hash);
+    const is_release = switch (optimize) {
+        .Debug => false,
+        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => true,
+    };
 
-    const vcs_log_raw = b.runAllowFail(
-        &.{
-            "jj",
-            "log",
-            "--no-graph",
-            "-r",
-            "ancestors(@, 50)",
-            "-T",
-            "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
-        },
-        &code,
-        .Ignore,
-    ) catch "No commit history available";
-    const vcs_log = std.mem.trimRight(u8, vcs_log_raw, "\n\r ");
-    options.addOption([]const u8, "changelog", vcs_log);
+    if (is_release) {
+        // Release builds: fail closed on missing metadata.
+        // Hash comes from -Dgit-hash=...; changelog is embedded from CHANGELOG.md.
+        const git_hash = b.option(
+            []const u8,
+            "git-hash",
+            "Build metadata: short commit hash (required for release)",
+        ) orelse {
+            std.debug.print("error: release build requires -Dgit-hash=<hash>\n", .{});
+            std.process.exit(1);
+        };
+        options.addOption([]const u8, "git_hash", git_hash);
+        test_options.addOption([]const u8, "git_hash", git_hash);
+        // State tracker key: version for release (matches ## [ver] headings).
+        options.addOption([]const u8, "build_id", pkg.version);
+        test_options.addOption([]const u8, "build_id", pkg.version);
+
+        const cl_embed = @embedFile("CHANGELOG.md");
+        options.addOption([]const u8, "changelog", cl_embed);
+        test_options.addOption([]const u8, "changelog", cl_embed);
+    } else {
+        // Debug builds: VCS shell-out for convenience.
+        var code: u8 = 0;
+        const vcs_hash_raw = b.runAllowFail(
+            &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short()" },
+            &code,
+            .Ignore,
+        ) catch "dev";
+        const vcs_hash = std.mem.trimRight(u8, vcs_hash_raw, "\n\r ");
+        options.addOption([]const u8, "git_hash", vcs_hash);
+        test_options.addOption([]const u8, "git_hash", vcs_hash);
+        // State tracker key: hash for dev (matches line-start in VCS log).
+        options.addOption([]const u8, "build_id", vcs_hash);
+        test_options.addOption([]const u8, "build_id", vcs_hash);
+
+        const vcs_log_raw = b.runAllowFail(
+            &.{
+                "jj",
+                "log",
+                "--no-graph",
+                "-r",
+                "ancestors(@, 50)",
+                "-T",
+                "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
+            },
+            &code,
+            .Ignore,
+        ) catch "";
+        const vcs_log = std.mem.trimRight(u8, vcs_log_raw, "\n\r ");
+        options.addOption([]const u8, "changelog", vcs_log);
+        test_options.addOption([]const u8, "changelog", vcs_log);
+    }
     options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
-    test_options.addOption([]const u8, "changelog", vcs_log);
     test_options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
 
     const core_agent_mod = b.createModule(.{
@@ -140,6 +171,7 @@ pub fn build(b: *std.Build) void {
         "hello",
         "agent-child",
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "1", // RPC fd: use stdout for standalone hello test
     });
     run_agent_child_hello.expectExitCode(0);
     test_step.dependOn(&run_agent_child_hello.step);

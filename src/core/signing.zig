@@ -76,6 +76,16 @@ pub const Seed = struct {
     pub fn bytes(self: Seed) [seed_len]u8 {
         return self.raw;
     }
+
+    /// Zero seed bytes. Uses volatile write to prevent compiler elision.
+    pub fn wipe(self: *Seed) void {
+        const ptr: *volatile [seed_len]u8 = @ptrCast(&self.raw);
+        ptr.* = [_]u8{0} ** seed_len;
+    }
+
+    pub fn deinit(self: *Seed) void {
+        self.wipe();
+    }
 };
 
 pub const PublicKey = struct {
@@ -226,6 +236,16 @@ pub const KeyPair = struct {
             error.KeyMismatch => return error.KeyMismatch,
         };
         return .{ .raw = sig.toBytes() };
+    }
+
+    /// Zero secret key bytes. Uses volatile write to prevent compiler elision.
+    pub fn wipe(self: *KeyPair) void {
+        const ptr: *volatile [Ed25519.SecretKey.encoded_length]u8 = @ptrCast(&self.pair.secret_key);
+        ptr.* = [_]u8{0} ** Ed25519.SecretKey.encoded_length;
+    }
+
+    pub fn deinit(self: *KeyPair) void {
+        self.wipe();
     }
 };
 
@@ -495,8 +515,11 @@ pub fn signManifestAlloc(
     asset: []const u8,
     archive: []const u8,
     url: []const u8,
-    kp: KeyPair,
+    kp_in: KeyPair,
 ) (std.mem.Allocator.Error || SignError || error{Overflow})![]u8 {
+    var kp = kp_in;
+    defer kp.wipe();
+
     const Sha256 = std.crypto.hash.sha2.Sha256;
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(archive, &digest, .{});
@@ -1027,4 +1050,45 @@ test "surrogate differs for different inputs under same key" {
     _ = key.surrogate("alpha", &b1);
     _ = key.surrogate("beta", &b2);
     try testing.expect(!std.mem.eql(u8, b1[0..], b2[0..]));
+}
+
+test "seed wipe zeroes bytes" {
+    var seed = try Seed.parseHex(seed_hex);
+    // Confirm non-zero before wipe.
+    var any_nonzero = false;
+    for (seed.raw) |b| if (b != 0) {
+        any_nonzero = true;
+        break;
+    };
+    try testing.expect(any_nonzero);
+    seed.wipe();
+    for (seed.raw) |b| try testing.expectEqual(@as(u8, 0), b);
+}
+
+test "seed deinit zeroes bytes" {
+    var seed = try Seed.parseHex(seed_hex);
+    seed.deinit();
+    for (seed.raw) |b| try testing.expectEqual(@as(u8, 0), b);
+}
+
+test "keypair wipe zeroes secret key" {
+    var kp = try fixtureKeyPair();
+    // Confirm non-zero before wipe.
+    const sk_bytes: []const u8 = std.mem.asBytes(&kp.pair.secret_key);
+    var any_nonzero = false;
+    for (sk_bytes) |b| if (b != 0) {
+        any_nonzero = true;
+        break;
+    };
+    try testing.expect(any_nonzero);
+    kp.wipe();
+    const wiped: []const u8 = std.mem.asBytes(&kp.pair.secret_key);
+    for (wiped) |b| try testing.expectEqual(@as(u8, 0), b);
+}
+
+test "keypair deinit zeroes secret key" {
+    var kp = try fixtureKeyPair();
+    kp.deinit();
+    const wiped: []const u8 = std.mem.asBytes(&kp.pair.secret_key);
+    for (wiped) |b| try testing.expectEqual(@as(u8, 0), b);
 }

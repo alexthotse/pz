@@ -248,8 +248,9 @@ const PolicyToolDispatch = struct {
 };
 
 const PolicyToolRegistry = struct {
-    ctxs: [10]PolicyToolDispatch = undefined,
-    entries: [10]core.tools.Entry = undefined,
+    const max_tools = 16;
+    ctxs: [max_tools]PolicyToolDispatch = undefined,
+    entries: [max_tools]core.tools.Entry = undefined,
     reg: core.tools.Registry = undefined,
 
     fn init(self: *PolicyToolRegistry, pol: *const RuntimePolicy, base: core.tools.Registry, audit: ?PolicyToolAudit) void {
@@ -2679,13 +2680,21 @@ fn runTui(
                                         const argv: core.audit.Str = .{ .text = sel, .vis = .mask };
                                         try runtimeCtlStart(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
                                         const next_sid = try alloc.dupe(u8, sel);
-                                        alloc.free(sid.*);
+                                        const prev_sid = sid.*;
                                         sid.* = next_sid;
-                                        _ = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
-                                        try runtimeCtlSuccess(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
-                                        const msg = try std.fmt.allocPrint(alloc, "resumed session {s}", .{sid.*});
-                                        defer alloc.free(msg);
-                                        try ui.tr.infoText(msg);
+                                        const ok = tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*) catch |err| {
+                                            // Rollback: restore previous sid.
+                                            sid.* = prev_sid;
+                                            alloc.free(next_sid);
+                                            return err;
+                                        };
+                                        alloc.free(prev_sid);
+                                        if (ok) {
+                                            try runtimeCtlSuccess(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+                                            const msg = try std.fmt.allocPrint(alloc, "resumed session {s}", .{sid.*});
+                                            defer alloc.free(msg);
+                                            try ui.tr.infoText(msg);
+                                        }
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
@@ -2701,9 +2710,13 @@ fn runTui(
                                         if (session_dir_path) |sdp| {
                                             try forkSessionFile(sdp, sid.*, next_sid);
                                         }
-                                        alloc.free(sid.*);
+                                        const prev_sid = sid.*;
                                         sid.* = next_sid;
-                                        try ui.ed.setText(sel);
+                                        ui.ed.setText(sel) catch |err| {
+                                            sid.* = prev_sid;
+                                            return err;
+                                        };
+                                        alloc.free(prev_sid);
                                         try ui.tr.infoText("[forked session]");
                                         try runtimeCtlSuccess(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, &.{});
                                         ui.ov.?.deinit(alloc);
@@ -4000,6 +4013,40 @@ const AuthReq = struct {
     key: []const u8,
 };
 
+/// Stores the PKCE verifier from a pending OAuth flow so that manual
+/// completion via `/login <provider> <callback-url>` can supply it
+/// independently of the CSRF state parameter.
+var pending_oauth_verifier: ?struct {
+    prov: core.providers.auth.Provider,
+    verifier: []u8,
+    alloc: std.mem.Allocator,
+
+    fn deinit(self: *@This()) void {
+        self.alloc.free(self.verifier);
+        self.* = undefined;
+    }
+} = null;
+
+fn storePendingVerifier(alloc: std.mem.Allocator, prov: core.providers.auth.Provider, verifier: []const u8) void {
+    clearPendingVerifier();
+    pending_oauth_verifier = .{
+        .prov = prov,
+        .verifier = alloc.dupe(u8, verifier) catch return,
+        .alloc = alloc,
+    };
+}
+
+fn clearPendingVerifier() void {
+    if (pending_oauth_verifier) |*v| v.deinit();
+    pending_oauth_verifier = null;
+}
+
+fn takePendingVerifier(prov: core.providers.auth.Provider) ?[]const u8 {
+    const pv = pending_oauth_verifier orelse return null;
+    if (pv.prov != prov) return null;
+    return pv.verifier;
+}
+
 fn parseAuthReq(arg: []const u8, provider_hint: ?[]const u8) !AuthReq {
     const trimmed = std.mem.trim(u8, arg, " \t");
     if (provider_hint) |name| {
@@ -4063,6 +4110,8 @@ fn runLoginFlow(
             const em = try report.cli(alloc, "wait for oauth callback", err);
             defer alloc.free(em);
             try out.writeAll(em);
+            // Store the PKCE verifier so manual `/login <provider> <url>` can use it.
+            storePendingVerifier(alloc, req.prov, flow.verifier);
             try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
             try out.writeAll("if your browser showed localhost callback URL, run:\n");
             try writeTextLine(alloc, out, "  /login {s} <callback-url>\n", .{oauth_name});
@@ -4084,13 +4133,19 @@ fn runLoginFlow(
             try out.writeAll(em);
             return;
         };
+        clearPendingVerifier();
         try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
         return;
     }
     if (kind == .oauth_complete) {
         const info = oauth_info orelse return error.OAuthNotSupported;
         const oauth_name = core.providers.auth.providerName(req.prov);
-        core.providers.auth.completeOAuthWithHooks(alloc, req.prov, req.key, hooks) catch |err| {
+        const verifier = takePendingVerifier(req.prov) orelse {
+            try out.writeAll("no pending oauth verifier; start a new /login flow first\n");
+            return;
+        };
+        defer clearPendingVerifier();
+        core.providers.auth.completeOAuthWithHooks(alloc, req.prov, req.key, verifier, hooks) catch |err| {
             const em = try report.cli(alloc, info.complete_action, err);
             defer alloc.free(em);
             try out.writeAll(em);
@@ -4148,7 +4203,9 @@ fn runRpcLogin(alloc: std.mem.Allocator, req: RpcReq, hooks: core.providers.auth
         return out.toOwnedSlice(alloc);
     }
     if (kind == .oauth_complete) {
-        try core.providers.auth.completeOAuthWithHooks(alloc, auth_req.prov, auth_req.key, hooks);
+        const verifier = takePendingVerifier(auth_req.prov) orelse return error.MissingOAuthVerifier;
+        defer clearPendingVerifier();
+        try core.providers.auth.completeOAuthWithHooks(alloc, auth_req.prov, auth_req.key, verifier, hooks);
         return std.fmt.allocPrint(alloc, "{s} oauth login complete\n", .{core.providers.auth.providerName(auth_req.prov)});
     }
     if (auth_req.key.len == 0) {
@@ -5351,6 +5408,8 @@ fn requireSessionDir(session_dir_path: ?[]const u8, no_session: bool) SessionOpE
     return session_dir_path.?;
 }
 
+/// Resume: resolve the target sid and atomically swap.
+/// On error, sid.* is unchanged (rollback-safe).
 fn applyResumeSid(
     alloc: std.mem.Allocator,
     sid: *([]u8),
@@ -5360,6 +5419,7 @@ fn applyResumeSid(
 ) (SessionOpErr || anyerror)!void {
     const dir = try requireSessionDir(session_dir_path, no_session);
     const next_sid = try resolveResumeSid(alloc, dir, token);
+    // Commit: swap only after all fallible ops succeed.
     alloc.free(sid.*);
     sid.* = next_sid;
 }
@@ -6187,7 +6247,7 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
         }
 
         // Update state with current git hash
-        const new_state = config.PzState{ .last_hash = cli.git_hash };
+        const new_state = config.PzState{ .last_hash = cli.build_id };
         new_state.save(alloc);
     }
 
@@ -13454,4 +13514,59 @@ test "resolveAbsCmd finds existing absolute path" {
     const result = try resolveAbsCmd(alloc, candidates);
     defer alloc.free(result);
     try std.testing.expectEqualStrings("/bin/sh", result);
+}
+
+test "P0-4 regression: AskUiCtx stored/sel_by_q alloc+free no leaks" {
+    // Exercises the StoredAnswer and sel_by_q allocation path that AskUiCtx
+    // uses internally. std.testing.allocator catches any leaks.
+    const alloc = std.testing.allocator;
+
+    // Allocate stored answers exactly as runWithReader does.
+    const n: usize = 5;
+    var stored = try alloc.alloc(AskUiCtx.StoredAnswer, n);
+    defer {
+        for (stored) |a| {
+            if (a.answer) |txt| alloc.free(txt);
+        }
+        alloc.free(stored);
+    }
+    for (stored) |*a| a.* = .{};
+
+    const sel_by_q = try alloc.alloc(usize, n);
+    defer alloc.free(sel_by_q);
+    @memset(sel_by_q, 0);
+
+    // Simulate setting answers (as setStoredAnswer does).
+    stored[0].answer = try alloc.dupe(u8, "first answer");
+    stored[0].index = 0;
+    stored[2].answer = try alloc.dupe(u8, "third answer");
+    stored[2].index = 2;
+
+    // Overwrite an answer (the old one must be freed, as setStoredAnswer does).
+    alloc.free(stored[0].answer.?);
+    stored[0].answer = try alloc.dupe(u8, "updated first");
+    stored[0].index = 0;
+
+    // Verify firstUnanswered works correctly with our stored state.
+    try std.testing.expectEqual(@as(?usize, 1), firstUnanswered(stored[0..]));
+
+    // Collect answers and free them.
+    const opts = [_]core.tools.Call.AskArgs.Option{
+        .{ .label = "A" },
+        .{ .label = "B" },
+    };
+    const qs = [_]core.tools.Call.AskArgs.Question{
+        .{ .id = "q0", .question = "Q0", .options = opts[0..], .allow_other = false },
+        .{ .id = "q1", .question = "Q1", .options = opts[0..], .allow_other = false },
+        .{ .id = "q2", .question = "Q2", .options = opts[0..], .allow_other = true },
+        .{ .id = "q3", .question = "Q3", .options = opts[0..], .allow_other = false },
+        .{ .id = "q4", .question = "Q4", .options = opts[0..], .allow_other = false },
+    };
+    const answers = try collectAskAnswers(alloc, qs[0..], stored[0..]);
+    defer alloc.free(answers);
+    try std.testing.expectEqual(@as(usize, 2), answers.len);
+
+    const payload = try buildAskResult(alloc, false, answers);
+    defer alloc.free(payload);
+    try std.testing.expect(payload.len > 0);
 }

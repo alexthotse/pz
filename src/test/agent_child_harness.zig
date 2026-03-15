@@ -11,6 +11,8 @@ const Mode = enum {
     invalid_hash,
     fd_report,
     pgid_report,
+    stdout_noise,
+    oversize,
 };
 
 pub fn main() !void {
@@ -19,16 +21,19 @@ pub fn main() !void {
 
     const alloc = arena.allocator();
     const argv = try std.process.argsAlloc(alloc);
-    if (argv.len != 4) return error.InvalidArgs;
+    if (argv.len != 5) return error.InvalidArgs;
 
     const mode = std.meta.stringToEnum(Mode, argv[1]) orelse return error.InvalidArgs;
     const agent_id = argv[2];
     const pol_hash = argv[3];
-    try agent.closeInheritedFds();
-    const stdout_file = std.fs.File.stdout();
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout = stdout_file.writerStreaming(&stdout_buf);
-    try writeHello(alloc, &stdout.interface, 1, agent_id, switch (mode) {
+    const rpc_fd = try std.fmt.parseInt(std.posix.fd_t, argv[4], 10);
+    try agent.closeInheritedFds(rpc_fd);
+
+    const rpc_file: std.fs.File = .{ .handle = rpc_fd };
+    var rpc_buf: [4096]u8 = undefined;
+    var rpc = rpc_file.writerStreaming(&rpc_buf);
+
+    try writeHello(alloc, &rpc.interface, 1, agent_id, switch (mode) {
         .mismatch => try mutateHashAlloc(alloc, pol_hash),
         .empty_hash => "",
         .invalid_hash => try invalidHashAlloc(alloc, pol_hash),
@@ -44,30 +49,71 @@ pub fn main() !void {
         switch (frame.msg) {
             .hello => {},
             .run => |run| {
-                const txt = switch (mode) {
-                    .echo => try std.fmt.allocPrint(alloc, "echo:{s}", .{run.prompt}),
-                    .fd_report => try listOpenFdsAlloc(alloc),
-                    .pgid_report => try pgidReportAlloc(alloc),
-                    else => unreachable,
-                };
-                try writeFrame(alloc, &stdout.interface, seq, .{
-                    .out = .{
-                        .id = run.id,
-                        .kind = .info,
-                        .text = txt,
+                switch (mode) {
+                    .stdout_noise => {
+                        // Write tool output to stdout (should not corrupt RPC).
+                        const stdout_file = std.fs.File.stdout();
+                        try stdout_file.writeAll("TOOL_OUTPUT_NOISE\n");
+                        try stdout_file.writeAll("{\"garbage\":true}\n");
+
+                        // RPC response goes through dedicated fd.
+                        const txt = try std.fmt.allocPrint(alloc, "rpc:{s}", .{run.prompt});
+                        try writeFrame(alloc, &rpc.interface, seq, .{
+                            .out = .{
+                                .id = run.id,
+                                .kind = .info,
+                                .text = txt,
+                            },
+                        });
+                        seq += 1;
+                        try writeFrame(alloc, &rpc.interface, seq, .{
+                            .done = .{
+                                .id = run.id,
+                                .stop = .done,
+                            },
+                        });
+                        seq += 1;
                     },
-                });
-                seq += 1;
-                try writeFrame(alloc, &stdout.interface, seq, .{
-                    .done = .{
-                        .id = run.id,
-                        .stop = .done,
+                    .oversize => {
+                        // Send an out frame with text > max_frame_len.
+                        const big = try alloc.alloc(u8, agent.max_frame_len + 1);
+                        @memset(big, 'X');
+                        try writeFrame(alloc, &rpc.interface, seq, .{
+                            .out = .{
+                                .id = run.id,
+                                .kind = .info,
+                                .text = big,
+                            },
+                        });
+                        seq += 1;
                     },
-                });
-                seq += 1;
+                    else => {
+                        const txt = switch (mode) {
+                            .echo => try std.fmt.allocPrint(alloc, "echo:{s}", .{run.prompt}),
+                            .fd_report => try listOpenFdsAlloc(alloc),
+                            .pgid_report => try pgidReportAlloc(alloc),
+                            else => unreachable,
+                        };
+                        try writeFrame(alloc, &rpc.interface, seq, .{
+                            .out = .{
+                                .id = run.id,
+                                .kind = .info,
+                                .text = txt,
+                            },
+                        });
+                        seq += 1;
+                        try writeFrame(alloc, &rpc.interface, seq, .{
+                            .done = .{
+                                .id = run.id,
+                                .stop = .done,
+                            },
+                        });
+                        seq += 1;
+                    },
+                }
             },
             .cancel => |cancel| {
-                try writeFrame(alloc, &stdout.interface, seq, .{
+                try writeFrame(alloc, &rpc.interface, seq, .{
                     .done = .{
                         .id = cancel.id,
                         .stop = .canceled,
@@ -82,12 +128,12 @@ pub fn main() !void {
 
 fn writeHello(
     alloc: std.mem.Allocator,
-    stdout: anytype,
+    rpc: anytype,
     seq: u32,
     agent_id: []const u8,
     pol_hash: []const u8,
 ) !void {
-    try writeFrame(alloc, stdout, seq, .{
+    try writeFrame(alloc, rpc, seq, .{
         .hello = .{
             .role = .child,
             .agent_id = agent_id,
@@ -96,15 +142,15 @@ fn writeHello(
     });
 }
 
-fn writeFrame(alloc: std.mem.Allocator, stdout: anytype, seq: u32, msg: agent.Msg) !void {
+fn writeFrame(alloc: std.mem.Allocator, rpc: anytype, seq: u32, msg: agent.Msg) !void {
     const raw = try agent.encodeLineAlloc(alloc, .{
         .protocol_version = agent.protocol_version,
         .seq = seq,
         .msg = msg,
     });
     defer alloc.free(raw);
-    try stdout.writeAll(raw);
-    try stdout.flush();
+    try rpc.writeAll(raw);
+    try rpc.flush();
 }
 
 fn readFrameAlloc(alloc: std.mem.Allocator, stdin: anytype) !?agent.Frame {

@@ -408,8 +408,8 @@ fn beginOAuthWithSpec(
     };
 }
 
-pub fn completeAnthropicOAuth(alloc: std.mem.Allocator, input: []const u8) !void {
-    return completeOAuth(alloc, .anthropic, input);
+pub fn completeAnthropicOAuth(alloc: std.mem.Allocator, input: []const u8, verifier: []const u8) !void {
+    return completeOAuth(alloc, .anthropic, input, verifier);
 }
 
 pub fn completeAnthropicOAuthFromLocalCallback(
@@ -422,8 +422,8 @@ pub fn completeAnthropicOAuthFromLocalCallback(
     return completeOAuthFromLocalCallback(alloc, .anthropic, callback, oauth_redirect_uri, expected_state, verifier);
 }
 
-pub fn completeOpenAICodexOAuth(alloc: std.mem.Allocator, input: []const u8) !void {
-    return completeOAuth(alloc, .openai, input);
+pub fn completeOpenAICodexOAuth(alloc: std.mem.Allocator, input: []const u8, verifier: []const u8) !void {
+    return completeOAuth(alloc, .openai, input, verifier);
 }
 
 pub fn completeOpenAICodexOAuthFromLocalCallback(
@@ -436,12 +436,13 @@ pub fn completeOpenAICodexOAuthFromLocalCallback(
     return completeOAuthFromLocalCallback(alloc, .openai, callback, oauth_redirect_uri, expected_state, verifier);
 }
 
-pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []const u8) !void {
-    return completeOAuthWithHooks(alloc, provider, input, .{});
+pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []const u8, verifier: []const u8) !void {
+    return completeOAuthWithHooks(alloc, provider, input, verifier, .{});
 }
 
-pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, input: []const u8, hooks: Hooks) !void {
+pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, input: []const u8, verifier: []const u8, hooks: Hooks) !void {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
+    if (verifier.len == 0) return error.MissingOAuthVerifier;
     try emitAuthAudit(alloc, hooks, 1, provider, "login", "oauth", .ok, .info, .{ .text = "oauth login start", .vis = .@"pub" });
 
     var parsed = try parseOAuthInput(alloc, input);
@@ -451,8 +452,8 @@ pub fn completeOAuthWithHooks(alloc: std.mem.Allocator, provider: Provider, inpu
     if (state.len == 0) return error.MissingOAuthState;
     const oauth_redirect_uri = parsed.redirect_uri orelse spec.default_redirect_uri;
 
-    // Manual completion path uses state as verifier (legacy code#state support).
-    const oauth = hooks.exchange_code(alloc, spec, parsed.code, state, oauth_redirect_uri, state, hooks) catch |err| {
+    // Verifier must be the separately-stored PKCE verifier, never derived from state.
+    const oauth = hooks.exchange_code(alloc, spec, parsed.code, state, oauth_redirect_uri, verifier, hooks) catch |err| {
         try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .fail, .err, .{ .text = @errorName(err), .vis = .mask });
         return err;
     };
@@ -1301,7 +1302,7 @@ test "auth audit covers oauth login and persistence" {
 
     var rows = AuditRows{};
     defer rows.deinit(std.testing.allocator);
-    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", .{
+    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "test-pkce-verifier", .{
         .home_override = home,
         .exchange_code = struct {
             fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Hooks) !OAuth {
@@ -1912,6 +1913,40 @@ test "completeOAuthFromLocalCallback rejects unsupported provider" {
     );
 }
 
+test "completeOAuthWithHooks rejects empty verifier" {
+    try std.testing.expectError(
+        error.MissingOAuthVerifier,
+        completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "", .{}),
+    );
+}
+
+test "completeOAuthWithHooks uses provided verifier not state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var got_verifier: []const u8 = "";
+    const Capture = struct {
+        var captured: []const u8 = "";
+        fn exchange(alloc: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, verifier: []const u8, _: Hooks) !OAuth {
+            captured = verifier;
+            return .{
+                .access = try alloc.dupe(u8, "a"),
+                .refresh = try alloc.dupe(u8, "r"),
+                .expires = 1,
+            };
+        }
+    };
+    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "my-pkce-verifier", .{
+        .home_override = home,
+        .exchange_code = Capture.exchange,
+    });
+    got_verifier = Capture.captured;
+    // The exchange must receive the explicit verifier, not the state from input.
+    try std.testing.expectEqualStrings("my-pkce-verifier", got_verifier);
+}
+
 test "separate OAuth state and PKCE verifier" {
     var flow = try beginAnthropicOAuth(std.testing.allocator);
     defer flow.deinit(std.testing.allocator);
@@ -1991,7 +2026,7 @@ test "completeOAuthWithHooks passes ca_file to exchange_code" {
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(home);
 
-    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", .{
+    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=abc&state=def", "test-pkce-verifier", .{
         .home_override = home,
         .ca_file = "/etc/pz/auth.pem",
         .exchange_code = struct {
@@ -2053,4 +2088,51 @@ test "initHttpClient fails closed on invalid ca bundle" {
     } else |err| {
         try std.testing.expectEqual(error.MissingEndCertificateMarker, err);
     }
+}
+
+test "P0-3 regression: listLoggedInHome deallocs cleanly with no providers" {
+    // Exercises the empty-result path: arena + ArrayList must not leak.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // No auth file present => empty result, but arena must still be freed.
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+
+    const result = try listLoggedInHome(alloc, home);
+    defer alloc.free(result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "P0-3 regression: listLoggedInHome deallocs cleanly with all providers" {
+    // Exercises the full-result path: arena for parsing + owned slice for output.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+
+    try saveApiKeyHome(alloc, home, .anthropic, "sk-a");
+    try saveApiKeyHome(alloc, home, .openai, "sk-o");
+    try saveApiKeyHome(alloc, home, .google, "sk-g");
+
+    const result = try listLoggedInHome(alloc, home);
+    defer alloc.free(result);
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+}
+
+test "P0-3 regression: listLoggedInHome deallocs cleanly on corrupt auth" {
+    // Exercises the error path: arena must be freed even when parse fails.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "{invalid json" });
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+
+    try std.testing.expectError(error.AuthCorrupt, listLoggedInHome(alloc, home));
 }

@@ -17,6 +17,7 @@ pub const State = struct {
     lines: u64 = 0,
     last_mac: ?Mac = null,
     last_key_id: ?u32 = null,
+    high_seq: u64 = 0,
 };
 
 pub const FailKind = enum {
@@ -24,6 +25,7 @@ pub const FailKind = enum {
     unknown_key,
     bad_prev,
     bad_mac,
+    replayed_seq,
 };
 
 pub const Fail = struct {
@@ -40,12 +42,63 @@ pub const Verify = union(enum) {
 const Line = struct {
     v: u16,
     kid: u32,
+    seq: ?u64 = null,
     prev: ?[]const u8 = null,
     mac: []const u8,
     body: []const u8,
 };
 
+/// Durable monotonic sequence tracker. Persists high-water mark to disk
+/// and rejects replayed (already-seen) sequence numbers.
+pub const SeqTracker = struct {
+    high: u64,
+    path: ?[]const u8,
+
+    pub fn init(path: ?[]const u8) SeqTracker {
+        var self = SeqTracker{ .high = 0, .path = path };
+        if (path) |p| {
+            const raw = std.fs.cwd().readFileAlloc(std.heap.page_allocator, p, 64) catch return self;
+            defer std.heap.page_allocator.free(raw);
+            self.high = std.fmt.parseInt(u64, std.mem.trim(u8, raw, " \t\r\n"), 10) catch 0;
+        }
+        return self;
+    }
+
+    /// Allocate the next sequence number, persist, and return it.
+    pub fn next(self: *SeqTracker) !u64 {
+        self.high += 1;
+        try self.persist();
+        return self.high;
+    }
+
+    /// Check if a seq is valid (strictly greater than high-water mark).
+    pub fn check(self: *const SeqTracker, seq: u64) bool {
+        return seq > self.high;
+    }
+
+    /// Advance high-water mark to seq and persist.
+    pub fn advance(self: *SeqTracker, seq: u64) !void {
+        if (seq > self.high) {
+            self.high = seq;
+            try self.persist();
+        }
+    }
+
+    fn persist(self: *const SeqTracker) !void {
+        const p = self.path orelse return;
+        var buf: [20]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{self.high}) catch return;
+        const file = std.fs.cwd().createFile(p, .{ .truncate = true }) catch return error.SeqPersistFailed;
+        defer file.close();
+        file.writeAll(s) catch return error.SeqPersistFailed;
+    }
+};
+
 pub fn sealAlloc(alloc: std.mem.Allocator, key: Key, prev: ?Mac, body: []const u8) ![]u8 {
+    return sealAllocSeq(alloc, key, prev, body, null);
+}
+
+pub fn sealAllocSeq(alloc: std.mem.Allocator, key: Key, prev: ?Mac, body: []const u8, seq: ?u64) ![]u8 {
     const mac = try calcMac(alloc, key, prev, body);
     var prev_hex_buf: [mac_len * 2]u8 = undefined;
     var mac_hex_buf: [mac_len * 2]u8 = undefined;
@@ -56,6 +109,10 @@ pub fn sealAlloc(alloc: std.mem.Allocator, key: Key, prev: ?Mac, body: []const u
 
     try w.writeAll("{\"v\":1,\"kid\":");
     try w.print("{d}", .{key.id});
+    if (seq) |s| {
+        try w.writeAll(",\"seq\":");
+        try w.print("{d}", .{s});
+    }
     try w.writeAll(",\"prev\":");
     if (prev) |tag| {
         try writeJsonStr(w, hexEncode(&prev_hex_buf, &tag));
@@ -100,6 +157,14 @@ pub fn verifyLogAlloc(alloc: std.mem.Allocator, raw: []const u8, keys: []const K
         const prev = if (doc.value.prev) |hex| parseTagHex(hex) catch {
             return .{ .fail = .{ .line = line_no, .kind = .malformed, .state = st } };
         } else null;
+
+        // Sequence number monotonicity check
+        if (doc.value.seq) |s| {
+            if (s <= st.high_seq) {
+                return .{ .fail = .{ .line = line_no, .kind = .replayed_seq, .state = st } };
+            }
+            st.high_seq = s;
+        }
 
         if (!sameTag(st.last_mac, prev)) {
             return .{ .fail = .{ .line = line_no, .kind = .bad_prev, .state = st } };
@@ -296,6 +361,50 @@ test "snapshot: verify stops at first tampered line" {
         \\[]u8
         \\  "line=2 kind=bad_mac lines=1 last=7efa0b75a5f823970f888c0f3dcf225f3a05c97670a99a97df13dcfa307c1f28 kid=7"
     ).expectEqual(got_snap);
+}
+
+test "seq tracker persists and rejects replayed seq" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/seq.hwm", .{dir});
+    defer testing.allocator.free(path);
+
+    var tracker = SeqTracker.init(path);
+    const s1 = try tracker.next();
+    try testing.expectEqual(@as(u64, 1), s1);
+    const s2 = try tracker.next();
+    try testing.expectEqual(@as(u64, 2), s2);
+    try testing.expect(!tracker.check(1));
+    try testing.expect(!tracker.check(2));
+    try testing.expect(tracker.check(3));
+
+    // Reload from disk
+    var tracker2 = SeqTracker.init(path);
+    try testing.expectEqual(@as(u64, 2), tracker2.high);
+    try testing.expect(!tracker2.check(2));
+    try testing.expect(tracker2.check(3));
+}
+
+test "verify rejects replayed sequence numbers" {
+    const key = Key{ .id = 1, .bytes = [_]u8{0x55} ** mac_len };
+
+    const l1 = try sealAllocSeq(testing.allocator, key, null, "{\"a\":1}", 5);
+    defer testing.allocator.free(l1);
+    const raw1 = try lineJoinAlloc(testing.allocator, &.{l1});
+    defer testing.allocator.free(raw1);
+    const r1 = (try verifyLogAlloc(testing.allocator, raw1, &.{key})).ok;
+
+    // Seal with seq=3 (less than 5) - should be rejected as replayed
+    const l2 = try sealAllocSeq(testing.allocator, key, r1.last_mac, "{\"a\":2}", 3);
+    defer testing.allocator.free(l2);
+    const raw2 = try lineJoinAlloc(testing.allocator, &.{ l1, l2 });
+    defer testing.allocator.free(raw2);
+    const got = try verifyLogAlloc(testing.allocator, raw2, &.{key});
+    try testing.expect(got == .fail);
+    try testing.expectEqual(FailKind.replayed_seq, got.fail.kind);
+    try testing.expectEqual(@as(u64, 2), got.fail.line);
 }
 
 test "crash recovery resumes from last good tag" {

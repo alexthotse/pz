@@ -4,9 +4,15 @@ const policy = @import("policy.zig");
 const prov_api = @import("providers/api.zig");
 const path_guard = @import("tools/path_guard.zig");
 
+/// Maximum total bytes for assembled AGENTS.md context.
+/// Files are included in discovery order; once the budget is exhausted,
+/// remaining files are truncated with a marker.
+pub const max_context_bytes: usize = 256 * 1024;
+
 /// Discover and load AGENTS.md context files.
 /// Searches global dir, then walks cwd upward to root.
 /// Returns concatenated content with section headers.
+/// Total output is capped at `max_context_bytes`; excess is truncated.
 pub fn load(alloc: std.mem.Allocator) !?[]u8 {
     if ((try loadPolicyLock(alloc)).context) return null;
 
@@ -41,25 +47,42 @@ pub fn load(alloc: std.mem.Allocator) !?[]u8 {
     return assembleParts(alloc, parts.items);
 }
 
+const truncation_marker = "\n\n[context truncated: budget exceeded]\n";
+
 fn assembleParts(alloc: std.mem.Allocator, parts: []const []u8) !?[]u8 {
+    return assemblePartsWithBudget(alloc, parts, max_context_bytes);
+}
+
+fn assemblePartsWithBudget(alloc: std.mem.Allocator, parts: []const []u8, budget: usize) !?[]u8 {
     if (parts.len == 0) return null;
 
-    var total: usize = 0;
-    for (parts) |p| total += p.len + 2; // \n\n separator
-    if (total >= 2) total -= 2; // no trailing separator
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(alloc);
 
-    const buf = try alloc.alloc(u8, total);
-    var off: usize = 0;
     for (parts, 0..) |p, i| {
-        if (i > 0) {
-            buf[off] = '\n';
-            buf[off + 1] = '\n';
-            off += 2;
+        const sep_len: usize = if (i > 0) 2 else 0;
+        const needed = sep_len + p.len;
+
+        if (buf.items.len + needed > budget) {
+            // Fit what we can, then truncate
+            const remaining = budget -| (buf.items.len + sep_len + truncation_marker.len);
+            if (sep_len > 0 and buf.items.len + sep_len <= budget) {
+                try buf.appendSlice(alloc, "\n\n");
+            }
+            if (remaining > 0 and remaining <= p.len) {
+                try buf.appendSlice(alloc, p[0..remaining]);
+            }
+            try buf.appendSlice(alloc, truncation_marker);
+            break;
         }
-        @memcpy(buf[off .. off + p.len], p);
-        off += p.len;
+
+        if (i > 0) {
+            try buf.appendSlice(alloc, "\n\n");
+        }
+        try buf.appendSlice(alloc, p);
     }
-    return buf;
+
+    return try buf.toOwnedSlice(alloc);
 }
 
 /// Returns list of discovered context file paths (for startup display).
@@ -188,6 +211,17 @@ test "assembleParts joins with newlines" {
 test "assembleParts empty returns null" {
     const result = try assembleParts(std.testing.allocator, &.{});
     try std.testing.expect(result == null);
+}
+
+test "assembleParts truncates when budget exceeded" {
+    const p1 = @constCast("aaaa");
+    const p2 = @constCast("bbbbbbbb");
+    const parts = [_][]u8{ p1, p2 };
+    // Budget of 10: "aaaa" (4) + "\n\n" (2) + "bbbbbbbb" (8) = 14 > 10
+    const result = (try assemblePartsWithBudget(std.testing.allocator, parts[0..], 10)).?;
+    defer std.testing.allocator.free(result);
+    try std.testing.expect(std.mem.startsWith(u8, result, "aaaa\n\n"));
+    try std.testing.expect(std.mem.endsWith(u8, result, "[context truncated: budget exceeded]\n"));
 }
 
 test "readFile wraps context content as untrusted input" {

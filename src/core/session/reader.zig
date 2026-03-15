@@ -612,3 +612,73 @@ test "jsonl replay property survives crap-and-mutate of valid rows" {
         .seed = 0x57e5_10c2,
     });
 }
+
+test "P0-1 regression: no UAF across multi-event compaction replay" {
+    // Exercises the arena-reset path in next(): each call deinits the previous
+    // arena before allocating a new one. A UAF would surface as a use of freed
+    // memory detected by std.testing.allocator (GeneralPurposeAllocator).
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const events = [_]Event{
+        textEvent(1, "alpha"),
+        textEvent(2, "bravo"),
+        textEvent(3, "charlie"),
+        textEvent(4, "delta"),
+        textEvent(5, "echo"),
+    };
+
+    {
+        const file = try tmp.dir.createFile("uaf.jsonl", .{});
+        defer file.close();
+        for (events) |ev| try encodeLine(file, ev);
+    }
+
+    var rdr = try ReplayReader.init(alloc, tmp.dir, "uaf", .{});
+    defer rdr.deinit();
+
+    // Read all events, encoding each before the arena is reset by the next
+    // next() call. If any string slice is a dangling pointer into the old
+    // arena, the GPA will catch it.
+    var count: usize = 0;
+    while (try rdr.next()) |ev| {
+        const raw = try schema.encodeAlloc(alloc, ev);
+        defer alloc.free(raw);
+        try std.testing.expect(raw.len > 0);
+        count += 1;
+    }
+    try std.testing.expectEqual(events.len, count);
+
+    // Also verify nextDup produces stable, independently-owned copies.
+    {
+        const file2 = try tmp.dir.createFile("uaf2.jsonl", .{});
+        defer file2.close();
+        for (events) |ev| try encodeLine(file2, ev);
+    }
+
+    var rdr2 = try ReplayReader.init(alloc, tmp.dir, "uaf2", .{});
+    defer rdr2.deinit();
+
+    var duped: [5]Event = undefined;
+    var n: usize = 0;
+    while (try rdr2.nextDup(alloc)) |ev| {
+        duped[n] = ev;
+        n += 1;
+    }
+    defer for (duped[0..n]) |ev| ev.free(alloc);
+    try std.testing.expectEqual(events.len, n);
+
+    // Verify duped events are still valid after reader is deinited.
+    rdr2.deinit();
+    rdr2 = try ReplayReader.init(alloc, tmp.dir, "uaf2", .{});
+    // ^ re-init so defer deinit is safe
+
+    for (duped[0..n], events[0..]) |got, want| {
+        const got_raw = try schema.encodeAlloc(alloc, got);
+        defer alloc.free(got_raw);
+        const want_raw = try schema.encodeAlloc(alloc, want);
+        defer alloc.free(want_raw);
+        try std.testing.expectEqualStrings(want_raw, got_raw);
+    }
+}

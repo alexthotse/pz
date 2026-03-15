@@ -1,6 +1,7 @@
 //! Print mode output formatting: JSON and text serialization.
 const std = @import("std");
 const core = @import("../../core.zig");
+const audit = core.audit;
 
 const ToolCallOut = struct {
     id: []const u8,
@@ -141,11 +142,13 @@ pub const Formatter = struct {
         self.text_ended_nl = text[text.len - 1] == '\n';
         const safe = try sanitizeOutput(self.alloc, text);
         defer if (safe.ptr != text.ptr) self.alloc.free(safe);
-        try self.out.writeAll(safe);
+        const redacted = try audit.redactTextAlloc(self.alloc, safe, .@"pub");
+        defer self.alloc.free(redacted);
+        try self.out.writeAll(redacted);
     }
 
     fn pushThinking(self: *Formatter, text: []const u8) !void {
-        const dup = try self.alloc.dupe(u8, text);
+        const dup = try audit.redactTextAlloc(self.alloc, text, .@"pub");
         errdefer self.alloc.free(dup);
         try self.thinking.append(self.alloc, dup);
     }
@@ -154,10 +157,10 @@ pub const Formatter = struct {
         const id = try self.alloc.dupe(u8, tc.id);
         errdefer self.alloc.free(id);
 
-        const name = try self.alloc.dupe(u8, tc.name);
+        const name = try audit.redactTextAlloc(self.alloc, tc.name, .@"pub");
         errdefer self.alloc.free(name);
 
-        const args = try self.alloc.dupe(u8, tc.args);
+        const args = try audit.redactTextAlloc(self.alloc, tc.args, .@"pub");
         errdefer self.alloc.free(args);
 
         try self.tool_calls.append(self.alloc, .{
@@ -171,7 +174,7 @@ pub const Formatter = struct {
         const id = try self.alloc.dupe(u8, tr.id);
         errdefer self.alloc.free(id);
 
-        const out = try self.alloc.dupe(u8, tr.output);
+        const out = try audit.redactTextAlloc(self.alloc, tr.output, .@"pub");
         errdefer self.alloc.free(out);
 
         try self.tool_results.append(self.alloc, .{
@@ -194,7 +197,7 @@ pub const Formatter = struct {
     }
 
     fn pushErr(self: *Formatter, text: []const u8) !void {
-        const dup = try self.alloc.dupe(u8, text);
+        const dup = try audit.redactTextAlloc(self.alloc, text, .@"pub");
         errdefer self.alloc.free(dup);
         try self.errs.append(self.alloc, dup);
     }
@@ -472,4 +475,38 @@ test "formatter sanitizes ANSI in text output" {
         .{ .text = "hi\x1b[31m red\x1b[0m" },
     };
     try expectFormatted(evs[0..], "hi red");
+}
+
+test "formatter redacts secrets in text output" {
+    var buf: [2048]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var formatter = Formatter.init(std.testing.allocator, fbs.writer().any());
+    defer formatter.deinit();
+
+    try formatter.push(.{ .text = "key: sk-live-abc123" });
+    try formatter.finish();
+
+    const written = fbs.getWritten();
+    // Must not contain the raw secret
+    try std.testing.expect(std.mem.indexOf(u8, written, "sk-live-abc123") == null);
+    // Must contain redaction tag
+    try std.testing.expect(std.mem.indexOf(u8, written, "[secret:") != null);
+}
+
+test "formatter redacts secrets in verbose tool output" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var formatter = Formatter.init(std.testing.allocator, fbs.writer().any());
+    formatter.verbose = true;
+    defer formatter.deinit();
+
+    try formatter.push(.{ .tool_call = .{ .id = "c1", .name = "bash", .args = "cat ~/.pz/auth.json" } });
+    try formatter.push(.{ .tool_result = .{ .id = "c1", .output = "authorization: bearer sk-test-key", .is_err = false } });
+    try formatter.finish();
+
+    const written = fbs.getWritten();
+    // Secret in tool result must be redacted
+    try std.testing.expect(std.mem.indexOf(u8, written, "sk-test-key") == null);
+    // Path in tool args must be redacted
+    try std.testing.expect(std.mem.indexOf(u8, written, "~/.pz/auth.json") == null);
 }

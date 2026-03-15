@@ -179,10 +179,10 @@ pub fn discoverAndRead(alloc: std.mem.Allocator) ![]SkillInfo {
     var seen = std.StringHashMap(usize).init(alloc);
     defer seen.deinit();
 
-    // Global: ~/.pi/agent/skills/*/SKILL.md
+    // Global: ~/.pz/skills/*/SKILL.md
     if (std.posix.getenv("HOME")) |home| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pi/agent/skills", .{home}) catch continue_label: {
+        const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pz/skills", .{home}) catch continue_label: {
             break :continue_label "";
         };
         if (skills_path.len > 0) {
@@ -190,13 +190,13 @@ pub fn discoverAndRead(alloc: std.mem.Allocator) ![]SkillInfo {
         }
     }
 
-    // Project: .pi/skills/*/SKILL.md relative to cwd
+    // Project: .pz/skills/*/SKILL.md relative to cwd
     {
         const cwd_path = std.fs.cwd().realpathAlloc(alloc, ".") catch null;
         defer if (cwd_path) |p| alloc.free(p);
         if (cwd_path) |cwd| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pi/skills", .{cwd}) catch "";
+            const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pz/skills", .{cwd}) catch "";
             if (skills_path.len > 0) {
                 try scanDir(alloc, &skills, &seen, skills_path, .project);
             }

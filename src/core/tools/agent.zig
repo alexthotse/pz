@@ -7,6 +7,7 @@ pub const Err = error{
     KindMismatch,
     InvalidArgs,
     OutOfMemory,
+    PolicyMismatch,
 };
 
 pub const Hook = struct {
@@ -41,6 +42,8 @@ pub const Opts = struct {
     max_bytes: usize,
     now_ms: i64 = 0,
     hook: ?Hook = null,
+    /// Parent's verified policy hash. Child must match or spawn fails.
+    policy_hash: ?[]const u8 = null,
 };
 
 pub const Handler = struct {
@@ -48,6 +51,7 @@ pub const Handler = struct {
     max_bytes: usize,
     now_ms: i64,
     hook: ?Hook,
+    policy_hash: ?[]const u8,
 
     pub fn init(opts: Opts) Handler {
         return .{
@@ -55,6 +59,7 @@ pub const Handler = struct {
             .max_bytes = opts.max_bytes,
             .now_ms = opts.now_ms,
             .hook = opts.hook,
+            .policy_hash = opts.policy_hash,
         };
     }
 
@@ -65,6 +70,11 @@ pub const Handler = struct {
         const args = call.args.agent;
         if (args.agent_id.len == 0) return error.InvalidArgs;
         if (args.prompt.len == 0) return error.InvalidArgs;
+
+        // Enforce authoritative policy inheritance: parent must have a
+        // verified policy hash, and the hook receives it for the child
+        // to validate during the hello handshake.
+        if (self.policy_hash == null) return error.PolicyMismatch;
 
         const hook = self.hook orelse return fail(call, .internal, "agent tool unavailable");
         const run_res = hook.run(args) catch |run_err| switch (run_err) {
@@ -237,6 +247,7 @@ test "agent handler renders info block and output" {
         .max_bytes = 1024,
         .now_ms = 44,
         .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
         .id = "agent-1",
@@ -299,6 +310,7 @@ test "agent handler truncates deterministically" {
         .max_bytes = 32,
         .now_ms = 45,
         .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
         .id = "agent-2",
@@ -358,6 +370,7 @@ test "agent handler maps rpc error to failed final" {
         .max_bytes = 1024,
         .now_ms = 46,
         .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
         .id = "agent-3",
@@ -396,4 +409,30 @@ test "agent handler maps rpc error to failed final" {
         \\child rejected prompt
         \\"
     ).expectEqual(snap);
+}
+
+test "agent handler rejects missing policy hash" {
+    const HookImpl = struct {
+        fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
+            return .{
+                .done = .{ .id = "req-4", .stop = .done },
+            };
+        }
+    };
+    var hook_impl = HookImpl{};
+    const h = Handler.init(.{
+        .alloc = std.testing.allocator,
+        .max_bytes = 1024,
+        .now_ms = 47,
+        .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .policy_hash = null,
+    });
+    const call: tools.Call = .{
+        .id = "agent-4",
+        .kind = .agent,
+        .args = .{ .agent = .{ .agent_id = "child", .prompt = "test" } },
+        .src = .model,
+        .at_ms = 47,
+    };
+    try std.testing.expectError(error.PolicyMismatch, h.run(call, noopSink()));
 }

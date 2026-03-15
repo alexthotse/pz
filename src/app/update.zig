@@ -19,7 +19,7 @@ const ReleasePayload = struct {
     assets: []ReleaseAsset = &.{},
 };
 
-const release_latest_url = "https://api.github.com/repos/joelreymont/pz/releases/latest";
+const default_release_url = "https://api.github.com/repos/joelreymont/pz/releases/latest";
 const release_accept = "application/vnd.github+json";
 const asset_accept = "application/octet-stream";
 const release_limit = 256 * 1024;
@@ -109,6 +109,7 @@ pub const AuditHooks = struct {
     check_update_allowed: *const fn (std.mem.Allocator) anyerror!void = checkUpdateAllowed,
     check_update_host: *const fn (std.mem.Allocator, []const u8) anyerror!void = checkUpdateHostAllowed,
     check_default_key: *const fn () bool = checkDefaultKeyRelease,
+    resolve_release_url: *const fn (std.mem.Allocator) anyerror![]const u8 = resolveReleaseUrl,
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
@@ -155,10 +156,15 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
         );
     };
 
-    if (try checkUpdateUrlOrAudit(alloc, hooks, release_latest_url, "metadata host denied")) |out| {
+    // Resolve release channel URL from policy or use default
+    const release_url = hooks.resolve_release_url(ar) catch default_release_url;
+    const release_url_is_alloc = !std.mem.eql(u8, @as([]const u8, release_url), default_release_url);
+    _ = release_url_is_alloc; // arena owns it
+
+    if (try checkUpdateUrlOrAudit(alloc, hooks, release_url, "metadata host denied")) |out| {
         return out;
     }
-    const release_http = hooks.http_get(alloc, release_latest_url, release_accept, release_limit) catch |err| {
+    const release_http = hooks.http_get(alloc, release_url, release_accept, release_limit) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
             alloc,
@@ -167,11 +173,11 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
             .fail,
             .err,
             .{ .text = "metadata fetch failed", .vis = .@"pub" },
-            .{ .text = release_latest_url, .vis = .mask },
+            .{ .text = release_url, .vis = .mask },
             try formatTransportFailure(
                 alloc,
                 "fetch latest release metadata",
-                release_latest_url,
+                release_url,
                 err,
             ),
         );
@@ -188,11 +194,11 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
                 .fail,
                 .err,
                 .{ .text = "metadata http failed", .vis = .@"pub" },
-                .{ .text = release_latest_url, .vis = .mask },
+                .{ .text = release_url, .vis = .mask },
                 try formatHttpFailure(
                     alloc,
                     "fetch latest release metadata",
-                    release_latest_url,
+                    release_url,
                     resp.code,
                     resp.body,
                 ),
@@ -486,6 +492,27 @@ fn emitUpdateAudit(
             },
         },
     });
+}
+
+/// Resolve release channel URL from policy, falling back to default GitHub URL.
+fn resolveReleaseUrl(alloc: std.mem.Allocator) ![]const u8 {
+    const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch return default_release_url;
+    defer alloc.free(cwd);
+    const home = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return resolveFromPolicy(alloc, cwd, null),
+        else => return default_release_url,
+    };
+    defer alloc.free(home);
+    return resolveFromPolicy(alloc, cwd, home);
+}
+
+fn resolveFromPolicy(alloc: std.mem.Allocator, cwd: []const u8, home: ?[]const u8) ![]const u8 {
+    const resolved = core.policy.loadResolved(alloc, cwd, home) catch return default_release_url;
+    defer core.policy.deinitResolved(alloc, resolved);
+    if (resolved.doc.release_url) |url| {
+        return alloc.dupe(u8, url);
+    }
+    return default_release_url;
 }
 
 fn checkUpdateAllowed(alloc: std.mem.Allocator) !void {
@@ -1280,7 +1307,7 @@ test "formatHttpFailure includes actionable fields" {
     const msg = try formatHttpFailure(
         std.testing.allocator,
         "fetch latest release metadata",
-        release_latest_url,
+        default_release_url,
         403,
         "{\"message\":\"API rate limit exceeded\"}",
     );
@@ -1452,13 +1479,13 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
         var tap = UpdateClientTap{};
 
         fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
-            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
         }
 
         fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
-            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+            const local_url = if (std.mem.eql(u8, url, default_release_url))
                 latest
             else if (std.mem.startsWith(u8, url, base))
                 url
@@ -1552,13 +1579,13 @@ test "update invalid runtime CA bundle fails before transport" {
         var latest: []const u8 = undefined;
 
         fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
-            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
         }
 
         fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
-            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+            const local_url = if (std.mem.eql(u8, url, default_release_url))
                 latest
             else if (std.mem.startsWith(u8, url, base))
                 url
@@ -1710,7 +1737,7 @@ test "update denies archive host before transport" {
         }.f,
         .http_get = struct {
             fn f(alloc: std.mem.Allocator, url: []const u8, _: []const u8, _: usize) !HttpResult {
-                if (!std.mem.eql(u8, url, release_latest_url)) return error.TestUnexpectedResult;
+                if (!std.mem.eql(u8, url, default_release_url)) return error.TestUnexpectedResult;
                 const asset_name = targetAssetName() orelse return error.TestUnexpectedResult;
                 const body = try std.fmt.allocPrint(
                     alloc,
@@ -1828,13 +1855,13 @@ test "update e2e verify fail stays local and audits deterministically" {
         }
 
         fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
-            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
         }
 
         fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
-            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+            const local_url = if (std.mem.eql(u8, url, default_release_url))
                 latest
             else if (std.mem.startsWith(u8, url, base))
                 url
@@ -1971,13 +1998,13 @@ test "update e2e verify success installs via local redirects and audits determin
         }
 
         fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
-            if (std.mem.eql(u8, url, release_latest_url)) return;
+            if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
         }
 
         fn httpGet(alloc: std.mem.Allocator, url: []const u8, accept: []const u8, limit: usize) !HttpResult {
-            const local_url = if (std.mem.eql(u8, url, release_latest_url))
+            const local_url = if (std.mem.eql(u8, url, default_release_url))
                 latest
             else if (std.mem.startsWith(u8, url, base))
                 url

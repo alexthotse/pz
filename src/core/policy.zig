@@ -13,6 +13,7 @@ pub const Effect = enum {
 
 /// Session persistence policy for headless modes (print/json).
 /// Headless modes default to `.off`; interactive modes (tui/rpc) to `.on`.
+/// Enterprise policy can force `.off` to disable all durable writes.
 pub const SessionPersist = enum {
     off,
     on,
@@ -26,6 +27,14 @@ pub const SessionPersist = enum {
             .print, .json => .off,
             .tui, .rpc => .on,
         };
+    }
+
+    /// Apply enterprise policy override. If enterprise policy disables
+    /// durable writes, returns `.off` regardless of the current value.
+    pub fn withEnterprise(self: SessionPersist, lock: Lock) SessionPersist {
+        // Enterprise config lock forces persistence off (no durable state).
+        if (lock.cfg) return .off;
+        return self;
     }
 };
 
@@ -328,12 +337,83 @@ pub const Doc = struct {
     rules: []const Rule,
     ca_file: ?[]const u8 = null,
     lock: Lock = .{},
+    /// Monotonically increasing — reject if lower than last-seen.
+    generation: u64 = 0,
+    /// Unix timestamp after which the policy is expired. null = no expiry.
+    not_after: ?i64 = null,
+    release_url: ?[]const u8 = null,
 };
 
 pub const SignedDoc = struct {
     doc: Doc,
     pk: signing.PublicKey,
     sig: signing.Signature,
+};
+
+/// Tracks last-seen policy generation for rollback detection.
+/// Stored in `.pz/policy-state.json`.
+pub const GenerationState = struct {
+    const state_rel = ".pz/policy-state.json";
+
+    pub fn load(alloc: std.mem.Allocator) !u64 {
+        const home = std.posix.getenv("HOME") orelse return error.NoHome;
+        const path = try std.fs.path.join(alloc, &.{ home, state_rel });
+        defer alloc.free(path);
+        const file = std.fs.openFileAbsolute(path, .{}) catch return 0;
+        defer file.close();
+        const raw = try file.readToEndAlloc(alloc, 4096);
+        defer alloc.free(raw);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return 0;
+        const gen_val = parsed.value.object.get("generation") orelse return 0;
+        return switch (gen_val) {
+            .integer => |i| if (i >= 0) @intCast(i) else 0,
+            else => 0,
+        };
+    }
+
+    pub fn store(alloc: std.mem.Allocator, gen: u64) !void {
+        const home = std.posix.getenv("HOME") orelse return error.NoHome;
+        const dir_path = try std.fs.path.join(alloc, &.{ home, ".pz" });
+        defer alloc.free(dir_path);
+        std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        const path = try std.fs.path.join(alloc, &.{ home, state_rel });
+        defer alloc.free(path);
+        var buf: [64]u8 = undefined;
+        const payload = std.fmt.bufPrint(&buf, "{{\"generation\":{d}}}", .{gen}) catch return error.InvalidPolicy;
+        const file = try std.fs.createFileAbsolute(path, .{});
+        defer file.close();
+        try file.writeAll(payload);
+    }
+
+    /// Load from an explicit path (for testing without HOME).
+    pub fn loadFrom(alloc: std.mem.Allocator, path: []const u8) !u64 {
+        const file = std.fs.openFileAbsolute(path, .{}) catch return 0;
+        defer file.close();
+        const raw = try file.readToEndAlloc(alloc, 4096);
+        defer alloc.free(raw);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return 0;
+        const gen_val = parsed.value.object.get("generation") orelse return 0;
+        return switch (gen_val) {
+            .integer => |i| if (i >= 0) @intCast(i) else 0,
+            else => 0,
+        };
+    }
+
+    /// Store to an explicit path (for testing without HOME).
+    pub fn storeTo(path: []const u8, gen: u64) !void {
+        var buf: [64]u8 = undefined;
+        const payload = std.fmt.bufPrint(&buf, "{{\"generation\":{d}}}", .{gen}) catch return error.InvalidPolicy;
+        const file = try std.fs.createFileAbsolute(path, .{});
+        defer file.close();
+        try file.writeAll(payload);
+    }
 };
 
 pub const Resolved = struct {
@@ -357,18 +437,43 @@ pub const VerifyError = error{
     SigMismatch,
     MissingSignature,
     OutOfMemory,
+    PolicyExpired,
+    GenerationRollback,
 };
 
 /// Verify a signed policy bundle against the build-time trusted public key.
+/// Checks expiry (not_after) and generation rollback against stored state.
 /// Returns the parsed SignedDoc on success; caller must deinitSignedDoc.
 pub fn verifySignedPolicy(alloc: std.mem.Allocator, raw: []const u8) VerifyError!SignedDoc {
-    return parseSignedDoc(alloc, raw) catch |err| switch (err) {
+    return verifySignedPolicyAt(alloc, raw, std.time.timestamp());
+}
+
+/// Like verifySignedPolicy but accepts an explicit wall-clock for testing.
+pub fn verifySignedPolicyAt(alloc: std.mem.Allocator, raw: []const u8, now: i64) VerifyError!SignedDoc {
+    const signed = parseSignedDoc(alloc, raw) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.MissingSignature => return error.MissingSignature,
         error.UntrustedSigner => return error.UntrustedSigner,
         error.SigMismatch => return error.SigMismatch,
         else => return error.InvalidPolicy,
     };
+    errdefer deinitSignedDoc(alloc, signed);
+
+    // Expiry check
+    if (signed.doc.not_after) |deadline| {
+        if (now > deadline) return error.PolicyExpired;
+    }
+
+    // Generation rollback check
+    const stored_gen = GenerationState.load(alloc) catch 0;
+    if (signed.doc.generation < stored_gen) return error.GenerationRollback;
+
+    // Persist new high-water mark
+    if (signed.doc.generation > stored_gen) {
+        GenerationState.store(alloc, signed.doc.generation) catch {};
+    }
+
+    return signed;
 }
 
 /// Parse a policy document from JSON.
@@ -379,6 +484,19 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
     const root = parsed.value;
 
     if (root != .object) return error.UnexpectedToken;
+
+    // Reject unknown top-level keys (fail-closed)
+    const known_top = std.StaticStringMap(void).initComptime(.{
+        .{ "version", {} },
+        .{ "rules", {} },
+        .{ "ca_file", {} },
+        .{ "lock", {} },
+        .{ "signature", {} },
+        .{ "release_url", {} },
+    });
+    for (root.object.keys()) |k| {
+        if (!known_top.has(k)) return error.UnknownPolicyKey;
+    }
 
     const ver: u16 = blk: {
         if (root.object.get("version")) |v| {
@@ -407,8 +525,22 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         }
     }
 
+    // Known rule keys
+    const known_rule = std.StaticStringMap(void).initComptime(.{
+        .{ "pattern", {} },
+        .{ "effect", {} },
+        .{ "tool", {} },
+        .{ "kind", {} },
+    });
+
     for (items, 0..) |item, i| {
         if (item != .object) return error.UnexpectedToken;
+
+        // Reject unknown rule keys
+        for (item.object.keys()) |k| {
+            if (!known_rule.has(k)) return error.UnknownPolicyKey;
+        }
+
         var rule = Rule{ .pattern = "", .effect = .allow };
 
         if (item.object.get("pattern")) |p| {
@@ -446,9 +578,23 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         ca_file = try alloc.dupe(u8, ca_val.string);
     }
 
+    // Known lock keys
+    const known_lock = std.StaticStringMap(void).initComptime(.{
+        .{ "config", {} },
+        .{ "env", {} },
+        .{ "cli", {} },
+        .{ "context", {} },
+        .{ "auth", {} },
+        .{ "system_prompt", {} },
+    });
+
     var lock = Lock{};
     if (root.object.get("lock")) |lock_val| {
         if (lock_val != .object) return error.UnexpectedToken;
+        // Reject unknown lock keys
+        for (lock_val.object.keys()) |k| {
+            if (!known_lock.has(k)) return error.UnknownPolicyKey;
+        }
         if (lock_val.object.get("config")) |v| {
             if (v != .bool) return error.UnexpectedToken;
             lock.cfg = v.bool;
@@ -475,7 +621,36 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         }
     }
 
-    return .{ .version = ver, .rules = rules, .ca_file = ca_file, .lock = lock };
+    var generation: u64 = 0;
+    if (root.object.get("generation")) |gen_val| {
+        switch (gen_val) {
+            .integer => |i| {
+                if (i < 0) return error.UnexpectedToken;
+                generation = @intCast(i);
+            },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    var not_after: ?i64 = null;
+    if (root.object.get("not_after")) |na_val| {
+        switch (na_val) {
+            .integer => |i| {
+                not_after = @intCast(i);
+            },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    // Extract optional release_url for enterprise channel
+    var release_url: ?[]u8 = null;
+    errdefer if (release_url) |v| alloc.free(v);
+    if (root.object.get("release_url")) |ru_val| {
+        if (ru_val != .string) return error.UnexpectedToken;
+        release_url = try alloc.dupe(u8, ru_val.string);
+    }
+
+    return .{ .version = ver, .rules = rules, .ca_file = ca_file, .lock = lock, .generation = generation, .not_after = not_after, .release_url = release_url };
 }
 
 pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
@@ -527,6 +702,10 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
         try w.writeAll(",\"ca_file\":");
         try writeJsonStr(w, ca_file);
     }
+    if (doc.release_url) |ru| {
+        try w.writeAll(",\"release_url\":");
+        try writeJsonStr(w, ru);
+    }
     if (doc.lock.cfg or doc.lock.env or doc.lock.cli or doc.lock.context or doc.lock.auth or doc.lock.system_prompt) {
         try w.writeAll(",\"lock\":{");
         var first = true;
@@ -559,6 +738,14 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
             try w.writeAll("\"system_prompt\":true");
         }
         try w.writeByte('}');
+    }
+    if (doc.generation != 0) {
+        try w.writeAll(",\"generation\":");
+        try w.print("{d}", .{doc.generation});
+    }
+    if (doc.not_after) |na| {
+        try w.writeAll(",\"not_after\":");
+        try w.print("{d}", .{na});
     }
     try w.writeAll(",\"rules\":[");
     for (doc.rules, 0..) |rule, i| {
@@ -642,6 +829,10 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
     var lock = Lock{};
     var ca_file: ?[]u8 = null;
     errdefer if (ca_file) |v| alloc.free(v);
+    var release_url: ?[]u8 = null;
+    errdefer if (release_url) |v| alloc.free(v);
+    var max_gen: u64 = 0;
+    var merged_na: ?i64 = null;
     for (docs[0..doc_n]) |maybe_doc| {
         const doc = maybe_doc.?;
         total_rules += doc.doc.rules.len;
@@ -649,6 +840,14 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
         if (doc.doc.ca_file) |v| {
             if (ca_file) |curr| alloc.free(curr);
             ca_file = try alloc.dupe(u8, v);
+        }
+        if (doc.doc.generation > max_gen) max_gen = doc.doc.generation;
+        if (doc.doc.not_after) |na| {
+            merged_na = if (merged_na) |cur| @min(cur, na) else na;
+        }
+        if (doc.doc.release_url) |v| {
+            if (release_url) |curr| alloc.free(curr);
+            release_url = try alloc.dupe(u8, v);
         }
     }
 
@@ -675,6 +874,9 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
         .rules = rules,
         .ca_file = ca_file,
         .lock = lock,
+        .generation = max_gen,
+        .not_after = merged_na,
+        .release_url = release_url,
     };
     errdefer deinitDoc(alloc, merged);
 
@@ -801,6 +1003,7 @@ pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {
         if (rule.kind) |k| alloc.free(k);
     }
     if (doc.ca_file) |v| alloc.free(v);
+    if (doc.release_url) |v| alloc.free(v);
     alloc.free(doc.rules);
 }
 
@@ -2087,6 +2290,18 @@ test "SessionPersist defaults off for headless modes" {
     try testing.expectEqual(SessionPersist.on, SessionPersist.forMode(Mode.rpc));
 }
 
+test "SessionPersist enterprise lock disables durable writes" {
+    const no_lock: Lock = .{};
+    const cfg_lock: Lock = .{ .cfg = true };
+    // Without enterprise lock, on stays on.
+    try testing.expectEqual(SessionPersist.on, SessionPersist.on.withEnterprise(no_lock));
+    // Enterprise cfg lock forces off.
+    try testing.expectEqual(SessionPersist.off, SessionPersist.on.withEnterprise(cfg_lock));
+    // Already off stays off regardless.
+    try testing.expectEqual(SessionPersist.off, SessionPersist.off.withEnterprise(no_lock));
+    try testing.expectEqual(SessionPersist.off, SessionPersist.off.withEnterprise(cfg_lock));
+}
+
 test "evaluateKind denied skill is blocked" {
     const rules = [_]Rule{
         .{ .pattern = "*", .effect = .deny, .kind = "skill" },
@@ -2122,6 +2337,29 @@ test "evaluateKind skill + tool combined filter" {
     try testing.expectEqual(Effect.allow, evaluateKind(&rules, "f.zig", "bash", null));
 }
 
+test "parseDoc rejects unknown top-level key" {
+    const json = "{\"version\":1,\"rules\":[],\"bogus\":true}";
+    try testing.expectError(error.UnknownPolicyKey, parseDoc(testing.allocator, json));
+}
+
+test "parseDoc rejects unknown rule key" {
+    const json = "{\"version\":1,\"rules\":[{\"pattern\":\"*\",\"effect\":\"allow\",\"nope\":1}]}";
+    try testing.expectError(error.UnknownPolicyKey, parseDoc(testing.allocator, json));
+}
+
+test "parseDoc rejects unknown lock key" {
+    const json = "{\"version\":1,\"rules\":[],\"lock\":{\"typo\":true}}";
+    try testing.expectError(error.UnknownPolicyKey, parseDoc(testing.allocator, json));
+}
+
+test "parseDoc accepts release_url" {
+    const json = "{\"version\":1,\"rules\":[],\"release_url\":\"https://releases.corp/pz/latest\"}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expect(doc.release_url != null);
+    try testing.expectEqualStrings("https://releases.corp/pz/latest", doc.release_url.?);
+}
+
 test "parseDoc with kind filter" {
     const json =
         \\{"version":1,"rules":[{"pattern":"*","effect":"deny","kind":"skill"}]}
@@ -2146,4 +2384,96 @@ test "encodeDoc roundtrips kind field" {
     try testing.expect(std.mem.eql(u8, "skill", parsed.rules[0].kind.?));
     try testing.expect(std.mem.eql(u8, "*.zig", parsed.rules[0].pattern));
     try testing.expectEqual(Effect.deny, parsed.rules[0].effect);
+}
+
+// ── Rollback resistance tests ──────────────────────────────────────────
+
+test "parseDoc roundtrips generation and not_after" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{ .rules = &rules, .generation = 42, .not_after = 1700000000 };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+    const parsed = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, parsed);
+    try testing.expectEqual(@as(u64, 42), parsed.generation);
+    try testing.expectEqual(@as(i64, 1700000000), parsed.not_after.?);
+}
+
+test "parseDoc defaults generation 0 and not_after null" {
+    const json = "{\"version\":1,\"rules\":[]}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(@as(u64, 0), doc.generation);
+    try testing.expect(doc.not_after == null);
+}
+
+test "expired policy rejected" {
+    const kp = try testKeyPair();
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{ .rules = &rules, .generation = 1, .not_after = 1000 };
+    const json = try encodeSignedDoc(testing.allocator, doc, kp);
+    defer testing.allocator.free(json);
+
+    // now=2000 > not_after=1000 → expired
+    try testing.expectError(error.PolicyExpired, verifySignedPolicyAt(testing.allocator, json, 2000));
+}
+
+test "fresh policy accepted before expiry" {
+    const kp = try testKeyPair();
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{ .rules = &rules, .generation = 0, .not_after = 5000 };
+    const json = try encodeSignedDoc(testing.allocator, doc, kp);
+    defer testing.allocator.free(json);
+
+    // now=3000 < not_after=5000 → accepted
+    const signed = try verifySignedPolicyAt(testing.allocator, json, 3000);
+    defer deinitSignedDoc(testing.allocator, signed);
+    try testing.expectEqual(@as(u64, 0), signed.doc.generation);
+    try testing.expectEqual(@as(i64, 5000), signed.doc.not_after.?);
+}
+
+test "generation rollback rejected via GenerationState" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Write a state file with generation=10
+    try tmp.dir.makePath(".pz");
+    try tmp.dir.writeFile(.{ .sub_path = ".pz/policy-state.json", .data = "{\"generation\":10}" });
+
+    const state_path = try tmp.dir.realpathAlloc(testing.allocator, ".pz/policy-state.json");
+    defer testing.allocator.free(state_path);
+
+    // Verify stored generation reads correctly
+    const gen = try GenerationState.loadFrom(testing.allocator, state_path);
+    try testing.expectEqual(@as(u64, 10), gen);
+
+    // Store a higher generation, verify it persists
+    try GenerationState.storeTo(state_path, 20);
+    const gen2 = try GenerationState.loadFrom(testing.allocator, state_path);
+    try testing.expectEqual(@as(u64, 20), gen2);
+}
+
+test "GenerationState loadFrom missing file returns 0" {
+    const gen = try GenerationState.loadFrom(testing.allocator, "/tmp/nonexistent-pz-policy-state.json");
+    try testing.expectEqual(@as(u64, 0), gen);
+}
+
+test "encodeDoc omits generation 0 and null not_after" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{ .rules = &rules };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+    // generation=0 should not appear in output
+    try testing.expect(std.mem.indexOf(u8, json, "generation") == null);
+    // not_after=null should not appear in output
+    try testing.expect(std.mem.indexOf(u8, json, "not_after") == null);
+}
+
+test "encodeDoc includes non-zero generation and non-null not_after" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{ .rules = &rules, .generation = 7, .not_after = 9999 };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"generation\":7") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"not_after\":9999") != null);
 }

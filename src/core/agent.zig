@@ -268,6 +268,9 @@ pub const Stub = struct {
     }
 };
 
+/// Maximum RPC frame size (1 MiB). Frames exceeding this are rejected.
+pub const max_frame_len: usize = 1 << 20;
+
 pub const ChildMode = enum {
     echo,
     mismatch,
@@ -275,6 +278,8 @@ pub const ChildMode = enum {
     invalid_hash,
     fd_report,
     pgid_report,
+    stdout_noise,
+    oversize,
 };
 
 pub const ChildProc = struct {
@@ -283,16 +288,25 @@ pub const ChildProc = struct {
     proc: std.process.Child,
     stdin_file: std.fs.File,
     stdout_file: std.fs.File,
+    rpc_file: std.fs.File,
     stdin_writer: std.fs.File.Writer,
-    stdout_reader: std.fs.File.Reader,
+    rpc_reader: std.fs.File.Reader,
     stub: Stub,
     in_buf: [4096]u8 = undefined,
-    out_buf: [4096]u8 = undefined,
+    rpc_buf: [4096]u8 = undefined,
+
+    /// Grace period before SIGTERM→SIGKILL escalation (ms).
+    pub const kill_grace_ms: u32 = 150;
+    /// Number of WNOHANG polls during grace period.
+    const kill_polls: u32 = 15;
+    /// Sleep between polls (ms).
+    const poll_sleep_ms: u64 = 10;
 
     pub const RunResult = struct {
         out: ?Out = null,
         done: ?Done = null,
         err: ?Err = null,
+        stdout: ?[]const u8 = null,
     };
 
     pub fn spawnHarness(
@@ -302,37 +316,61 @@ pub const ChildProc = struct {
         agent_id: []const u8,
         policy_hash: []const u8,
     ) !ChildProc {
-        if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .wasi) {
+        const builtin = @import("builtin");
+        const is_posix = builtin.os.tag != .windows and builtin.os.tag != .wasi;
+        if (is_posix) {
             try markOpenFdsCloexec();
         }
+
+        // Create dedicated RPC pipe: child writes to rpc_w, parent reads from rpc_r.
+        // rpc_r: CLOEXEC (parent-only), rpc_w: no CLOEXEC (inherited by child).
+        const rpc_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+        const rpc_r: std.posix.fd_t = rpc_pipe[0];
+        const rpc_w: std.posix.fd_t = rpc_pipe[1];
+        errdefer std.posix.close(rpc_r);
+        errdefer std.posix.close(rpc_w);
+
+        // Clear CLOEXEC on write end so child inherits it.
+        if (is_posix) {
+            try clearCloexec(rpc_w);
+        }
+
         var arena = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
+        const rpc_fd_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{rpc_w});
         const argv = [_][]const u8{
             harness_path,
             @tagName(mode),
             agent_id,
             policy_hash,
+            rpc_fd_str,
         };
         var proc = std.process.Child.init(argv[0..], alloc);
         proc.stdin_behavior = .Pipe;
         proc.stdout_behavior = .Pipe;
         proc.stderr_behavior = .Ignore;
-        if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .wasi) {
+        if (is_posix) {
             proc.pgid = 0;
         }
         try proc.spawn();
+
+        // Parent closes write end; only child uses it.
+        std.posix.close(rpc_w);
+
         const stdin_file = proc.stdin orelse return error.BrokenPipe;
         const stdout_file = proc.stdout orelse return error.BrokenPipe;
         proc.stdin = null;
         proc.stdout = null;
+        const rpc_file: std.fs.File = .{ .handle = rpc_r };
         var out: ChildProc = undefined;
         out.alloc = alloc;
         out.arena = arena;
         out.proc = proc;
         out.stdin_file = stdin_file;
         out.stdout_file = stdout_file;
+        out.rpc_file = rpc_file;
         out.stdin_writer = stdin_file.writerStreaming(&out.in_buf);
-        out.stdout_reader = stdout_file.readerStreaming(&out.out_buf);
+        out.rpc_reader = rpc_file.readerStreaming(&out.rpc_buf);
         out.stub = try Stub.init(agent_id, policy_hash);
         return out;
     }
@@ -340,12 +378,25 @@ pub const ChildProc = struct {
     pub fn deinit(self: *ChildProc) void {
         self.stdin_file.close();
         self.stdout_file.close();
-        std.posix.kill(self.proc.id, std.posix.SIG.TERM) catch |err| switch (err) {
-            error.ProcessNotFound => {},
-            else => {},
-        };
-        _ = self.proc.wait() catch {};
+        self.rpc_file.close();
+        killAndWait(&self.proc);
         self.arena.deinit();
+    }
+
+    /// Drain child stdout into arena-owned slice (tool output spool).
+    pub fn spoolStdout(self: *ChildProc) ![]const u8 {
+        const a = self.arena.allocator();
+        var list: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = self.stdout_file.read(&buf) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => return err,
+            };
+            if (n == 0) break;
+            try list.appendSlice(a, buf[0..n]);
+        }
+        return try list.toOwnedSlice(a);
     }
 
     pub fn connect(self: *ChildProc) !Hello {
@@ -397,12 +448,63 @@ pub const ChildProc = struct {
     }
 
     fn recv(self: *ChildProc) !Frame {
-        const line = try self.stdout_reader.interface.takeDelimiter('\n');
+        const line = try self.rpc_reader.interface.takeDelimiter('\n');
         const raw = line orelse return error.EndOfStream;
+        if (raw.len > max_frame_len) return error.FrameTooLarge;
         const parsed = try decodeSlice(self.arena.allocator(), raw);
         return parsed.value;
     }
 };
+
+/// SIGTERM the process group, poll for exit, escalate to SIGKILL.
+fn killAndWait(child: *std.process.Child) void {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+        _ = child.wait() catch {};
+        return;
+    }
+    const pid = child.id;
+    // TERM the process group.
+    std.posix.kill(-pid, std.posix.SIG.TERM) catch |err| switch (err) {
+        error.ProcessNotFound => {
+            _ = child.wait() catch {};
+            return;
+        },
+        else => {
+            _ = child.wait() catch {};
+            return;
+        },
+    };
+
+    // Poll with WNOHANG during grace period.
+    var polls: u32 = 0;
+    while (polls < ChildProc.kill_polls) : (polls += 1) {
+        const res = std.posix.waitpid(pid, std.c.W.NOHANG);
+        if (res.pid != 0) {
+            child.id = undefined;
+            return;
+        }
+        std.Thread.sleep(ChildProc.poll_sleep_ms * std.time.ns_per_ms);
+    }
+
+    // Escalate to SIGKILL on the process group.
+    std.posix.kill(-pid, std.posix.SIG.KILL) catch |err| switch (err) {
+        error.ProcessNotFound => {},
+        else => {},
+    };
+    _ = child.wait() catch {};
+}
+
+fn clearCloexec(fd: std.posix.fd_t) !void {
+    const flags_rc = std.posix.system.fcntl(fd, std.posix.F.GETFD, @as(c_int, 0));
+    switch (std.posix.errno(flags_rc)) {
+        .SUCCESS => {
+            const flags: c_int = @intCast(flags_rc);
+            _ = std.posix.system.fcntl(fd, std.posix.F.SETFD, flags & ~@as(c_int, std.posix.FD_CLOEXEC));
+        },
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
 
 fn markOpenFdsCloexec() !void {
     const lim = try std.posix.getrlimit(.NOFILE);
@@ -422,12 +524,16 @@ fn markOpenFdsCloexec() !void {
     }
 }
 
-pub fn closeInheritedFds() !void {
+/// Close inherited fds >= 3, optionally keeping one fd open.
+pub fn closeInheritedFds(keep_fd: ?std.posix.fd_t) !void {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
     const lim = try std.posix.getrlimit(.NOFILE);
     const max_fd: usize = @intCast(@min(lim.cur, 1024));
     var fd: usize = 3;
     while (fd < max_fd) : (fd += 1) {
+        if (keep_fd) |k| {
+            if (@as(usize, @intCast(k)) == fd) continue;
+        }
         switch (std.posix.errno(std.posix.system.close(@intCast(fd)))) {
             .SUCCESS, .BADF => {},
             else => |err| return std.posix.unexpectedErrno(err),
@@ -986,10 +1092,11 @@ test "spawned child accepts inherited policy hash" {
     });
 }
 
-test "spawned child inherits only stdio fds" {
+test "spawned child inherits only stdio and rpc fds" {
     const build_options = @import("build_options");
     const hash =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    // Open a leaked fd that should NOT survive into the child.
     const leak_fd = try std.posix.openZ("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
     defer std.posix.close(leak_fd);
 
@@ -1002,8 +1109,20 @@ test "spawned child inherits only stdio fds" {
         .prompt = "list fds",
     });
     const out = res.out orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("0,1,2", out.text);
-    try testing.expect(std.mem.indexOfScalar(u8, out.text, @as(u8, '3')) == null);
+    // Child should have: 0 (stdin), 1 (stdout), 2 (stderr/null), and the RPC write fd.
+    // The leaked fd must not appear.
+    var has_rpc = false;
+    var it = std.mem.tokenizeScalar(u8, out.text, ',');
+    while (it.next()) |tok| {
+        const fd_val = std.fmt.parseInt(i32, tok, 10) catch return error.TestUnexpectedResult;
+        if (fd_val != 0 and fd_val != 1 and fd_val != 2) {
+            // Must be the RPC fd, and only one extra.
+            if (has_rpc) return error.TestUnexpectedResult;
+            has_rpc = true;
+        }
+        if (fd_val == leak_fd) return error.TestUnexpectedResult;
+    }
+    try testing.expect(has_rpc);
 }
 
 test "spawned child runs in its own process group" {
@@ -1180,4 +1299,43 @@ test "property: decodeSlice survives crap-and-mutate hello frames" {
         .iterations = 500,
         .seed = 0xa93e_7104,
     });
+}
+
+test "tool stdout does not corrupt RPC channel" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .stdout_noise, "agent-child", hash);
+    defer child.deinit();
+
+    _ = try child.connect();
+    const res = try child.runReq(.{
+        .id = "job-noise",
+        .prompt = "make noise",
+    });
+    // RPC frames arrive intact despite stdout noise.
+    const out = res.out orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("rpc:make noise", out.text);
+    try testing.expect(res.done != null);
+
+    // Stdout contains the tool output noise, not RPC data.
+    const spool = try child.spoolStdout();
+    try testing.expect(spool.len > 0);
+    try testing.expect(std.mem.indexOf(u8, spool, "TOOL_OUTPUT_NOISE") != null);
+}
+
+test "oversized RPC frame is rejected" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .oversize, "agent-child", hash);
+    defer child.deinit();
+
+    _ = try child.connect();
+    // The child sends a frame larger than max_frame_len. Parent must reject.
+    const err = child.runReq(.{
+        .id = "job-big",
+        .prompt = "overflow",
+    });
+    try testing.expectError(error.FrameTooLarge, err);
 }

@@ -111,16 +111,34 @@ pub fn tryProactiveRefresh(
 
 // ── Retry loop ─────────────────────────────────────────────────────────
 
-/// Real sleeper: delegates to std.Thread.sleep.
-/// Checks cancel before and after sleep for bounded responsiveness.
+/// Interruptible sleeper using poll on a cancel pipe.
+/// When the cancel fd becomes readable, poll returns immediately,
+/// giving sub-millisecond cancel responsiveness vs bounded sleep.
 pub const RealSleeper = struct {
-    cancel: ?providers.CancelPoll = null,
+    cancel_fd: std.posix.fd_t = -1,
 
+    /// Poll the cancel pipe fd with the given timeout.
+    /// Returns immediately if the pipe becomes readable (canceled)
+    /// or after timeout_ms elapses (normal backoff).
+    /// Falls back to Thread.sleep when no cancel fd is set.
     pub fn sleep(self: *RealSleeper, ms: u64) void {
-        if (self.cancel) |c| if (c.isCanceled()) return;
-        std.Thread.sleep(ms * std.time.ns_per_ms);
-        // Post-sleep check intentionally omitted: caller checks cancel
-        // after wait returns. P10 replaces with pipe-based interrupt.
+        if (self.cancel_fd < 0) {
+            std.Thread.sleep(ms * std.time.ns_per_ms);
+            return;
+        }
+        var fds = [1]std.posix.pollfd{.{
+            .fd = self.cancel_fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const timeout: i32 = if (ms > std.math.maxInt(i32))
+            std.math.maxInt(i32)
+        else
+            @intCast(ms);
+        _ = std.posix.poll(&fds, timeout) catch {
+            // poll error — fall back to Thread.sleep
+            std.Thread.sleep(ms * std.time.ns_per_ms);
+        };
     }
 };
 

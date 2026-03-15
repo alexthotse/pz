@@ -21,13 +21,13 @@ pub const Env = struct {
 
     pub fn fromProcess(alloc: std.mem.Allocator) !Env {
         return .{
-            .model = dupEnvAlias(alloc, "PZ_MODEL", "PI_MODEL"),
-            .models = dupEnvAlias(alloc, "PZ_MODELS", "PI_MODELS"),
-            .provider = dupEnvAlias(alloc, "PZ_PROVIDER", "PI_PROVIDER"),
-            .session_dir = dupEnvAlias(alloc, "PZ_SESSION_DIR", "PI_SESSION_DIR"),
-            .mode = dupEnvAlias(alloc, "PZ_MODE", "PI_MODE"),
-            .theme = dupEnvAlias(alloc, "PZ_THEME", "PI_THEME"),
-            .provider_cmd = dupEnvAlias(alloc, "PZ_PROVIDER_CMD", "PI_PROVIDER_CMD"),
+            .model = dupEnv(alloc, "PZ_MODEL"),
+            .models = dupEnv(alloc, "PZ_MODELS"),
+            .provider = dupEnv(alloc, "PZ_PROVIDER"),
+            .session_dir = dupEnv(alloc, "PZ_SESSION_DIR"),
+            .mode = dupEnv(alloc, "PZ_MODE"),
+            .theme = dupEnv(alloc, "PZ_THEME"),
+            .provider_cmd = dupEnv(alloc, "PZ_PROVIDER_CMD"),
             .home = dupEnv(alloc, "HOME"),
         };
     }
@@ -353,7 +353,7 @@ fn loadFile(
 
     const parsed = try std.json.parseFromSlice(FileCfg, alloc, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
+        .ignore_unknown_fields = false,
     });
     return parsed;
 }
@@ -375,7 +375,7 @@ fn loadGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!?std.json
 
     const parsed = try std.json.parseFromSlice(SettingsCfg, alloc, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
+        .ignore_unknown_fields = false,
     });
     return parsed;
 }
@@ -518,11 +518,6 @@ fn replaceOptStr(
     const next = try alloc.dupe(u8, src);
     if (dst.*) |curr| alloc.free(curr);
     dst.* = next;
-}
-
-fn dupEnvAlias(alloc: std.mem.Allocator, primary: []const u8, fallback: []const u8) ?[]const u8 {
-    if (dupEnv(alloc, primary)) |v| return v;
-    return dupEnv(alloc, fallback);
 }
 
 fn dupEnv(alloc: std.mem.Allocator, key: []const u8) ?[]const u8 {

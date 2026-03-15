@@ -6,6 +6,7 @@ const build_options = @import("build_options");
 
 pub const version = build_options.version;
 pub const git_hash = build_options.git_hash;
+pub const build_id = build_options.build_id;
 pub const changelog = build_options.changelog;
 
 pub const ParseError = Args.ParseError || config.Err;

@@ -1516,3 +1516,50 @@ test "generateSummaryWithProvider returns provider error" {
         null,
     ));
 }
+
+test "P0-1 regression: compaction run has no leaks across multi-event stream" {
+    // Exercises the compaction read-encode-write loop with many events of
+    // varied types. std.testing.allocator (GPA) detects any leaks or UAF.
+    const writer = @import("writer.zig");
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var wr = try writer.Writer.init(alloc, tmp.dir, .{
+        .flush = .{ .always = {} },
+    });
+
+    // Write a mix of event types including noops that compaction strips.
+    const event_count = 20;
+    var i: usize = 0;
+    while (i < event_count) : (i += 1) {
+        const ms: i64 = @intCast(i + 1);
+        const ev: schema.Event = switch (i % 5) {
+            0 => .{ .at_ms = ms, .data = .{ .text = .{ .text = "text" } } },
+            1 => .{ .at_ms = ms, .data = .{ .noop = {} } },
+            2 => .{ .at_ms = ms, .data = .{ .prompt = .{ .text = "prompt" } } },
+            3 => .{ .at_ms = ms, .data = .{ .err = .{ .text = "oops" } } },
+            4 => .{ .at_ms = ms, .data = .{ .stop = .{ .reason = .done } } },
+            else => unreachable,
+        };
+        try wr.append("leak", ev);
+    }
+
+    const ck = try run(alloc, tmp.dir, "leak", 999);
+    // 20 events, 4 noops stripped => 16 output lines
+    try std.testing.expectEqual(@as(u64, event_count), ck.in_lines);
+    try std.testing.expectEqual(@as(u64, 16), ck.out_lines);
+
+    // Verify the compacted file is still readable without leaks.
+    var rdr = try reader.ReplayReader.init(alloc, tmp.dir, "leak", .{});
+    defer rdr.deinit();
+    var read_count: u64 = 0;
+    while (try rdr.next()) |ev| {
+        const raw = try schema.encodeAlloc(alloc, ev);
+        defer alloc.free(raw);
+        try std.testing.expect(raw.len > 0);
+        read_count += 1;
+    }
+    try std.testing.expectEqual(ck.out_lines, read_count);
+}
