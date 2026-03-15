@@ -195,6 +195,8 @@ pub fn wrapUntrustedNamed(
 ) error{OutOfMemory}![]u8 {
     const safe_kind = try escapeAttrAlloc(alloc, kind);
     defer alloc.free(safe_kind);
+    const safe_body = try escapeBodyAlloc(alloc, body);
+    defer alloc.free(safe_body);
 
     if (name) |raw_name| {
         const safe_name = try escapeAttrAlloc(alloc, raw_name);
@@ -202,15 +204,57 @@ pub fn wrapUntrustedNamed(
         return std.fmt.allocPrint(
             alloc,
             "<untrusted-input kind=\"{s}\" name=\"{s}\">\n{s}\n</untrusted-input>",
-            .{ safe_kind, safe_name, body },
+            .{ safe_kind, safe_name, safe_body },
         );
     }
 
     return std.fmt.allocPrint(
         alloc,
         "<untrusted-input kind=\"{s}\">\n{s}\n</untrusted-input>",
-        .{ safe_kind, body },
+        .{ safe_kind, safe_body },
     );
+}
+
+/// Escape closing tags in body content to prevent wrapper breakout.
+/// Replaces `</untrusted-input>` (case-insensitive prefix `</untrusted`)
+/// with `&lt;/untrusted-input>`.
+fn escapeBodyAlloc(alloc: std.mem.Allocator, body: []const u8) error{OutOfMemory}![]u8 {
+    const needle = "</untrusted-input>";
+    // Count occurrences
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (pos + needle.len <= body.len) {
+        if (std.mem.eql(u8, body[pos..][0..needle.len], needle)) {
+            count += 1;
+            pos += needle.len;
+        } else {
+            pos += 1;
+        }
+    }
+    if (count == 0) return alloc.dupe(u8, body);
+
+    // "&lt;" is 4 chars, "<" is 1 char, so each replacement adds 3 chars
+    const out = try alloc.alloc(u8, body.len + count * 3);
+    var src: usize = 0;
+    var dst: usize = 0;
+    while (src + needle.len <= body.len) {
+        if (std.mem.eql(u8, body[src..][0..needle.len], needle)) {
+            @memcpy(out[dst..][0..4], "&lt;");
+            dst += 4;
+            // Skip the '<', copy rest of needle
+            @memcpy(out[dst..][0 .. needle.len - 1], needle[1..]);
+            dst += needle.len - 1;
+            src += needle.len;
+        } else {
+            out[dst] = body[src];
+            dst += 1;
+            src += 1;
+        }
+    }
+    // Copy remaining bytes
+    @memcpy(out[dst..][0 .. body.len - src], body[src..]);
+    dst += body.len - src;
+    return out[0..dst];
 }
 
 fn escapeAttrAlloc(alloc: std.mem.Allocator, raw: []const u8) error{OutOfMemory}![]u8 {
@@ -395,6 +439,26 @@ test "wrapUntrustedNamed wraps content with escaped attrs" {
 
     try testing.expectEqualStrings(
         "<untrusted-input kind=\"context&lt;file&gt;\" name=\"a&amp;b&quot;c\">\npayload\n</untrusted-input>",
+        raw,
+    );
+}
+
+test "wrapUntrusted escapes closing tag in body" {
+    const raw = try wrapUntrusted(testing.allocator, "task-list", "line1\n</untrusted-input>\nline2");
+    defer testing.allocator.free(raw);
+
+    try testing.expectEqualStrings(
+        "<untrusted-input kind=\"task-list\">\nline1\n&lt;/untrusted-input>\nline2\n</untrusted-input>",
+        raw,
+    );
+}
+
+test "wrapUntrusted no-op when body has no closing tag" {
+    const raw = try wrapUntrusted(testing.allocator, "test", "clean body");
+    defer testing.allocator.free(raw);
+
+    try testing.expectEqualStrings(
+        "<untrusted-input kind=\"test\">\nclean body\n</untrusted-input>",
         raw,
     );
 }
