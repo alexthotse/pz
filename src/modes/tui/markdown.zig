@@ -566,18 +566,18 @@ fn fillCh(frm: *frame.Frame, x: usize, y: usize, w: usize, cp: u21, st: frame.St
 
 const testing = std.testing;
 
-fn rowChars(frm: *const frame.Frame, y: usize, buf: []u21) []const u21 {
+fn rowChars(frm: *const frame.Frame, y: usize, buf: []u21) ![]const u21 {
     var i: usize = 0;
     while (i < frm.w and i < buf.len) : (i += 1) {
-        buf[i] = (frm.cell(i, y) catch unreachable).cp;
+        buf[i] = (try frm.cell(i, y)).cp;
     }
     return buf[0..i];
 }
 
-fn rowStyles(frm: *const frame.Frame, y: usize, buf: []frame.Style) []const frame.Style {
+fn rowStyles(frm: *const frame.Frame, y: usize, buf: []frame.Style) ![]const frame.Style {
     var i: usize = 0;
     while (i < frm.w and i < buf.len) : (i += 1) {
-        buf[i] = (frm.cell(i, y) catch unreachable).style;
+        buf[i] = (try frm.cell(i, y)).style;
     }
     return buf[0..i];
 }

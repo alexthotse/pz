@@ -329,7 +329,7 @@ test "find handler truncates on high hit count instead of erroring" {
     var i: usize = 0;
     while (i < 20) : (i += 1) {
         var name: [12]u8 = undefined;
-        const n = std.fmt.bufPrint(&name, "d/f{d}.txt", .{i}) catch unreachable;
+        const n = try std.fmt.bufPrint(&name, "d/f{d}.txt", .{i});
         try tmp.dir.writeFile(.{ .sub_path = n, .data = "" });
     }
 

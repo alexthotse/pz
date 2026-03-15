@@ -30,7 +30,9 @@ pub const CwdGuard = struct {
     }
 
     pub fn deinit(self: *CwdGuard) void {
-        self.prev.setAsCwd() catch unreachable;
+        self.prev.setAsCwd() catch |err| {
+            std.log.warn("CwdGuard: failed to restore cwd: {}", .{err});
+        };
         self.prev.close();
         mu.unlock();
         self.* = undefined;

@@ -1200,7 +1200,7 @@ pub fn approvalSummaryAlloc(
         .edit => std.fmt.allocPrint(alloc, "edit {s}", .{parsed_args.edit.path}),
         .agent => std.fmt.allocPrint(alloc, "agent {s}", .{parsed_args.agent.agent_id}),
         .web => tools.web.approvalSummaryAlloc(alloc, parsed_args.web),
-        else => unreachable,
+        else => std.fmt.allocPrint(alloc, "[unknown tool]", .{}),
     };
 }
 

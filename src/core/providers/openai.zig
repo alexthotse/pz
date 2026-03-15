@@ -473,7 +473,7 @@ fn writeTextInput(alloc: std.mem.Allocator, js: *std.json.Stringify, role: []con
             try writeJsonLossy(alloc, js, text);
             try js.endObject();
         },
-        else => {},
+        else => return error.UnsupportedPartType,
     };
     try js.endArray();
     try js.endObject();
@@ -515,7 +515,7 @@ fn writeAssistantInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts:
             try writeJsonLossy(alloc, js, tc.args);
             try js.endObject();
         },
-        else => {},
+        else => return error.UnsupportedPartType,
     };
 }
 
@@ -531,7 +531,7 @@ fn writeToolInput(alloc: std.mem.Allocator, js: *std.json.Stringify, parts: []co
             try writeJsonLossy(alloc, js, tr.output);
             try js.endObject();
         },
-        else => {},
+        else => return error.UnsupportedPartType,
     };
 }
 
@@ -933,7 +933,7 @@ test "parseSseData property randomized tool lifecycle preserves args and tool st
         resetParserState(&stream);
 
         var id_buf: [24]u8 = undefined;
-        const call_id = std.fmt.bufPrint(&id_buf, "call-{d}", .{iter}) catch unreachable;
+        const call_id = try std.fmt.bufPrint(&id_buf, "call-{d}", .{iter});
 
         var head_buf: [16]u8 = undefined;
         const args_head = randSafeToken(rnd, &head_buf);
@@ -941,38 +941,38 @@ test "parseSseData property randomized tool lifecycle preserves args and tool st
         const args_tail = randSafeToken(rnd, &tail_buf);
 
         var full_buf: [64]u8 = undefined;
-        const args_full = std.fmt.bufPrint(&full_buf, "{s}{s}", .{ args_head, args_tail }) catch unreachable;
+        const args_full = try std.fmt.bufPrint(&full_buf, "{s}{s}", .{ args_head, args_tail });
 
         var ev_added_buf: [256]u8 = undefined;
-        const ev_added = std.fmt.bufPrint(
+        const ev_added = try std.fmt.bufPrint(
             &ev_added_buf,
             "{{\"type\":\"response.output_item.added\",\"item\":{{\"type\":\"function_call\",\"call_id\":\"{s}\",\"name\":\"bash\",\"arguments\":\"{s}\"}}}}",
             .{ call_id, args_head },
-        ) catch unreachable;
+        );
         try testing.expect((try testParse(&stream, ev_added)) == null);
 
         var ev_delta_buf: [192]u8 = undefined;
-        const ev_delta = std.fmt.bufPrint(
+        const ev_delta = try std.fmt.bufPrint(
             &ev_delta_buf,
             "{{\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{s}\"}}",
             .{args_tail},
-        ) catch unreachable;
+        );
         try testing.expect((try testParse(&stream, ev_delta)) == null);
 
         var ev_done_args_buf: [256]u8 = undefined;
-        const ev_done_args = std.fmt.bufPrint(
+        const ev_done_args = try std.fmt.bufPrint(
             &ev_done_args_buf,
             "{{\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{s}\"}}",
             .{args_full},
-        ) catch unreachable;
+        );
         try testing.expect((try testParse(&stream, ev_done_args)) == null);
 
         var ev_item_done_buf: [256]u8 = undefined;
-        const ev_item_done = std.fmt.bufPrint(
+        const ev_item_done = try std.fmt.bufPrint(
             &ev_item_done_buf,
             "{{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"function_call\",\"call_id\":\"{s}\",\"name\":\"bash\"}}}}",
             .{call_id},
-        ) catch unreachable;
+        );
         const tool_ev = (try testParse(&stream, ev_item_done)) orelse return error.TestUnexpectedResult;
         switch (tool_ev) {
             .tool_call => |tc| {

@@ -664,7 +664,9 @@ pub const Manager = struct {
                     self.journal.appendCleanup(job.id, "startup_reap") catch {};
                     continue;
                 },
-                else => {},
+                else => {
+                    std.log.warn("bg: TERM signal failed for pid {}: {}", .{ pid, err });
+                },
             };
 
             var reaped = false;
@@ -681,7 +683,9 @@ pub const Manager = struct {
             if (!reaped) {
                 std.posix.kill(pid, std.posix.SIG.KILL) catch |err| switch (err) {
                     error.ProcessNotFound => {},
-                    else => {},
+                    else => {
+                        std.log.warn("bg: KILL signal failed for pid {}: {}", .{ pid, err });
+                    },
                 };
                 // Final blocking reap after KILL.
                 _ = std.posix.waitpid(pid, 0);
@@ -701,7 +705,9 @@ pub const Manager = struct {
         var n: u32 = 0;
         while (n < 64) : (n += 1) {
             const ts = std.time.milliTimestamp();
-            const path = try std.fmt.allocPrint(self.alloc, "/tmp/pz-bg-{d}-{d}.log", .{
+            const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
+            const path = try std.fmt.allocPrint(self.alloc, "{s}/pz-bg-{d}-{d}.log", .{
+                tmp_dir,
                 id,
                 ts + @as(i64, n),
             });

@@ -31,6 +31,10 @@ pub fn detect() Protocol {
     return .none;
 }
 
+test "detect returns none in test environment" {
+    try std.testing.expectEqual(Protocol.none, detect());
+}
+
 /// Default image display height in terminal rows.
 pub const img_rows: usize = 8;
 

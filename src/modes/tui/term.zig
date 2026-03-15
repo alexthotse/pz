@@ -69,9 +69,7 @@ pub fn enableRaw(fd: std.posix.fd_t) bool {
 /// Restore original terminal attributes.
 pub fn restore(fd: std.posix.fd_t) void {
     if (saved_termios) |orig| {
-        std.posix.tcsetattr(fd, .FLUSH, orig) catch |err| {
-            std.debug.print("warning: terminal restore failed: {s}\n", .{@errorName(err)});
-        };
+        std.posix.tcsetattr(fd, .FLUSH, orig) catch {};
         saved_termios = null;
     }
 }

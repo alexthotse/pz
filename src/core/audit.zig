@@ -453,7 +453,9 @@ const Ring = struct {
         self.spool_seq += 1;
         const f = dir.createFile(name, .{ .truncate = true }) catch return;
         defer f.close();
-        f.writeAll(raw) catch {};
+        f.writeAll(raw) catch |err| {
+            std.log.warn("audit spool write failed: {}", .{err});
+        };
     }
 
     fn removeSpool(self: *Ring, slot_idx: usize) void {

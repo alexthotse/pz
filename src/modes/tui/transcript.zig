@@ -785,8 +785,7 @@ fn formatAskResultAlloc(alloc: std.mem.Allocator, out: []const u8) std.mem.Alloc
     const noun = if (parsed.value.answers.len == 1) "answer" else "answers";
     try std.fmt.format(buf.writer(alloc), "ask: {d} {s}\n", .{ parsed.value.answers.len, noun });
     for (parsed.value.answers, 0..) |ans, i| {
-        _ = ans.index;
-        try std.fmt.format(buf.writer(alloc), "  - {s}: {s}", .{ ans.id, ans.answer });
+        try std.fmt.format(buf.writer(alloc), "  [{d}] {s}: {s}", .{ ans.index, ans.id, ans.answer });
         if (i + 1 < parsed.value.answers.len) try buf.append(alloc, '\n');
     }
     return try buf.toOwnedSlice(alloc);

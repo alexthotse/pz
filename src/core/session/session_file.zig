@@ -34,14 +34,7 @@ pub const File = struct {
 
     pub fn deinit(self: *File) void {
         if (!self.closed) {
-            if (!builtin.is_test) {
-                std.debug.print("warning: session file not closed, deleting orphan: {s}\n", .{self.path});
-            }
-            self.dir.deleteFile(self.path) catch |err| {
-                if (!builtin.is_test) {
-                    std.debug.print("warning: orphan cleanup failed: {s}\n", .{@errorName(err)});
-                }
-            };
+            self.dir.deleteFile(self.path) catch {};
         }
         self.alloc.free(self.path);
         self.* = undefined;
@@ -65,9 +58,7 @@ pub fn cleanOrphanTmpFiles(dir: std.fs.Dir) void {
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.endsWith(u8, entry.name, ".compact.tmp")) {
-            dir.deleteFile(entry.name) catch |err| {
-                std.debug.print("warning: orphan tmp cleanup failed for {s}: {s}\n", .{ entry.name, @errorName(err) });
-            };
+            dir.deleteFile(entry.name) catch {};
         }
     }
 }

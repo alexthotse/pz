@@ -9,6 +9,7 @@ const providers = @import("../providers.zig");
 const prov_api = @import("../providers/api.zig");
 const summary_types = @import("summary.zig");
 const fs_secure = @import("../fs_secure.zig");
+const log = std.log.scoped(.compact);
 
 pub const checkpoint_version: u16 = 1;
 
@@ -300,10 +301,14 @@ fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?File
         mod_set.deinit(alloc);
     }
 
+    var skipped: usize = 0;
     for (events) |ev| {
         const tc = switch (ev.data) {
             .tool_call => |tc| tc,
-            else => continue,
+            else => {
+                skipped += 1;
+                continue;
+            },
         };
         const p = try extractPath(alloc, tc.args) orelse continue;
         if (isToolKind(tc.name, &write_tools)) {
@@ -323,6 +328,7 @@ fn extractFileOps(alloc: std.mem.Allocator, events: []const schema.Event) !?File
             alloc.free(p);
         }
     }
+    if (skipped > 0) log.debug("extractFileOps: skipped {d} non-tool_call events", .{skipped});
 
     if (read_set.count() == 0 and mod_set.count() == 0) return null;
 

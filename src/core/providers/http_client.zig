@@ -104,7 +104,9 @@ pub fn tryProactiveRefresh(
     if (auth.auth != .oauth) return;
     const now = std.time.milliTimestamp();
     if (now < auth.auth.oauth.expires) return;
-    refreshAuth(alloc, auth, tag, ca_file, ar) catch {};
+    refreshAuth(alloc, auth, tag, ca_file, ar) catch |err| {
+        std.log.warn("proactive oauth refresh failed: {}", .{err});
+    };
 }
 
 // ── Retry loop ─────────────────────────────────────────────────────────
@@ -192,7 +194,10 @@ pub fn retryLoop(
 
 pub fn drainResponse(stream: anytype, ar: std.mem.Allocator) void {
     const rdr = stream.response.reader(&stream.transfer_buf);
-    _ = rdr.allocRemaining(ar, .limited(16384)) catch {};
+    _ = rdr.allocRemaining(ar, .limited(16384)) catch |err| switch (err) {
+        error.OutOfMemory => std.log.warn("drain response OOM", .{}),
+        else => {},
+    };
 }
 
 // ── Error body handling ────────────────────────────────────────────────

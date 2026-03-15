@@ -19,6 +19,7 @@ pub fn cp(idx: u8) u21 {
 }
 
 pub fn utf8(idx: u8, buf: *[4]u8) []const u8 {
+    // All braille codepoints (U+2800..U+28FF) are valid UTF-8; encode cannot fail.
     const n = std.unicode.utf8Encode(cp(idx), buf) catch unreachable;
     return buf[0..n];
 }

@@ -578,7 +578,6 @@ const AskUiCtx = struct {
                 q.question;
 
             var ov = tui_overlay.Overlay.initDyn(
-                self.alloc,
                 rows.releaseItems(),
                 title,
                 .session,
@@ -2373,12 +2372,8 @@ fn runTui(
     try tui_render.Renderer.setTitle(out, cwd_path);
 
     defer {
-        tui_render.Renderer.setTitle(out, "") catch |err| {
-            std.debug.print("warning: title reset failed: {s}\n", .{@errorName(err)});
-        };
-        tui_render.Renderer.cleanup(out) catch |err| {
-            std.debug.print("warning: terminal cleanup failed: {s}\n", .{@errorName(err)});
-        };
+        tui_render.Renderer.setTitle(out, "") catch {};
+        tui_render.Renderer.cleanup(out) catch {};
     }
 
     var sink_impl = TuiSink{
@@ -2476,9 +2471,7 @@ fn runTui(
 
     // Set terminal title (OSC 0)
     try out.writeAll("\x1b]0;pz\x07");
-    defer out.writeAll("\x1b]0;\x07") catch |err| {
-        std.debug.print("warning: title clear failed: {s}\n", .{@errorName(err)});
-    };
+    defer out.writeAll("\x1b]0;\x07") catch {};
 
     try ui.draw(out);
     try maybeShowVersionUpdate(alloc, &ui, &ver_check, &ver_notice_done, out);
@@ -2543,7 +2536,7 @@ fn runTui(
             if (session_dir_path) |sdp| {
                 if (listUserMessages(alloc, sdp, sid.*)) |msgs| {
                     if (msgs.len > 0) {
-                        var ov = tui_overlay.Overlay.initDyn(alloc, msgs, "Fork from message", .session);
+                        var ov = tui_overlay.Overlay.initDyn(msgs, "Fork from message", .session);
                         ov.sel = msgs.len - 1;
                         ov.fixScroll();
                         ov.kind = .fork;
@@ -2910,7 +2903,7 @@ fn runTui(
                                 if (session_dir_path) |sdp| {
                                     if (listUserMessages(alloc, sdp, sid.*)) |msgs| {
                                         if (msgs.len > 0) {
-                                            var ov = tui_overlay.Overlay.initDyn(alloc, msgs, "Fork from message", .session);
+                                            var ov = tui_overlay.Overlay.initDyn(msgs, "Fork from message", .session);
                                             ov.sel = msgs.len - 1; // select last message
                                             ov.fixScroll();
                                             ov.kind = .fork;
@@ -4038,7 +4031,7 @@ fn runLoginFlow(
     const kind = classifyLoginInput(req.prov, req.key);
     const oauth_info = core.providers.auth.oauthLoginInfo(req.prov);
     if (kind == .oauth_start) {
-        const info = oauth_info orelse unreachable;
+        const info = oauth_info orelse return error.OAuthNotSupported;
         var listener = core.providers.oauth_callback.Listener.init(alloc, .{
             .path = info.callback_path,
         }) catch |err| {
@@ -4095,7 +4088,7 @@ fn runLoginFlow(
         return;
     }
     if (kind == .oauth_complete) {
-        const info = oauth_info orelse unreachable;
+        const info = oauth_info orelse return error.OAuthNotSupported;
         const oauth_name = core.providers.auth.providerName(req.prov);
         core.providers.auth.completeOAuthWithHooks(alloc, req.prov, req.key, hooks) catch |err| {
             const em = try report.cli(alloc, info.complete_action, err);
@@ -4120,7 +4113,7 @@ fn runRpcLogin(alloc: std.mem.Allocator, req: RpcReq, hooks: core.providers.auth
     const kind = classifyLoginInput(auth_req.prov, auth_req.key);
     const oauth_info = core.providers.auth.oauthLoginInfo(auth_req.prov);
     if (kind == .oauth_start) {
-        const info = oauth_info orelse unreachable;
+        const info = oauth_info orelse return error.OAuthNotSupported;
         var listener = try core.providers.oauth_callback.Listener.init(alloc, .{
             .path = info.callback_path,
         });
@@ -5903,7 +5896,7 @@ fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run) !?[]u8 {
 }
 
 const model_cycle = [_][]const u8{
-    "claude-opus-4-6",
+    default_model,
     "claude-sonnet-4-5",
     "claude-haiku-4-5-20251001",
 };
@@ -6555,7 +6548,7 @@ fn showLogoutOverlay(alloc: std.mem.Allocator, ui: *tui_harness.Ui, providers: [
     for (providers, 0..) |p, i| {
         names[i] = try alloc.dupe(u8, core.providers.auth.providerName(p));
     }
-    ui.ov = tui_overlay.Overlay.initDyn(alloc, names, "Logout", .logout);
+    ui.ov = tui_overlay.Overlay.initDyn(names, "Logout", .logout);
     return true;
 }
 
@@ -6596,7 +6589,7 @@ fn showQueueOverlay(
         filled = idx + 1;
     }
 
-    var ov = tui_overlay.Overlay.initDyn(alloc, items, "Queued Messages", .queue);
+    var ov = tui_overlay.Overlay.initDyn(items, "Queued Messages", .queue);
     ov.hint = "Up/Down select, Enter edit, Esc close";
     ui.ov = ov;
     return true;
@@ -6783,9 +6776,7 @@ fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
     var tmp_buf: [64]u8 = undefined;
     const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
     const tmp = try std.fmt.bufPrint(&tmp_buf, "/tmp/pz-edit-{d}.txt", .{ts});
-    defer std.fs.deleteFileAbsolute(tmp) catch |err| {
-        std.debug.print("warning: temp file cleanup failed: {s}\n", .{@errorName(err)});
-    };
+    defer std.fs.deleteFileAbsolute(tmp) catch {};
     {
         const f = try std.fs.createFileAbsolute(tmp, .{});
         defer f.close();
@@ -6842,11 +6833,17 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
         return;
     }
 
-    // Save clipboard image to temp file
-    const save_argv = [_][]const u8{
-        "osascript",                                                                                                                                                              "-e",
-        "set imgData to the clipboard as «class PNGf»\nset fp to open for access POSIX file \"/tmp/pz-paste.png\" with write permission\nwrite imgData to fp\nclose access fp",
-    };
+    // Save clipboard image to unique temp file
+    const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
+    var tmp_buf: [128]u8 = undefined;
+    const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}/pz-paste-{d}.png", .{ tmp_dir, ts });
+    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+
+    const script = try std.fmt.allocPrint(alloc, "set imgData to the clipboard as «class PNGf»\nset fp to open for access POSIX file \"{s}\" with write permission\nwrite imgData to fp\nclose access fp", .{tmp_path});
+    defer alloc.free(script);
+
+    const save_argv = [_][]const u8{ "osascript", "-e", script };
     const save_result = std.process.Child.run(.{
         .allocator = alloc,
         .argv = save_argv[0..],
@@ -6858,8 +6855,10 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     defer alloc.free(save_result.stdout);
     defer alloc.free(save_result.stderr);
 
-    ui.tr.imageBlock("/tmp/pz-paste.png") catch |err| {
-        ui.tr.infoText("[pasted image: /tmp/pz-paste.png]") catch return err;
+    ui.tr.imageBlock(tmp_path) catch |err| {
+        const msg = try std.fmt.allocPrint(alloc, "[pasted image: {s}]", .{tmp_path});
+        defer alloc.free(msg);
+        ui.tr.infoText(msg) catch return err;
     };
 }
 

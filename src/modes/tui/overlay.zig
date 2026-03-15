@@ -37,8 +37,7 @@ pub const Overlay = struct {
         return .{ .items = items, .sel = if (items.len > 0) @min(cur, items.len - 1) else 0 };
     }
 
-    pub fn initDyn(alloc: std.mem.Allocator, dyn: [][]u8, title: []const u8, kind: Kind) Overlay {
-        _ = alloc;
+    pub fn initDyn(dyn: [][]u8, title: []const u8, kind: Kind) Overlay {
         return .{
             .items = &.{},
             .dyn_items = dyn,

@@ -24,15 +24,21 @@ pub const ThinkingLevel = enum {
     xhigh,
     adaptive,
 
+    const budget_minimal: u32 = 1024;
+    const budget_low: u32 = 4096;
+    const budget_medium: u32 = 10240;
+    const budget_high: u32 = 32768;
+    const budget_xhigh: u32 = 65536;
+
     pub fn toProviderOpts(self: ThinkingLevel) core.providers.Opts {
         return switch (self) {
             .off => .{ .thinking = .off },
             .adaptive => .{ .thinking = .adaptive },
-            .minimal => .{ .thinking = .budget, .thinking_budget = 1024 },
-            .low => .{ .thinking = .budget, .thinking_budget = 4096 },
-            .medium => .{ .thinking = .budget, .thinking_budget = 10240 },
-            .high => .{ .thinking = .budget, .thinking_budget = 32768 },
-            .xhigh => .{ .thinking = .budget, .thinking_budget = 65536 },
+            .minimal => .{ .thinking = .budget, .thinking_budget = budget_minimal },
+            .low => .{ .thinking = .budget, .thinking_budget = budget_low },
+            .medium => .{ .thinking = .budget, .thinking_budget = budget_medium },
+            .high => .{ .thinking = .budget, .thinking_budget = budget_high },
+            .xhigh => .{ .thinking = .budget, .thinking_budget = budget_xhigh },
         };
     }
 };

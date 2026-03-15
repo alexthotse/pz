@@ -522,14 +522,18 @@ pub const Panels = struct {
 /// Cache read: opus=$1.50, sonnet=$0.30, haiku=$0.08. Cache write: opus=$18.75, sonnet=$3.75, haiku=$1.00.
 /// Returns micents to add to cumulative total.
 fn calcCost(model: []const u8, u: core.providers.Usage) u64 {
-    // Detect model tier from name substring
+    // Detect model tier from name substring.
+    // Rates in micents per million tokens (1 micent = 1/100000 $).
     const Rates = struct { in: u64, out: u64, cr: u64, cw: u64 };
-    const rates: Rates = if (std.mem.indexOf(u8, model, "opus") != null)
-        .{ .in = 1500, .out = 7500, .cr = 150, .cw = 1875 }
+    const opus: Rates = .{ .in = 1500, .out = 7500, .cr = 150, .cw = 1875 };
+    const haiku: Rates = .{ .in = 80, .out = 400, .cr = 8, .cw = 100 };
+    const sonnet: Rates = .{ .in = 300, .out = 1500, .cr = 30, .cw = 375 };
+    const rates = if (std.mem.indexOf(u8, model, "opus") != null)
+        opus
     else if (std.mem.indexOf(u8, model, "haiku") != null)
-        .{ .in = 80, .out = 400, .cr = 8, .cw = 100 }
-    else // sonnet or unknown → sonnet rates
-        .{ .in = 300, .out = 1500, .cr = 30, .cw = 375 };
+        haiku
+    else
+        sonnet;
 
     // rates in cents/MTok. micents = tokens * cents / MTok * (100000/100) = tokens * rate / 1000
     // Use saturating math to prevent overflow on extreme token counts

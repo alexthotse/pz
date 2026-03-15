@@ -460,7 +460,7 @@ fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const 
                     }
                     try js.endObject();
                 },
-                else => {},
+                else => return error.UnsupportedPartType,
             }
         }
     }
@@ -477,7 +477,7 @@ fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []cons
         if (msg.role == .system) continue; // handled by writeSystem
 
         const role: []const u8 = switch (msg.role) {
-            .system => unreachable,
+            .system => return error.UnsupportedRole,
             .user => "user",
             .assistant => "assistant",
             .tool => "user",
@@ -773,7 +773,7 @@ test "parseSseData property randomized tool_use lifecycle preserves args and too
         resetParserState(&stream);
 
         var id_buf: [24]u8 = undefined;
-        const call_id = std.fmt.bufPrint(&id_buf, "tool-{d}", .{iter}) catch unreachable;
+        const call_id = try std.fmt.bufPrint(&id_buf, "tool-{d}", .{iter});
 
         var head_buf: [16]u8 = undefined;
         const args_head = randSafeToken(rnd, &head_buf);
@@ -781,30 +781,30 @@ test "parseSseData property randomized tool_use lifecycle preserves args and too
         const args_tail = randSafeToken(rnd, &tail_buf);
 
         var full_buf: [64]u8 = undefined;
-        const args_full = std.fmt.bufPrint(&full_buf, "{s}{s}", .{ args_head, args_tail }) catch unreachable;
+        const args_full = try std.fmt.bufPrint(&full_buf, "{s}{s}", .{ args_head, args_tail });
 
         var ev_start_buf: [256]u8 = undefined;
-        const ev_start = std.fmt.bufPrint(
+        const ev_start = try std.fmt.bufPrint(
             &ev_start_buf,
             "{{\"type\":\"content_block_start\",\"content_block\":{{\"type\":\"tool_use\",\"id\":\"{s}\",\"name\":\"bash\"}}}}",
             .{call_id},
-        ) catch unreachable;
+        );
         try testing.expect((try testParse(&stream, ev_start)) == null);
 
         var ev_head_buf: [256]u8 = undefined;
-        const ev_head = std.fmt.bufPrint(
+        const ev_head = try std.fmt.bufPrint(
             &ev_head_buf,
             "{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{s}\"}}}}",
             .{args_head},
-        ) catch unreachable;
+        );
         try testing.expect((try testParse(&stream, ev_head)) == null);
 
         var ev_tail_buf: [256]u8 = undefined;
-        const ev_tail = std.fmt.bufPrint(
+        const ev_tail = try std.fmt.bufPrint(
             &ev_tail_buf,
             "{{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{s}\"}}}}",
             .{args_tail},
-        ) catch unreachable;
+        );
         try testing.expect((try testParse(&stream, ev_tail)) == null);
 
         const tool_ev = (try testParse(&stream, "{\"type\":\"content_block_stop\"}")) orelse return error.TestUnexpectedResult;

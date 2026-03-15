@@ -630,7 +630,7 @@ fn httpGetResultWith(
         }
         return res;
     }
-    unreachable;
+    return error.AllModesExhausted;
 }
 
 fn httpGetResultOnce(
@@ -1406,7 +1406,7 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
 
-    const asset_name = targetAssetName() orelse unreachable;
+    const asset_name = targetAssetName() orelse return error.UnsupportedPlatform;
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
@@ -1775,7 +1775,7 @@ test "update e2e verify fail stays local and audits deterministically" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    const asset_name = targetAssetName() orelse unreachable;
+    const asset_name = targetAssetName() orelse return error.UnsupportedPlatform;
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
@@ -1909,7 +1909,7 @@ test "update e2e verify success installs via local redirects and audits determin
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    const asset_name = targetAssetName() orelse unreachable;
+    const asset_name = targetAssetName() orelse return error.UnsupportedPlatform;
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };

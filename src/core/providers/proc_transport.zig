@@ -79,9 +79,7 @@ pub const ProcChunk = struct {
 
         child.spawn() catch |spawn_err| return mapProcErr(spawn_err);
         errdefer {
-            killAndWait(&child) catch |err| {
-                std.debug.print("warning: child cleanup failed: {s}\n", .{@errorName(err)});
-            };
+            killAndWait(&child) catch {};
         }
 
         var stdin = child.stdin orelse return error.Closed;
