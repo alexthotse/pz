@@ -834,3 +834,506 @@ test "T7d subagent progress indicator in footer" {
     }
     try std.testing.expect(found_bg);
 }
+
+// ── UX4: Overlay walkthrough tests ──
+
+test "UX4 model-select overlay open, navigate, select, close" {
+    const ov_mod = @import("overlay.zig");
+    var ui = try Ui.init(std.testing.allocator, 50, 14, "claude", "anthropic");
+    defer ui.deinit();
+
+    // Open model-select overlay
+    const models = [_][]const u8{ "claude-opus-4-6", "claude-sonnet-4", "gpt-4o" };
+    ui.ov = ov_mod.Overlay.init(&models, 0);
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 14);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Overlay renders — find "Select Model" title
+    var found_title = false;
+    var r: usize = 0;
+    while (r < 14) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "Select Model") != null) {
+            found_title = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_title);
+
+    // Initial selection is item 0
+    try std.testing.expectEqual(@as(usize, 0), ui.ov.?.sel);
+    try std.testing.expect(std.mem.eql(u8, ui.ov.?.selected().?, "claude-opus-4-6"));
+
+    // Navigate down twice
+    ui.ov.?.down();
+    try std.testing.expectEqual(@as(usize, 1), ui.ov.?.sel);
+    ui.ov.?.down();
+    try std.testing.expectEqual(@as(usize, 2), ui.ov.?.sel);
+    try std.testing.expect(std.mem.eql(u8, ui.ov.?.selected().?, "gpt-4o"));
+
+    // Navigate up wraps to last
+    ui.ov.?.down(); // wraps to 0
+    try std.testing.expectEqual(@as(usize, 0), ui.ov.?.sel);
+    ui.ov.?.up(); // wraps to 2
+    try std.testing.expectEqual(@as(usize, 2), ui.ov.?.sel);
+
+    // Re-render with new selection — should show > on selected item
+    try renderToVs(&ui, &vs);
+    var found_sel = false;
+    r = 0;
+    while (r < 14) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, ">") != null and
+            std.mem.indexOf(u8, row, "gpt-4o") != null)
+        {
+            found_sel = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_sel);
+
+    // Close overlay (esc)
+    ui.ov.?.deinit(std.testing.allocator);
+    ui.ov = null;
+    try std.testing.expect(ui.ov == null);
+
+    // Renders cleanly without overlay
+    try renderToVs(&ui, &vs);
+}
+
+test "UX4 settings overlay open, toggle, close" {
+    var ui = try Ui.init(std.testing.allocator, 50, 14, "m", "p");
+    defer ui.deinit();
+
+    // Open settings overlay with heap-allocated toggles
+    const labels = [_][]const u8{ "Show tools", "Show thinking", "Auto-compact" };
+    const toggles = try std.testing.allocator.alloc(bool, 3);
+    toggles[0] = true;
+    toggles[1] = true;
+    toggles[2] = false;
+    ui.ov = .{
+        .items = &labels,
+        .title = "Settings",
+        .kind = .settings,
+        .toggles = toggles,
+    };
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 14);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Settings title visible
+    var found_title = false;
+    var r: usize = 0;
+    while (r < 14) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "Settings") != null) {
+            found_title = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_title);
+
+    // Toggle "Show tools" off (sel=0)
+    try std.testing.expect(ui.ov.?.getToggle(0).? == true);
+    ui.ov.?.toggle();
+    try std.testing.expect(ui.ov.?.getToggle(0).? == false);
+
+    // Navigate to "Auto-compact" and toggle on
+    ui.ov.?.down(); // sel=1
+    ui.ov.?.down(); // sel=2
+    try std.testing.expectEqual(@as(usize, 2), ui.ov.?.sel);
+    try std.testing.expect(ui.ov.?.getToggle(2).? == false);
+    ui.ov.?.toggle();
+    try std.testing.expect(ui.ov.?.getToggle(2).? == true);
+
+    // Re-render after toggles
+    try renderToVs(&ui, &vs);
+
+    // Close overlay (esc) — overlay cleaned up by deinit
+    ui.ov.?.deinit(std.testing.allocator);
+    ui.ov = null;
+    try std.testing.expect(ui.ov == null);
+
+    // Renders cleanly
+    try renderToVs(&ui, &vs);
+}
+
+// ── UX5: Settings persistence walkthrough tests ──
+
+test "UX5 show_tools toggle hides tool output in subsequent renders" {
+    var ui = try Ui.init(std.testing.allocator, 50, 12, "m", "p");
+    defer ui.deinit();
+
+    // Add text + tool + text
+    try ui.onProvider(.{ .text = "before tools" });
+    try ui.onProvider(.{ .tool_call = .{ .id = "c1", .name = "read", .args = "{}" } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "c1", .output = "file content", .is_err = false } });
+    try ui.onProvider(.{ .text = "after tools" });
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 12);
+    defer vs.deinit();
+
+    // Default: tools visible
+    try renderToVs(&ui, &vs);
+    var found_tool = false;
+    var r: usize = 0;
+    while (r < 7) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "$ read") != null) {
+            found_tool = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_tool);
+
+    // Toggle show_tools off (simulating settings overlay toggle)
+    ui.tr.show_tools = false;
+
+    // Re-render — tool blocks hidden
+    try renderToVs(&ui, &vs);
+    var still_has_tool = false;
+    r = 0;
+    while (r < 7) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "$ read") != null) {
+            still_has_tool = true;
+            break;
+        }
+    }
+    try std.testing.expect(!still_has_tool);
+
+    // Text blocks still visible
+    var found_before = false;
+    var found_after = false;
+    r = 0;
+    while (r < 7) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "before tools") != null) found_before = true;
+        if (std.mem.indexOf(u8, row, "after tools") != null) found_after = true;
+    }
+    try std.testing.expect(found_before);
+    try std.testing.expect(found_after);
+}
+
+test "UX5 show_thinking toggle hides thinking in subsequent renders" {
+    var ui = try Ui.init(std.testing.allocator, 50, 12, "m", "p");
+    defer ui.deinit();
+
+    try ui.onProvider(.{ .text = "question" });
+    try ui.onProvider(.{ .thinking = "deep analysis" });
+    try ui.onProvider(.{ .text = "answer" });
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 12);
+    defer vs.deinit();
+
+    // Default: thinking visible
+    try renderToVs(&ui, &vs);
+    var found_think = false;
+    var r: usize = 0;
+    while (r < 7) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "deep analysis") != null) {
+            found_think = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_think);
+
+    // Toggle thinking off
+    ui.tr.show_thinking = false;
+
+    // Re-render — thinking hidden
+    try renderToVs(&ui, &vs);
+    var still_has_think = false;
+    r = 0;
+    while (r < 7) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "deep analysis") != null) {
+            still_has_think = true;
+            break;
+        }
+    }
+    try std.testing.expect(!still_has_think);
+
+    // Text blocks remain
+    var found_q = false;
+    var found_a = false;
+    r = 0;
+    while (r < 7) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "question") != null) found_q = true;
+        if (std.mem.indexOf(u8, row, "answer") != null) found_a = true;
+    }
+    try std.testing.expect(found_q);
+    try std.testing.expect(found_a);
+}
+
+test "UX5 settings toggles persist across multiple render cycles" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var ui = try Ui.init(std.testing.allocator, 50, 14, "m", "p");
+    defer ui.deinit();
+
+    // Add mixed content
+    try ui.onProvider(.{ .text = "intro" });
+    try ui.onProvider(.{ .thinking = "reasoning" });
+    try ui.onProvider(.{ .tool_call = .{ .id = "t1", .name = "bash", .args = "{}" } });
+    try ui.onProvider(.{ .tool_result = .{ .id = "t1", .output = "done", .is_err = false } });
+    try ui.onProvider(.{ .text = "conclusion" });
+
+    var vs = try VScreen.init(std.testing.allocator, 50, 14);
+    defer vs.deinit();
+
+    // Disable both tools and thinking
+    ui.tr.show_tools = false;
+    ui.tr.show_thinking = false;
+
+    // Render 3 times — settings must persist
+    try renderToVs(&ui, &vs);
+    try renderToVs(&ui, &vs);
+    try renderToVs(&ui, &vs);
+
+    // Verify settings unchanged after multiple renders
+    const Snap = struct { tools: bool, thinking: bool };
+    try oh.snap(@src(),
+        \\modes.tui.test.test.UX5 settings toggles persist across multiple render cycles.Snap
+        \\  .tools: bool = false
+        \\  .thinking: bool = false
+    ).expectEqual(Snap{
+        .tools = ui.tr.show_tools,
+        .thinking = ui.tr.show_thinking,
+    });
+
+    // Only text blocks visible: intro, conclusion
+    var found_tool = false;
+    var found_think = false;
+    var found_intro = false;
+    var found_concl = false;
+    var r: usize = 0;
+    while (r < 9) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "$ bash") != null) found_tool = true;
+        if (std.mem.indexOf(u8, row, "reasoning") != null) found_think = true;
+        if (std.mem.indexOf(u8, row, "intro") != null) found_intro = true;
+        if (std.mem.indexOf(u8, row, "conclusion") != null) found_concl = true;
+    }
+    try std.testing.expect(!found_tool);
+    try std.testing.expect(!found_think);
+    try std.testing.expect(found_intro);
+    try std.testing.expect(found_concl);
+
+    // Re-enable and verify they appear again
+    ui.tr.show_tools = true;
+    ui.tr.show_thinking = true;
+    try renderToVs(&ui, &vs);
+
+    var tool_back = false;
+    var think_back = false;
+    r = 0;
+    while (r < 9) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "$ bash") != null) tool_back = true;
+        if (std.mem.indexOf(u8, row, "reasoning") != null) think_back = true;
+    }
+    try std.testing.expect(tool_back);
+    try std.testing.expect(think_back);
+}
+
+// ── UX1: Startup walkthrough ──
+
+test "UX1 startup frame has shift+drag hint in footer" {
+    var ui = try Ui.initFull(std.testing.allocator, 60, 10, "gpt-4o", "openai", "/tmp/proj", "main", null);
+    defer ui.deinit();
+
+    var vs = try VScreen.init(std.testing.allocator, 60, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Footer line 1 (row 8 for h=10): shift+drag hint right-aligned
+    var found_hint = false;
+    var r: usize = 7;
+    while (r < 10) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "shift+drag: select") != null) {
+            found_hint = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_hint);
+}
+
+test "UX1 startup frame has model in footer" {
+    var ui = try Ui.initFull(std.testing.allocator, 60, 10, "claude-sonnet", "anthropic", "/tmp", "", null);
+    defer ui.deinit();
+
+    var vs = try VScreen.init(std.testing.allocator, 60, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Footer line 2 (last row) has model name
+    const last = try vs.rowText(std.testing.allocator, 9);
+    defer std.testing.allocator.free(last);
+    try std.testing.expect(std.mem.indexOf(u8, last, "claude-sonnet") != null);
+}
+
+test "UX1 startup frame has cwd and branch in footer" {
+    var ui = try Ui.initFull(std.testing.allocator, 60, 10, "m", "p", "~/proj", "main", null);
+    defer ui.deinit();
+
+    var vs = try VScreen.init(std.testing.allocator, 60, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Footer line 1 (row 8): cwd + branch
+    const row8 = try vs.rowText(std.testing.allocator, 8);
+    defer std.testing.allocator.free(row8);
+    try std.testing.expect(std.mem.indexOf(u8, row8, "~/proj") != null);
+    try std.testing.expect(std.mem.indexOf(u8, row8, "(main)") != null);
+}
+
+test "UX1 startup empty transcript shows border and editor region" {
+    var ui = try Ui.init(std.testing.allocator, 40, 10, "m", "p");
+    defer ui.deinit();
+
+    var vs = try VScreen.init(std.testing.allocator, 40, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // h=10: tx_h=5, border row 5, editor row 6, border row 7, footer 8-9
+    // Top border should be ─ (U+2500)
+    try vs.expectText(5, 0, "\xe2\x94\x80");
+    // Bottom border too
+    try vs.expectText(7, 0, "\xe2\x94\x80");
+    // Transcript area should be blank (no content yet)
+    const row0 = try vs.rowText(std.testing.allocator, 0);
+    defer std.testing.allocator.free(row0);
+    try std.testing.expectEqual(@as(usize, 0), row0.len);
+}
+
+// ── UX2: Input/editing walkthrough ──
+
+test "UX2 type text, undo, redo via harness" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    // Type "hello"
+    for ("hello") |ch| {
+        _ = try ui.onKey(.{ .char = ch });
+    }
+    try std.testing.expectEqualStrings("hello", ui.editorText());
+
+    // Undo (ctrl-z) — reverts entire insert group
+    _ = try ui.onKey(.{ .ctrl_z = {} });
+    try std.testing.expectEqualStrings("", ui.editorText());
+
+    // Redo (ctrl-shift-z) — restores
+    _ = try ui.onKey(.{ .ctrl_shift_z = {} });
+    try std.testing.expectEqualStrings("hello", ui.editorText());
+}
+
+test "UX2 ctrl-u clears editor line" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    for ("some text") |ch| {
+        _ = try ui.onKey(.{ .char = ch });
+    }
+    try std.testing.expectEqualStrings("some text", ui.editorText());
+
+    // ctrl-u kills entire line
+    _ = try ui.onKey(.{ .ctrl_u = {} });
+    try std.testing.expectEqualStrings("", ui.editorText());
+}
+
+test "UX2 multiline editor via ctrl-j inserts newlines" {
+    var ui = try Ui.init(std.testing.allocator, 40, 10, "m", "p");
+    defer ui.deinit();
+
+    for ("line1") |ch| _ = try ui.onKey(.{ .char = ch });
+    _ = try ui.onKey(.{ .ctrl_j = {} }); // newline
+    for ("line2") |ch| _ = try ui.onKey(.{ .char = ch });
+
+    try std.testing.expectEqualStrings("line1\nline2", ui.editorText());
+
+    // Render and verify editor shows content
+    var vs = try VScreen.init(std.testing.allocator, 40, 10);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Editor rows should contain both lines
+    var found_l1 = false;
+    var found_l2 = false;
+    var r: usize = 0;
+    while (r < 10) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "line1") != null) found_l1 = true;
+        if (std.mem.indexOf(u8, row, "line2") != null) found_l2 = true;
+    }
+    try std.testing.expect(found_l1);
+    try std.testing.expect(found_l2);
+}
+
+test "UX2 model cycle returns cycle_model action" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    // ctrl-p cycles model
+    const act = try ui.onKey(.{ .ctrl_p = {} });
+    try std.testing.expectEqual(harness.editor.Action.cycle_model, act);
+}
+
+test "UX2 editor submit clears and adds to transcript" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    for ("hello world") |ch| _ = try ui.onKey(.{ .char = ch });
+    const act = try ui.onKey(.{ .enter = {} });
+    try std.testing.expectEqual(harness.editor.Action.submit, act);
+    try std.testing.expectEqualStrings("", ui.editorText());
+
+    // Transcript should contain the user message
+    var vs = try VScreen.init(std.testing.allocator, 40, 8);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    var found = false;
+    var r: usize = 0;
+    while (r < 3) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "hello world") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "UX2 undo after backspace restores character" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    for ("ab") |ch| _ = try ui.onKey(.{ .char = ch });
+    _ = try ui.onKey(.{ .backspace = {} }); // delete 'b'
+    try std.testing.expectEqualStrings("a", ui.editorText());
+
+    _ = try ui.onKey(.{ .ctrl_z = {} }); // undo backspace
+    try std.testing.expectEqualStrings("ab", ui.editorText());
+}

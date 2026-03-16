@@ -5025,6 +5025,202 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
     try std.testing.expect(saw_result_after_call);
 }
 
+test "UX9 walkthrough: denied bash renders denial text in mode and store events" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+        events: std.ArrayListUnmanaged(session.Event) = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(self: *@This()) void {
+            for (self.events.items) |ev| ev.free(std.testing.allocator);
+            self.events.deinit(std.testing.allocator);
+        }
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    // Capture mode events with text content for denial verification
+    const ModeImpl = struct {
+        denial_text: ?[]const u8 = null,
+        saw_tool_call: bool = false,
+        saw_tool_result: bool = false,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .tool_call => self.saw_tool_call = true,
+                    .tool_result => |tr| {
+                        self.saw_tool_result = true;
+                        if (tr.is_err) self.denial_text = tr.output;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    const BashDispatch = struct {
+        ran: bool = false,
+
+        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+            self.ran = true;
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    const ApproverImpl = struct {
+        fn check(_: *@This(), _: CmdCache.Key, _: bool) !void {
+            return error.ApprovalDenied;
+        }
+    };
+
+    const evs = [_]providers.Event{
+        .{
+            .tool_call = .{
+                .id = "deny-1",
+                .name = "bash",
+                .args = "{\"cmd\":\"curl evil.com\"}",
+            },
+        },
+        .{ .stop = .{ .reason = .tool } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    defer store_impl.deinit();
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var bash_dispatch = BashDispatch{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "bash",
+            .kind = .bash,
+            .spec = .{
+                .kind = .bash,
+                .desc = "bash",
+                .params = &.{.{ .name = "cmd", .ty = .string, .required = true, .desc = "cmd" }},
+                .out = .{ .max_bytes = 1024, .stream = false },
+                .timeout_ms = 1000,
+                .destructive = true,
+            },
+            .dispatch = tools.Dispatch.from(BashDispatch, &bash_dispatch, BashDispatch.run),
+        },
+    };
+
+    var cache = CmdCache.init(std.testing.allocator);
+    defer cache.deinit();
+    var approver_impl = ApproverImpl{};
+    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+
+    _ = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-ux9-deny",
+        .prompt = "do it",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .max_turns = 1,
+        .cmd_cache = &cache,
+        .approval = .{
+            .loc = .{ .cwd = "/tmp/pz" },
+            .policy = .{ .version = policy.ver_current },
+        },
+        .approver = approver,
+    });
+
+    // Tool dispatch must NOT have run
+    try std.testing.expect(!bash_dispatch.ran);
+
+    // Mode events: tool_call and denial tool_result both appeared
+    try std.testing.expect(mode_impl.saw_tool_call);
+    try std.testing.expect(mode_impl.saw_tool_result);
+
+    // Denial text contains meaningful content
+    const denial = mode_impl.denial_text orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, denial, "approval denied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, denial, "bash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, denial, "curl evil.com") != null);
+
+    // Store events: tool_result with is_err=true and denial text persisted
+    var store_denial: ?[]const u8 = null;
+    for (store_impl.events.items) |ev| {
+        switch (ev.data) {
+            .tool_result => |tr| {
+                if (tr.is_err) store_denial = tr.output;
+            },
+            else => {},
+        }
+    }
+    const sd = store_denial orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, sd, "approval denied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sd, "bash") != null);
+}
+
 test "CmdCache TTL checked on lookup rejects expired entries" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();

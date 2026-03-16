@@ -12840,6 +12840,61 @@ test "runtime bg command validates usage and missing ids" {
     try std.testing.expectEqualStrings("usage: /bg run <cmd>|list|show <id>|stop <id>\n", bad_sub);
 }
 
+test "UX8 walkthrough: bg run spawns job, bg list shows it, bg show shows detail, reload refreshes context" {
+    var mgr = try bg.Manager.init(std.testing.allocator);
+    defer mgr.deinit();
+
+    // /bg run spawns a job
+    const started = try runBgCommand(std.testing.allocator, &mgr, "run echo hello");
+    defer std.testing.allocator.free(started);
+    try std.testing.expect(std.mem.indexOf(u8, started, "bg started id=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, started, "pid=") != null);
+
+    // /bg list shows running jobs
+    const listed = try runBgCommand(std.testing.allocator, &mgr, "list");
+    defer std.testing.allocator.free(listed);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "id pid state code log cmd\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed, "echo hello\n") != null);
+
+    // /bg show shows job detail
+    const shown = try runBgCommand(std.testing.allocator, &mgr, "show 1");
+    defer std.testing.allocator.free(shown);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "id=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "state=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "cmd=echo hello\n") != null);
+
+    // /reload refreshes context (load returns new content)
+    var rows = AuditRows{};
+    defer rows.deinit(std.testing.allocator);
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{
+        .emit_audit_ctx = &rows,
+        .emit_audit = AuditRows.emit,
+        .now_ms = struct {
+            fn f() i64 {
+                return 500;
+            }
+        }.f,
+    } };
+    var sys_prompt: ?[]const u8 = null;
+    var sys_prompt_owned: ?[]u8 = null;
+    defer if (sys_prompt_owned) |buf| std.testing.allocator.free(buf);
+
+    const res = try reloadContextWithAudit(
+        std.testing.allocator,
+        &sys_prompt,
+        &sys_prompt_owned,
+        &ctl_audit,
+        struct {
+            fn f(alloc: std.mem.Allocator) !?[]u8 {
+                return try alloc.dupe(u8, "refreshed context");
+            }
+        }.f,
+    );
+    try std.testing.expectEqual(ReloadRes.loaded, res);
+    try std.testing.expectEqualStrings("refreshed context", sys_prompt.?);
+    try std.testing.expect(rows.rows.items.len >= 2); // start + success
+}
+
 test "parseCmdToolMask fuzz smoke does not panic" {
     var prng = std.Random.DefaultPrng.init(0x5EED_F00D);
     const rnd = prng.random();
@@ -13606,4 +13661,896 @@ test "P0-4 regression: AskUiCtx stored/sel_by_q alloc+free no leaks" {
     const payload = try buildAskResult(alloc, false, answers);
     defer alloc.free(payload);
     try std.testing.expect(payload.len > 0);
+}
+
+// --- UX6: Session walkthrough tests ---
+
+fn slashHelper(
+    alloc: std.mem.Allocator,
+    line: []const u8,
+    sid: *([]u8),
+    model: *([]const u8),
+    model_owned: *?[]u8,
+    provider: *([]const u8),
+    provider_owned: *?[]u8,
+    pol: *const RuntimePolicy,
+    tools_rt: *core.tools.builtin.Runtime,
+    bg_mgr: *bg.Manager,
+    session_dir_path: ?[]const u8,
+    no_session: bool,
+    out: std.io.FixedBufferStream([]u8).Writer,
+    ctl_audit: *RuntimeCtlAudit,
+) !CmdRes {
+    return handleSlashCommand(
+        alloc,
+        line,
+        sid,
+        model,
+        model_owned,
+        provider,
+        provider_owned,
+        pol,
+        tools_rt,
+        bg_mgr,
+        session_dir_path,
+        no_session,
+        null,
+        out.any(),
+        .{},
+        ctl_audit,
+    );
+}
+
+test "UX6: /new creates clean session with new sid" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "old-session");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/new", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    // sid changed from original
+    try std.testing.expect(!std.mem.eql(u8, sid, "old-session"));
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "new session") != null);
+}
+
+test "UX6: /name persists session title" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "100");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/name my-project", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "session named: my-project") != null);
+}
+
+test "UX6: /name without arg shows usage" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/name", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "usage: /name") != null);
+}
+
+test "UX6: /resume with no arg returns select_session" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/resume", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.select_session, got);
+}
+
+test "UX6: /resume with sid switches to that session" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    // Write a minimal session file so resume can find it.
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "hello" } } },
+        .{ .at_ms = 2, .data = .{ .stop = .{ .reason = .done } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/200.jsonl", &events);
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "100");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/resume 200", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.resumed, got);
+    try std.testing.expectEqualStrings("200", sid);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "resumed session 200") != null);
+}
+
+test "UX6: /fork with no arg returns select_fork" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/fork", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.select_fork, got);
+}
+
+test "UX6: /fork with sid copies session" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "hello" } } },
+        .{ .at_ms = 2, .data = .{ .stop = .{ .reason = .done } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/300.jsonl", &events);
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "100");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/fork 300", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "forked session") != null);
+    // sid changed to the new fork
+    try std.testing.expect(!std.mem.eql(u8, sid, "100"));
+}
+
+test "UX6: /compact on disabled session shows notice" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/compact", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    // Should report error about sessions being disabled
+    try std.testing.expect(out_fbs.getWritten().len > 0);
+}
+
+test "UX6: /export on disabled session shows error" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/export out.md", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(out_fbs.getWritten().len > 0);
+}
+
+test "UX6: /export writes file for valid session" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    const events = [_]core.session.Event{
+        .{ .at_ms = 1, .data = .{ .prompt = .{ .text = "hello" } } },
+        .{ .at_ms = 2, .data = .{ .text = .{ .text = "world" } } },
+        .{ .at_ms = 3, .data = .{ .stop = .{ .reason = .done } } },
+    };
+    try writeSessionEventsFile(tmp, "sess/400.jsonl", &events);
+
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "400");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/export", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "exported to") != null);
+}
+
+// --- UX7: Auth/providers walkthrough tests ---
+
+test "UX7: /login with no arg returns select_login overlay" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/login", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.select_login, got);
+}
+
+test "UX7: /login unknown provider shows error" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/login bogus-provider", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "unknown provider: bogus-provider") != null);
+}
+
+test "UX7: /logout with unknown provider shows error" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/logout bogus", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "unknown provider: bogus") != null);
+}
+
+test "UX7: /model with arg changes active model" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "sonnet-4";
+    var provider: []const u8 = "anthropic";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/model opus-4", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.handled, got);
+    try std.testing.expectEqualStrings("opus-4", model);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "model set to opus-4") != null);
+}
+
+test "UX7: /model with no arg returns select_model" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root = try tmp.dir.openDir(".", .{});
+    defer root.close();
+    var guard = try path_guard.CwdGuard.enter(root);
+    defer guard.deinit();
+    var pol = try RuntimePolicy.load(alloc);
+    defer pol.deinit();
+
+    var sid = try alloc.dupe(u8, "s");
+    defer alloc.free(sid);
+    var model: []const u8 = "m";
+    var provider: []const u8 = "p";
+    var model_owned: ?[]u8 = null;
+    defer if (model_owned) |b| alloc.free(b);
+    var provider_owned: ?[]u8 = null;
+    defer if (provider_owned) |b| alloc.free(b);
+    var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = alloc });
+    defer tools_rt.deinit();
+    var bg_mgr = try bg.Manager.init(alloc);
+    defer bg_mgr.deinit();
+    var ctl_audit = RuntimeCtlAudit{ .hooks = .{} };
+    var out_buf: [512]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const got = try slashHelper(alloc, "/model", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, null, true, out_fbs.writer(), &ctl_audit);
+    try std.testing.expectEqual(CmdRes.select_model, got);
+}
+
+test "UX10: version check notice appears when update available" {
+    const alloc = std.testing.allocator;
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+
+    // Simulate a completed version check with a newer version.
+    var checker = version_check.Checker.init(alloc);
+    checker.result = try alloc.dupe(u8, "v99.0.0");
+    checker.done.store(true, .release);
+    defer checker.deinit();
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var done = false;
+
+    try maybeShowVersionUpdate(alloc, &ui, &checker, &done, out_fbs.writer().any());
+
+    try std.testing.expect(done);
+
+    // Verify transcript blocks contain the update notice.
+    var found_update = false;
+    var found_upgrade = false;
+    for (ui.tr.blocks.items) |blk| {
+        if (std.mem.indexOf(u8, blk.buf.items, "Update available: v99.0.0") != null) found_update = true;
+        if (std.mem.indexOf(u8, blk.buf.items, "/upgrade") != null) found_upgrade = true;
+    }
+    try std.testing.expect(found_update);
+    try std.testing.expect(found_upgrade);
+}
+
+test "UX10: version check notice skips when already done" {
+    const alloc = std.testing.allocator;
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+
+    var checker = version_check.Checker.init(alloc);
+    checker.result = try alloc.dupe(u8, "v99.0.0");
+    checker.done.store(true, .release);
+    defer checker.deinit();
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+    var done = true; // Already done
+
+    try maybeShowVersionUpdate(alloc, &ui, &checker, &done, out_fbs.writer().any());
+
+    // No blocks should be added when already done.
+    try std.testing.expectEqual(@as(usize, 0), ui.tr.blocks.items.len);
+}
+
+test "UX11: manual /compact shows compacting notice" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.panels.ctx_limit = 100;
+    ui.panels.cum_tok = 95;
+    ui.panels.has_usage = true;
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const Ctx = struct {
+        saw_notice: bool = false,
+        ui_ref: *tui_harness.Ui,
+
+        fn run(raw: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !CompactRun {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            for (self.ui_ref.tr.blocks.items) |blk| {
+                if (std.mem.eql(u8, blk.buf.items, "[compacting...]")) {
+                    self.saw_notice = true;
+                    return .compacted;
+                }
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    var ctx = Ctx{ .ui_ref = &ui };
+    const outcome = try autoCompactWith(
+        alloc,
+        &ui,
+        out_fbs.writer().any(),
+        "sess-1",
+        sess_abs,
+        false,
+        true, // force
+        &ctx,
+        Ctx.run,
+    );
+
+    try std.testing.expectEqual(AutoCompactOutcome.compacted, outcome);
+    try std.testing.expect(ctx.saw_notice);
+
+    // Verify output stream also contains the notice.
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "[compacting...]") != null);
+}
+
+test "UX11: compaction preserves history after compact" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.panels.ctx_limit = 100;
+    ui.panels.cum_tok = 95;
+    ui.panels.has_usage = true;
+
+    // Add some transcript history before compaction.
+    try ui.tr.infoText("turn 1");
+    try ui.tr.infoText("turn 2");
+    const pre_ct = ui.tr.blocks.items.len;
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const Ctx = struct {
+        fn run(_: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !CompactRun {
+            return .compacted;
+        }
+    };
+
+    const outcome = try autoCompactWith(
+        alloc,
+        &ui,
+        out_fbs.writer().any(),
+        "sess-1",
+        sess_abs,
+        false,
+        true,
+        null,
+        Ctx.run,
+    );
+    try std.testing.expectEqual(AutoCompactOutcome.compacted, outcome);
+
+    // History blocks (turn 1, turn 2) plus [compacting...] and [session compacted].
+    try std.testing.expectEqual(pre_ct + 2, ui.tr.blocks.items.len);
+
+    // Verify original history still present.
+    try std.testing.expectEqualStrings("turn 1", ui.tr.blocks.items[0].buf.items);
+    try std.testing.expectEqualStrings("turn 2", ui.tr.blocks.items[1].buf.items);
+}
+
+test "UX11: compaction failure is non-fatal" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sess");
+    const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess_abs);
+
+    var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
+    defer ui.deinit();
+    ui.panels.ctx_limit = 100;
+    ui.panels.cum_tok = 95;
+    ui.panels.has_usage = true;
+
+    var out_buf: [16384]u8 = undefined;
+    var out_fbs = std.io.fixedBufferStream(&out_buf);
+
+    const Ctx = struct {
+        fn run(_: ?*anyopaque, _: std.mem.Allocator, _: std.fs.Dir, _: []const u8, _: i64) !CompactRun {
+            return error.FileNotFound;
+        }
+    };
+
+    // Compaction failure should return .failed, not propagate the error.
+    const outcome = try autoCompactWith(
+        alloc,
+        &ui,
+        out_fbs.writer().any(),
+        "sess-1",
+        sess_abs,
+        false,
+        true,
+        null,
+        Ctx.run,
+    );
+    try std.testing.expectEqual(AutoCompactOutcome.failed, outcome);
+
+    // Verify failure message in transcript.
+    var found_fail = false;
+    for (ui.tr.blocks.items) |blk| {
+        if (std.mem.indexOf(u8, blk.buf.items, "auto-compact failed") != null) found_fail = true;
+    }
+    try std.testing.expect(found_fail);
+}
+
+// ── UX3: Commands walkthrough ──
+
+test "UX3 /clear resets transcript to empty" {
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 40, 10, "m", "p");
+    defer ui.deinit();
+
+    try ui.onProvider(.{ .text = "response text" });
+    try ui.tr.userText("user msg");
+    try std.testing.expect(ui.tr.count() > 0);
+
+    ui.clearTranscript();
+    try std.testing.expectEqual(@as(usize, 0), ui.tr.count());
+
+    // After clear, vscreen should show empty transcript
+    const vscreen = @import("../modes/tui/vscreen.zig");
+    const TestBuf = @import("../modes/tui/test_buf.zig").TestBuf;
+    var vs = try vscreen.VScreen.init(std.testing.allocator, 40, 10);
+    defer vs.deinit();
+    var buf: [16384]u8 = undefined;
+    var out = TestBuf.init(&buf);
+    try ui.draw(&out);
+    vs.clear();
+    vs.feed(out.view());
+
+    const row0 = try vs.rowText(std.testing.allocator, 0);
+    defer std.testing.allocator.free(row0);
+    try std.testing.expectEqual(@as(usize, 0), row0.len);
+}
+
+test "UX3 /new via transcript shows new session info" {
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 50, 10, "m", "p");
+    defer ui.deinit();
+
+    // Simulate what runtime does on /new: emit info text
+    try ui.tr.infoText("new session abc123");
+
+    const vscreen = @import("../modes/tui/vscreen.zig");
+    const TestBuf = @import("../modes/tui/test_buf.zig").TestBuf;
+    var vs = try vscreen.VScreen.init(std.testing.allocator, 50, 10);
+    defer vs.deinit();
+    var buf: [16384]u8 = undefined;
+    var out = TestBuf.init(&buf);
+    try ui.draw(&out);
+    vs.clear();
+    vs.feed(out.view());
+
+    var found = false;
+    var r: usize = 0;
+    while (r < 5) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "new session abc123") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "UX3 /help /hotkeys output via info transcript" {
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 60, 20, "m", "p");
+    defer ui.deinit();
+
+    // Simulate /help output (runtime writes to transcript as info)
+    try ui.tr.infoText("/help  /session  /model  /tools  /clear  /new  /hotkeys  /quit");
+
+    const vscreen = @import("../modes/tui/vscreen.zig");
+    const TestBuf = @import("../modes/tui/test_buf.zig").TestBuf;
+    var vs = try vscreen.VScreen.init(std.testing.allocator, 60, 20);
+    defer vs.deinit();
+    var buf: [16384]u8 = undefined;
+    var out = TestBuf.init(&buf);
+    try ui.draw(&out);
+    vs.clear();
+    vs.feed(out.view());
+
+    var found_help = false;
+    var found_hotkeys = false;
+    var r: usize = 0;
+    while (r < 15) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "/help") != null) found_help = true;
+        if (std.mem.indexOf(u8, row, "/hotkeys") != null) found_hotkeys = true;
+    }
+    try std.testing.expect(found_help);
+    try std.testing.expect(found_hotkeys);
+}
+
+test "UX3 /settings triggers overlay" {
+    var ui = try tui_harness.Ui.init(std.testing.allocator, 40, 12, "m", "p");
+    defer ui.deinit();
+
+    // Simulate what runtime does on /settings: set overlay
+    const labels = [_][]const u8{ "Show tools", "Show thinking" };
+    const toggles = try std.testing.allocator.alloc(bool, 2);
+    toggles[0] = true;
+    toggles[1] = false;
+    ui.ov = .{
+        .items = &labels,
+        .title = "Settings",
+        .kind = .settings,
+        .toggles = toggles,
+    };
+
+    try std.testing.expect(ui.ov != null);
+    try std.testing.expectEqualStrings("Settings", ui.ov.?.title);
+
+    // Render with overlay — no crash
+    const vscreen = @import("../modes/tui/vscreen.zig");
+    const TestBuf = @import("../modes/tui/test_buf.zig").TestBuf;
+    var vs = try vscreen.VScreen.init(std.testing.allocator, 40, 12);
+    defer vs.deinit();
+    var buf: [16384]u8 = undefined;
+    var out = TestBuf.init(&buf);
+    try ui.draw(&out);
+    vs.clear();
+    vs.feed(out.view());
+
+    // Overlay should render "Settings" title somewhere
+    var found = false;
+    var r: usize = 0;
+    while (r < 12) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "Settings") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
 }

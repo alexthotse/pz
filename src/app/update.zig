@@ -2177,6 +2177,118 @@ test "update blocks when check_default_key returns true" {
     try std.testing.expect(std.mem.indexOf(u8, out.msg, "default dev signing key") != null);
 }
 
+test "UX10: upgrade with signed manifest verification success" {
+    if (targetAssetName() == null) return;
+
+    const asset_name = targetAssetName() orelse return error.UnsupportedPlatform;
+    const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "test-bin\n");
+    defer std.testing.allocator.free(archive);
+    const manifest = try updateTestManifestAlloc(std.testing.allocator, archive, true, "v9.9.9", asset_name, "http://local/archive");
+    defer std.testing.allocator.free(manifest);
+
+    var call_idx: usize = 0;
+    const Ctx = struct {
+        var s_archive: []const u8 = undefined;
+        var s_manifest: []const u8 = undefined;
+        var s_asset_name: []const u8 = undefined;
+
+        fn httpGet(alloc: std.mem.Allocator, url: []const u8, _: []const u8, _: usize) !HttpResult {
+            if (std.mem.indexOf(u8, url, "releases/latest") != null) {
+                const body = try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"tag_name\":\"v9.9.9\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"http://local/archive\"}},{{\"name\":\"{s}" ++ sig_suffix ++ "\",\"browser_download_url\":\"http://local/archive.manifest\"}}]}}",
+                    .{ s_asset_name, s_asset_name },
+                );
+                return .{ .ok = body };
+            }
+            if (std.mem.endsWith(u8, url, ".manifest")) {
+                return .{ .ok = try alloc.dupe(u8, s_manifest) };
+            }
+            return .{ .ok = try alloc.dupe(u8, s_archive) };
+        }
+
+        fn noCheck(_: std.mem.Allocator) !void {}
+        fn noHostCheck(_: std.mem.Allocator, _: []const u8) !void {}
+        fn noDefaultKey() bool {
+            return false;
+        }
+        fn install(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {}
+    };
+    Ctx.s_archive = archive;
+    Ctx.s_manifest = manifest;
+    Ctx.s_asset_name = asset_name;
+    _ = &call_idx;
+
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = Ctx.httpGet,
+        .check_update_allowed = Ctx.noCheck,
+        .check_update_host = Ctx.noHostCheck,
+        .check_default_key = Ctx.noDefaultKey,
+        .install_binary = Ctx.install,
+        .self_exe_path = struct {
+            fn f(alloc: std.mem.Allocator) ![]u8 {
+                return try alloc.dupe(u8, "/tmp/pz-verify-test");
+            }
+        }.f,
+    });
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expect(out.ok);
+    try std.testing.expect(std.mem.indexOf(u8, out.msg, "updated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.msg, "v9.9.9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.msg, "verified") != null);
+}
+
+test "UX10: upgrade rejects invalid signed manifest" {
+    if (targetAssetName() == null) return;
+
+    const asset_name = targetAssetName() orelse return error.UnsupportedPlatform;
+    const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "test-bin\n");
+    defer std.testing.allocator.free(archive);
+    // Create an INVALID manifest (flipped first byte)
+    const manifest = try updateTestManifestAlloc(std.testing.allocator, archive, false, "v9.9.9", asset_name, "http://local/archive");
+    defer std.testing.allocator.free(manifest);
+
+    const Ctx = struct {
+        var s_archive: []const u8 = undefined;
+        var s_manifest: []const u8 = undefined;
+        var s_asset_name: []const u8 = undefined;
+
+        fn httpGet(alloc: std.mem.Allocator, url: []const u8, _: []const u8, _: usize) !HttpResult {
+            if (std.mem.indexOf(u8, url, "releases/latest") != null) {
+                const body = try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"tag_name\":\"v9.9.9\",\"assets\":[{{\"name\":\"{s}\",\"browser_download_url\":\"http://local/archive\"}},{{\"name\":\"{s}" ++ sig_suffix ++ "\",\"browser_download_url\":\"http://local/archive.manifest\"}}]}}",
+                    .{ s_asset_name, s_asset_name },
+                );
+                return .{ .ok = body };
+            }
+            if (std.mem.endsWith(u8, url, ".manifest")) {
+                return .{ .ok = try alloc.dupe(u8, s_manifest) };
+            }
+            return .{ .ok = try alloc.dupe(u8, s_archive) };
+        }
+
+        fn noCheck(_: std.mem.Allocator) !void {}
+        fn noHostCheck(_: std.mem.Allocator, _: []const u8) !void {}
+        fn noDefaultKey() bool {
+            return false;
+        }
+    };
+    Ctx.s_archive = archive;
+    Ctx.s_manifest = manifest;
+    Ctx.s_asset_name = asset_name;
+
+    const out = try runOutcomeWith(std.testing.allocator, .{
+        .http_get = Ctx.httpGet,
+        .check_update_allowed = Ctx.noCheck,
+        .check_update_host = Ctx.noHostCheck,
+        .check_default_key = Ctx.noDefaultKey,
+    });
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expect(!out.ok);
+    try std.testing.expect(std.mem.indexOf(u8, out.msg, "signature verification failed") != null);
+}
+
 test "verifyArchiveManifest rejects downgrade" {
     const kp = try core.signing.KeyPair.fromSeed(
         try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166"),
