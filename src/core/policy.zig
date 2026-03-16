@@ -494,6 +494,8 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         .{ "lock", {} },
         .{ "signature", {} },
         .{ "release_url", {} },
+        .{ "generation", {} },
+        .{ "not_after", {} },
     });
     for (root.object.keys()) |k| {
         if (!known_top.has(k)) return error.UnknownPolicyKey;

@@ -15,20 +15,60 @@ A security-first coding harness rewritten from the ground up in Zig for enterpri
 
 ## Features
 
-Pi-grade harness capabilities, with the product direction centered on built-in enterprise guardrails rather than extensibility:
+### Harness
 
 - **Interactive TUI** — streaming responses, markdown rendering, syntax highlighting
 - **Image rendering** — Kitty graphics protocol support in terminal
 - **24 slash commands** — `/model`, `/fork`, `/export`, `/compact`, `/share`, `/tree`, and more
 - **Autocomplete dropdown** — fuzzy-filtered command and file path completion
-- **8 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`
+- **9 built-in tools** — `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `ask`, `web`
+- **Skills** — discoverable `/skillname` slash commands with frontmatter, registry, and policy gating
 - **Session management** — persist, resume, fork, name, export, share as gist
 - **OAuth + API key auth** — automatic token refresh, multi-provider support
 - **Thinking modes** — adaptive and budget-capped extended thinking
 - **Prompt caching** — automatic cache_control on system messages
 - **Headless modes** — `--print`, `--json`, and `rpc` for scripting and integration
+- **Agent tool** — spawn subagents with dedicated RPC fd, progress streaming, process group isolation
 - **Zero-alloc hot path** — rendering and input handling avoid heap allocations
-- **582 tests** — unit, integration, snapshot, and property tests
+
+### Security
+
+- **Signed policy bundles** — Ed25519-verified policy with lock mode, generation rollback resistance, and expiry
+- **Tool sandbox** — process group isolation, env scrubbing, TERM→KILL escalation
+- **Egress policy** — deny-by-default endpoint allowlists, bounded deadlines, policy-bound proxy
+- **TOCTOU guards** — fd-pinned tool I/O with `readlinkat`/`O_NOFOLLOW`, hardlink rejection, root confinement
+- **Symlink escape prevention** — component-by-component path walk for tool paths and context files
+- **Shell tokenizer** — parse `bash -c`, quoting, command substitution for policy-driven command denial
+- **Prompt injection boundaries** — untrusted content wrapped with provenance markers, context budgets
+- **DNS rebinding protection** — private-range blocking on web tool and redirect hops
+- **Secret zeroization** — Ed25519 seed/keypair wiped after use
+- **Absolute-path commands** — `/share`, `/copy`, editor, paste use absolute paths, not PATH resolution
+
+### Audit
+
+- **Structured audit log** — typed events with severity, outcome, HMAC-SHA256 chained integrity
+- **Syslog shipping** — RFC 5424 UDP/TCP with TLS hooks, hostname resolution, reconnect backoff
+- **Durable spool** — file-backed audit spool with ordered resend on collector reconnect
+- **Keyed redaction** — HMAC-based per-session pseudonyms, non-correlatable across deployments
+- **Privileged action audit** — export, share, copy, model change, subagent, editor launch tracked
+- **Pipeline sanitization** — ANSI/control stripping and secret redaction for `--print`/`--json` output
+
+### Enterprise
+
+- **Canonical `.pz/` layout** — settings, auth, policy, sessions, audit under one root
+- **Signed self-update** — Ed25519 manifest verification, key ring with rollback/downgrade detection, crash-safe install
+- **Context-bound approvals** — tool kind, cwd, repo root, policy hash, session lifetime binding
+- **LRU approval cache** — bounded eviction for context-bound approvals
+- **Fail-closed policy** — unknown keys rejected, unsigned policies rejected in lock mode
+- **Secure local storage** — 0700/0600 perms, atomic writes (temp+fsync+rename), O_NOFOLLOW confinement
+- **Event loop** — kqueue (macOS) event loop core with provider and tool I/O migration
+
+### Testing
+
+- **1300+ tests** — unit, integration, snapshot (ohsnap), and property (zcheck) tests
+- **PTY harness** — real-process TUI tests with ANSI AST parsing
+- **Mock infrastructure** — provider, syslog, HTTP, cancel, time mocks
+- **Allocator regression** — test-allocator proofs for UAF and leak safety
 
 ## Build
 
@@ -39,6 +79,8 @@ zig build -Doptimize=ReleaseFast
 ```
 
 The binary lands in `zig-out/bin/pz`.
+
+Release builds require `-Dgit-hash=<hash>` and embed `CHANGELOG.md`. Debug builds use VCS.
 
 ## Run
 
@@ -74,7 +116,8 @@ Canonical `pz` state lives under `.pz/`:
 - `~/.pz/auth.json` — OAuth / API key credentials
 - `~/.pz/state.json` — local machine state
 - `~/.pz/sessions/` and `./.pz/sessions/` — persisted sessions
-- `~/.pz/policy.json` and `./.pz/policy.json` — authoritative policy bundles
+- `~/.pz/policy.json` and `./.pz/policy.json` — authoritative signed policy bundles
+- `~/.pz/skills/` and `./.pz/skills/` — skill definitions
 - `AGENTS.md` — policy-controlled context files
 
 ## License
