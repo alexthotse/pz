@@ -22,6 +22,9 @@ pub fn deinitActives(alloc: std.mem.Allocator, actives: []Active) void {
 pub const Opts = struct {
     state_dir: ?[]const u8 = null,
     enabled: ?bool = null,
+    home: ?[]const u8 = null,
+    pz_state_dir: ?[]const u8 = null,
+    xdg_state_home: ?[]const u8 = null,
 };
 
 pub const Journal = struct {
@@ -40,7 +43,7 @@ pub const Journal = struct {
         const base_dir = if (opts.state_dir) |override|
             try alloc.dupe(u8, override)
         else
-            try resolveStateDir(alloc);
+            try resolveStateDirOpts(alloc, opts);
         defer alloc.free(base_dir);
 
         try fs_secure.ensureDirPath(base_dir);
@@ -228,11 +231,11 @@ const StateEnv = struct {
     home: ?[]const u8 = null,
 };
 
-fn resolveStateDir(alloc: std.mem.Allocator) ![]u8 {
+fn resolveStateDirOpts(alloc: std.mem.Allocator, opts: Opts) ![]u8 {
     return resolveStateDirEnv(alloc, .{
-        .pz_state_dir = std.posix.getenv("PZ_STATE_DIR"),
-        .xdg_state_home = std.posix.getenv("XDG_STATE_HOME"),
-        .home = std.posix.getenv("HOME"),
+        .pz_state_dir = opts.pz_state_dir,
+        .xdg_state_home = opts.xdg_state_home,
+        .home = opts.home,
     });
 }
 

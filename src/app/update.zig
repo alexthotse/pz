@@ -89,13 +89,13 @@ fn initHttpClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Cli
     return try app_tls.initRuntimeClient(alloc);
 }
 
-pub fn run(alloc: std.mem.Allocator) ![]u8 {
-    const out = try runOutcome(alloc);
+pub fn run(alloc: std.mem.Allocator, home: ?[]const u8) ![]u8 {
+    const out = try runOutcome(alloc, home);
     return out.msg;
 }
 
-pub fn runOutcome(alloc: std.mem.Allocator) !Outcome {
-    return runOutcomeWith(alloc, .{});
+pub fn runOutcome(alloc: std.mem.Allocator, home: ?[]const u8) !Outcome {
+    return runOutcomeWith(alloc, .{ .home = home });
 }
 
 pub fn runOutcomeAudited(alloc: std.mem.Allocator, hooks: AuditHooks) !Outcome {
@@ -106,10 +106,11 @@ pub const AuditHooks = struct {
     http_get: *const fn (std.mem.Allocator, []const u8, []const u8, usize) anyerror!HttpResult = httpGetResult,
     self_exe_path: *const fn (std.mem.Allocator) anyerror![]u8 = std.fs.selfExePathAlloc,
     install_binary: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void = installBinary,
-    check_update_allowed: *const fn (std.mem.Allocator) anyerror!void = checkUpdateAllowed,
-    check_update_host: *const fn (std.mem.Allocator, []const u8) anyerror!void = checkUpdateHostAllowed,
+    check_update_allowed: *const fn (std.mem.Allocator, ?[]const u8) anyerror!void = checkUpdateAllowed,
+    check_update_host: *const fn (std.mem.Allocator, []const u8, ?[]const u8) anyerror!void = checkUpdateHostAllowed,
     check_default_key: *const fn () bool = checkDefaultKeyRelease,
-    resolve_release_url: *const fn (std.mem.Allocator) anyerror![]const u8 = resolveReleaseUrl,
+    resolve_release_url: *const fn (std.mem.Allocator, ?[]const u8) anyerror![]const u8 = resolveReleaseUrl,
+    home: ?[]const u8 = null,
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
@@ -142,7 +143,7 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
 
     try emitUpdateAudit(alloc, hooks, 1, .ok, .info, .{ .text = "upgrade start", .vis = .@"pub" }, null);
 
-    hooks.check_update_allowed(alloc) catch |err| {
+    hooks.check_update_allowed(alloc, hooks.home) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
             alloc,
@@ -157,7 +158,7 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
     };
 
     // Resolve release channel URL from policy or use default
-    const release_url = hooks.resolve_release_url(ar) catch default_release_url;
+    const release_url = hooks.resolve_release_url(ar, hooks.home) catch default_release_url;
     const release_url_is_alloc = !std.mem.eql(u8, @as([]const u8, release_url), default_release_url);
     _ = release_url_is_alloc; // arena owns it
 
@@ -432,7 +433,7 @@ fn runOutcomeWith(alloc: std.mem.Allocator, hooks: Hooks) !Outcome {
 }
 
 fn checkUpdateUrlOrAudit(alloc: std.mem.Allocator, hooks: Hooks, url: []const u8, msg: []const u8) !?Outcome {
-    hooks.check_update_host(alloc, url) catch |err| {
+    hooks.check_update_host(alloc, url, hooks.home) catch |err| {
         if (err == error.OutOfMemory) return err;
         return try auditOutcome(
             alloc,
@@ -495,14 +496,9 @@ fn emitUpdateAudit(
 }
 
 /// Resolve release channel URL from policy, falling back to default GitHub URL.
-fn resolveReleaseUrl(alloc: std.mem.Allocator) ![]const u8 {
+fn resolveReleaseUrl(alloc: std.mem.Allocator, home: ?[]const u8) ![]const u8 {
     const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch return default_release_url;
     defer alloc.free(cwd);
-    const home = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return resolveFromPolicy(alloc, cwd, null),
-        else => return default_release_url,
-    };
-    defer alloc.free(home);
     return resolveFromPolicy(alloc, cwd, home);
 }
 
@@ -515,12 +511,12 @@ fn resolveFromPolicy(alloc: std.mem.Allocator, cwd: []const u8, home: ?[]const u
     return default_release_url;
 }
 
-fn checkUpdateAllowed(alloc: std.mem.Allocator) !void {
+fn checkUpdateAllowed(alloc: std.mem.Allocator, home: ?[]const u8) !void {
     const cwd_path = update_policy_file;
     try checkPolicyPath(alloc, cwd_path);
 
-    const home = std.posix.getenv("HOME") orelse return;
-    const home_path = try std.fs.path.join(alloc, &.{ home, update_policy_file });
+    const h = home orelse return;
+    const home_path = try std.fs.path.join(alloc, &.{ h, update_policy_file });
     defer alloc.free(home_path);
     try checkPolicyPath(alloc, home_path);
 }
@@ -544,11 +540,11 @@ fn checkPolicyPath(alloc: std.mem.Allocator, path: []const u8) !void {
     }
 }
 
-fn checkUpdateHostAllowed(alloc: std.mem.Allocator, url: []const u8) !void {
+fn checkUpdateHostAllowed(alloc: std.mem.Allocator, url: []const u8, home: ?[]const u8) !void {
     try checkHostPolicyPath(alloc, update_policy_file, url);
 
-    const home = std.posix.getenv("HOME") orelse return;
-    const home_path = try std.fs.path.join(alloc, &.{ home, update_policy_file });
+    const h = home orelse return;
+    const home_path = try std.fs.path.join(alloc, &.{ h, update_policy_file });
     defer alloc.free(home_path);
     try checkHostPolicyPath(alloc, home_path, url);
 }
@@ -1361,7 +1357,7 @@ test "checkUpdateHostAllowed rejects host absent from policy" {
 
     try std.testing.expectError(
         error.UpdateHostDenied,
-        checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest"),
+        checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest", null),
     );
 }
 
@@ -1382,7 +1378,7 @@ test "checkUpdateHostAllowed accepts explicitly allowed host" {
         ,
     });
 
-    try checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest");
+    try checkUpdateHostAllowed(std.testing.allocator, "https://api.github.com/repos/joelreymont/pz/releases/latest", null);
 }
 
 const UpdateFetchSnap = struct {
@@ -1478,7 +1474,7 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
         var latest: []const u8 = undefined;
         var tap = UpdateClientTap{};
 
-        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+        fn checkHost(_: std.mem.Allocator, url: []const u8, _: ?[]const u8) !void {
             if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
@@ -1578,7 +1574,7 @@ test "update invalid runtime CA bundle fails before transport" {
         var base: []const u8 = undefined;
         var latest: []const u8 = undefined;
 
-        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+        fn checkHost(_: std.mem.Allocator, url: []const u8, _: ?[]const u8) !void {
             if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
@@ -1645,7 +1641,7 @@ test "update audit emits start and deny entries on policy block" {
 
     const out = try runOutcomeWith(std.testing.allocator, .{
         .check_update_allowed = struct {
-            fn f(_: std.mem.Allocator) !void {
+            fn f(_: std.mem.Allocator, _: ?[]const u8) !void {
                 return error.UpgradeDisabledByPolicy;
             }
         }.f,
@@ -1728,10 +1724,10 @@ test "update denies archive host before transport" {
 
     const out = try runOutcomeWith(std.testing.allocator, .{
         .check_update_allowed = struct {
-            fn f(_: std.mem.Allocator) !void {}
+            fn f(_: std.mem.Allocator, _: ?[]const u8) !void {}
         }.f,
         .check_update_host = struct {
-            fn f(_: std.mem.Allocator, url: []const u8) !void {
+            fn f(_: std.mem.Allocator, url: []const u8, _: ?[]const u8) !void {
                 if (std.mem.endsWith(u8, url, ".tar.gz")) return error.UpdateHostDenied;
             }
         }.f,
@@ -1854,7 +1850,7 @@ test "update e2e verify fail stays local and audits deterministically" {
             return clk.nowMs();
         }
 
-        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+        fn checkHost(_: std.mem.Allocator, url: []const u8, _: ?[]const u8) !void {
             if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
@@ -1997,7 +1993,7 @@ test "update e2e verify success installs via local redirects and audits determin
             return clk.nowMs();
         }
 
-        fn checkHost(_: std.mem.Allocator, url: []const u8) !void {
+        fn checkHost(_: std.mem.Allocator, url: []const u8, _: ?[]const u8) !void {
             if (std.mem.eql(u8, url, default_release_url)) return;
             if (std.mem.startsWith(u8, url, base)) return;
             return error.TestUnexpectedResult;
@@ -2207,8 +2203,8 @@ test "UX10: upgrade with signed manifest verification success" {
             return .{ .ok = try alloc.dupe(u8, s_archive) };
         }
 
-        fn noCheck(_: std.mem.Allocator) !void {}
-        fn noHostCheck(_: std.mem.Allocator, _: []const u8) !void {}
+        fn noCheck(_: std.mem.Allocator, _: ?[]const u8) !void {}
+        fn noHostCheck(_: std.mem.Allocator, _: []const u8, _: ?[]const u8) !void {}
         fn noDefaultKey() bool {
             return false;
         }
@@ -2268,8 +2264,8 @@ test "UX10: upgrade rejects invalid signed manifest" {
             return .{ .ok = try alloc.dupe(u8, s_archive) };
         }
 
-        fn noCheck(_: std.mem.Allocator) !void {}
-        fn noHostCheck(_: std.mem.Allocator, _: []const u8) !void {}
+        fn noCheck(_: std.mem.Allocator, _: ?[]const u8) !void {}
+        fn noHostCheck(_: std.mem.Allocator, _: []const u8, _: ?[]const u8) !void {}
         fn noDefaultKey() bool {
             return false;
         }

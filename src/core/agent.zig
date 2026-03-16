@@ -364,6 +364,11 @@ pub const ChildProc = struct {
         const stdout_file = proc.stdout orelse return error.BrokenPipe;
         proc.stdin = null;
         proc.stdout = null;
+
+        // Set stdout pipe to non-blocking so spoolStdout can drain without hanging.
+        if (is_posix) {
+            try setNonBlock(stdout_file.handle);
+        }
         const rpc_file: std.fs.File = .{ .handle = rpc_r };
 
         var el = try EventLoop.init();
@@ -499,6 +504,7 @@ pub const ChildProc = struct {
             self.waitRpcMs(@intCast(@min(remain, std.math.maxInt(i32)))) catch {}; // cleanup: propagation impossible
         }
         const line = self.rpc_reader.interface.takeDelimiter('\n') catch |err| {
+            if (err == error.StreamTooLong) return error.FrameTooLarge;
             // If no data available and we're past deadline, surface timeout.
             if (std.time.milliTimestamp() >= deadline) return error.Timeout;
             return err;
@@ -558,6 +564,21 @@ fn killAndWait(child: *std.process.Child) void {
         else => {},
     };
     _ = child.wait() catch {}; // cleanup: propagation impossible
+}
+
+fn setNonBlock(fd: std.posix.fd_t) !void {
+    const flags_rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    switch (std.posix.errno(flags_rc)) {
+        .SUCCESS => {
+            const flags: c_int = @intCast(flags_rc);
+            const rc = std.posix.system.fcntl(fd, std.posix.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {},
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+        },
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
 }
 
 fn clearCloexec(fd: std.posix.fd_t) !void {

@@ -195,8 +195,15 @@ const AuthFile = struct {
 };
 
 fn findAuthFile(ar: std.mem.Allocator, home: []const u8) ![]const u8 {
+    // Primary: ~/.pz/auth.json
     const path = try authFilePath(ar, home);
-    if (std.fs.cwd().access(path, .{})) |_| return path else |_| return error.AuthNotFound;
+    if (std.fs.cwd().access(path, .{})) |_| return path else |_| {}
+    ar.free(path);
+    // Fallback: ~/.pi/agent/auth.json (legacy migration)
+    const legacy = try std.fs.path.join(ar, &.{ home, ".pi", "agent", "auth.json" });
+    if (std.fs.cwd().access(legacy, .{})) |_| return legacy else |_| {}
+    ar.free(legacy);
+    return error.AuthNotFound;
 }
 
 fn authFilePath(ar: std.mem.Allocator, home: []const u8) ![]const u8 {
@@ -296,9 +303,10 @@ fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provider:
 
     const path = findAuthFile(ar, home) catch return error.AuthNotFound;
     const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return error.AuthNotFound;
+    // Allow unknown fields for legacy ~/.pi/agent/auth.json compat (has accountId, openai-codex, etc.)
     const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = false,
+        .ignore_unknown_fields = true,
     }) catch return error.AuthCorrupt;
     const entry = switch (provider) {
         .anthropic => parsed.value.anthropic,
@@ -1051,10 +1059,9 @@ fn atomicAuthWrite(dir_path: []const u8, name: []const u8, data: []const u8) !vo
 }
 
 /// List providers that have credentials stored (merges all auth files).
-pub fn listLoggedIn(alloc: std.mem.Allocator) ![]Provider {
-    const home = std.process.getEnvVarOwned(alloc, "HOME") catch return try alloc.alloc(Provider, 0);
-    defer alloc.free(home);
-    return listLoggedInHome(alloc, home);
+pub fn listLoggedIn(alloc: std.mem.Allocator, home: ?[]const u8) ![]Provider {
+    const h = home orelse return try alloc.alloc(Provider, 0);
+    return listLoggedInHome(alloc, h);
 }
 
 fn listLoggedInHome(alloc: std.mem.Allocator, home: []const u8) ![]Provider {

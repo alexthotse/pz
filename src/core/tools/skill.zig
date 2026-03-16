@@ -11,9 +11,10 @@ pub const Err = error{
 
 pub const Cache = struct {
     skills: ?[]core_skill.SkillInfo = null,
+    home: ?[]const u8 = null,
 
     pub fn load(self: *Cache, alloc: std.mem.Allocator) ![]const core_skill.SkillInfo {
-        if (self.skills == null) self.skills = try core_skill.discoverAndRead(alloc);
+        if (self.skills == null) self.skills = try core_skill.discoverAndRead(alloc, self.home);
         return self.skills.?;
     }
 

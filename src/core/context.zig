@@ -13,8 +13,8 @@ pub const max_context_bytes: usize = 256 * 1024;
 /// Searches global dir, then walks cwd upward to root.
 /// Returns concatenated content with section headers.
 /// Total output is capped at `max_context_bytes`; excess is truncated.
-pub fn load(alloc: std.mem.Allocator) !?[]u8 {
-    if ((try loadPolicyLock(alloc)).context) return null;
+pub fn load(alloc: std.mem.Allocator, home: ?[]const u8) !?[]u8 {
+    if ((try loadPolicyLock(alloc, home)).context) return null;
 
     var parts = std.ArrayListUnmanaged([]u8){};
     defer {
@@ -23,7 +23,7 @@ pub fn load(alloc: std.mem.Allocator) !?[]u8 {
     }
 
     // Global: ~/.pz/AGENTS.md
-    if (try globalDir(alloc)) |gdir| {
+    if (try globalDir(alloc, home)) |gdir| {
         defer alloc.free(gdir);
         if (try readContext(alloc, gdir)) |content| {
             try parts.append(alloc, content);
@@ -86,8 +86,8 @@ fn assemblePartsWithBudget(alloc: std.mem.Allocator, parts: []const []u8, budget
 }
 
 /// Returns list of discovered context file paths (for startup display).
-pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
-    if ((try loadPolicyLock(alloc)).context) return try alloc.alloc([]u8, 0);
+pub fn discoverPaths(alloc: std.mem.Allocator, home: ?[]const u8) ![][]u8 {
+    if ((try loadPolicyLock(alloc, home)).context) return try alloc.alloc([]u8, 0);
 
     var paths = std.ArrayListUnmanaged([]u8){};
     errdefer {
@@ -95,7 +95,7 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
         paths.deinit(alloc);
     }
 
-    if (try globalDir(alloc)) |gdir| {
+    if (try globalDir(alloc, home)) |gdir| {
         defer alloc.free(gdir);
         if (try findFile(alloc, gdir)) |p| try paths.append(alloc, p);
     }
@@ -119,14 +119,10 @@ fn findFile(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
     return try std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{dir});
 }
 
-/// Returns the global config dir (~/.pz), or null when HOME is unset.
-fn globalDir(alloc: std.mem.Allocator) !?[]u8 {
-    const home = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
-        else => return err,
-    };
-    defer alloc.free(home);
-    return try std.fmt.allocPrint(alloc, "{s}/.pz", .{home});
+/// Returns the global config dir (~/.pz), or null when HOME is unset/invalid.
+fn globalDir(alloc: std.mem.Allocator, home: ?[]const u8) !?[]u8 {
+    const h = home orelse return null;
+    return try std.fmt.allocPrint(alloc, "{s}/.pz", .{h});
 }
 
 
@@ -134,11 +130,9 @@ fn readContext(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
     return readFile(alloc, dir, "AGENTS.md");
 }
 
-fn loadPolicyLock(alloc: std.mem.Allocator) !policy.Lock {
+fn loadPolicyLock(alloc: std.mem.Allocator, home: ?[]const u8) !policy.Lock {
     const cwd = realCwdAlloc(alloc) orelse return .{};
     defer alloc.free(cwd);
-    const home = std.process.getEnvVarOwned(alloc, "HOME") catch null;
-    defer if (home) |v| alloc.free(v);
     return policy.loadLock(alloc, cwd, home);
 }
 
@@ -161,11 +155,19 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?[]u8 
     };
     defer file.close();
 
-    const content = try file.readToEndAlloc(alloc, 1024 * 1024);
-    if (content.len == 0) {
-        alloc.free(content);
+    const raw = try file.readToEndAlloc(alloc, 1024 * 1024);
+    if (raw.len == 0) {
+        alloc.free(raw);
         return null;
     }
+
+    // Context files may contain non-UTF-8 bytes; sanitize before wrapping
+    // so downstream JSON serialization and TUI rendering never see bad bytes.
+    const content = if (std.unicode.Utf8View.init(raw)) |_| raw else |_| blk: {
+        const san = try @import("utf8.zig").sanitizeLossyAlloc(alloc, raw);
+        alloc.free(raw);
+        break :blk san;
+    };
 
     const wrapped = prov_api.wrapUntrustedNamed(alloc, "context-file", path, content) catch |err| {
         alloc.free(content);
@@ -301,7 +303,7 @@ test "discoverPaths walks real cwd ancestry, not symlink aliases" {
     try std.posix.chdir(alias_sub);
     defer std.posix.chdir(old) catch {}; // test: error irrelevant
 
-    const paths = try discoverPaths(std.testing.allocator);
+    const paths = try discoverPaths(std.testing.allocator, null);
     defer {
         for (paths) |p| std.testing.allocator.free(p);
         std.testing.allocator.free(paths);
@@ -342,7 +344,7 @@ test "load returns null when policy locks context" {
     try std.posix.chdir(cwd);
     defer std.posix.chdir(old) catch {}; // test: error irrelevant
 
-    const got = try load(std.testing.allocator);
+    const got = try load(std.testing.allocator, null);
     defer if (got) |v| std.testing.allocator.free(v);
     try std.testing.expect(got == null);
 }

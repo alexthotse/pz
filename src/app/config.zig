@@ -18,6 +18,16 @@ pub const Env = struct {
     theme: ?[]const u8 = null,
     provider_cmd: ?[]const u8 = null,
     home: ?[]const u8 = null,
+    tmp_dir: ?[]const u8 = null,
+    state_dir: ?[]const u8 = null,
+    xdg_state_home: ?[]const u8 = null,
+
+    pub const tmp_dir_default = "/tmp";
+
+    /// Return TMPDIR or the default.
+    pub fn tmpDir(self: Env) []const u8 {
+        return self.tmp_dir orelse tmp_dir_default;
+    }
 
     pub fn fromProcess(alloc: std.mem.Allocator) !Env {
         return .{
@@ -28,7 +38,10 @@ pub const Env = struct {
             .mode = dupEnv(alloc, "PZ_MODE"),
             .theme = dupEnv(alloc, "PZ_THEME"),
             .provider_cmd = dupEnv(alloc, "PZ_PROVIDER_CMD"),
-            .home = dupEnv(alloc, "HOME"),
+            .home = validatedHome(alloc),
+            .tmp_dir = dupEnv(alloc, "TMPDIR"),
+            .state_dir = dupEnv(alloc, "PZ_STATE_DIR"),
+            .xdg_state_home = dupEnv(alloc, "XDG_STATE_HOME"),
         };
     }
 
@@ -41,6 +54,9 @@ pub const Env = struct {
         if (self.theme) |v| alloc.free(v);
         if (self.provider_cmd) |v| alloc.free(v);
         if (self.home) |v| alloc.free(v);
+        if (self.tmp_dir) |v| alloc.free(v);
+        if (self.state_dir) |v| alloc.free(v);
+        if (self.xdg_state_home) |v| alloc.free(v);
         self.* = undefined;
     }
 };
@@ -71,14 +87,31 @@ pub const Config = struct {
     }
 };
 
+/// Validate a home path: reject empty, non-absolute, or null-byte-containing.
+pub fn validateHome(home: ?[]const u8) ?[]const u8 {
+    const h = home orelse return null;
+    if (h.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, h, 0) != null) return null;
+    if (!std.fs.path.isAbsolute(h)) return null;
+    return h;
+}
+
+/// Read and validate HOME from env, allocating a copy. Called once at startup.
+fn validatedHome(alloc: std.mem.Allocator) ?[]const u8 {
+    const raw = dupEnv(alloc, "HOME") orelse return null;
+    if (validateHome(raw) != null) return raw;
+    alloc.free(raw);
+    return null;
+}
+
 pub const pz_state_dir = ".pz";
 pub const pz_state_file = "state.json";
 
 pub const PzState = struct {
     last_hash: ?[]const u8 = null,
 
-    pub fn load(alloc: std.mem.Allocator) !?PzState {
-        return loadForHome(alloc, std.posix.getenv("HOME"));
+    pub fn load(alloc: std.mem.Allocator, home: ?[]const u8) !?PzState {
+        return loadForHome(alloc, home);
     }
 
     /// Load PzState from disk.
@@ -103,8 +136,8 @@ pub const PzState = struct {
         };
     }
 
-    pub fn save(self: PzState, alloc: std.mem.Allocator) void {
-        self.saveForHome(alloc, std.posix.getenv("HOME"));
+    pub fn save(self: PzState, alloc: std.mem.Allocator, home: ?[]const u8) void {
+        self.saveForHome(alloc, home);
     }
 
     pub fn saveForHome(self: PzState, alloc: std.mem.Allocator, home_override: ?[]const u8) void {
@@ -366,6 +399,8 @@ fn loadFile(
 
 fn loadGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!?std.json.Parsed(SettingsCfg) {
     const home_path = home orelse return null;
+    if (home_path.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, home_path, 0) != null) return null;
     const path = try std.fs.path.join(alloc, &.{ home_path, auto_cfg_path });
     defer alloc.free(path);
     if (!std.fs.path.isAbsolute(path)) return error.InvalidHomePath;

@@ -33,7 +33,6 @@ fn renderToVs(ui: *Ui, vs: *VScreen) !void {
     var buf: [16384]u8 = undefined;
     var out = BufWriter.init(&buf);
     try ui.draw(&out);
-    vs.clear();
     vs.feed(out.view());
 }
 
@@ -1126,7 +1125,7 @@ test "UX5 settings toggles persist across multiple render cycles" {
     while (r < 9) : (r += 1) {
         const row = try vs.rowText(std.testing.allocator, r);
         defer std.testing.allocator.free(row);
-        if (std.mem.indexOf(u8, row, "$ bash") != null) found_tool = true;
+        if (std.mem.indexOf(u8, row, "<command>") != null) found_tool = true;
         if (std.mem.indexOf(u8, row, "reasoning") != null) found_think = true;
         if (std.mem.indexOf(u8, row, "intro") != null) found_intro = true;
         if (std.mem.indexOf(u8, row, "conclusion") != null) found_concl = true;
@@ -1147,7 +1146,7 @@ test "UX5 settings toggles persist across multiple render cycles" {
     while (r < 9) : (r += 1) {
         const row = try vs.rowText(std.testing.allocator, r);
         defer std.testing.allocator.free(row);
-        if (std.mem.indexOf(u8, row, "$ bash") != null) tool_back = true;
+        if (std.mem.indexOf(u8, row, "<command>") != null) tool_back = true;
         if (std.mem.indexOf(u8, row, "reasoning") != null) think_back = true;
     }
     try std.testing.expect(tool_back);

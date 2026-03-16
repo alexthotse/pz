@@ -187,6 +187,7 @@ pub fn build(b: *std.Build) void {
         perf_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
     }
     perf_tests.root_module.addImport("zcheck", zcheck_mod);
+    perf_tests.root_module.addOptions("build_options", test_options);
     const run_perf_tests = b.addRunArtifact(perf_tests);
     const perf_step = b.step("perf", "Run performance budget tests");
     perf_step.dependOn(&run_perf_tests.step);

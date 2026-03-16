@@ -204,6 +204,7 @@ test "tool contract handlers emit deterministic envelopes" {
         .max_bytes = 4096,
         .now_ms = 70,
         .hook = @import("agent.zig").Hook.from(AgentImpl, &agent_impl, AgentImpl.run),
+        .policy_hash = "test",
     });
     const agent_call: tools.Call = .{
         .id = "a1",

@@ -32,7 +32,7 @@ pub fn run() !void {
         .version => |txt| try out.writeAll(txt),
         .changelog => |txt| try out.writeAll(txt),
         .upgrade => {
-            const outcome = try update.runOutcome(alloc);
+            const outcome = try update.runOutcome(alloc, env.home);
             defer outcome.deinit(alloc);
             try out.writeAll(outcome.msg);
         },

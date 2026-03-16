@@ -1033,6 +1033,28 @@ test "panels validate utf8 model and event fields" {
     try std.testing.expectError(error.InvalidUtf8, ps.setProvider(bad[0..]));
 }
 
+test "panels footer rejects non-utf8 cwd" {
+    const bad_cwd = "/tmp/\xff/proj";
+    var ps = try Panels.initFull(std.testing.allocator, "m", "p", bad_cwd, "main");
+    defer ps.deinit();
+
+    var frm = try frame.Frame.init(std.testing.allocator, 60, 2);
+    defer frm.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.InvalidUtf8, ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 }));
+}
+
+test "panels footer rejects non-utf8 branch" {
+    const bad_branch = "feat/\xff";
+    var ps = try Panels.initFull(std.testing.allocator, "m", "p", "proj", bad_branch);
+    defer ps.deinit();
+
+    var frm = try frame.Frame.init(std.testing.allocator, 60, 2);
+    defer frm.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.InvalidUtf8, ps.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 60, .h = 2 }));
+}
+
 test "panels render rejects out of bounds rect" {
     var ps = try Panels.init(std.testing.allocator, "gpt", "prov");
     defer ps.deinit();

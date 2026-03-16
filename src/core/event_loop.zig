@@ -206,6 +206,7 @@ fn kqueueWaitChanges(kq: posix.fd_t, changelist: []const std.posix.Kevent, event
             .INTR => continue,
             .BADF => return error.BadFd,
             .INVAL => return error.InvalidArg,
+            .NOENT => return error.NotRegistered,
             else => |e| return posix.unexpectedErrno(e),
         }
     }

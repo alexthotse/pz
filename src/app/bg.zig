@@ -81,6 +81,10 @@ const Job = struct {
 pub const Manager = struct {
     pub const Opts = struct {
         state_dir: ?[]const u8 = null,
+        home: ?[]const u8 = null,
+        tmp_dir: []const u8 = "/tmp",
+        pz_state_dir: ?[]const u8 = null,
+        xdg_state_home: ?[]const u8 = null,
         recover: bool = true,
         emit_audit_ctx: ?*anyopaque = null,
         emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
@@ -96,6 +100,7 @@ pub const Manager = struct {
     wake_r: std.posix.fd_t,
     wake_w: std.posix.fd_t,
     journal: journal_mod.Journal,
+    tmp_dir: []const u8 = "/tmp",
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = nowMs,
@@ -122,7 +127,11 @@ pub const Manager = struct {
             .wake_w = pipe[1],
             .journal = try journal_mod.Journal.init(alloc, .{
                 .state_dir = opts.state_dir,
+                .home = opts.home,
+                .pz_state_dir = opts.pz_state_dir,
+                .xdg_state_home = opts.xdg_state_home,
             }),
+            .tmp_dir = opts.tmp_dir,
             .emit_audit_ctx = opts.emit_audit_ctx,
             .emit_audit = opts.emit_audit,
             .now_ms = opts.now_ms,
@@ -709,9 +718,8 @@ pub const Manager = struct {
         var n: u32 = 0;
         while (n < 64) : (n += 1) {
             const ts = std.time.milliTimestamp();
-            const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
             const path = try std.fmt.allocPrint(self.alloc, "{s}/pz-bg-{d}-{d}.log", .{
-                tmp_dir,
+                self.tmp_dir,
                 id,
                 ts + @as(i64, n),
             });

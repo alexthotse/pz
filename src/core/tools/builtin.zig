@@ -165,6 +165,7 @@ pub const Opts = struct {
     ask_hook: ?AskHook = null,
     /// Parent's verified policy hash for agent sandbox inheritance.
     policy_hash: ?[]const u8 = null,
+    home: ?[]const u8 = null,
 };
 
 pub const Runtime = struct {
@@ -174,7 +175,7 @@ pub const Runtime = struct {
     agent_hook: ?agent_tool.Hook,
     ask_hook: ?AskHook,
     policy_hash: ?[]const u8,
-    skill_cache: skill.Cache = .{},
+    skill_cache: skill.Cache,
     entries: [11]tools.Entry = undefined,
     selected: [11]tools.Entry = undefined,
 
@@ -186,6 +187,7 @@ pub const Runtime = struct {
             .agent_hook = opts.agent_hook,
             .ask_hook = opts.ask_hook,
             .policy_hash = opts.policy_hash,
+            .skill_cache = .{ .home = opts.home },
         };
     }
 

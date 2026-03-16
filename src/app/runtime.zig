@@ -158,10 +158,9 @@ const RuntimePolicy = struct {
     alloc: std.mem.Allocator,
     resolved: core.policy.Resolved,
 
-    fn load(alloc: std.mem.Allocator) !RuntimePolicy {
+    fn load(alloc: std.mem.Allocator, home: ?[]const u8) !RuntimePolicy {
         const cwd = try std.process.getCwdAlloc(alloc);
         defer alloc.free(cwd);
-        const home = if (builtin.is_test) null else std.posix.getenv("HOME");
         return .{
             .alloc = alloc,
             .resolved = try core.policy.loadResolved(alloc, cwd, home),
@@ -467,7 +466,14 @@ const TuiSink = struct {
 
     fn push(self: *TuiSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
-            .provider => |pev| try self.ui.onProvider(pev),
+            .provider => |pev| {
+                // Provider text may contain invalid UTF-8 from API responses.
+                // Sanitize text fields before TUI rendering.
+                self.ui.onProvider(pev) catch |err| switch (err) {
+                    error.InvalidUtf8 => try self.pushSanitized(pev),
+                    else => return err,
+                };
+            },
             .session_write_err => |msg| {
                 const note = try std.fmt.allocPrint(self.ui.alloc, "[session write failed: {s}]", .{msg});
                 defer self.ui.alloc.free(note);
@@ -476,6 +482,53 @@ const TuiSink = struct {
             else => {},
         }
         try self.ui.draw(self.out);
+    }
+
+    fn pushSanitized(self: *TuiSink, pev: core.providers.Event) !void {
+        const alloc = self.ui.alloc;
+        switch (pev) {
+            .text => |t| {
+                const s = try sanitizeUtf8LossyAlloc(alloc, t);
+                defer alloc.free(s);
+                try self.ui.onProvider(.{ .text = s });
+            },
+            .thinking => |t| {
+                const s = try sanitizeUtf8LossyAlloc(alloc, t);
+                defer alloc.free(s);
+                try self.ui.onProvider(.{ .thinking = s });
+            },
+            .tool_call => |tc| {
+                const s_id = try sanitizeUtf8LossyAlloc(alloc, tc.id);
+                defer alloc.free(s_id);
+                const s_name = try sanitizeUtf8LossyAlloc(alloc, tc.name);
+                defer alloc.free(s_name);
+                const s_args = try sanitizeUtf8LossyAlloc(alloc, tc.args);
+                defer alloc.free(s_args);
+                try self.ui.onProvider(.{ .tool_call = .{
+                    .id = s_id,
+                    .name = s_name,
+                    .args = s_args,
+                } });
+            },
+            .tool_result => |tr| {
+                const s_id = try sanitizeUtf8LossyAlloc(alloc, tr.id);
+                defer alloc.free(s_id);
+                const s_out = try sanitizeUtf8LossyAlloc(alloc, tr.output);
+                defer alloc.free(s_out);
+                try self.ui.onProvider(.{ .tool_result = .{
+                    .id = s_id,
+                    .output = s_out,
+                    .is_err = tr.is_err,
+                } });
+            },
+            .err => |t| {
+                const s = try sanitizeUtf8LossyAlloc(alloc, t);
+                defer alloc.free(s);
+                try self.ui.onProvider(.{ .err = s });
+            },
+            // Non-text events pass through directly
+            .usage, .stop => try self.ui.onProvider(pev),
+        }
     }
 };
 
@@ -1735,8 +1788,9 @@ fn exportAuditHooks(hooks: AuditHooks) core.session.@"export".AuditHooks {
     };
 }
 
-fn updateAuditHooks(hooks: AuditHooks) update_mod.AuditHooks {
+fn updateAuditHooks(hooks: AuditHooks, home: ?[]const u8) update_mod.AuditHooks {
     return .{
+        .home = home,
         .emit_audit_ctx = hooks.emit_audit_ctx,
         .emit_audit = hooks.emit_audit,
         .now_ms = hooks.now_ms,
@@ -1826,10 +1880,11 @@ fn reloadContextWithAudit(
     sys_prompt: *?[]const u8,
     sys_prompt_owned: *?[]u8,
     audit: *RuntimeCtlAudit,
-    load_fn: *const fn (std.mem.Allocator) anyerror!?[]u8,
+    load_fn: *const fn (std.mem.Allocator, ?[]const u8) anyerror!?[]u8,
+    home: ?[]const u8,
 ) !ReloadRes {
     try runtimeCtlStart(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &.{});
-    const next_ctx = load_fn(alloc) catch |err| {
+    const next_ctx = load_fn(alloc, home) catch |err| {
         try runtimeCtlFail(
             audit,
             alloc,
@@ -1933,7 +1988,8 @@ fn execWithIoTuiHooks(
     defer if (has_provider_rt) provider_rt.deinit();
     defer if (has_native_rt) native_rt.deinit();
 
-    var pol = try RuntimePolicy.load(alloc);
+    const home = run_cmd.home;
+    var pol = try RuntimePolicy.load(alloc, home);
     defer pol.deinit();
 
     // Shared event loop for TUI mode — providers and tools use it
@@ -1947,6 +2003,7 @@ fn execWithIoTuiHooks(
     var tools_rt = core.tools.builtin.Runtime.init(.{
         .alloc = alloc,
         .tool_mask = run_cmd.tool_mask,
+        .home = home,
     });
 
     var sid: []u8 = &.{};
@@ -2029,7 +2086,7 @@ fn execWithIoTuiHooks(
         },
         .dispatch => {
             const sess_store = store.?;
-            const sys_prompt = try buildSystemPrompt(alloc, run_cmd);
+            const sys_prompt = try buildSystemPrompt(alloc, run_cmd, home);
             defer if (sys_prompt) |sp| alloc.free(sp);
 
             switch (run_cmd.mode) {
@@ -2112,6 +2169,7 @@ fn runPrint(
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
 ) !void {
+    const home = run_cmd.home;
     const prompt = run_cmd.prompt orelse return error.EmptyPrompt;
 
     var sink_impl = PrintSink.init(alloc, out);
@@ -2139,7 +2197,7 @@ fn runPrint(
     };
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
-    const approval_bind = try loadApprovalBindAlloc(alloc);
+    const approval_bind = try loadApprovalBindAlloc(alloc, home);
     defer approval_bind.deinit(alloc);
     const approval_loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, approval_loc);
@@ -2285,6 +2343,7 @@ fn runJson(
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
 ) !void {
+    const home = run_cmd.home;
     var sink_impl = JsonSink{
         .alloc = alloc,
         .out = out,
@@ -2293,7 +2352,7 @@ fn runJson(
     const popts = run_cmd.thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
-    const approval_bind = try loadApprovalBindAlloc(alloc);
+    const approval_bind = try loadApprovalBindAlloc(alloc, home);
     defer approval_bind.deinit(alloc);
     const approval_loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, approval_loc);
@@ -2362,6 +2421,7 @@ fn runTui(
     audit_hooks: AuditHooks,
     tui_hooks: TuiHooks,
 ) !void {
+    const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
     var model_owned: ?[]u8 = null;
@@ -2380,13 +2440,24 @@ fn runTui(
         break :blk ptr[0..m.len];
     } else &model_cycle;
 
-    const cwd_path = getProjectPath(alloc) catch "";
+    const cwd_path = getProjectPath(alloc, home) catch "";
     defer if (cwd_path.len > 0) alloc.free(cwd_path);
     const branch = getGitBranch(alloc) catch "";
     defer if (branch.len > 0) alloc.free(branch);
 
+    // Sanitize all external text before TUI: model/provider/cwd/branch may
+    // originate from JSON, env vars, CLI args, or VCS that contain non-UTF-8.
+    const safe_model = try ensureUtf8OrSanitize(alloc, model);
+    defer if (safe_model.owned) |o| alloc.free(o);
+    const safe_provider = try ensureUtf8OrSanitize(alloc, provider_label);
+    defer if (safe_provider.owned) |o| alloc.free(o);
+    const safe_cwd = try ensureUtf8OrSanitize(alloc, cwd_path);
+    defer if (safe_cwd.owned) |o| alloc.free(o);
+    const safe_branch = try ensureUtf8OrSanitize(alloc, branch);
+    defer if (safe_branch.owned) |o| alloc.free(o);
+
     const tsz = tui_term.size(std.posix.STDOUT_FILENO) orelse tui_term.Size{ .w = 80, .h = 24 };
-    var ui = try tui_harness.Ui.initFull(alloc, tsz.w, tsz.h, model, provider_label, cwd_path, branch, run_cmd.cfg.theme);
+    var ui = try tui_harness.Ui.initFull(alloc, tsz.w, tsz.h, safe_model.text, safe_provider.text, safe_cwd.text, safe_branch.text, run_cmd.cfg.theme);
     defer ui.deinit();
     ui.img_cap = @import("../modes/tui/image.zig").detect();
     ui.panels.ctx_limit = modelCtxWindow(model);
@@ -2394,7 +2465,7 @@ fn runTui(
 
     _ = tui_term.installSigwinch();
     try tui_render.Renderer.setup(out);
-    try tui_render.Renderer.setTitle(out, cwd_path);
+    try tui_render.Renderer.setTitle(out, safe_cwd.text);
 
     defer {
         tui_render.Renderer.setTitle(out, "") catch {}; // cleanup: propagation impossible
@@ -2421,11 +2492,15 @@ fn runTui(
     const cancel = core.loop.CancelSrc.from(InputWatcher, &watcher, InputWatcher.isCanceled);
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
-    const approval_bind = try loadApprovalBindAlloc(alloc);
+    const approval_bind = try loadApprovalBindAlloc(alloc, home);
     defer approval_bind.deinit(alloc);
     const approval_loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, approval_loc);
     var bg_mgr = try bg.Manager.initWithOpts(alloc, .{
+        .home = home,
+        .tmp_dir = run_cmd.tmp_dir,
+        .pz_state_dir = run_cmd.state_dir,
+        .xdg_state_home = run_cmd.xdg_state_home,
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
         .emit_audit = audit_hooks.emit_audit,
         .now_ms = audit_hooks.now_ms,
@@ -2489,9 +2564,9 @@ fn runTui(
     };
     if (is_resumed) {
         const restored = try tryRestoreSessionIntoUi(alloc, &ui, session_dir_path, no_session, sid.*);
-        if (!restored) try showStartup(alloc, &ui, true);
+        if (!restored) try showStartup(alloc, &ui, true, home);
     } else {
-        try showStartup(alloc, &ui, false);
+        try showStartup(alloc, &ui, false, home);
     }
 
     // Set terminal title (OSC 0)
@@ -2520,6 +2595,7 @@ fn runTui(
             init_cmd_fbs.writer().any(),
             audit_hooks,
             &ctl_audit,
+            home,
         );
         if (cmd == .quit) return;
         if (cmd == .clear) {
@@ -2534,7 +2610,7 @@ fn runTui(
             try showCost(alloc, &ui);
         }
         if (cmd == .reload) {
-            const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load);
+            const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, home);
             switch (reloaded) {
                 .loaded => try ui.tr.infoText("[context reloaded]"),
                 .empty => try ui.tr.infoText("[context reloaded (no files)]"),
@@ -2620,7 +2696,7 @@ fn runTui(
         const live_cancel = core.loop.CancelSrc.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled);
         var live_cmd_cache = core.loop.CmdCache.init(alloc);
         defer live_cmd_cache.deinit();
-        const live_approval_bind = try loadApprovalBindAlloc(alloc);
+        const live_approval_bind = try loadApprovalBindAlloc(alloc, home);
         defer live_approval_bind.deinit(alloc);
         const live_approval_loc = try getApprovalLocAlloc(alloc);
         defer freeApprovalLoc(alloc, live_approval_loc);
@@ -2887,6 +2963,7 @@ fn runTui(
                                 cmd_fbs.writer().any(),
                                 audit_hooks,
                                 &ctl_audit,
+                                home,
                             );
                             if (cmd == .quit) return;
                             if (cmd == .clear) {
@@ -2907,7 +2984,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .reload) {
-                                const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load);
+                                const reloaded = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, home);
                                 switch (reloaded) {
                                     .loaded => try ui.tr.infoText("[context reloaded]"),
                                     .empty => try ui.tr.infoText("[context reloaded (no files)]"),
@@ -2965,7 +3042,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .select_logout) {
-                                const providers = core.providers.auth.listLoggedIn(alloc) catch try alloc.alloc(core.providers.auth.Provider, 0);
+                                const providers = core.providers.auth.listLoggedIn(alloc, home) catch try alloc.alloc(core.providers.auth.Provider, 0);
                                 defer alloc.free(providers);
                                 if (!try showLogoutOverlay(alloc, &ui, providers)) {
                                     try ui.tr.infoText("no providers logged in");
@@ -3131,7 +3208,7 @@ fn runTui(
                         },
                         .paste_image => {
                             if (pre) |p| alloc.free(p);
-                            try pasteImage(alloc, &ui);
+                            try pasteImage(alloc, &ui, run_cmd.tmp_dir);
                             try ui.draw(out);
                         },
                         .reverse_cycle_model => {
@@ -3349,6 +3426,7 @@ fn runTui(
                 out,
                 audit_hooks,
                 &ctl_audit,
+                home,
             );
             if (cmd == .quit) return;
             if (cmd == .clear) {
@@ -3372,7 +3450,7 @@ fn runTui(
                 continue;
             }
             if (cmd == .reload) {
-                _ = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load);
+                _ = try reloadContextWithAudit(alloc, &sys_prompt, &sys_prompt_owned, &ctl_audit, core.context.load, home);
                 try ui.draw(out);
                 cmd_ct += 1;
                 continue;
@@ -3428,6 +3506,7 @@ fn runRpc(
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
 ) !void {
+    const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
     var model: []const u8 = resolveDefault(run_cmd.cfg.model);
     var model_owned: ?[]u8 = null;
@@ -3444,7 +3523,7 @@ fn runRpc(
     const popts = run_cmd.thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
-    const approval_bind = try loadApprovalBindAlloc(alloc);
+    const approval_bind = try loadApprovalBindAlloc(alloc, home);
     defer approval_bind.deinit(alloc);
     const approval_loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, approval_loc);
@@ -3461,6 +3540,10 @@ fn runRpc(
         .approval_loc = approval_loc,
     };
     var bg_mgr = try bg.Manager.initWithOpts(alloc, .{
+        .home = home,
+        .tmp_dir = run_cmd.tmp_dir,
+        .pz_state_dir = run_cmd.state_dir,
+        .xdg_state_home = run_cmd.xdg_state_home,
         .emit_audit_ctx = audit_hooks.emit_audit_ctx,
         .emit_audit = audit_hooks.emit_audit,
         .now_ms = audit_hooks.now_ms,
@@ -3742,7 +3825,7 @@ fn runRpc(
                 });
             },
             .logout => {
-                const msg = runRpcLogout(alloc, req, provider_label, audit_hooks.auth()) catch |err| {
+                const msg = runRpcLogout(alloc, req, provider_label, audit_hooks.auth(), home) catch |err| {
                     const err_msg = try report.rpc(alloc, "logout", err);
                     defer alloc.free(err_msg);
                     try writeJsonLine(alloc, out, .{
@@ -3763,7 +3846,7 @@ fn runRpc(
             },
             .upgrade => {
                 try runtimeCtlStart(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
-                const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks)) catch |err| {
+                const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks, home)) catch |err| {
                     try runtimeCtlFail(
                         &ctl_audit,
                         alloc,
@@ -4254,6 +4337,7 @@ fn runRpcLogout(
     req: RpcReq,
     active_name: []const u8,
     hooks: core.providers.auth.Hooks,
+    home: ?[]const u8,
 ) ![]u8 {
     const provider_name = if (req.provider) |name|
         std.mem.trim(u8, name, " \t")
@@ -4266,7 +4350,7 @@ fn runRpcLogout(
         return std.fmt.allocPrint(alloc, "logged out of {s}\n", .{core.providers.auth.providerName(prov)});
     }
 
-    const logged_in = core.providers.auth.listLoggedIn(alloc) catch try alloc.alloc(core.providers.auth.Provider, 0);
+    const logged_in = core.providers.auth.listLoggedIn(alloc, home) catch try alloc.alloc(core.providers.auth.Provider, 0);
     defer alloc.free(logged_in);
     if (logged_in.len == 0) return alloc.dupe(u8, "no providers logged in\n");
     const prov = chooseLogoutProvider(active_name, logged_in) orelse return error.InvalidArgs;
@@ -4305,8 +4389,8 @@ fn classifySlashSkill(skills: []const core_skill.SkillInfo, name: []const u8) Sl
     return .allowed;
 }
 
-fn loadSlashSkill(alloc: std.mem.Allocator, name: []const u8) !SlashSkill {
-    const skills = try core_skill.discoverAndRead(alloc);
+fn loadSlashSkill(alloc: std.mem.Allocator, name: []const u8, home: ?[]const u8) !SlashSkill {
+    const skills = try core_skill.discoverAndRead(alloc, home);
     defer core_skill.freeSkills(alloc, skills);
     return classifySlashSkill(skills, name);
 }
@@ -4328,6 +4412,7 @@ fn handleSlashCommand(
     out: std.Io.AnyWriter,
     audit_hooks: AuditHooks,
     ctl_audit: *RuntimeCtlAudit,
+    home: ?[]const u8,
 ) !CmdRes {
     if (line.len == 0 or line[0] != '/') return .unhandled;
 
@@ -4369,7 +4454,7 @@ fn handleSlashCommand(
     });
 
     const resolved = cmd_map.get(cmd) orelse {
-        switch (try loadSlashSkill(alloc, cmd)) {
+        switch (try loadSlashSkill(alloc, cmd, home)) {
             .allowed => {
                 if (pol.allowsCmd(cmd)) return .unhandled;
                 try writeTextLine(alloc, out, "blocked by policy: /{s}\n", .{cmd});
@@ -4512,7 +4597,7 @@ fn handleSlashCommand(
         },
         .upgrade => {
             try runtimeCtlStart(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
-            const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks)) catch |err| {
+            const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks, home)) catch |err| {
                 try runtimeCtlFail(
                     ctl_audit,
                     alloc,
@@ -4797,7 +4882,7 @@ fn handleSlashCommand(
                 return .handled;
             }
 
-            const logged_in = core.providers.auth.listLoggedIn(alloc) catch try alloc.alloc(core.providers.auth.Provider, 0);
+            const logged_in = core.providers.auth.listLoggedIn(alloc, home) catch try alloc.alloc(core.providers.auth.Provider, 0);
             defer alloc.free(logged_in);
             if (logged_in.len == 0) {
                 try out.writeAll("no providers logged in\n");
@@ -5485,21 +5570,50 @@ fn restoreSessionIntoUi(
     ui.panels.resetSessionView();
 
     while (try rdr.next()) |ev| {
+        // Session JSONL may contain non-UTF-8 bytes from corrupted files
+        // or tool output that was persisted verbatim. Sanitize all text
+        // fields before passing to TUI which requires valid UTF-8.
         switch (ev.data) {
             .noop => {},
-            .prompt => |p| try ui.tr.userText(p.text),
-            .text => |t| try ui.onProvider(.{ .text = t.text }),
-            .thinking => |t| try ui.onProvider(.{ .thinking = t.text }),
-            .tool_call => |tc| try ui.onProvider(.{ .tool_call = .{
-                .id = tc.id,
-                .name = tc.name,
-                .args = tc.args,
-            } }),
-            .tool_result => |tr| try ui.onProvider(.{ .tool_result = .{
-                .id = tr.id,
-                .output = tr.output,
-                .is_err = tr.is_err,
-            } }),
+            .prompt => |p| {
+                const s = try ensureUtf8OrSanitize(alloc, p.text);
+                defer if (s.owned) |o| alloc.free(o);
+                try ui.tr.userText(s.text);
+            },
+            .text => |t| {
+                const s = try ensureUtf8OrSanitize(alloc, t.text);
+                defer if (s.owned) |o| alloc.free(o);
+                try ui.onProvider(.{ .text = s.text });
+            },
+            .thinking => |t| {
+                const s = try ensureUtf8OrSanitize(alloc, t.text);
+                defer if (s.owned) |o| alloc.free(o);
+                try ui.onProvider(.{ .thinking = s.text });
+            },
+            .tool_call => |tc| {
+                const s_id = try ensureUtf8OrSanitize(alloc, tc.id);
+                defer if (s_id.owned) |o| alloc.free(o);
+                const s_name = try ensureUtf8OrSanitize(alloc, tc.name);
+                defer if (s_name.owned) |o| alloc.free(o);
+                const s_args = try ensureUtf8OrSanitize(alloc, tc.args);
+                defer if (s_args.owned) |o| alloc.free(o);
+                try ui.onProvider(.{ .tool_call = .{
+                    .id = s_id.text,
+                    .name = s_name.text,
+                    .args = s_args.text,
+                } });
+            },
+            .tool_result => |tr| {
+                const s_id = try ensureUtf8OrSanitize(alloc, tr.id);
+                defer if (s_id.owned) |o| alloc.free(o);
+                const s_out = try ensureUtf8OrSanitize(alloc, tr.output);
+                defer if (s_out.owned) |o| alloc.free(o);
+                try ui.onProvider(.{ .tool_result = .{
+                    .id = s_id.text,
+                    .output = s_out.text,
+                    .is_err = tr.is_err,
+                } });
+            },
             .usage => |u| try ui.onProvider(.{ .usage = .{
                 .in_tok = u.in_tok,
                 .out_tok = u.out_tok,
@@ -5510,7 +5624,11 @@ fn restoreSessionIntoUi(
             .stop => |stop| try ui.onProvider(.{ .stop = .{
                 .reason = mapSessionStopReason(stop.reason),
             } }),
-            .err => |msg| try ui.onProvider(.{ .err = msg.text }),
+            .err => |msg| {
+                const s = try ensureUtf8OrSanitize(alloc, msg.text);
+                defer if (s.owned) |o| alloc.free(o);
+                try ui.onProvider(.{ .err = s.text });
+            },
         }
     }
 
@@ -5809,25 +5927,25 @@ fn freeApprovalLoc(alloc: std.mem.Allocator, loc: core.loop.CmdCache.Loc) void {
     }
 }
 
-fn loadApprovalBindAlloc(alloc: std.mem.Allocator) !core.policy.ApprovalBind {
+fn loadApprovalBindAlloc(alloc: std.mem.Allocator, home: ?[]const u8) !core.policy.ApprovalBind {
     const cwd = try std.fs.cwd().realpathAlloc(alloc, ".");
     defer alloc.free(cwd);
-    return core.policy.loadApprovalBind(alloc, cwd, std.posix.getenv("HOME"));
+    return core.policy.loadApprovalBind(alloc, cwd, home);
 }
 
-fn getProjectPath(alloc: std.mem.Allocator) ![]u8 {
+fn getProjectPath(alloc: std.mem.Allocator, home: ?[]const u8) ![]u8 {
     const loc = try getApprovalLocAlloc(alloc);
     defer freeApprovalLoc(alloc, loc);
     switch (loc) {
-        .cwd => |cwd| return shortenHomePath(alloc, cwd),
-        .repo_root => |root| return shortenHomePath(alloc, root),
+        .cwd => |cwd| return shortenHomePath(alloc, cwd, home),
+        .repo_root => |root| return shortenHomePath(alloc, root, home),
     }
 }
 
-fn shortenHomePath(alloc: std.mem.Allocator, full: []const u8) ![]u8 {
-    const home = std.posix.getenv("HOME") orelse "";
-    if (home.len > 0 and std.mem.startsWith(u8, full, home)) {
-        return std.fmt.allocPrint(alloc, "~{s}", .{full[home.len..]});
+fn shortenHomePath(alloc: std.mem.Allocator, full: []const u8, home: ?[]const u8) ![]u8 {
+    const h = home orelse "";
+    if (h.len > 0 and std.mem.startsWith(u8, full, h)) {
+        return std.fmt.allocPrint(alloc, "~{s}", .{full[h.len..]});
     }
     return alloc.dupe(u8, full);
 }
@@ -5911,7 +6029,8 @@ fn runCmdTrimAlloc(alloc: std.mem.Allocator, argv: []const []const u8, max_bytes
     if (result.term.Exited != 0) return null;
     const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
     if (trimmed.len == 0) return null;
-    return alloc.dupe(u8, trimmed) catch null;
+    // Sanitize: external process output may contain invalid UTF-8
+    return sanitizeUtf8LossyAlloc(alloc, trimmed) catch null;
 }
 
 test "parseJjBookmark extracts first bookmark" {
@@ -5952,8 +6071,13 @@ fn resolveDefaultProvider(provider: []const u8) []const u8 {
 
 fn modelCtxWindow(model: []const u8) u64 {
     const table = .{
+        .{ "opus-4-6", 1000000 },
+        .{ "opus-4-5", 200000 },
         .{ "opus-4", 200000 },
+        .{ "sonnet-4-6", 200000 },
+        .{ "sonnet-4-5", 200000 },
         .{ "sonnet-4", 200000 },
+        .{ "haiku-4-5", 200000 },
         .{ "haiku-4", 200000 },
         .{ "claude-3-5", 200000 },
         .{ "claude-3.5", 200000 },
@@ -5973,14 +6097,14 @@ fn isPathLike(raw: []const u8) bool {
     return false;
 }
 
-fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run) !?[]u8 {
+fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run, home: ?[]const u8) !?[]u8 {
     if (run_cmd.cfg.policy_lock.system_prompt and
         (run_cmd.system_prompt != null or run_cmd.append_system_prompt != null))
     {
         return error.PolicyLockedSystemPrompt;
     }
     if (run_cmd.cfg.policy_lock.context) {
-        const paths = try core.context.discoverPaths(alloc);
+        const paths = try core.context.discoverPaths(alloc, home);
         defer {
             for (paths) |p| alloc.free(p);
             alloc.free(paths);
@@ -5994,7 +6118,7 @@ fn buildSystemPrompt(alloc: std.mem.Allocator, run_cmd: cli.Run) !?[]u8 {
         return try alloc.dupe(u8, sp);
     }
 
-    const ctx = try core.context.load(alloc);
+    const ctx = try core.context.load(alloc, home);
     if (run_cmd.append_system_prompt) |ap| {
         if (ctx) |c| {
             defer alloc.free(c);
@@ -6172,7 +6296,7 @@ fn thinkingBorderFg(level: args_mod.ThinkingLevel) @import("../modes/tui/frame.z
     };
 }
 
-fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) !void {
+fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool, home: ?[]const u8) !void {
     const t = tui_theme.get();
 
     // Version banner (matching pi's "pi v0.52.12")
@@ -6215,7 +6339,7 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
     }
 
     // Context section
-    const ctx_paths = try core.context.discoverPaths(alloc);
+    const ctx_paths = try core.context.discoverPaths(alloc, home);
     defer {
         for (ctx_paths) |p| alloc.free(p);
         alloc.free(ctx_paths);
@@ -6224,20 +6348,20 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
         try ui.tr.styledText("", .{}); // blank line
         try ui.tr.styledText("", .{}); // blank line (pi has 2)
         try ui.tr.styledText("[Context]", .{ .fg = t.md_heading });
-        const home = std.posix.getenv("HOME") orelse "";
+        const h = home orelse "";
         for (ctx_paths) |p| {
-            // Shorten home prefix to ~/
-            const display = if (home.len > 0 and std.mem.startsWith(u8, p, home))
-                try std.fmt.allocPrint(alloc, "  ~{s}", .{p[home.len..]})
+            // Shorten home prefix to ~/; paths may contain non-UTF-8 bytes
+            const display = if (h.len > 0 and std.mem.startsWith(u8, p, h))
+                try std.fmt.allocPrint(alloc, "  ~{s}", .{p[h.len..]})
             else
                 try std.fmt.allocPrint(alloc, "  {s}", .{p});
             defer alloc.free(display);
-            try ui.tr.infoText(display);
+            try infoTextSafe(alloc, ui, display);
         }
     }
 
     // Skills section
-    const skills = try discoverSkills(alloc);
+    const skills = try discoverSkills(alloc, home);
     defer core_skill.freeSkills(alloc, skills);
     if (skills.len > 0) {
         try ui.tr.styledText("", .{}); // blank line
@@ -6255,13 +6379,13 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
                     skillSourceName(skill.source),
                 });
             defer alloc.free(display);
-            try ui.tr.infoText(display);
+            try infoTextSafe(alloc, ui, display);
         }
     }
 
     // What's New section (only on fresh sessions)
     if (!is_resumed) {
-        var state = (try config.PzState.load(alloc)) orelse config.PzState{};
+        var state = (try config.PzState.load(alloc, home)) orelse config.PzState{};
         defer state.deinit(alloc);
 
         const new_entries = changelog.entriesSince(state.last_hash);
@@ -6270,18 +6394,18 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
             defer alloc.free(formatted);
             try ui.tr.styledText("", .{}); // blank line
             try ui.tr.styledText("[What's New]", .{ .fg = t.md_heading });
-            // Split and display each line
+            // Split and display each line; VCS text may contain non-UTF-8
             var off: usize = 0;
             while (off < formatted.len) {
                 const eol = std.mem.indexOfScalarPos(u8, formatted, off, '\n') orelse formatted.len;
-                try ui.tr.infoText(formatted[off..eol]);
+                try infoTextSafe(alloc, ui, formatted[off..eol]);
                 off = eol + 1;
             }
         }
 
         // Update state with current git hash
         const new_state = config.PzState{ .last_hash = cli.build_id };
-        new_state.save(alloc);
+        new_state.save(alloc, home);
     }
 
     // Trailing blank lines before prompt (matching pi's spacing)
@@ -6289,8 +6413,8 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
     try ui.tr.styledText("", .{});
 }
 
-fn discoverSkills(alloc: std.mem.Allocator) ![]core_skill.SkillInfo {
-    const skills = try core_skill.discoverAndRead(alloc);
+fn discoverSkills(alloc: std.mem.Allocator, home: ?[]const u8) ![]core_skill.SkillInfo {
+    const skills = try core_skill.discoverAndRead(alloc, home);
     std.mem.sort(core_skill.SkillInfo, skills, {}, struct {
         fn lt(_: void, a: core_skill.SkillInfo, b: core_skill.SkillInfo) bool {
             return std.mem.lessThan(u8, a.dir_name, b.dir_name);
@@ -6315,6 +6439,20 @@ fn infoTextSafe(alloc: std.mem.Allocator, ui: *tui_harness.Ui, text: []const u8)
         },
         else => return err,
     };
+}
+
+const Utf8Safe = struct {
+    text: []const u8,
+    owned: ?[]u8 = null,
+};
+
+/// Return `raw` unchanged if valid UTF-8, else allocate a sanitized copy.
+fn ensureUtf8OrSanitize(alloc: std.mem.Allocator, raw: []const u8) !Utf8Safe {
+    if (std.unicode.Utf8View.init(raw)) |_| {
+        return .{ .text = raw };
+    } else |_| {}
+    const owned = try sanitizeUtf8LossyAlloc(alloc, raw);
+    return .{ .text = owned, .owned = owned };
 }
 
 fn sanitizeUtf8LossyAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
@@ -6886,6 +7024,9 @@ fn runBashMode(
 fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
     const raw_ed = std.posix.getenv("EDITOR") orelse std.posix.getenv("VISUAL") orelse "/usr/bin/vi";
 
+    // Reject null bytes — could truncate the path at the C boundary.
+    if (std.mem.indexOfScalar(u8, raw_ed, 0) != null) return error.EditorNotFound;
+
     // Reject relative paths — require absolute path or bare command name.
     // Relative paths with separators (./foo, ../bar) are rejected to
     // prevent path-traversal attacks via EDITOR.
@@ -6945,7 +7086,7 @@ fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
     return content;
 }
 
-fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
+fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8) !void {
     // macOS: check clipboard for image via osascript
     const argv = [_][]const u8{
         "/usr/bin/osascript",                                                                                            "-e",
@@ -6969,7 +7110,6 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     }
 
     // Save clipboard image to unique temp file
-    const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
     var tmp_buf: [128]u8 = undefined;
     const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
     const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}/pz-paste-{d}.png", .{ tmp_dir, ts });
@@ -8220,6 +8360,35 @@ test "infoTextSafe accepts invalid utf8 command output" {
     try std.testing.expectEqual(@as(usize, 1), ui.tr.count());
 }
 
+test "sanitized cwd/branch render in footer without InvalidUtf8" {
+    const alloc = std.testing.allocator;
+
+    // Non-UTF-8 cwd and branch — would crash renderFooter without sanitization.
+    const bad_cwd = "/tmp/\xff/proj";
+    const bad_branch = "feat/\xff";
+    const bad_model = "gpt\xff";
+
+    const safe_cwd = try ensureUtf8OrSanitize(alloc, bad_cwd);
+    defer if (safe_cwd.owned) |o| alloc.free(o);
+    const safe_branch = try ensureUtf8OrSanitize(alloc, bad_branch);
+    defer if (safe_branch.owned) |o| alloc.free(o);
+    const safe_model = try ensureUtf8OrSanitize(alloc, bad_model);
+    defer if (safe_model.owned) |o| alloc.free(o);
+
+    // Sanitized text must be valid UTF-8.
+    _ = try std.unicode.Utf8View.init(safe_cwd.text);
+    _ = try std.unicode.Utf8View.init(safe_branch.text);
+    _ = try std.unicode.Utf8View.init(safe_model.text);
+
+    // Must render without error.
+    var ui = try tui_harness.Ui.initFull(alloc, 80, 12, safe_model.text, "p", safe_cwd.text, safe_branch.text, null);
+    defer ui.deinit();
+
+    var frm = try tui_frame.Frame.init(alloc, 80, 2);
+    defer frm.deinit(alloc);
+    try ui.panels.renderFooter(&frm, .{ .x = 0, .y = 0, .w = 80, .h = 2 });
+}
+
 fn eofReader() std.Io.AnyReader {
     const S = struct {
         fn read(_: *const anyopaque, buf: []u8) anyerror!usize {
@@ -8469,7 +8638,7 @@ test "runtime blocks tool dispatch under verified policy" {
     defer guard.deinit();
     const root_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root_abs);
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
     const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
     defer std.testing.allocator.free(sess_abs);
@@ -8638,7 +8807,7 @@ test "subagent stub inherits effective policy hash" {
     const root_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root_abs);
 
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     var stub = try initSubagentStub(&pol, "agent-child");
@@ -8668,7 +8837,7 @@ test "subagent spawn fails closed under verified policy" {
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
 
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     try std.testing.expectError(error.PolicyDenied, initSubagentStub(&pol, "blocked"));
@@ -8875,7 +9044,7 @@ test "runtime tui overflow retries once with injected live stdin" {
     };
     var provider_impl = RetryProvider{ .alloc = std.testing.allocator };
 
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
     var tools_rt = core.tools.builtin.Runtime.init(.{
         .alloc = std.testing.allocator,
@@ -9738,13 +9907,13 @@ test "discoverSkills returns skill metadata with source" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".pi/skills/review-plan");
-    var skill = try tmp.dir.createFile(".pi/skills/review-plan/SKILL.md", .{});
+    try tmp.dir.makePath(".pz/skills/release");
+    var skill = try tmp.dir.createFile(".pz/skills/release/SKILL.md", .{});
     defer skill.close();
     try skill.writeAll(
         \\---
-        \\name: review-plan
-        \\description: review
+        \\name: release
+        \\description: release pz
         \\user_invocable: true
         \\---
         \\Body
@@ -9755,14 +9924,14 @@ test "discoverSkills returns skill metadata with source" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
-    const skills = try discoverSkills(std.testing.allocator);
+    const skills = try discoverSkills(std.testing.allocator, null);
     defer core_skill.freeSkills(std.testing.allocator, skills);
 
-    const info = core_skill.findByDirName(skills, "review-plan") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("review", info.meta.description);
+    const info = core_skill.findByDirName(skills, "release") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("release pz", info.meta.description);
     try std.testing.expectEqual(core_skill.Source.project, info.source);
 }
 
@@ -9770,13 +9939,13 @@ test "handleSlashCommand falls through for user-invocable skills" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".pi/skills/review-plan");
-    var skill = try tmp.dir.createFile(".pi/skills/review-plan/SKILL.md", .{});
+    try tmp.dir.makePath(".pz/skills/release");
+    var skill = try tmp.dir.createFile(".pz/skills/release/SKILL.md", .{});
     defer skill.close();
     try skill.writeAll(
         \\---
-        \\name: review-plan
-        \\description: review
+        \\name: release
+        \\description: release pz
         \\user_invocable: true
         \\---
         \\Body
@@ -9787,7 +9956,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     var sid = try std.testing.allocator.dupe(u8, "sid");
@@ -9808,7 +9977,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
 
     const got = try handleSlashCommand(
         std.testing.allocator,
-        "/review-plan",
+        "/release",
         &sid,
         &model,
         &model_owned,
@@ -9823,6 +9992,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
         out_fbs.writer().any(),
         .{},
         &ctl_audit,
+        null,
     );
 
     try std.testing.expectEqual(CmdRes.unhandled, got);
@@ -9833,13 +10003,13 @@ test "handleSlashCommand blocks non-user-invocable skills" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".pi/skills/review-plan");
-    var skill = try tmp.dir.createFile(".pi/skills/review-plan/SKILL.md", .{});
+    try tmp.dir.makePath(".pz/skills/release");
+    var skill = try tmp.dir.createFile(".pz/skills/release/SKILL.md", .{});
     defer skill.close();
     try skill.writeAll(
         \\---
-        \\name: review-plan
-        \\description: review
+        \\name: release
+        \\description: release pz
         \\user_invocable: false
         \\---
         \\Body
@@ -9850,7 +10020,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     var sid = try std.testing.allocator.dupe(u8, "sid");
@@ -9871,7 +10041,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
 
     const got = try handleSlashCommand(
         std.testing.allocator,
-        "/review-plan",
+        "/release",
         &sid,
         &model,
         &model_owned,
@@ -9886,10 +10056,11 @@ test "handleSlashCommand blocks non-user-invocable skills" {
         out_fbs.writer().any(),
         .{},
         &ctl_audit,
+        null,
     );
 
     try std.testing.expectEqual(CmdRes.handled, got);
-    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "skill blocked: /review-plan") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "skill blocked: /release") != null);
 }
 
 test "TurnCtx.run binds approval context for destructive tools" {
@@ -9900,7 +10071,7 @@ test "TurnCtx.run binds approval context for destructive tools" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -10040,7 +10211,7 @@ test "handleSlashCommand blocks builtins under verified policy" {
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
 
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     var sid = try std.testing.allocator.dupe(u8, "sid");
@@ -10076,6 +10247,7 @@ test "handleSlashCommand blocks builtins under verified policy" {
         out_fbs.writer().any(),
         .{},
         &ctl_audit,
+        null,
     );
 
     try std.testing.expectEqual(CmdRes.handled, got);
@@ -10111,7 +10283,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
 
-    var pol = try RuntimePolicy.load(std.testing.allocator);
+    var pol = try RuntimePolicy.load(std.testing.allocator, null);
     defer pol.deinit();
 
     const root_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -10175,6 +10347,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         out_fbs.writer().any(),
         ctl_audit.hooks,
         &ctl_audit,
+        null,
     );
 
     ctl_audit.hooks.share_gist = struct {
@@ -10200,6 +10373,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         out_fbs.writer().any(),
         ctl_audit.hooks,
         &ctl_audit,
+        null,
     );
 
     _ = try handleSlashCommand(
@@ -10219,6 +10393,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         out_fbs.writer().any(),
         ctl_audit.hooks,
         &ctl_audit,
+        null,
     );
 
     ctl_audit.hooks.run_upgrade = struct {
@@ -10247,6 +10422,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
         out_fbs.writer().any(),
         ctl_audit.hooks,
         &ctl_audit,
+        null,
     );
 
     const joined = try std.mem.join(std.testing.allocator, "\n", rows.rows.items);
@@ -10255,28 +10431,34 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
     defer std.testing.allocator.free(export_abs);
     const share_abs = try std.fs.path.join(std.testing.allocator, &.{ sess_abs, "100.md" });
     defer std.testing.allocator.free(share_abs);
-    const export_tag = try core.audit.redactTextAlloc(std.testing.allocator, export_abs, .mask);
-    defer std.testing.allocator.free(export_tag);
-    const share_tag = try core.audit.redactTextAlloc(std.testing.allocator, share_abs, .mask);
-    defer std.testing.allocator.free(share_tag);
-    const norm_export = try std.mem.replaceOwned(u8, std.testing.allocator, joined, export_tag, "[mask:EXPORT_PATH]");
-    defer std.testing.allocator.free(norm_export);
-    const norm = try std.mem.replaceOwned(u8, std.testing.allocator, norm_export, share_tag, "[mask:SHARE_PATH]");
+    const rkey_100 = core.audit.RedactKey.fromSid("100");
+    const rkey_rt = core.audit.RedactKey.fromSid("runtime");
+    const export_tag_100 = try core.audit.redactKeyedAlloc(std.testing.allocator, export_abs, .mask, rkey_100);
+    defer std.testing.allocator.free(export_tag_100);
+    const export_tag_rt = try core.audit.redactKeyedAlloc(std.testing.allocator, export_abs, .mask, rkey_rt);
+    defer std.testing.allocator.free(export_tag_rt);
+    const share_tag_100 = try core.audit.redactKeyedAlloc(std.testing.allocator, share_abs, .mask, rkey_100);
+    defer std.testing.allocator.free(share_tag_100);
+    const n1 = try std.mem.replaceOwned(u8, std.testing.allocator, joined, export_tag_100, "[mask:EXPORT_PATH]");
+    defer std.testing.allocator.free(n1);
+    const n2 = try std.mem.replaceOwned(u8, std.testing.allocator, n1, export_tag_rt, "[mask:EXPORT_PATH]");
+    defer std.testing.allocator.free(n2);
+    const norm = try std.mem.replaceOwned(u8, std.testing.allocator, n2, share_tag_100, "[mask:SHARE_PATH]");
     defer std.testing.allocator.free(norm);
     try oh.snap(@src(),
         \\[]u8
-        \\  "{"v":1,"ts_ms":999,"sid":"runtime","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"session-export","vis":"pub"},"op":"export"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"export","argv":{"text":"[mask:96832bf7da08afc9]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"100","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:EXPORT_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:EXPORT_PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"100","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:EXPORT_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:EXPORT_PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":2,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"session-export","vis":"pub"},"op":"export"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"export","argv":{"text":"[mask:96832bf7da08afc9]","vis":"mask"}},"attrs":[{"key":"path","vis":"mask","ty":"str","val":"[mask:EXPORT_PATH]"}]}
+        \\  "{"v":1,"ts_ms":999,"sid":"runtime","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"session-export","vis":"pub"},"op":"export"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"export","argv":{"text":"[mask:a69ccd97609ac644]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":1,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:EXPORT_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"op":"export","target":{"text":"100","vis":"pub"},"detail":{"text":"[mask:EXPORT_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":2,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:EXPORT_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"op":"export","target":{"text":"100","vis":"pub"},"detail":{"text":"[mask:EXPORT_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":2,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"session-export","vis":"pub"},"op":"export"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"export","argv":{"text":"[mask:a69ccd97609ac644]","vis":"mask"}},"attrs":[{"key":"path","vis":"mask","ty":"str","val":"[mask:EXPORT_PATH]"}]}
         \\{"v":1,"ts_ms":999,"sid":"runtime","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"net","name":{"text":"gist","vis":"pub"},"op":"share"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"share"},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"100","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:SHARE_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:SHARE_PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"100","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:SHARE_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"name":{"text":"export","vis":"pub"},"call_id":"100","argv":{"text":"[mask:SHARE_PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":4,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"net","name":{"text":"gist","vis":"pub"},"op":"share"},"msg":{"text":"[mask:f32272af783cb16f]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"share"},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":1,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:SHARE_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"op":"export","target":{"text":"100","vis":"pub"},"detail":{"text":"[mask:SHARE_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"100","seq":2,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:SHARE_PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export complete","vis":"pub"},"data":{"op":"export","target":{"text":"100","vis":"pub"},"detail":{"text":"[mask:SHARE_PATH]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":4,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"net","name":{"text":"gist","vis":"pub"},"op":"share"},"msg":{"text":"[mask:c85c93dae75e2c92]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"share"},"attrs":[]}
         \\{"v":1,"ts_ms":999,"sid":"runtime","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":999,"sid":"runtime","seq":6,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":999,"sid":"runtime","seq":7,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
-        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":8,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"[mask:6570e9c86ff68452]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
+        \\{"v":1,"ts_ms":999,"sid":"runtime","seq":8,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"[mask:72a5bdd8c44d96df]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
     ).expectEqual(norm);
 }
 
@@ -12632,10 +12814,11 @@ test "runtime reload audit snapshots start success and failure" {
         &sys_prompt_owned,
         &ctl_audit,
         struct {
-            fn f(alloc: std.mem.Allocator) !?[]u8 {
+            fn f(alloc: std.mem.Allocator, _: ?[]const u8) !?[]u8 {
                 return try alloc.dupe(u8, "ctx a");
             }
         }.f,
+        null,
     );
     try std.testing.expectEqual(ReloadRes.loaded, loaded);
 
@@ -12645,10 +12828,11 @@ test "runtime reload audit snapshots start success and failure" {
         &sys_prompt_owned,
         &ctl_audit,
         struct {
-            fn f(_: std.mem.Allocator) !?[]u8 {
+            fn f(_: std.mem.Allocator, _: ?[]const u8) !?[]u8 {
                 return null;
             }
         }.f,
+        null,
     );
     try std.testing.expectEqual(ReloadRes.empty, empty);
 
@@ -12660,10 +12844,11 @@ test "runtime reload audit snapshots start success and failure" {
             &sys_prompt_owned,
             &ctl_audit,
             struct {
-                fn f(_: std.mem.Allocator) !?[]u8 {
+                fn f(_: std.mem.Allocator, _: ?[]const u8) !?[]u8 {
                     return error.AccessDenied;
                 }
             }.f,
+            null,
         ),
     );
 
@@ -12676,7 +12861,7 @@ test "runtime reload audit snapshots start success and failure" {
         \\{"v":1,"ts_ms":777,"sid":"runtime","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}
         \\{"v":1,"ts_ms":777,"sid":"runtime","seq":4,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[{"key":"loaded","vis":"pub","ty":"bool","val":false}]}
         \\{"v":1,"ts_ms":777,"sid":"runtime","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}
-        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":6,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"[mask:ce3db9ab7a88d359]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}"
+        \\{"v":1,"ts_ms":777,"sid":"runtime","seq":6,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"reload"},"msg":{"text":"[mask:324e1bba42a2f616]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"reload"},"attrs":[]}"
     ).expectEqual(joined);
 }
 
@@ -12787,23 +12972,23 @@ test "runtime rpc control commands emit audited redacted control records" {
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":3,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"m2","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"p3"}]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":4,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"model"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"model","argv":{"text":"m2","vis":"pub"}},"attrs":[{"key":"provider","vis":"pub","ty":"str","val":"p3"}]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":5,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"bogus","vis":"pub"}},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":6,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"[mask:fa8bbdf6c4af830c]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"bogus","vis":"pub"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":6,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"[mask:24d3ce8fa6053fec]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"bogus","vis":"pub"}},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":7,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"read,skill","vis":"pub"}},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":8,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cfg","name":{"text":"runtime","vis":"pub"},"op":"tools"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"tools","argv":{"text":"read,skill","vis":"pub"}},"attrs":[{"key":"tools","vis":"pub","ty":"str","val":"read,skill"}]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":9,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:37774687180645c4]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":10,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:37774687180645c4]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":11,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"fork"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"fork","argv":{"text":"[mask:c0807a979f88a933]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":12,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"fork"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"fork","argv":{"text":"[mask:c0807a979f88a933]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":9,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:1f9a8dd2d2543fe7]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":10,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:1f9a8dd2d2543fe7]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":11,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"fork"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"fork","argv":{"text":"[mask:c89ec3c8c9704dbe]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":12,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"fork"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"fork","argv":{"text":"[mask:c89ec3c8c9704dbe]","vis":"mask"}},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":13,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"compact"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"compact"},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":14,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"compact"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"compact"},"attrs":[{"key":"in_lines","vis":"pub","ty":"uint","val":3},{"key":"out_lines","vis":"pub","ty":"uint","val":3}]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":15,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"new"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"new"},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":16,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"new"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"new"},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":17,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":18,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:bd710b2156a1699e]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:91910081c6428103]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":17,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:9820c0c43c1a6dc0]","vis":"mask"}},"attrs":[]}
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":18,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"sess","name":{"text":"session","vis":"pub"},"op":"resume"},"msg":{"text":"[mask:a3d269af3f28886b]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"resume","argv":{"text":"[mask:9820c0c43c1a6dc0]","vis":"mask"}},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":19,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":20,"kind":"tool","sev":"notice","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control success","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
         \\{"v":1,"ts_ms":888,"sid":"runtime","seq":21,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"runtime control start","vis":"pub"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
-        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":22,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"[mask:6570e9c86ff68452]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
+        \\{"v":1,"ts_ms":888,"sid":"runtime","seq":22,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"upgrade"},"msg":{"text":"[mask:72a5bdd8c44d96df]","vis":"mask"},"data":{"name":{"text":"runtime","vis":"pub"},"call_id":"upgrade"},"attrs":[]}"
     ).expectEqual(joined);
 }
 
@@ -12885,10 +13070,11 @@ test "UX8 walkthrough: bg run spawns job, bg list shows it, bg show shows detail
         &sys_prompt_owned,
         &ctl_audit,
         struct {
-            fn f(alloc: std.mem.Allocator) !?[]u8 {
+            fn f(alloc: std.mem.Allocator, _: ?[]const u8) !?[]u8 {
                 return try alloc.dupe(u8, "refreshed context");
             }
         }.f,
+        null,
     );
     try std.testing.expectEqual(ReloadRes.loaded, res);
     try std.testing.expectEqualStrings("refreshed context", sys_prompt.?);
@@ -13026,7 +13212,7 @@ test "runtime bg command run show list workflow" {
     defer std.testing.allocator.free(started);
     try std.testing.expect(std.mem.indexOf(u8, started, "bg started id=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, started, "pid=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, started, "log=/tmp/pz-bg-") != null);
+    try std.testing.expect(std.mem.indexOf(u8, started, "pz-bg-") != null);
 
     const shown = try runBgCommand(std.testing.allocator, &mgr, "show 1");
     defer std.testing.allocator.free(shown);
@@ -13342,7 +13528,7 @@ test "buildSystemPrompt rejects explicit prompt under policy lock" {
     };
     defer run.cfg.deinit(std.testing.allocator);
 
-    try std.testing.expectError(error.PolicyLockedSystemPrompt, buildSystemPrompt(std.testing.allocator, run));
+    try std.testing.expectError(error.PolicyLockedSystemPrompt, buildSystemPrompt(std.testing.allocator, run, null));
 }
 
 test "buildSystemPrompt rejects context under policy lock" {
@@ -13370,7 +13556,7 @@ test "buildSystemPrompt rejects context under policy lock" {
     };
     defer run.cfg.deinit(std.testing.allocator);
 
-    try std.testing.expectError(error.PolicyLockedContext, buildSystemPrompt(std.testing.allocator, run));
+    try std.testing.expectError(error.PolicyLockedContext, buildSystemPrompt(std.testing.allocator, run, null));
 }
 
 test "shouldRetryOverflow gates retry to real overflow in same model once" {
@@ -13698,6 +13884,7 @@ fn slashHelper(
         out.any(),
         .{},
         ctl_audit,
+        null,
     );
 }
 
@@ -13709,7 +13896,7 @@ test "UX6: /new creates clean session with new sid" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "old-session");
@@ -13747,7 +13934,7 @@ test "UX6: /name persists session title" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "100");
@@ -13779,7 +13966,7 @@ test "UX6: /name without arg shows usage" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -13811,7 +13998,7 @@ test "UX6: /resume with no arg returns select_session" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -13853,7 +14040,7 @@ test "UX6: /resume with sid switches to that session" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "100");
@@ -13886,7 +14073,7 @@ test "UX6: /fork with no arg returns select_fork" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -13927,7 +14114,7 @@ test "UX6: /fork with sid copies session" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "100");
@@ -13961,7 +14148,7 @@ test "UX6: /compact on disabled session shows notice" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -13994,7 +14181,7 @@ test "UX6: /export on disabled session shows error" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14037,7 +14224,7 @@ test "UX6: /export writes file for valid session" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "400");
@@ -14071,7 +14258,7 @@ test "UX7: /login with no arg returns select_login overlay" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14102,7 +14289,7 @@ test "UX7: /login unknown provider shows error" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14134,7 +14321,7 @@ test "UX7: /logout with unknown provider shows error" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14166,7 +14353,7 @@ test "UX7: /model with arg changes active model" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14199,7 +14386,7 @@ test "UX7: /model with no arg returns select_model" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14239,7 +14426,7 @@ test "UX6: /share calls share_gist and prints url" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
@@ -14267,7 +14454,7 @@ test "UX6: /share calls share_gist and prints url" {
     var out_buf: [1024]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
 
-    const got = try handleSlashCommand(alloc, "/share", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, null, out_fbs.writer().any(), ctl_audit.hooks, &ctl_audit);
+    const got = try handleSlashCommand(alloc, "/share", &sid, &model, &model_owned, &provider, &provider_owned, &pol, &tools_rt, &bg_mgr, sess_abs, false, null, out_fbs.writer().any(), ctl_audit.hooks, &ctl_audit, null);
     try std.testing.expectEqual(CmdRes.handled, got);
     try std.testing.expect(std.mem.indexOf(u8, out_fbs.getWritten(), "https://gist.example.com/123") != null);
 }
@@ -14291,7 +14478,7 @@ test "UX6: /resume failure leaves prior sid intact" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "100");
@@ -14324,7 +14511,7 @@ test "UX7: /provider with arg switches active provider" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14705,7 +14892,7 @@ test "UX3 /session returns session info" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "test-sid");
@@ -14739,7 +14926,7 @@ test "UX3 /changelog returns changelog text" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14771,7 +14958,7 @@ test "UX3 /copy returns copy action" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");
@@ -14802,7 +14989,7 @@ test "UX3 /quit returns quit action" {
     defer root.close();
     var guard = try path_guard.CwdGuard.enter(root);
     defer guard.deinit();
-    var pol = try RuntimePolicy.load(alloc);
+    var pol = try RuntimePolicy.load(alloc, null);
     defer pol.deinit();
 
     var sid = try alloc.dupe(u8, "s");

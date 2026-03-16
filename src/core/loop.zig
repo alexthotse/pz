@@ -5087,7 +5087,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
     // Capture mode events with text content for denial verification
     const ModeImpl = struct {
-        denial_text: ?[]const u8 = null,
+        denial_text: ?[]u8 = null,
         saw_tool_call: bool = false,
         saw_tool_result: bool = false,
 
@@ -5097,12 +5097,19 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
                     .tool_call => self.saw_tool_call = true,
                     .tool_result => |tr| {
                         self.saw_tool_result = true;
-                        if (tr.is_err) self.denial_text = tr.output;
+                        if (tr.is_err) {
+                            if (self.denial_text) |old| std.testing.allocator.free(old);
+                            self.denial_text = std.testing.allocator.dupe(u8, tr.output) catch null;
+                        }
                     },
                     else => {},
                 },
                 else => {},
             }
+        }
+
+        fn deinit(self: *@This()) void {
+            if (self.denial_text) |t| std.testing.allocator.free(t);
         }
     };
 
@@ -5152,6 +5159,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
     var mode_impl = ModeImpl{};
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    defer mode_impl.deinit();
 
     var bash_dispatch = BashDispatch{};
     const entries = [_]tools.Entry{
@@ -5202,6 +5210,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
     // Denial text contains meaningful content
     const denial = mode_impl.denial_text orelse return error.TestUnexpectedResult;
+    std.debug.print("\n[DEBUG UX9-bash] denial_text='{s}'\n", .{denial});
     try std.testing.expect(std.mem.indexOf(u8, denial, "approval denied") != null);
     try std.testing.expect(std.mem.indexOf(u8, denial, "bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, denial, "curl evil.com") != null);
@@ -5607,18 +5616,25 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     };
 
     const ModeImpl = struct {
-        denial_text: ?[]const u8 = null,
+        denial_text: ?[]u8 = null,
 
         fn push(self: *@This(), ev: ModeEv) !void {
             switch (ev) {
                 .provider => |pev| switch (pev) {
                     .tool_result => |tr| {
-                        if (tr.is_err) self.denial_text = tr.output;
+                        if (tr.is_err) {
+                            if (self.denial_text) |old| std.testing.allocator.free(old);
+                            self.denial_text = std.testing.allocator.dupe(u8, tr.output) catch null;
+                        }
                     },
                     else => {},
                 },
                 else => {},
             }
+        }
+
+        fn deinit(self: *@This()) void {
+            if (self.denial_text) |t| std.testing.allocator.free(t);
         }
     };
 
@@ -5675,6 +5691,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     );
 
     var mode_impl = ModeImpl{};
+    defer mode_impl.deinit();
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
 
     var web_dispatch = WebDispatch{};
@@ -5720,6 +5737,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
 
     // Mode received "blocked by policy" denial
     const denial = mode_impl.denial_text orelse return error.TestUnexpectedResult;
+    std.debug.print("\n[DEBUG UX9-web] denial_text='{s}'\n", .{denial});
     try std.testing.expect(std.mem.indexOf(u8, denial, "blocked by policy") != null);
 
     // Store persisted denial tool_result with is_err=true

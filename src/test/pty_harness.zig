@@ -1209,3 +1209,600 @@ test "T7b PTY auth login overlay renders provider list" {
     try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "openai") or
         try streamHasText(std.testing.allocator, out.stdout, "anthropic"));
 }
+
+// ── UX1-UX6: keyboard-driven PTY walkthrough tests ──
+
+test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{ "--no-session" },
+        &.{
+            .{ .wait_ms = 300, .input = "\x03" }, // ctrl-c once (clear)
+            .{ .wait_ms = 200, .input = "\x03" }, // ctrl-c again (quit)
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_version: bool,
+        has_shift_drag: bool,
+        has_drop_files: bool,
+    };
+    try oh.snap(@src(),
+        \\test.pty_harness.test.UX1 PTY startup shows version, hints, cwd and quits cleanly.Snap
+        \\  .has_version: bool = true
+        \\  .has_shift_drag: bool = true
+        \\  .has_drop_files: bool = true
+    ).expectEqual(Snap{
+        .has_version = try streamHasText(std.testing.allocator, out.stdout, "pz v"),
+        .has_shift_drag = try streamHasText(std.testing.allocator, out.stdout, "shift+drag"),
+        .has_drop_files = try streamHasText(std.testing.allocator, out.stdout, "drop files"),
+    });
+}
+
+test "UX2 PTY input: type text, ctrl-u kills line, ctrl-c quits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{ "--no-session" },
+        &.{
+            .{ .wait_ms = 300, .input = "hello" },
+            .{ .wait_ms = 200, .input = "\x15" }, // ctrl-u (kill line)
+            .{ .wait_ms = 200, .input = "\x03\x03" }, // ctrl-c twice (quit)
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The stream should contain "hello" (typed) and the TUI alt screen
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "hello"));
+    try std.testing.expect(std.mem.indexOf(u8, out.stdout, "\x1b[?1049h") != null);
+}
+
+test "UX3 PTY commands: /help and /hotkeys render output" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{ "--no-session" },
+        &.{
+            .{ .wait_ms = 300, .input = "/help\n" },
+            .{ .wait_ms = 400, .input = "/hotkeys\n" },
+            .{ .wait_ms = 400, .input = "\x03\x03" },
+        },
+        500,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_help_list: bool,
+        has_hotkeys_header: bool,
+        has_hotkeys_entry: bool,
+    };
+    try oh.snap(@src(),
+        \\test.pty_harness.test.UX3 PTY commands: /help and /hotkeys render output.Snap
+        \\  .has_help_list: bool = true
+        \\  .has_hotkeys_header: bool = true
+        \\  .has_hotkeys_entry: bool = true
+    ).expectEqual(Snap{
+        .has_help_list = try streamHasText(std.testing.allocator, out.stdout, "/changelog"),
+        .has_hotkeys_header = try streamHasText(std.testing.allocator, out.stdout, "Keyboard shortcuts"),
+        .has_hotkeys_entry = try streamHasText(std.testing.allocator, out.stdout, "Ctrl+C"),
+    });
+}
+
+test "UX4 PTY overlays: /settings opens and esc closes" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{ "--no-session" },
+        &.{
+            .{ .wait_ms = 300, .input = "/settings\n" },
+            .{ .wait_ms = 400, .input = "\x1b" }, // ESC to close overlay
+            .{ .wait_ms = 300, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_settings_title: bool,
+        has_show_tools: bool,
+    };
+    try oh.snap(@src(),
+        \\test.pty_harness.test.UX4 PTY overlays: /settings opens and esc closes.Snap
+        \\  .has_settings_title: bool = true
+        \\  .has_show_tools: bool = true
+    ).expectEqual(Snap{
+        .has_settings_title = try streamHasText(std.testing.allocator, out.stdout, "Settings"),
+        .has_show_tools = try streamHasText(std.testing.allocator, out.stdout, "Show tools"),
+    });
+}
+
+test "UX5 PTY settings: toggle item with down+enter" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{ "--no-session" },
+        &.{
+            .{ .wait_ms = 300, .input = "/settings\n" },
+            .{ .wait_ms = 350, .input = "\x1b[B" }, // down arrow
+            .{ .wait_ms = 200, .input = "\n" }, // enter to toggle
+            .{ .wait_ms = 300, .input = "\x1b" }, // ESC to close
+            .{ .wait_ms = 200, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Settings overlay was opened and interacted with
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "Settings"));
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "Show tools"));
+}
+
+test "UX6 PTY sessions: /new creates and /name sets name" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("sess");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--session-dir",
+            sess_abs,
+        },
+        &.{
+            .{ .wait_ms = 300, .input = "/new\n" },
+            .{ .wait_ms = 400, .input = "/name test-session\n" },
+            .{ .wait_ms = 400, .input = "\x03\x03" },
+        },
+        500,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_new_session: bool,
+        has_name_set: bool,
+    };
+    try oh.snap(@src(),
+        \\test.pty_harness.test.UX6 PTY sessions: /new creates and /name sets name.Snap
+        \\  .has_new_session: bool = true
+        \\  .has_name_set: bool = true
+    ).expectEqual(Snap{
+        .has_new_session = try streamHasText(std.testing.allocator, out.stdout, "new session"),
+        .has_name_set = try streamHasText(std.testing.allocator, out.stdout, "session named: test-session"),
+    });
+}
+
+// ── UX7: Auth overlay surfaces ──
+
+test "UX7 PTY auth login and model overlays" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{"--no-session"},
+        &.{
+            .{ .wait_ms = 250, .input = "/login\n" },
+            .{ .wait_ms = 350, .input = "\x1b" }, // ESC dismiss
+            .{ .wait_ms = 250, .input = "/model\n" },
+            .{ .wait_ms = 350, .input = "\x1b" }, // ESC dismiss
+            .{ .wait_ms = 200, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const Snap = struct {
+        has_login: bool,
+        has_login_provider: bool,
+        has_model_overlay: bool,
+    };
+    try oh.snap(@src(),
+        \\test.pty_harness.test.UX7 PTY auth login and model overlays.Snap
+        \\  .has_login: bool = true
+        \\  .has_login_provider: bool = true
+        \\  .has_model_overlay: bool = true
+    ).expectEqual(Snap{
+        .has_login = try streamHasText(std.testing.allocator, out.stdout, "Login"),
+        .has_login_provider = try streamHasText(std.testing.allocator, out.stdout, "openai") or
+            try streamHasText(std.testing.allocator, out.stdout, "anthropic"),
+        .has_model_overlay = try streamHasText(std.testing.allocator, out.stdout, "Select Model"),
+    });
+}
+
+// ── UX8: Background job management ──
+
+test "UX8 PTY bg list shows status" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{"--no-session"},
+        &.{
+            .{ .wait_ms = 250, .input = "/bg list\n" },
+            .{ .wait_ms = 350, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+    // Empty bg list should show "no background jobs"
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "no background jobs"));
+}
+
+// ── UX9: Security policy denial ──
+
+test "UX9 PTY policy denies bash tool" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try writePolicy(tmp.dir, .{
+        .rules = &.{
+            .{ .pattern = "tool/bash", .effect = .deny },
+        },
+    });
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    // Provider that tries to call bash — policy should deny
+    const provider_cmd =
+        "cat >/dev/null; " ++
+        "printf 'tool_call:c1:bash:{\"command\":\"echo hi\"}\\nstop:done\\n'";
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--no-session",
+            "--provider-cmd",
+            provider_cmd,
+        },
+        &.{
+            .{ .wait_ms = 250, .input = "run echo hi\n" },
+            .{ .wait_ms = 800, .input = "\x03\x03" },
+        },
+        500,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+    // Denial text should appear in the transcript
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "blocked by policy") or
+        try streamHasText(std.testing.allocator, out.stdout, "denied"));
+}
+
+// ── UX10: Changelog ──
+
+test "UX10 PTY changelog shows what's new" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{"--no-session"},
+        &.{
+            .{ .wait_ms = 250, .input = "/changelog\n" },
+            .{ .wait_ms = 350, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+    // Changelog header should appear
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "What's New"));
+}
+
+// ── UX11: Compaction ──
+
+test "UX11 PTY compact with no session shows disabled notice" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{"--no-session"},
+        &.{
+            .{ .wait_ms = 250, .input = "/compact\n" },
+            .{ .wait_ms = 350, .input = "\x03\x03" },
+        },
+        400,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+    // Should report session disabled
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "session persistence is disabled") or
+        try streamHasText(std.testing.allocator, out.stdout, "SessionDisabled"));
+}
+
+test "UX11 PTY compact with active session shows compaction result" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("sess");
+
+    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+    const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
+    defer std.testing.allocator.free(sess_abs);
+
+    var env = try baseEnv(std.testing.allocator, home_abs);
+    defer env.deinit();
+
+    const provider_cmd =
+        "cat >/dev/null; " ++
+        "printf 'text:ack\\nstop:done\\n'";
+
+    var out = try runPzPtySteps(
+        std.testing.allocator,
+        cwd_abs,
+        &env,
+        &.{
+            "--session-dir",
+            sess_abs,
+            "--provider-cmd",
+            provider_cmd,
+        },
+        &.{
+            .{ .wait_ms = 250, .input = "ping\n" },
+            .{ .wait_ms = 500, .input = "/compact\n" },
+            .{ .wait_ms = 400, .input = "\x03\x03" },
+        },
+        500,
+    );
+    defer out.deinit(std.testing.allocator);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
+        else => return error.TestUnexpectedResult,
+    }
+    // Compaction should report result
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "compacted in="));
+}
+
+test "real-env PTY: pz starts and exits without crash" {
+    // Spawn pz with the real process environment (no HOME override).
+    // This catches crashes from real-world HOME/config/VCS state.
+    const alloc = std.testing.allocator;
+    const pz_bin = try pzBinAlloc(alloc);
+    defer alloc.free(pz_bin);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+
+    // Use real env, only add TERM/size and skip version check.
+    var env = try std.process.getEnvMap(alloc);
+    defer env.deinit();
+    try env.put("TERM", "xterm-256color");
+    try env.put("COLUMNS", "100");
+    try env.put("LINES", "32");
+    try env.put("PZ_SKIP_VERSION_CHECK", "1");
+
+    // Send Ctrl-C immediately to exit.
+    var out = try runPzPty(alloc, cwd, &env, &.{}, "\x03\x03", 300, 500);
+    defer out.deinit(alloc);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .Signal => |sig| {
+            // SIGINT (2) is acceptable; SIGABRT (6) is not.
+            if (sig == @as(u32, @intCast(c.SIGABRT))) return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}

@@ -723,8 +723,6 @@ test "harness renders full-width transcript with footer" {
 }
 
 test "harness tool footer shows redacted bash command" {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
     var ui = try Ui.init(std.testing.allocator, 48, 8, "gpt-5", "openai");
     defer ui.deinit();
 
@@ -734,10 +732,12 @@ test "harness tool footer shows redacted bash command" {
         .args = "{\"cmd\":\"curl 'https://svc.local/x?token=secret' /Users/joel/.ssh/id_rsa\"}",
     } });
 
-    try oh.snap(@src(),
-        \\[]const u8
-        \\  "curl '[secret:f46ae11f145e0f15]' [path:7bb914..."
-    ).expectEqual(ui.panels.toolLabel());
+    const label = ui.panels.toolLabel();
+    // Redaction tags are keyed by a per-process random seed, so check
+    // structure rather than exact hashes.
+    try std.testing.expect(std.mem.startsWith(u8, label, "curl '"));
+    try std.testing.expect(std.mem.indexOf(u8, label, "[secret:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, label, "[path:") != null);
 }
 
 test "harness editor interaction returns submit and clears line" {

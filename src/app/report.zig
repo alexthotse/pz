@@ -169,6 +169,84 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
             .next = "use --tools read,write,bash,edit,grep,find,ls,ask or --no-tools",
         },
     },
+    .{
+        "InvalidUtf8", Rule{
+            .summary = "invalid UTF-8 in display text",
+            .next = "check AGENTS.md, config files, and VCS history for non-UTF-8 characters",
+        },
+    },
+    .{
+        "OutOfMemory", Rule{
+            .summary = "allocator ran out of memory",
+            .next = "reduce context size or close other applications and retry",
+        },
+    },
+    .{
+        "TornReplayLine", Rule{
+            .summary = "session file has an incomplete trailing line",
+            .next = "the session was interrupted mid-write; replay will skip the torn line",
+        },
+    },
+    .{
+        "MalformedReplayLine", Rule{
+            .summary = "session file contains a malformed event line",
+            .next = "the session file may be corrupt; start a new session or edit the .jsonl file",
+        },
+    },
+    .{
+        "UnsupportedVersion", Rule{
+            .summary = "session file uses an unsupported event version",
+            .next = "upgrade pz to a version that supports this session format",
+        },
+    },
+    .{
+        "InvalidFileMode", Rule{
+            .summary = "invalid mode value in config file",
+            .next = "use one of: tui, print, json, rpc in your settings.json",
+        },
+    },
+    .{
+        "InvalidEnvMode", Rule{
+            .summary = "invalid mode value in PZ_MODE environment variable",
+            .next = "set PZ_MODE to one of: tui, print, json, rpc",
+        },
+    },
+    .{
+        "PolicyLockedConfig", Rule{
+            .summary = "policy prevents config file overrides",
+            .next = "remove local config files or contact the policy administrator",
+        },
+    },
+    .{
+        "PolicyLockedEnv", Rule{
+            .summary = "policy prevents environment variable overrides",
+            .next = "unset PZ_* environment variables or contact the policy administrator",
+        },
+    },
+    .{
+        "PolicyLockedCli", Rule{
+            .summary = "policy prevents CLI flag overrides",
+            .next = "remove conflicting CLI flags or contact the policy administrator",
+        },
+    },
+    .{
+        "PolicyLockedSystemPrompt", Rule{
+            .summary = "policy prevents system prompt overrides",
+            .next = "remove --system-prompt/--append-system-prompt or contact the policy administrator",
+        },
+    },
+    .{
+        "TerminalSetupFailed", Rule{
+            .summary = "failed to enable terminal raw mode",
+            .next = "ensure stdout is a terminal; use print/json mode for non-TTY environments",
+        },
+    },
+    .{
+        "Overflow", Rule{
+            .summary = "context window exceeded",
+            .next = "reduce prompt size or use /compact to shrink the conversation",
+        },
+    },
 });
 
 fn lookup(err: anyerror) Rule {

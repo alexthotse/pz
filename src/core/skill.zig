@@ -168,7 +168,7 @@ pub fn isValidDirName(name: []const u8) bool {
     return true;
 }
 
-pub fn discoverAndRead(alloc: std.mem.Allocator) ![]SkillInfo {
+pub fn discoverAndRead(alloc: std.mem.Allocator, home: ?[]const u8) ![]SkillInfo {
     var skills = std.ArrayList(SkillInfo).empty;
     errdefer {
         for (skills.items) |s| freeSkill(alloc, s);
@@ -180,9 +180,9 @@ pub fn discoverAndRead(alloc: std.mem.Allocator) ![]SkillInfo {
     defer seen.deinit();
 
     // Global: ~/.pz/skills/*/SKILL.md
-    if (std.posix.getenv("HOME")) |home| {
+    if (home) |h| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pz/skills", .{home}) catch continue_label: {
+        const skills_path = std.fmt.bufPrint(&path_buf, "{s}/.pz/skills", .{h}) catch continue_label: {
             break :continue_label "";
         };
         if (skills_path.len > 0) {

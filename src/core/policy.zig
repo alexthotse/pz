@@ -355,9 +355,9 @@ pub const SignedDoc = struct {
 pub const GenerationState = struct {
     const state_rel = ".pz/policy-state.json";
 
-    pub fn load(alloc: std.mem.Allocator) !u64 {
-        const home = std.posix.getenv("HOME") orelse return error.NoHome;
-        const path = try std.fs.path.join(alloc, &.{ home, state_rel });
+    pub fn load(alloc: std.mem.Allocator, home: ?[]const u8) !u64 {
+        const h = home orelse return error.NoHome;
+        const path = try std.fs.path.join(alloc, &.{ h, state_rel });
         defer alloc.free(path);
         const file = std.fs.openFileAbsolute(path, .{}) catch return 0;
         defer file.close();
@@ -373,15 +373,15 @@ pub const GenerationState = struct {
         };
     }
 
-    pub fn store(alloc: std.mem.Allocator, gen: u64) !void {
-        const home = std.posix.getenv("HOME") orelse return error.NoHome;
-        const dir_path = try std.fs.path.join(alloc, &.{ home, ".pz" });
+    pub fn store(alloc: std.mem.Allocator, gen: u64, home: ?[]const u8) !void {
+        const h = home orelse return error.NoHome;
+        const dir_path = try std.fs.path.join(alloc, &.{ h, ".pz" });
         defer alloc.free(dir_path);
         std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        const path = try std.fs.path.join(alloc, &.{ home, state_rel });
+        const path = try std.fs.path.join(alloc, &.{ h, state_rel });
         defer alloc.free(path);
         var buf: [64]u8 = undefined;
         const payload = std.fmt.bufPrint(&buf, "{{\"generation\":{d}}}", .{gen}) catch return error.InvalidPolicy;
@@ -445,12 +445,12 @@ pub const VerifyError = error{
 /// Verify a signed policy bundle against the build-time trusted public key.
 /// Checks expiry (not_after) and generation rollback against stored state.
 /// Returns the parsed SignedDoc on success; caller must deinitSignedDoc.
-pub fn verifySignedPolicy(alloc: std.mem.Allocator, raw: []const u8) VerifyError!SignedDoc {
-    return verifySignedPolicyAt(alloc, raw, std.time.timestamp());
+pub fn verifySignedPolicy(alloc: std.mem.Allocator, raw: []const u8, home: ?[]const u8) VerifyError!SignedDoc {
+    return verifySignedPolicyAt(alloc, raw, std.time.timestamp(), home);
 }
 
 /// Like verifySignedPolicy but accepts an explicit wall-clock for testing.
-pub fn verifySignedPolicyAt(alloc: std.mem.Allocator, raw: []const u8, now: i64) VerifyError!SignedDoc {
+pub fn verifySignedPolicyAt(alloc: std.mem.Allocator, raw: []const u8, now: i64, home: ?[]const u8) VerifyError!SignedDoc {
     const signed = parseSignedDoc(alloc, raw) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.MissingSignature => return error.MissingSignature,
@@ -466,12 +466,12 @@ pub fn verifySignedPolicyAt(alloc: std.mem.Allocator, raw: []const u8, now: i64)
     }
 
     // Generation rollback check
-    const stored_gen = GenerationState.load(alloc) catch 0;
+    const stored_gen = GenerationState.load(alloc, home) catch 0;
     if (signed.doc.generation < stored_gen) return error.GenerationRollback;
 
     // Persist new high-water mark
     if (signed.doc.generation > stored_gen) {
-        GenerationState.store(alloc, signed.doc.generation) catch return error.GenerationPersistFailed;
+        GenerationState.store(alloc, signed.doc.generation, home) catch return error.GenerationPersistFailed;
     }
 
     return signed;
@@ -1481,7 +1481,7 @@ test "verifySignedPolicy accepts valid bundle" {
     const json = try encodeSignedDoc(testing.allocator, .{ .rules = &rules }, kp);
     defer testing.allocator.free(json);
 
-    const doc = try verifySignedPolicy(testing.allocator, json);
+    const doc = try verifySignedPolicy(testing.allocator, json, null);
     defer deinitSignedDoc(testing.allocator, doc);
 
     try testing.expectEqual(@as(usize, 1), doc.doc.rules.len);
@@ -1499,7 +1499,7 @@ test "verifySignedPolicy rejects tampered bundle" {
     const idx = std.mem.indexOf(u8, mut, "src/*") orelse return error.TestUnexpectedResult;
     mut[idx] = 'X';
 
-    try testing.expectError(error.SigMismatch, verifySignedPolicy(testing.allocator, mut));
+    try testing.expectError(error.SigMismatch, verifySignedPolicy(testing.allocator, mut, null));
 }
 
 test "verifySignedPolicy rejects unsigned doc" {
@@ -1507,7 +1507,7 @@ test "verifySignedPolicy rejects unsigned doc" {
     const json = try encodeDoc(testing.allocator, .{ .rules = &rules });
     defer testing.allocator.free(json);
 
-    try testing.expectError(error.MissingSignature, verifySignedPolicy(testing.allocator, json));
+    try testing.expectError(error.MissingSignature, verifySignedPolicy(testing.allocator, json, null));
 }
 
 test "loadResolved sets locked when signed policy present" {
@@ -2418,7 +2418,7 @@ test "expired policy rejected" {
     defer testing.allocator.free(json);
 
     // now=2000 > not_after=1000 → expired
-    try testing.expectError(error.PolicyExpired, verifySignedPolicyAt(testing.allocator, json, 2000));
+    try testing.expectError(error.PolicyExpired, verifySignedPolicyAt(testing.allocator, json, 2000, null));
 }
 
 test "fresh policy accepted before expiry" {
@@ -2429,7 +2429,7 @@ test "fresh policy accepted before expiry" {
     defer testing.allocator.free(json);
 
     // now=3000 < not_after=5000 → accepted
-    const signed = try verifySignedPolicyAt(testing.allocator, json, 3000);
+    const signed = try verifySignedPolicyAt(testing.allocator, json, 3000, null);
     defer deinitSignedDoc(testing.allocator, signed);
     try testing.expectEqual(@as(u64, 0), signed.doc.generation);
     try testing.expectEqual(@as(i64, 5000), signed.doc.not_after.?);
