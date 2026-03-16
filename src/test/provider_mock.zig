@@ -64,14 +64,14 @@ pub const ScriptedProvider = struct {
                 }};
                 _ = try std.posix.poll(&fds, -1);
                 var buf: [8]u8 = undefined;
-                _ = std.posix.read(self.wake_r, &buf) catch {};
+                _ = std.posix.read(self.wake_r, &buf) catch {}; // test: error irrelevant
                 break :blk null;
             },
         };
     }
 
     fn abort(self: *ScriptedProvider) void {
-        _ = std.posix.write(self.wake_w, "\x01") catch {};
+        _ = std.posix.write(self.wake_w, "\x01") catch {}; // test: error irrelevant
     }
 
     fn streamDeinit(_: *ScriptedProvider) void {}

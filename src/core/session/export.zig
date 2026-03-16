@@ -41,60 +41,7 @@ fn toMarkdownWith(
     out_path: ?[]const u8,
     hooks: AuditHooks,
 ) ![]u8 {
-    var rdr = try reader_mod.ReplayReader.init(alloc, dir, sid, .{});
-    defer rdr.deinit();
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(alloc);
-
-    // Header
-    try buf.appendSlice(alloc, "# Session ");
-    try buf.appendSlice(alloc, sid);
-    try buf.appendSlice(alloc, "\n\n");
-
-    while (try rdr.next()) |ev| {
-        switch (ev.data) {
-            .prompt => |p| {
-                try appendSection(alloc, &buf, "User", p.text);
-            },
-            .text => |t| {
-                try appendSection(alloc, &buf, "Assistant", t.text);
-            },
-            .thinking => |t| {
-                try buf.appendSlice(alloc, "<details><summary>Thinking</summary>\n\n");
-                try appendFence(alloc, &buf, t.text);
-                try buf.appendSlice(alloc, "\n</details>\n\n");
-            },
-            .tool_call => |tc| {
-                try buf.appendSlice(alloc, "### Tool: ");
-                const safe_name = try redactLossyAlloc(alloc, tc.name, .@"pub");
-                defer alloc.free(safe_name);
-                try buf.appendSlice(alloc, safe_name);
-                try buf.appendSlice(alloc, "\n\n");
-                try appendFence(alloc, &buf, tc.args);
-                try buf.appendSlice(alloc, "\n");
-            },
-            .tool_result => |tr| {
-                try buf.appendSlice(alloc, if (tr.is_err) "#### Error\n\n" else "#### Result\n\n");
-                // Truncate very long tool output
-                const max_out = 2000;
-                const raw_out = if (tr.output.len > max_out) tr.output[0..max_out] else tr.output;
-                try appendFence(alloc, &buf, raw_out);
-                if (tr.output.len > max_out) {
-                    const trunc_msg = try std.fmt.allocPrint(alloc, "\n... ({d} bytes truncated)", .{tr.output.len - max_out});
-                    defer alloc.free(trunc_msg);
-                    try buf.appendSlice(alloc, trunc_msg);
-                }
-                try buf.appendSlice(alloc, "\n");
-            },
-            .err => |e| {
-                try appendSection(alloc, &buf, "Error", e.text);
-            },
-            .usage, .stop, .noop => {},
-        }
-    }
-
-    // Determine output path (resolve relative to cwd)
+    // Determine output path (resolve relative to cwd) before streaming.
     const dest = if (out_path) |p| blk: {
         if (std.fs.path.isAbsolute(p)) {
             break :blk try alloc.dupe(u8, p);
@@ -132,8 +79,13 @@ fn toMarkdownWith(
         },
     });
 
-    // Atomic export: write to temp, fsync, rename.
-    atomicExportWrite(dest, buf.items) catch |err| {
+    // Stream markdown incrementally via atomic temp file.
+    var stream_ctx = StreamCtx{
+        .alloc = alloc,
+        .session_dir = dir,
+        .sid = sid,
+    };
+    atomicExportStream(dest, &stream_ctx, StreamCtx.write) catch |err| {
         try emitAudit(alloc, hooks, exportOutcomeAudit(sid, dest, hooks.now_ms(), .fail, @errorName(err)));
         return err;
     };
@@ -143,18 +95,78 @@ fn toMarkdownWith(
     return dest;
 }
 
-/// Atomic write for export: temp file + fsync + rename over dest.
-fn atomicExportWrite(dest: []const u8, data: []const u8) !void {
+const StreamCtx = struct {
+    alloc: std.mem.Allocator,
+    session_dir: std.fs.Dir,
+    sid: []const u8,
+
+    fn write(self: *StreamCtx, file: std.fs.File) anyerror!void {
+        var rdr = try reader_mod.ReplayReader.init(self.alloc, self.session_dir, self.sid, .{});
+        defer rdr.deinit();
+
+        // Header
+        try file.writeAll("# Session ");
+        try file.writeAll(self.sid);
+        try file.writeAll("\n\n");
+
+        while (try rdr.next()) |ev| {
+            switch (ev.data) {
+                .prompt => |p| {
+                    try writeSection(self.alloc, file, "User", p.text);
+                },
+                .text => |t| {
+                    try writeSection(self.alloc, file, "Assistant", t.text);
+                },
+                .thinking => |t| {
+                    try file.writeAll("<details><summary>Thinking</summary>\n\n");
+                    try writeFence(self.alloc, file, t.text);
+                    try file.writeAll("\n</details>\n\n");
+                },
+                .tool_call => |tc| {
+                    try file.writeAll("### Tool: ");
+                    const safe_name = try redactLossyAlloc(self.alloc, tc.name, .@"pub");
+                    defer self.alloc.free(safe_name);
+                    try file.writeAll(safe_name);
+                    try file.writeAll("\n\n");
+                    try writeFence(self.alloc, file, tc.args);
+                    try file.writeAll("\n");
+                },
+                .tool_result => |tr| {
+                    try file.writeAll(if (tr.is_err) "#### Error\n\n" else "#### Result\n\n");
+                    const max_out = 2000;
+                    const raw_out = if (tr.output.len > max_out) tr.output[0..max_out] else tr.output;
+                    try writeFence(self.alloc, file, raw_out);
+                    if (tr.output.len > max_out) {
+                        const trunc_msg = try std.fmt.allocPrint(self.alloc, "\n... ({d} bytes truncated)", .{tr.output.len - max_out});
+                        defer self.alloc.free(trunc_msg);
+                        try file.writeAll(trunc_msg);
+                    }
+                    try file.writeAll("\n");
+                },
+                .err => |e| {
+                    try writeSection(self.alloc, file, "Error", e.text);
+                },
+                .usage, .stop, .noop => {},
+            }
+        }
+    }
+};
+
+/// Atomic streaming write: temp file + write callback + fsync + rename.
+fn atomicExportStream(
+    dest: []const u8,
+    ctx: *StreamCtx,
+    writeFn: fn (*StreamCtx, std.fs.File) anyerror!void,
+) !void {
     const dir_path = std.fs.path.dirname(dest) orelse return error.FileNotFound;
     const basename = std.fs.path.basename(dest);
 
-    var dir = if (std.fs.path.isAbsolute(dir_path))
+    var out_dir = if (std.fs.path.isAbsolute(dir_path))
         try std.fs.openDirAbsolute(dir_path, .{})
     else
         try std.fs.cwd().openDir(dir_path, .{});
-    defer dir.close();
+    defer out_dir.close();
 
-    // Temp name: ".basename.tmp"
     var tmp_buf: [512]u8 = undefined;
     const needed = 1 + basename.len + 4;
     if (needed > tmp_buf.len) return error.NameTooLong;
@@ -163,48 +175,51 @@ fn atomicExportWrite(dest: []const u8, data: []const u8) !void {
     @memcpy(tmp_buf[1 + basename.len .. needed], ".tmp");
     const tmp_name = tmp_buf[0..needed];
 
-    // Clean up stale temp, create, write, fsync
-    dir.deleteFile(tmp_name) catch {};
-    var file = try dir.createFile(tmp_name, .{ .truncate = true, .mode = fs_secure.file_mode });
+    out_dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
+    var file = try out_dir.createFile(tmp_name, .{ .truncate = true, .mode = fs_secure.file_mode });
     errdefer {
         file.close();
-        dir.deleteFile(tmp_name) catch {};
+        out_dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
     }
-    try file.writeAll(data);
+    try writeFn(ctx, file);
     try file.sync();
     file.close();
 
-    // Rename over target
-    dir.rename(tmp_name, basename) catch |err| {
-        dir.deleteFile(tmp_name) catch {};
+    out_dir.rename(tmp_name, basename) catch |err| {
+        out_dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
         return err;
     };
 }
 
-fn appendSection(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), title: []const u8, txt: []const u8) !void {
-    try buf.appendSlice(alloc, "## ");
-    try buf.appendSlice(alloc, title);
-    try buf.appendSlice(alloc, "\n\n");
-    try appendFence(alloc, buf, txt);
-    try buf.appendSlice(alloc, "\n");
+fn writeSection(alloc: std.mem.Allocator, f: std.fs.File, title: []const u8, txt: []const u8) !void {
+    try f.writeAll("## ");
+    try f.writeAll(title);
+    try f.writeAll("\n\n");
+    try writeFence(alloc, f, txt);
+    try f.writeAll("\n");
 }
 
-fn appendFence(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), txt: []const u8) !void {
+fn writeFence(alloc: std.mem.Allocator, f: std.fs.File, txt: []const u8) !void {
     const safe = try redactLossyAlloc(alloc, txt, .@"pub");
     defer alloc.free(safe);
 
     const n = fenceLen(safe);
-    var fence = std.ArrayListUnmanaged(u8){};
-    defer fence.deinit(alloc);
-    try fence.resize(alloc, n);
-    @memset(fence.items, '`');
+    try writeTicks(f, n);
+    try f.writeAll("\n");
+    try f.writeAll(safe);
+    if (safe.len == 0 or safe[safe.len - 1] != '\n') try f.writeAll("\n");
+    try writeTicks(f, n);
+    try f.writeAll("\n\n");
+}
 
-    try buf.appendSlice(alloc, fence.items);
-    try buf.appendSlice(alloc, "\n");
-    try buf.appendSlice(alloc, safe);
-    if (safe.len == 0 or safe[safe.len - 1] != '\n') try buf.appendSlice(alloc, "\n");
-    try buf.appendSlice(alloc, fence.items);
-    try buf.appendSlice(alloc, "\n\n");
+fn writeTicks(f: std.fs.File, n: usize) !void {
+    const chunk = "````````````````";
+    var rem = n;
+    while (rem > 0) {
+        const batch = @min(rem, chunk.len);
+        try f.writeAll(chunk[0..batch]);
+        rem -= batch;
+    }
 }
 
 fn redactLossyAlloc(alloc: std.mem.Allocator, txt: []const u8, vis: audit.Vis) ![]u8 {

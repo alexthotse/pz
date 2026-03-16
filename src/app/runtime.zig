@@ -26,6 +26,7 @@ const tui_panels = @import("../modes/tui/panels.zig");
 const tui_path_complete = @import("../modes/tui/path_complete.zig");
 const args_mod = @import("args.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
+const event_loop = @import("../core/event_loop.zig");
 const audit_e2e = @import("../test/audit_e2e.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const syslog_mock = @import("../test/syslog_mock.zig");
@@ -102,6 +103,13 @@ const NativeProviderRuntime = union(enum) {
             .anthropic => .{ .anthropic = try core.providers.anthropic.Client.init(alloc, hooks) },
             .openai => .{ .openai = try core.providers.openai.Client.init(alloc, hooks) },
         };
+    }
+
+    fn setEventLoop(self: *NativeProviderRuntime, el: *event_loop.EventLoop) void {
+        switch (self.*) {
+            .anthropic => |*client| client.el = el,
+            .openai => |*client| client.el = el,
+        }
     }
 
     fn asProvider(self: *NativeProviderRuntime) core.providers.Provider {
@@ -538,7 +546,7 @@ const AskUiCtx = struct {
             if (self.ui.ov) |*ov| {
                 ov.deinit(self.alloc);
                 self.ui.ov = null;
-                self.ui.draw(self.out) catch {};
+                self.ui.draw(self.out) catch {}; // cleanup: propagation impossible
             }
         }
 
@@ -971,7 +979,7 @@ const InputWatcher = struct {
 };
 
 fn signalWake(fd: std.posix.fd_t) void {
-    _ = std.posix.write(fd, "\x01") catch {};
+    _ = std.posix.write(fd, "\x01") catch {}; // cleanup: propagation impossible
 }
 
 fn drainWake(fd: std.posix.fd_t) void {
@@ -1338,7 +1346,7 @@ const LiveTurn = struct {
 
     fn nudge(self: *LiveTurn) void {
         const b = [_]u8{1};
-        _ = std.posix.write(self.wake_w, &b) catch {};
+        _ = std.posix.write(self.wake_w, &b) catch {}; // cleanup: propagation impossible
     }
 };
 
@@ -1921,6 +1929,14 @@ fn execWithIoTuiHooks(
     var pol = try RuntimePolicy.load(alloc);
     defer pol.deinit();
 
+    // Shared event loop for TUI mode — providers and tools use it
+    // instead of creating per-call instances.
+    var el: ?event_loop.EventLoop = if (run_cmd.mode == .tui)
+        event_loop.EventLoop.init() catch null
+    else
+        null;
+    defer if (el) |*e| e.deinit();
+
     var tools_rt = core.tools.builtin.Runtime.init(.{
         .alloc = alloc,
         .tool_mask = run_cmd.tool_mask,
@@ -1959,6 +1975,7 @@ fn execWithIoTuiHooks(
                     if (NativeProviderRuntime.init(alloc, native_kind, hooks.auth())) |nr| {
                         native_rt = nr;
                         has_native_rt = true;
+                        if (el) |*e| native_rt.setEventLoop(e);
                         provider = native_rt.asProvider();
                     } else |err| {
                         missing_provider.msg = missingProviderMsgForInitErr(native_kind, err);
@@ -2373,8 +2390,8 @@ fn runTui(
     try tui_render.Renderer.setTitle(out, cwd_path);
 
     defer {
-        tui_render.Renderer.setTitle(out, "") catch {};
-        tui_render.Renderer.cleanup(out) catch {};
+        tui_render.Renderer.setTitle(out, "") catch {}; // cleanup: propagation impossible
+        tui_render.Renderer.cleanup(out) catch {}; // cleanup: propagation impossible
     }
 
     var sink_impl = TuiSink{
@@ -2472,7 +2489,7 @@ fn runTui(
 
     // Set terminal title (OSC 0)
     try out.writeAll("\x1b]0;pz\x07");
-    defer out.writeAll("\x1b]0;\x07") catch {};
+    defer out.writeAll("\x1b]0;\x07") catch {}; // cleanup: propagation impossible
 
     try ui.draw(out);
     try maybeShowVersionUpdate(alloc, &ui, &ver_check, &ver_notice_done, out);
@@ -2502,7 +2519,9 @@ fn runTui(
             ui.clearTranscript();
         }
         if (cmd == .copy) {
+            try runtimeCtlStart(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
             try copyLastResponse(alloc, &ui);
+            try runtimeCtlSuccess(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
         }
         if (cmd == .cost) {
             try showCost(alloc, &ui);
@@ -2869,7 +2888,9 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .copy) {
+                                try runtimeCtlStart(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
                                 try copyLastResponse(alloc, &ui);
+                                try runtimeCtlSuccess(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
                                 try ui.draw(out);
                                 continue;
                             }
@@ -3048,6 +3069,7 @@ fn runTui(
                         },
                         .ext_editor => {
                             if (pre) |p| alloc.free(p);
+                            try runtimeCtlStart(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, &.{});
                             tui_term.restore(stdin_fd);
                             const ed_result = openExtEditor(alloc, ui.editorText());
                             _ = tui_term.enableRaw(stdin_fd);
@@ -3056,12 +3078,14 @@ fn runTui(
                                     defer alloc.free(txt);
                                     try ui.ed.setText(txt);
                                 }
+                                try runtimeCtlSuccess(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, &.{});
                             } else |err| {
                                 const detail = try report.inlineMsg(alloc, err);
                                 defer alloc.free(detail);
                                 const msg = try std.fmt.allocPrint(alloc, "[editor failed: {s}]", .{detail});
                                 defer alloc.free(msg);
                                 try ui.tr.infoText(msg);
+                                try runtimeCtlFail(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, .{ .text = "editor failed", .vis = .@"pub" }, &.{});
                             }
                             try ui.draw(out);
                         },
@@ -3327,7 +3351,9 @@ fn runTui(
                 continue;
             }
             if (cmd == .copy) {
+                try runtimeCtlStart(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
                 try copyLastResponse(alloc, &ui);
+                try runtimeCtlSuccess(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
                 try ui.draw(out);
                 cmd_ct += 1;
                 continue;
@@ -6228,7 +6254,7 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool) 
 
     // What's New section (only on fresh sessions)
     if (!is_resumed) {
-        var state = config.PzState.load(alloc) orelse config.PzState{};
+        var state = (try config.PzState.load(alloc)) orelse config.PzState{};
         defer state.deinit(alloc);
 
         const new_entries = changelog.entriesSince(state.last_hash);
@@ -6853,8 +6879,12 @@ fn runBashMode(
 fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
     const raw_ed = std.posix.getenv("EDITOR") orelse std.posix.getenv("VISUAL") orelse "/usr/bin/vi";
 
-    // Reject relative paths — require absolute path to editor
+    // Reject relative paths — require absolute path or bare command name.
+    // Relative paths with separators (./foo, ../bar) are rejected to
+    // prevent path-traversal attacks via EDITOR.
     const ed = if (!std.fs.path.isAbsolute(raw_ed)) blk: {
+        // Reject any relative path containing a separator
+        if (std.mem.indexOfScalar(u8, raw_ed, '/') != null) return error.EditorNotFound;
         // Resolve bare command name against known safe dirs
         const safe_dirs = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin" };
         var found: ?[]const u8 = null;
@@ -6874,7 +6904,7 @@ fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
     var tmp_buf: [64]u8 = undefined;
     const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
     const tmp = try std.fmt.bufPrint(&tmp_buf, "/tmp/pz-edit-{d}.txt", .{ts});
-    defer std.fs.deleteFileAbsolute(tmp) catch {};
+    defer std.fs.deleteFileAbsolute(tmp) catch {}; // cleanup: propagation impossible
     {
         const f = try std.fs.createFileAbsolute(tmp, .{});
         defer f.close();
@@ -6936,7 +6966,7 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     var tmp_buf: [128]u8 = undefined;
     const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
     const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}/pz-paste-{d}.png", .{ tmp_dir, ts });
-    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+    defer std.fs.deleteFileAbsolute(tmp_path) catch {}; // cleanup: propagation impossible
 
     const script = try std.fmt.allocPrint(alloc, "set imgData to the clipboard as «class PNGf»\nset fp to open for access POSIX file \"{s}\" with write permission\nwrite imgData to fp\nclose access fp", .{tmp_path});
     defer alloc.free(script);
@@ -7518,7 +7548,7 @@ test "input watcher join wakes promptly while paused" {
 
         fn run(self: *@This()) void {
             self.watcher.join(null);
-            _ = std.posix.write(self.fd, "\x01") catch {};
+            _ = std.posix.write(self.fd, "\x01") catch {}; // cleanup: propagation impossible
         }
     };
     var ctx = Ctx{ .watcher = &watcher, .fd = done_pipe[1] };
@@ -12827,7 +12857,7 @@ test "parseCmdToolMask fuzz smoke does not panic" {
                 else => 'x',
             };
         }
-        _ = parseCmdToolMask(buf[0..n]) catch {};
+        _ = parseCmdToolMask(buf[0..n]) catch {}; // test: error irrelevant
     }
 }
 
@@ -13263,7 +13293,7 @@ test "buildSystemPrompt rejects context under policy lock" {
     const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(cwd);
     try std.posix.chdir(cwd);
-    defer std.posix.chdir(old) catch {};
+    defer std.posix.chdir(old) catch {}; // test: error irrelevant
 
     var run = cli.Run{
         .mode = .tui,

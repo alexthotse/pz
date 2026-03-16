@@ -417,7 +417,7 @@ const Ring = struct {
                     self.slots[idx] = dup;
                     self.head = nextIdx(self.slots.len, idx);
                     self.dropped += 1;
-                    self.writeSpool(raw);
+                    try self.writeSpool(raw);
                     return .{ .dropped = 1 };
                 },
                 .fail_closed => return error.SpoolFull,
@@ -428,7 +428,7 @@ const Ring = struct {
         const idx = (self.head + self.len) % self.slots.len;
         self.slots[idx] = dup;
         self.len += 1;
-        self.writeSpool(raw);
+        try self.writeSpool(raw);
         return .{};
     }
 
@@ -446,19 +446,14 @@ const Ring = struct {
         self.len -= 1;
     }
 
-    fn writeSpool(self: *Ring, raw: []const u8) void {
+    fn writeSpool(self: *Ring, raw: []const u8) error{ SpoolCreate, SpoolWrite, SpoolName }!void {
         const dir = self.spool_dir orelse return;
         var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{self.spool_seq}) catch return;
+        const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{self.spool_seq}) catch return error.SpoolName;
         self.spool_seq += 1;
-        const f = dir.createFile(name, .{ .truncate = true }) catch |err| {
-            std.log.warn("audit spool create failed: {}", .{err});
-            return;
-        };
+        const f = dir.createFile(name, .{ .truncate = true }) catch return error.SpoolCreate;
         defer f.close();
-        f.writeAll(raw) catch |err| {
-            std.log.warn("audit spool write failed: {}", .{err});
-        };
+        f.writeAll(raw) catch return error.SpoolWrite;
     }
 
     fn removeSpool(self: *Ring, slot_idx: usize) void {

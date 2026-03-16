@@ -158,7 +158,7 @@ pub const EventLoop = struct {
                     .data = 0,
                     .udata = 0,
                 }};
-                _ = kqueueWaitChanges(self.backend, &changelist, &.{}, null) catch {};
+                _ = kqueueWaitChanges(self.backend, &changelist, &.{}, null) catch {}; // cleanup: propagation impossible
             }
         } else {
             const rc = std.os.linux.epoll_ctl(@intCast(self.backend), std.os.linux.EPOLL.CTL_DEL, @intCast(fd), null);

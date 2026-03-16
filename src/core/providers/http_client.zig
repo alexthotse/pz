@@ -124,7 +124,7 @@ pub const RealSleeper = struct {
     /// Wait using EventLoop with timeout. The cancel fd (if set) is
     /// already registered with the event loop, so a cancel signal
     /// will interrupt the wait immediately.
-    /// Falls back to poll when no event loop is available.
+    /// Falls back to poll on cancel_fd when no event loop is available.
     pub fn sleep(self: *RealSleeper, ms: u64) void {
         const timeout: i32 = if (ms > std.math.maxInt(i32))
             std.math.maxInt(i32)
@@ -137,19 +137,35 @@ pub const RealSleeper = struct {
             return;
         }
 
-        // Fallback: poll on cancel fd or sleep.
-        if (self.cancel_fd < 0) {
-            std.Thread.sleep(ms * std.time.ns_per_ms);
-            return;
-        }
+        // Always poll on cancel_fd — never use Thread.sleep.
+        // If cancel_fd is not set, use a self-pipe to get a
+        // pollable fd that simply times out.
         var fds = [1]std.posix.pollfd{.{
-            .fd = self.cancel_fd,
+            .fd = if (self.cancel_fd >= 0) self.cancel_fd else selfPipeFd(),
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        _ = std.posix.poll(&fds, timeout) catch {
-            std.Thread.sleep(ms * std.time.ns_per_ms);
+        _ = std.posix.poll(&fds, timeout) catch return;
+    }
+
+    /// Return the read end of a process-wide self-pipe used as a
+    /// pollable fd when no cancel_fd or event loop is available.
+    /// The write end is never written to, so poll simply times out.
+    fn selfPipeFd() std.posix.fd_t {
+        const S = struct {
+            var fd: std.posix.fd_t = -1;
+            var mu: std.Thread.Mutex = .{};
         };
+        // Fast path: already initialized.
+        if (@atomicLoad(std.posix.fd_t, &S.fd, .acquire) >= 0) return S.fd;
+        S.mu.lock();
+        defer S.mu.unlock();
+        // Double-check after acquiring lock.
+        if (S.fd >= 0) return S.fd;
+        const fds = std.posix.pipe2(.{ .CLOEXEC = true }) catch return -1;
+        @atomicStore(std.posix.fd_t, &S.fd, fds[0], .release);
+        // Write end intentionally leaked — never written.
+        return fds[0];
     }
 };
 

@@ -8,6 +8,7 @@ pub const Ctx = struct {
     store: core.session.SessionStore,
     sid: []const u8,
     prompt: []const u8,
+    model: []const u8 = "default",
 };
 
 pub fn Mode(comptime T: type, comptime run_fn: fn (ctx: *T, run_ctx: Ctx) anyerror!void) type {

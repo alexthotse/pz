@@ -59,10 +59,10 @@ pub const VerifyError = error{
 pub const Seed = struct {
     raw: [seed_len]u8,
 
-    pub fn parse(raw: []const u8) SeedError!Seed {
-        if (raw.len != seed_len) return error.BadSeedLen;
+    pub fn parse(raw_in: []const u8) SeedError!Seed {
+        if (raw_in.len != seed_len) return error.BadSeedLen;
         var buf: [seed_len]u8 = undefined;
-        @memcpy(buf[0..], raw);
+        @memcpy(buf[0..], raw_in);
         return .{ .raw = buf };
     }
 
@@ -75,6 +75,11 @@ pub const Seed = struct {
 
     pub fn bytes(self: Seed) [seed_len]u8 {
         return self.raw;
+    }
+
+    /// Read-only pointer to raw seed bytes (internal use only).
+    pub fn rawSlice(self: *const Seed) *const [seed_len]u8 {
+        return &self.raw;
     }
 
     /// Zero seed bytes. Uses volatile write to prevent compiler elision.
@@ -221,7 +226,7 @@ pub const KeyPair = struct {
     pair: Ed25519.KeyPair,
 
     pub fn fromSeed(seed: Seed) KeyPairError!KeyPair {
-        const pair = Ed25519.KeyPair.generateDeterministic(seed.raw) catch return error.BadSeed;
+        const pair = Ed25519.KeyPair.generateDeterministic(seed.rawSlice().*) catch return error.BadSeed;
         return .{ .pair = pair };
     }
 
@@ -1052,23 +1057,50 @@ test "surrogate differs for different inputs under same key" {
     try testing.expect(!std.mem.eql(u8, b1[0..], b2[0..]));
 }
 
+test "P36b RedactKey rotation produces different surrogates after rekey" {
+    // Simulates session key rotation: same input text under two different
+    // session-derived keys must produce distinct surrogates, proving that
+    // a rekey (new sid) decorrelates previously redacted values.
+    const txt = "api-key-12345";
+    const k1 = RedactKey.fromSid("sess-before-rotation");
+    const k2 = RedactKey.fromSid("sess-after-rotation");
+
+    // Keys themselves must differ.
+    try testing.expect(!std.mem.eql(u8, k1.bytes[0..], k2.bytes[0..]));
+
+    // Surrogates for identical input must differ.
+    var b1: [16]u8 = undefined;
+    var b2: [16]u8 = undefined;
+    _ = k1.surrogate(txt, &b1);
+    _ = k2.surrogate(txt, &b2);
+    try testing.expect(!std.mem.eql(u8, b1[0..], b2[0..]));
+
+    // Each key is individually deterministic (idempotent).
+    var b1b: [16]u8 = undefined;
+    var b2b: [16]u8 = undefined;
+    _ = k1.surrogate(txt, &b1b);
+    _ = k2.surrogate(txt, &b2b);
+    try testing.expectEqualSlices(u8, b1[0..], b1b[0..]);
+    try testing.expectEqualSlices(u8, b2[0..], b2b[0..]);
+}
+
 test "seed wipe zeroes bytes" {
     var seed = try Seed.parseHex(seed_hex);
     // Confirm non-zero before wipe.
     var any_nonzero = false;
-    for (seed.raw) |b| if (b != 0) {
+    for (seed.rawSlice()) |b| if (b != 0) {
         any_nonzero = true;
         break;
     };
     try testing.expect(any_nonzero);
     seed.wipe();
-    for (seed.raw) |b| try testing.expectEqual(@as(u8, 0), b);
+    for (seed.rawSlice()) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
 test "seed deinit zeroes bytes" {
     var seed = try Seed.parseHex(seed_hex);
     seed.deinit();
-    for (seed.raw) |b| try testing.expectEqual(@as(u8, 0), b);
+    for (seed.rawSlice()) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
 test "keypair wipe zeroes secret key" {

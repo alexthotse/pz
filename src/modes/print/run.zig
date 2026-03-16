@@ -44,7 +44,7 @@ fn execVerbose(run_ctx: mode.Ctx, out: std.Io.AnyWriter, verbose: bool) run_err.
     };
 
     var stream = run_ctx.provider.start(.{
-        .model = model_default,
+        .model = run_ctx.model,
         .msgs = msgs[0..],
     }) catch return error.ProviderStart;
     defer stream.deinit();

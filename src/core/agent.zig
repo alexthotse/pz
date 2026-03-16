@@ -409,9 +409,17 @@ pub const ChildProc = struct {
         return try list.toOwnedSlice(a);
     }
 
+    /// Hello handshake deadline (ms).
+    pub const hello_deadline_ms: i64 = 5_000;
+    /// Default run completion deadline (ms). Caller may override via runReqTimeout.
+    pub const default_run_deadline_ms: i64 = 5 * 60 * 1_000;
+    /// Cancel acknowledgment deadline (ms). After expiry, escalate to SIGKILL.
+    pub const cancel_deadline_ms: i64 = 2_000;
+
     pub fn connect(self: *ChildProc) !Hello {
         try self.send(try self.stub.hello());
-        const ev = try self.stub.recv(try self.recv());
+        const deadline = std.time.milliTimestamp() + hello_deadline_ms;
+        const ev = try self.stub.recv(try self.recvDeadline(deadline));
         return switch (ev) {
             .ready => |ready| ready,
             else => error.UnexpectedMsg,
@@ -419,10 +427,15 @@ pub const ChildProc = struct {
     }
 
     pub fn runReq(self: *ChildProc, req: Request) !RunResult {
+        return self.runReqTimeout(req, default_run_deadline_ms);
+    }
+
+    pub fn runReqTimeout(self: *ChildProc, req: Request, timeout_ms: i64) !RunResult {
         try self.send(try self.stub.run(req));
+        const deadline = std.time.milliTimestamp() + timeout_ms;
         var res: RunResult = .{};
         while (true) {
-            const ev = try self.stub.recv(try self.recv());
+            const ev = try self.stub.recv(try self.recvDeadline(deadline));
             switch (ev) {
                 .out => |out| res.out = out,
                 .done => |done| {
@@ -440,14 +453,30 @@ pub const ChildProc = struct {
 
     pub fn cancelReq(self: *ChildProc) !Done {
         try self.send(try self.stub.cancel());
+        const deadline = std.time.milliTimestamp() + cancel_deadline_ms;
         while (true) {
-            const ev = try self.stub.recv(try self.recv());
+            const frame = self.recvDeadline(deadline) catch |err| {
+                if (err == error.Timeout) {
+                    // Deadline expired — escalate to SIGKILL.
+                    self.killEscalate();
+                    return error.Timeout;
+                }
+                return err;
+            };
+            const ev = try self.stub.recv(frame);
             switch (ev) {
                 .done => |done| return done,
                 .err => |rpc_err| return if (rpc_err.fatal) error.UnexpectedMsg else error.UnexpectedMsg,
                 else => {},
             }
         }
+    }
+
+    /// SIGKILL the child process group immediately.
+    fn killEscalate(self: *ChildProc) void {
+        const b = @import("builtin");
+        if (b.os.tag == .windows or b.os.tag == .wasi) return;
+        std.posix.kill(-self.proc.id, std.posix.SIG.KILL) catch {};
     }
 
     fn send(self: *ChildProc, frame: Frame) !void {
@@ -458,22 +487,34 @@ pub const ChildProc = struct {
     }
 
     fn recv(self: *ChildProc) !Frame {
-        // Notify the event loop that we need the RPC fd, then perform
-        // the blocking read. The event loop is available for callers to
-        // integrate with a broader readiness loop (e.g., cancel pipe).
+        return self.recvDeadline(std.math.maxInt(i64));
+    }
+
+    /// Receive a frame with an absolute deadline (ms since epoch).
+    /// Returns error.Timeout if deadline passes before a full line arrives.
+    fn recvDeadline(self: *ChildProc, deadline: i64) !Frame {
         if (self.rpc_reader.interface.bufferedLen() == 0) {
-            self.waitRpc() catch {};
+            const remain = deadline - std.time.milliTimestamp();
+            if (remain <= 0) return error.Timeout;
+            self.waitRpcMs(@intCast(@min(remain, std.math.maxInt(i32)))) catch {}; // cleanup: propagation impossible
         }
-        const line = try self.rpc_reader.interface.takeDelimiter('\n');
-        const raw = line orelse return error.EndOfStream;
+        const line = self.rpc_reader.interface.takeDelimiter('\n') catch |err| {
+            // If no data available and we're past deadline, surface timeout.
+            if (std.time.milliTimestamp() >= deadline) return error.Timeout;
+            return err;
+        };
+        const raw = line orelse {
+            if (std.time.milliTimestamp() >= deadline) return error.Timeout;
+            return error.EndOfStream;
+        };
         if (raw.len > max_frame_len) return error.FrameTooLarge;
         const parsed = try decodeSlice(self.arena.allocator(), raw);
         return parsed.value;
     }
 
-    fn waitRpc(self: *ChildProc) !void {
+    fn waitRpcMs(self: *ChildProc, timeout_ms: i32) !void {
         var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
-        const events = try self.el.wait(100, &ev_buf);
+        const events = try self.el.wait(timeout_ms, &ev_buf);
         for (events) |ev| {
             if (ev.fd == self.rpc_file.handle and ev.readable) return;
         }
@@ -484,18 +525,18 @@ pub const ChildProc = struct {
 fn killAndWait(child: *std.process.Child) void {
     const builtin = @import("builtin");
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {
-        _ = child.wait() catch {};
+        _ = child.wait() catch {}; // cleanup: propagation impossible
         return;
     }
     const pid = child.id;
     // TERM the process group.
     std.posix.kill(-pid, std.posix.SIG.TERM) catch |err| switch (err) {
         error.ProcessNotFound => {
-            _ = child.wait() catch {};
+            _ = child.wait() catch {}; // cleanup: propagation impossible
             return;
         },
         else => {
-            _ = child.wait() catch {};
+            _ = child.wait() catch {}; // cleanup: propagation impossible
             return;
         },
     };
@@ -516,7 +557,7 @@ fn killAndWait(child: *std.process.Child) void {
         error.ProcessNotFound => {},
         else => {},
     };
-    _ = child.wait() catch {};
+    _ = child.wait() catch {}; // cleanup: propagation impossible
 }
 
 fn clearCloexec(fd: std.posix.fd_t) !void {

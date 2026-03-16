@@ -212,7 +212,7 @@ fn setRecvTimeout(fd: std.posix.fd_t, ms: u32) void {
         .sec = @intCast(ms / 1000),
         .usec = @intCast(@as(u32, ms % 1000) * 1000),
     };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {}; // cleanup: propagation impossible
 }
 
 fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) void {
@@ -222,8 +222,8 @@ fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) void {
         "HTTP/1.1 {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, body.len },
     ) catch return;
-    _ = std.posix.write(fd, hdr) catch {};
-    _ = std.posix.write(fd, body) catch {};
+    _ = std.posix.write(fd, hdr) catch {}; // cleanup: propagation impossible
+    _ = std.posix.write(fd, body) catch {}; // cleanup: propagation impossible
 }
 
 const callback_ok_body =
@@ -238,7 +238,7 @@ fn sendTestCallback(port: u16, req: []const u8) void {
     defer stream.close();
     _ = std.posix.write(stream.handle, req) catch return;
     var sink: [256]u8 = undefined;
-    _ = std.posix.read(stream.handle, &sink) catch {};
+    _ = std.posix.read(stream.handle, &sink) catch {}; // cleanup: propagation impossible
 }
 
 test "parseCodeStateQuery decodes URL-encoded params" {

@@ -328,7 +328,7 @@ fn runChild(
         if (!stdout_open and !stderr_open) {
             // Pipes drained; sleep briefly while waiting for child exit.
             var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
-            _ = el.wait(@intCast(wait_poll_ms), &ev_buf) catch {};
+            _ = el.wait(@intCast(wait_poll_ms), &ev_buf) catch {}; // cleanup: propagation impossible
             continue;
         }
 
@@ -348,7 +348,7 @@ fn runChild(
                     sink,
                     &seq,
                 ) catch |read_err| return mapCollectErr(read_err);
-                if (!stdout_open) el.unregister(stdout_file.handle) catch {};
+                if (!stdout_open) el.unregister(stdout_file.handle) catch {}; // cleanup: propagation impossible
             }
             if (ev.fd == stderr_file.handle and stderr_open and ev.readable) {
                 stderr_open = readFd(
@@ -363,7 +363,7 @@ fn runChild(
                     sink,
                     &seq,
                 ) catch |read_err| return mapCollectErr(read_err);
-                if (!stderr_open) el.unregister(stderr_file.handle) catch {};
+                if (!stderr_open) el.unregister(stderr_file.handle) catch {}; // cleanup: propagation impossible
             }
         }
     }
@@ -1125,7 +1125,7 @@ test "bash handler denies process exec outside workspace inside sandbox" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const script_rel = ".zig-cache/p30a-run.sh";
-    defer std.fs.cwd().deleteFile(script_rel) catch {};
+    defer std.fs.cwd().deleteFile(script_rel) catch {}; // test: error irrelevant
     try std.fs.cwd().writeFile(.{ .sub_path = script_rel, .data = "#!/bin/sh\nprintf nope\n" });
     var script_file = try std.fs.cwd().openFile(script_rel, .{ .mode = .read_only });
     defer script_file.close();
@@ -1489,7 +1489,7 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
 
     try std.testing.expectEqual(@as(usize, 1), res.out.len);
     const bg_pid = try std.fmt.parseInt(std.posix.pid_t, res.out[0].chunk, 10);
-    defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {};
+    defer std.posix.kill(bg_pid, std.posix.SIG.KILL) catch {}; // test: error irrelevant
     try WaitGone.run(bg_pid);
     try oh.snap(@src(),
         \\core.tools.bash.test.bash handler cancels running child and reaps TERM-resistant process.Snap

@@ -653,7 +653,7 @@ pub const Manager = struct {
             std.log.warn("bg: done tracking append failed for job {}: {}", .{ id, err });
         };
         const b = [_]u8{1};
-        _ = std.posix.write(self.wake_w, &b) catch {};
+        _ = std.posix.write(self.wake_w, &b) catch {}; // cleanup: propagation impossible
     }
 
     fn recoverStale(self: *Manager) !void {

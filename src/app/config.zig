@@ -77,23 +77,29 @@ pub const pz_state_file = "state.json";
 pub const PzState = struct {
     last_hash: ?[]const u8 = null,
 
-    pub fn load(alloc: std.mem.Allocator) ?PzState {
+    pub fn load(alloc: std.mem.Allocator) !?PzState {
         return loadForHome(alloc, std.posix.getenv("HOME"));
     }
 
-    pub fn loadForHome(alloc: std.mem.Allocator, home_override: ?[]const u8) ?PzState {
+    /// Load PzState from disk.
+    /// Returns null when HOME is unset or state file is absent.
+    /// Returns error for corrupt data, permission denied, OOM, etc.
+    pub fn loadForHome(alloc: std.mem.Allocator, home_override: ?[]const u8) !?PzState {
         const path = statePathAlloc(alloc, home_override) orelse return null;
         defer alloc.free(path);
-        const raw = std.fs.cwd().readFileAlloc(alloc, path, 64 * 1024) catch return null;
+        const raw = std.fs.cwd().readFileAlloc(alloc, path, 64 * 1024) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
         defer alloc.free(raw);
-        const parsed = std.json.parseFromSlice(PzState, alloc, raw, .{
+        const parsed = try std.json.parseFromSlice(PzState, alloc, raw, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
-        }) catch return null;
+        });
         defer parsed.deinit();
         // Dupe fields so they outlive the parsed arena
         return .{
-            .last_hash = if (parsed.value.last_hash) |h| (alloc.dupe(u8, h) catch return null) else null,
+            .last_hash = if (parsed.value.last_hash) |h| (try alloc.dupe(u8, h)) else null,
         };
     }
 
@@ -163,7 +169,7 @@ test "pz state save and load are home-overrideable" {
     defer state.deinit(std.testing.allocator);
     state.saveForHome(std.testing.allocator, home);
 
-    var loaded = PzState.loadForHome(std.testing.allocator, home) orelse return error.TestUnexpectedResult;
+    var loaded = (try PzState.loadForHome(std.testing.allocator, home)) orelse return error.TestUnexpectedResult;
     defer loaded.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("abc123", loaded.last_hash orelse return error.TestUnexpectedResult);
 }
@@ -195,7 +201,7 @@ test "pz state save locks dir and file modes" {
 }
 
 test "pz state load returns null without overrideable home" {
-    try std.testing.expect(PzState.loadForHome(std.testing.allocator, null) == null);
+    try std.testing.expect((try PzState.loadForHome(std.testing.allocator, null)) == null);
 }
 
 pub fn discover(
@@ -947,7 +953,7 @@ test "config works with null HOME (env isolation)" {
 
 test "PzState works with null HOME (env isolation)" {
     // load returns null, save is a no-op
-    try std.testing.expect(PzState.loadForHome(std.testing.allocator, null) == null);
+    try std.testing.expect((try PzState.loadForHome(std.testing.allocator, null)) == null);
 
     var state = PzState{ .last_hash = null };
     state.saveForHome(std.testing.allocator, null); // should not crash

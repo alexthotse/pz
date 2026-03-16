@@ -439,6 +439,7 @@ pub const VerifyError = error{
     OutOfMemory,
     PolicyExpired,
     GenerationRollback,
+    GenerationPersistFailed,
 };
 
 /// Verify a signed policy bundle against the build-time trusted public key.
@@ -470,7 +471,7 @@ pub fn verifySignedPolicyAt(alloc: std.mem.Allocator, raw: []const u8, now: i64)
 
     // Persist new high-water mark
     if (signed.doc.generation > stored_gen) {
-        GenerationState.store(alloc, signed.doc.generation) catch {};
+        GenerationState.store(alloc, signed.doc.generation) catch return error.GenerationPersistFailed;
     }
 
     return signed;

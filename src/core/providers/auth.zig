@@ -884,8 +884,8 @@ fn setSocketDeadlines(conn: *std.http.Client.Connection) void {
     const fd = conn.stream_writer.getStream().handle;
     const tv = std.posix.timeval{ .sec = auth_http_deadline_s, .usec = 0 };
     const tv_bytes: []const u8 = std.mem.asBytes(&tv);
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.SNDTIMEO, tv_bytes) catch {};
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.RCVTIMEO, tv_bytes) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.SNDTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.RCVTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
 }
 
 fn decodeQueryValue(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {

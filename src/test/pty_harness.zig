@@ -308,7 +308,7 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
 
     const sig1_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-sig1" });
     defer std.testing.allocator.free(sig1_path);
-    defer std.fs.deleteFileAbsolute(sig1_path) catch {};
+    defer std.fs.deleteFileAbsolute(sig1_path) catch {}; // test: error irrelevant
     {
         var f = try std.fs.createFileAbsolute(sig1_path, .{ .truncate = true });
         defer f.close();
@@ -316,7 +316,7 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
     }
     const sig2_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-sig2" });
     defer std.testing.allocator.free(sig2_path);
-    defer std.fs.deleteFileAbsolute(sig2_path) catch {};
+    defer std.fs.deleteFileAbsolute(sig2_path) catch {}; // test: error irrelevant
     {
         var f = try std.fs.createFileAbsolute(sig2_path, .{ .truncate = true });
         defer f.close();
@@ -424,7 +424,7 @@ test "real pz PTY startup survives live version check" {
             std.Thread.sleep(250 * std.time.ns_per_ms);
             var f = std.fs.createFileAbsolute(self.path, .{ .truncate = true }) catch return;
             defer f.close();
-            f.writeAll("\x03\x03") catch {};
+            f.writeAll("\x03\x03") catch {}; // test: error irrelevant
         }
     };
 
@@ -448,15 +448,15 @@ test "real pz PTY startup survives live version check" {
     }});
     defer server.deinit();
     const thr = try server.spawn();
-    defer server.join(thr) catch {};
+    defer server.join(thr) catch {}; // test: error irrelevant
     const version_url = try server.urlAlloc(std.testing.allocator, "/repos/joelreymont/pz/releases/latest");
     defer std.testing.allocator.free(version_url);
     try env.put("PZ_VERSION_URL", version_url);
 
     const sig_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-version-quit" });
     defer std.testing.allocator.free(sig_path);
-    defer std.fs.deleteFileAbsolute(sig_path) catch {};
-    std.fs.deleteFileAbsolute(sig_path) catch {};
+    defer std.fs.deleteFileAbsolute(sig_path) catch {}; // test: error irrelevant
+    std.fs.deleteFileAbsolute(sig_path) catch {}; // test: error irrelevant
 
     const pz_bin = try pzBinAlloc(std.testing.allocator);
     defer std.testing.allocator.free(pz_bin);
@@ -735,7 +735,7 @@ test "real pz PTY renders slash help over the live terminal path" {
     defer std.testing.allocator.free(pz_bin);
     const slash_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-slash" });
     defer std.testing.allocator.free(slash_path);
-    defer std.fs.deleteFileAbsolute(slash_path) catch {};
+    defer std.fs.deleteFileAbsolute(slash_path) catch {}; // test: error irrelevant
     {
         var f = try std.fs.createFileAbsolute(slash_path, .{ .truncate = true });
         defer f.close();
@@ -743,7 +743,7 @@ test "real pz PTY renders slash help over the live terminal path" {
     }
     const quit_path = try std.fs.path.join(std.testing.allocator, &.{ cwd_abs, ".pty-quit" });
     defer std.testing.allocator.free(quit_path);
-    defer std.fs.deleteFileAbsolute(quit_path) catch {};
+    defer std.fs.deleteFileAbsolute(quit_path) catch {}; // test: error irrelevant
     {
         var f = try std.fs.createFileAbsolute(quit_path, .{ .truncate = true });
         defer f.close();

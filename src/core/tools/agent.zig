@@ -123,7 +123,7 @@ pub const Handler = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return fail(call, .io, @errorName(run_err)),
             };
-            return finish(self, call, args.agent_id, run_res);
+            return finish(self, call, args.agent_id, run_res, bridge.dropped);
         }
 
         const hook = self.hook orelse return fail(call, .internal, "agent tool unavailable");
@@ -131,7 +131,7 @@ pub const Handler = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => return fail(call, .io, @errorName(run_err)),
         };
-        return finish(self, call, args.agent_id, run_res);
+        return finish(self, call, args.agent_id, run_res, 0);
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
@@ -150,6 +150,7 @@ const SinkBridge = struct {
     call_id: []const u8,
     at_ms: i64,
     seq: u32 = 0,
+    dropped: u32 = 0,
 
     fn push(self: *SinkBridge, ev: rpc.ProgressEvent) void {
         const chunk: []const u8 = switch (ev) {
@@ -170,12 +171,14 @@ const SinkBridge = struct {
             .chunk = chunk,
         };
         self.seq += 1;
-        self.sink.push(.{ .output = out }) catch {};
+        self.sink.push(.{ .output = out }) catch {
+            self.dropped += 1;
+        };
     }
 };
 
-fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.ChildProc.RunResult) Err!tools.Result {
-    const full = try renderAlloc(self.alloc, agent_id, run_res);
+fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.ChildProc.RunResult, dropped: u32) Err!tools.Result {
+    const full = try renderAlloc(self.alloc, agent_id, run_res, dropped);
     defer self.alloc.free(full);
 
     const slice = tools.truncate.apply(full, self.max_bytes);
@@ -250,7 +253,7 @@ fn finalFor(run_res: rpc.ChildProc.RunResult) tools.Result.Final {
     };
 }
 
-fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.ChildProc.RunResult) ![]u8 {
+fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.ChildProc.RunResult, dropped: u32) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     const wr = out.writer(alloc);
@@ -263,6 +266,7 @@ fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.Chil
     try wr.print("kind: {s}\n", .{kind});
     try wr.print("stop: {s}\n", .{stop});
     try wr.print("truncated: {}\n", .{child_trunc});
+    if (dropped > 0) try wr.print("dropped_output: {d}\n", .{dropped});
     if (run_res.err) |rpc_err| {
         try wr.print("error: {s}\n", .{rpc_err.code});
         try wr.print("fatal: {}\n\n", .{rpc_err.fatal});

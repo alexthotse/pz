@@ -125,7 +125,7 @@ pub fn atomicWriteAt(dir: std.fs.Dir, name: []const u8, data: []const u8) !void 
     const tmp_name = tmpName(name, &tmp_buf) catch return error.NameTooLong;
 
     // Clean up stale temp from prior interrupted writes.
-    dir.deleteFile(tmp_name) catch {};
+    dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
 
     var tmp_file = try createConfined(dir, tmp_name, .{
         .exclusive = true,
@@ -133,7 +133,7 @@ pub fn atomicWriteAt(dir: std.fs.Dir, name: []const u8, data: []const u8) !void 
     });
     errdefer {
         tmp_file.close();
-        dir.deleteFile(tmp_name) catch {};
+        dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
     }
 
     try tmp_file.writeAll(data);
@@ -155,7 +155,7 @@ pub fn atomicWriteAtFn(
     var tmp_buf: [256]u8 = undefined;
     const tmp_name = tmpName(name, &tmp_buf) catch return error.NameTooLong;
 
-    dir.deleteFile(tmp_name) catch {};
+    dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
 
     var tmp_file = try createConfined(dir, tmp_name, .{
         .exclusive = true,
@@ -163,7 +163,7 @@ pub fn atomicWriteAtFn(
     });
     errdefer {
         tmp_file.close();
-        dir.deleteFile(tmp_name) catch {};
+        dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
     }
 
     try writeFn(ctx, tmp_file);

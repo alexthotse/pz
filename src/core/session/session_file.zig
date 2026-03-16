@@ -18,7 +18,7 @@ pub const File = struct {
 
         // Confined create: O_NOFOLLOW + hardlink check for .pz state.
         var f = try fs_secure.createConfined(dir, owned, .{ .truncate = false });
-        errdefer dir.deleteFile(owned) catch {};
+        errdefer dir.deleteFile(owned) catch {}; // cleanup: propagation impossible
         f.close();
 
         return .{
@@ -34,7 +34,7 @@ pub const File = struct {
 
     pub fn deinit(self: *File) void {
         if (!self.closed) {
-            self.dir.deleteFile(self.path) catch {};
+            self.dir.deleteFile(self.path) catch {}; // cleanup: propagation impossible
         }
         self.alloc.free(self.path);
         self.* = undefined;
@@ -58,7 +58,7 @@ pub fn cleanOrphanTmpFiles(dir: std.fs.Dir) void {
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.endsWith(u8, entry.name, ".compact.tmp")) {
-            dir.deleteFile(entry.name) catch {};
+            dir.deleteFile(entry.name) catch {}; // cleanup: propagation impossible
         }
     }
 }

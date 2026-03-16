@@ -79,7 +79,7 @@ pub const ProcChunk = struct {
 
         child.spawn() catch |spawn_err| return mapProcErr(spawn_err);
         errdefer {
-            killAndWait(&child) catch {};
+            killAndWait(&child) catch {}; // cleanup: propagation impossible
         }
 
         var stdin = child.stdin orelse return error.Closed;

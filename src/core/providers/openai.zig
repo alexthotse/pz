@@ -75,7 +75,7 @@ pub const Client = struct {
             stream.body_rdr = stream.response.reader(&stream.transfer_buf);
             stream.conn_fd = hc.connFd(stream);
             if (stream.el) |el| {
-                if (stream.conn_fd) |fd| el.register(fd, .read) catch {};
+                if (stream.conn_fd) |fd| el.register(fd, .read) catch {}; // cleanup: propagation impossible
             }
         }
 
@@ -339,7 +339,7 @@ const SseStream = struct {
 
     fn deinit(self: *SseStream) void {
         if (self.el) |el| {
-            if (self.conn_fd) |fd| el.unregister(fd) catch {};
+            if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
         }
         const alloc = self.alloc;
         self.tool_call_id.deinit(alloc);
@@ -352,7 +352,7 @@ const SseStream = struct {
 
     fn abort(self: *SseStream) void {
         if (self.req.connection) |conn| {
-            std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {};
+            std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
         }
     }
 };

@@ -39,4 +39,5 @@ comptime {
     _ = @import("test/syslog_mock.zig");
     _ = @import("test/provider_mock.zig");
     _ = @import("test/pty_harness.zig");
+    _ = @import("test/utf8_e2e.zig");
 }

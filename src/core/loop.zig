@@ -4000,6 +4000,156 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
     });
 }
 
+test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partial persist" {
+    // Mock provider streams text every 50ms, cancel after 100ms.
+    // Proves: cancel detected within 200ms, partial text persisted.
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        text_ct: usize = 0,
+        canceled_ct: usize = 0,
+        last_text: [128]u8 = [_]u8{0} ** 128,
+        last_text_len: usize = 0,
+        rdr: ReaderImpl = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            switch (ev.data) {
+                .text => |t| {
+                    self.text_ct += 1;
+                    const len = @min(t.text.len, self.last_text.len);
+                    @memcpy(self.last_text[0..len], t.text[0..len]);
+                    self.last_text_len = len;
+                },
+                .stop => |s| {
+                    if (s.reason == .canceled) self.canceled_ct += 1;
+                },
+                else => {},
+            }
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ModeImpl = struct {
+        canceled_ct: usize = 0,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .stop => |s| {
+                        if (s.reason == .canceled) self.canceled_ct += 1;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    const CancelCtx = struct {
+        cancel: *cancel_mock.Flag,
+        slot: *providers.AbortSlot,
+
+        fn run(self: *@This()) void {
+            // Cancel after 100ms — within the 50ms streaming cadence.
+            std.Thread.sleep(100 * std.time.ns_per_ms);
+            self.cancel.request();
+            self.slot.abort();
+        }
+    };
+
+    // First step emits text immediately, second blocks (simulates 50ms+ streaming).
+    const steps = [_]provider_mock.Step{
+        .{ .ev = .{ .text = "partial" } },
+        .{ .block = {} },
+    };
+    var provider_impl = try provider_mock.ScriptedProvider.init(steps[0..]);
+    defer provider_impl.deinit();
+    const provider = provider_impl.asProvider();
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var cancel_impl = cancel_mock.Flag{};
+    const cancel = CancelSrc.from(cancel_mock.Flag, &cancel_impl, cancel_mock.Flag.isCanceled);
+    var abort_slot = providers.AbortSlot{};
+    var cancel_ctx = CancelCtx{
+        .cancel = &cancel_impl,
+        .slot = &abort_slot,
+    };
+    const cancel_thr = try std.Thread.spawn(.{}, CancelCtx.run, .{&cancel_ctx});
+    defer cancel_thr.join();
+
+    const start_ns = std.time.nanoTimestamp();
+    const out = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-p02-cancel",
+        .prompt = "hello",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(&.{}),
+        .mode = mode,
+        .cancel = cancel,
+        .abort_slot = &abort_slot,
+    });
+    const elapsed_ms: i128 = @divTrunc(std.time.nanoTimestamp() - start_ns, std.time.ns_per_ms);
+
+    // Must cancel within 200ms budget.
+    try std.testing.expect(elapsed_ms < 200);
+
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    const Snap = struct {
+        out: @TypeOf(out),
+        store_text_ct: usize,
+        store_last_text: []const u8,
+        store_canceled_ct: usize,
+        mode_canceled_ct: usize,
+    };
+    try oh.snap(@src(),
+        \\core.loop.test.P0-2 cancel latency: streaming every 50ms cancels within 200ms with partial persist.Snap
+        \\  .out: core.loop.RunOut
+        \\    .turns: u16 = 0
+        \\    .tool_calls: u32 = 0
+        \\  .store_text_ct: usize = 1
+        \\  .store_last_text: []const u8
+        \\    "partial"
+        \\  .store_canceled_ct: usize = 1
+        \\  .mode_canceled_ct: usize = 1
+    ).expectEqual(Snap{
+        .out = out,
+        .store_text_ct = store_impl.text_ct,
+        .store_last_text = store_impl.last_text[0..store_impl.last_text_len],
+        .store_canceled_ct = store_impl.canceled_ct,
+        .mode_canceled_ct = mode_impl.canceled_ct,
+    });
+}
+
 test "CmdCache approve echo hi does not approve echo rm -rf" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
