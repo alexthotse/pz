@@ -1162,6 +1162,70 @@ test "redirect e2e blocks rebound redirect targets" {
     });
 }
 
+test "UX10: fetchRedirectChainAlloc follows 302 and returns final body" {
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{
+                .status = "302 Found",
+            },
+        },
+        .{
+            .resp = .{
+                .status = "200 OK",
+                .headers = &.{"Content-Type: text/plain"},
+                .body = "arrived",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const port = server.port();
+    const host = try std.fmt.allocPrint(ar, "redir.test:{d}", .{port});
+    const start_url = try std.fmt.allocPrint(ar, "http://{s}/a", .{host});
+    const final_url = try std.fmt.allocPrint(ar, "http://{s}/b", .{host});
+
+    steps[0].expect = .{ .target = "/a", .host = host };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{final_url})};
+    steps[1].expect = .{ .target = "/b", .host = host };
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/redir.test", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "redir.test", .ip = .{ 34, 117, 59, 81 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, h: []const u8, p: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, h, p, &addrs);
+        }
+
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    const got = try fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start_url,
+    }, .{
+        .egress = .{ .rules = &rules },
+    }, .{ .resolve = Mock.resolve, .free = Mock.free });
+    defer got.deinit(std.testing.allocator);
+    try server.join(thr);
+
+    // Redirect followed: 1 hop, final status 200, correct body
+    try std.testing.expectEqual(@as(u8, 1), got.hops);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    try std.testing.expectEqualStrings("arrived", got.body);
+    // 2 requests total
+    try std.testing.expectEqual(@as(usize, 2), server.requestCount());
+}
+
 test "Deadline init uses policy bounds" {
     const ep: policy_mod.EgressPolicy = .{
         .connect_deadline_ms = 5_000,

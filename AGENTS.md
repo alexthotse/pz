@@ -88,6 +88,11 @@ Run relevant tests before and after each fix or feature.
 Every bug fix must add or strengthen a test.
 Use `ohsnap` snapshots for struct/multi-field outputs and serialized payload checks.
 Use `std.testing.expectEqual` only for scalar primitives.
+
+### UX Testing (two layers, BOTH required per UX row)
+1. **Mock-terminal (fast, <1s)** — construct Ui/vscreen in memory, drive with method calls. Catches rendering/state regressions. Runs every build.
+2. **PTY keyboard (slow, 2-5s)** — spawn real `pz` binary via `src/test/pty_harness.zig`, inject keystrokes, verify screen via vscreen/ANSI. Proves the real binary works from the keyboard.
+A UX flow is NOT fully tested until BOTH layers exist. The walkthrough matrix requires PTY tests.
 Use `joelreymont/zcheck` for property tests and add fuzz/property coverage where the surface warrants it.
 
 ## Zig Rules

@@ -1337,3 +1337,174 @@ test "UX2 undo after backspace restores character" {
     _ = try ui.onKey(.{ .ctrl_z = {} }); // undo backspace
     try std.testing.expectEqualStrings("ab", ui.editorText());
 }
+
+// ── UX1 gap: version banner, context/skills indicators, provider, clean exit ──
+
+test "UX1 version banner text in transcript" {
+    var ui = try Ui.init(std.testing.allocator, 60, 14, "m", "p");
+    defer ui.deinit();
+
+    // Simulate what showStartup does: push version line
+    const ver_line = " pz v" ++ @import("../../app/cli.zig").version;
+    try ui.tr.infoText(ver_line);
+
+    var vs = try VScreen.init(std.testing.allocator, 60, 14);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    var found = false;
+    var r: usize = 0;
+    while (r < 9) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "pz v") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "UX1 context and skills indicators in transcript" {
+    var ui = try Ui.init(std.testing.allocator, 60, 14, "m", "p");
+    defer ui.deinit();
+
+    // Simulate showStartup context/skills sections
+    try ui.tr.infoText("[Context]");
+    try ui.tr.infoText("  ~/proj/CLAUDE.md");
+    try ui.tr.infoText("[Skills]");
+    try ui.tr.infoText("  release [project]");
+
+    var vs = try VScreen.init(std.testing.allocator, 60, 14);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    var found_ctx = false;
+    var found_skills = false;
+    var r: usize = 0;
+    while (r < 9) : (r += 1) {
+        const row = try vs.rowText(std.testing.allocator, r);
+        defer std.testing.allocator.free(row);
+        if (std.mem.indexOf(u8, row, "[Context]") != null) found_ctx = true;
+        if (std.mem.indexOf(u8, row, "[Skills]") != null) found_skills = true;
+    }
+    try std.testing.expect(found_ctx);
+    try std.testing.expect(found_skills);
+}
+
+test "UX1 provider accessible via panels" {
+    var ui = try Ui.initFull(std.testing.allocator, 60, 10, "claude", "anthropic", "/tmp", "", null);
+    defer ui.deinit();
+
+    try std.testing.expectEqualStrings("anthropic", ui.panels.providerName());
+
+    try ui.setProvider("openai");
+    try std.testing.expectEqualStrings("openai", ui.panels.providerName());
+}
+
+test "UX1 clean exit via ctrl-c on empty" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    // ctrl-c on empty editor returns cancel (quit)
+    const act = try ui.onKey(.{ .ctrl_c = {} });
+    try std.testing.expectEqual(harness.editor.Action.cancel, act);
+}
+
+test "UX1 clean exit via ctrl-d on empty" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    const act = try ui.onKey(.{ .ctrl_d = {} });
+    try std.testing.expectEqual(harness.editor.Action.cancel, act);
+}
+
+// ── UX2 gap: history navigation, cancel key ──
+
+test "UX2 up arrow recalls previous input via harness" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    // Type and submit "hello"
+    for ("hello") |ch| _ = try ui.onKey(.{ .char = ch });
+    _ = try ui.onKey(.{ .enter = {} });
+
+    // Up arrow should recall "hello"
+    _ = try ui.onKey(.{ .up = {} });
+    try std.testing.expectEqualStrings("hello", ui.editorText());
+
+    // Down arrow returns to empty
+    _ = try ui.onKey(.{ .down = {} });
+    try std.testing.expectEqualStrings("", ui.editorText());
+}
+
+test "UX2 ctrl-c clears text then cancels via harness" {
+    var ui = try Ui.init(std.testing.allocator, 40, 8, "m", "p");
+    defer ui.deinit();
+
+    // Type text
+    for ("draft") |ch| _ = try ui.onKey(.{ .char = ch });
+
+    // ctrl-c with text clears (interrupt)
+    const act1 = try ui.onKey(.{ .ctrl_c = {} });
+    try std.testing.expectEqual(harness.editor.Action.interrupt, act1);
+    try std.testing.expectEqualStrings("", ui.editorText());
+
+    // ctrl-c on empty → cancel
+    const act2 = try ui.onKey(.{ .ctrl_c = {} });
+    try std.testing.expectEqual(harness.editor.Action.cancel, act2);
+}
+
+// ── UX4 gap: resume overlay, close overlay with ctrl-c ──
+
+test "UX4 resume overlay opens and closes" {
+    const ov_mod = @import("overlay.zig");
+    var ui = try Ui.init(std.testing.allocator, 50, 14, "m", "p");
+    defer ui.deinit();
+
+    // Open session overlay (simulating /resume with no arg)
+    const sids = try std.testing.allocator.alloc([]u8, 2);
+    sids[0] = try std.testing.allocator.dupe(u8, "100");
+    sids[1] = try std.testing.allocator.dupe(u8, "200");
+    ui.ov = ov_mod.Overlay.initDyn(sids, "Resume Session", .session);
+
+    try std.testing.expect(ui.ov != null);
+    try std.testing.expectEqualStrings("Resume Session", ui.ov.?.title);
+    try std.testing.expectEqual(ov_mod.Kind.session, ui.ov.?.kind);
+
+    // Render with overlay — no crash
+    var vs = try VScreen.init(std.testing.allocator, 50, 14);
+    defer vs.deinit();
+    try renderToVs(&ui, &vs);
+
+    // Close overlay
+    ui.ov.?.deinit(std.testing.allocator);
+    ui.ov = null;
+    try std.testing.expect(ui.ov == null);
+
+    // Renders cleanly after close
+    try renderToVs(&ui, &vs);
+}
+
+test "UX4 overlay close with ctrl-c simulated" {
+    const ov_mod = @import("overlay.zig");
+    var ui = try Ui.init(std.testing.allocator, 50, 14, "m", "p");
+    defer ui.deinit();
+
+    // Open model overlay
+    const models = [_][]const u8{ "a", "b" };
+    ui.ov = ov_mod.Overlay.init(&models, 0);
+    try std.testing.expect(ui.ov != null);
+
+    // Simulate ctrl-c close: runtime checks if overlay is open,
+    // closes it instead of forwarding to editor. Test the close path.
+    if (ui.ov) |*ov| {
+        ov.deinit(std.testing.allocator);
+        ui.ov = null;
+    }
+    try std.testing.expect(ui.ov == null);
+
+    // Editor still functional after overlay close
+    _ = try ui.onKey(.{ .char = 'x' });
+    try std.testing.expectEqualStrings("x", ui.editorText());
+}

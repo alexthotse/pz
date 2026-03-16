@@ -2289,6 +2289,55 @@ test "UX10: upgrade rejects invalid signed manifest" {
     try std.testing.expect(std.mem.indexOf(u8, out.msg, "signature verification failed") != null);
 }
 
+test "UX10: httpGetResult follows 302 redirect and returns final body" {
+    var resps = [_]http_mock.Response{
+        .{
+            .status = "302 Found",
+            .headers = &.{"Location: /final"},
+        },
+        .{
+            .status = "200 OK",
+            .headers = &.{"Content-Type: text/plain"},
+            .body = "redirect-ok",
+        },
+    };
+    var server = try http_mock.Server.initSeq(&resps);
+    defer server.deinit();
+
+    const url = try server.urlAlloc(std.testing.allocator, "/start");
+    defer std.testing.allocator.free(url);
+
+    const thr = try server.spawn();
+    const res = try httpGetResult(std.testing.allocator, url, "text/plain", 4096);
+    try server.join(thr);
+    defer res.deinit(std.testing.allocator);
+
+    // Redirect was followed: 2 requests seen
+    try std.testing.expectEqual(@as(usize, 2), server.requestCount());
+
+    // Final body returned
+    switch (res) {
+        .ok => |body| try std.testing.expectEqualStrings("redirect-ok", body),
+        .status => return error.TestUnexpectedResult,
+    }
+}
+
+test "UX10: initClient with ca_file loads bundle and disables rescan" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cert_path = try app_tls.writeTestCert(tmp.dir, "ca.pem");
+    defer std.testing.allocator.free(cert_path);
+
+    var http = try app_tls.initClient(std.testing.allocator, cert_path);
+    defer http.deinit();
+
+    // CA bundle loaded
+    try std.testing.expect(http.ca_bundle.map.size != 0);
+    // Rescan disabled (no ambient cert pickup)
+    try std.testing.expect(!@atomicLoad(bool, &http.next_https_rescan_certs, .acquire));
+}
+
 test "verifyArchiveManifest rejects downgrade" {
     const kp = try core.signing.KeyPair.fromSeed(
         try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166"),
