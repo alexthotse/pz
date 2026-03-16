@@ -2477,3 +2477,44 @@ test "encodeDoc includes non-zero generation and non-null not_after" {
     try testing.expect(std.mem.indexOf(u8, json, "\"generation\":7") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"not_after\":9999") != null);
 }
+
+// ── Proof canaries ──────────────────────────────────────────────────
+
+test "canary: IPv4 egress blocklist completeness (Lean Egress)" {
+    // Every RFC 1918 / loopback / link-local address must be blocked.
+    try testing.expect(isBlockedIp4(.{ 10, 0, 0, 1 }));
+    try testing.expect(isBlockedIp4(.{ 10, 255, 255, 255 }));
+    try testing.expect(isBlockedIp4(.{ 172, 16, 0, 1 }));
+    try testing.expect(isBlockedIp4(.{ 172, 31, 255, 255 }));
+    try testing.expect(isBlockedIp4(.{ 192, 168, 1, 1 }));
+    try testing.expect(isBlockedIp4(.{ 127, 0, 0, 1 }));
+    try testing.expect(isBlockedIp4(.{ 169, 254, 1, 1 }));
+    // Public addresses must NOT be blocked.
+    try testing.expect(!isBlockedIp4(.{ 8, 8, 8, 8 }));
+    try testing.expect(!isBlockedIp4(.{ 1, 1, 1, 1 }));
+    // Edge cases.
+    try testing.expect(!isBlockedIp4(.{ 172, 15, 255, 255 }));
+    try testing.expect(isBlockedIp4(.{ 172, 16, 0, 0 }));
+    try testing.expect(!isBlockedIp4(.{ 172, 32, 0, 0 }));
+}
+
+test "canary: protected paths always deny (Lean Evaluate.protected_always_deny)" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    // Protected paths denied regardless of allow-all rules.
+    try testing.expectEqual(Effect.deny, evaluate(&rules, ".pz/foo", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "bar.audit.log", null));
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "AGENTS.md", null));
+    // Non-protected paths use rules.
+    try testing.expectEqual(Effect.allow, evaluate(&rules, "src/main.zig", null));
+}
+
+test "canary: evaluate first-match-wins (Lean Evaluate.first_match_wins)" {
+    const rules = [_]Rule{
+        .{ .pattern = "*.zig", .effect = .deny },
+        .{ .pattern = "*", .effect = .allow },
+    };
+    // First matching rule wins — deny, not allow.
+    try testing.expectEqual(Effect.deny, evaluate(&rules, "foo.zig", null));
+    // Non-matching first rule → second rule applies.
+    try testing.expectEqual(Effect.allow, evaluate(&rules, "foo.txt", null));
+}

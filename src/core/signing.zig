@@ -1092,3 +1092,18 @@ test "keypair deinit zeroes secret key" {
     const wiped: []const u8 = std.mem.asBytes(&kp.pair.secret_key);
     for (wiped) |b| try testing.expectEqual(@as(u8, 0), b);
 }
+
+// ── Proof canary ────────────────────────────────────────────────────
+
+test "canary: ctEql correctness (Lean CtEql.ctEql_iff)" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { a: zc.Id, b: zc.Id }) bool {
+            const sa = args.a.slice();
+            const sb = args.b.slice();
+            const ct = ctEql(sa, sb);
+            const eq = std.mem.eql(u8, sa, sb);
+            return ct == eq;
+        }
+    }.prop, .{ .iterations = 5000 });
+}

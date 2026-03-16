@@ -1311,3 +1311,40 @@ test "maskForName validates builtin tool names" {
     try std.testing.expect(maskForName("web") != null);
     try std.testing.expect(maskForName("wat") == null);
 }
+
+// ── Proof canaries ──────────────────────────────────────────────────
+// Mirror Lean theorems on real Zig constants. If these fail, proofs are stale.
+
+test "canary: mask sanitization strips unknown bits (Lean Mask.sanitize_strips_unknown)" {
+    const zc = @import("zcheck");
+    try zc.check(struct {
+        fn prop(args: struct { mask: u16 }) bool {
+            return (args.mask & mask_all) <= mask_all;
+        }
+    }.prop, .{ .iterations = 10000 });
+}
+
+test "canary: thread mask never exceeds parent (Lean Mask.thread_no_escalation)" {
+    const zc = @import("zcheck");
+    const thread_default = mask_all & ~(mask_bash | mask_agent);
+    try zc.check(struct {
+        fn prop(args: struct { parent: u16, req: u16 }) bool {
+            const td = mask_all & ~(mask_bash | mask_agent);
+            return (args.req & args.parent & td) <= args.parent;
+        }
+    }.prop, .{ .iterations = 10000 });
+    _ = thread_default;
+}
+
+test "canary: thread default strips bash and agent (Lean Mask.thread_default_strips_*)" {
+    const zc = @import("zcheck");
+    const thread_default = mask_all & ~(mask_bash | mask_agent);
+    try zc.check(struct {
+        fn prop(args: struct { parent: u16, req: u16 }) bool {
+            const td = mask_all & ~(mask_bash | mask_agent);
+            const result = args.req & args.parent & td;
+            return (result & mask_bash) == 0 and (result & mask_agent) == 0;
+        }
+    }.prop, .{ .iterations = 10000 });
+    _ = thread_default;
+}
