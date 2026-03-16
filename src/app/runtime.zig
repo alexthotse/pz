@@ -211,6 +211,13 @@ const RuntimePolicy = struct {
         const path = toolPolicyPath(&buf, name, call) catch return false;
         return self.allows(path, name);
     }
+
+    fn allowsToolKind(self: *const RuntimePolicy, name: []const u8, call: core.tools.Call, kind_str: []const u8) bool {
+        if (!self.enforced()) return true;
+        var buf: [256]u8 = undefined;
+        const path = toolPolicyPath(&buf, name, call) catch return false;
+        return core.policy.evaluateKind(self.resolved.doc.rules, path, name, kind_str) == .allow;
+    }
 };
 
 fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]const u8 {
@@ -293,7 +300,7 @@ const PolicyToolAuth = struct {
     now_ms: *const fn () i64 = std.time.milliTimestamp,
     seq: *u64,
 
-    fn check(self: *@This(), call_id: []const u8, name: []const u8, kind: core.tools.Kind, parsed_args: core.tools.Call.Args) !void {
+    fn check(self: *@This(), call_id: []const u8, name: []const u8, kind: core.tools.Kind, kind_str: []const u8, parsed_args: core.tools.Call.Args) !void {
         const call: core.tools.Call = .{
             .id = "",
             .kind = kind,
@@ -302,7 +309,7 @@ const PolicyToolAuth = struct {
             .at_ms = 0,
             .cancel = null,
         };
-        if (!self.pol.allowsTool(name, call)) {
+        if (!self.pol.allowsToolKind(name, call, kind_str)) {
             try self.emitDeny(call_id, name, kind, parsed_args);
             return error.PolicyDenied;
         }

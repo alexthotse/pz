@@ -16,6 +16,7 @@ pub const Client = struct {
     http: std.http.Client,
     ca_file: ?[]u8,
     el: ?*hc.EventLoop = null,
+    cancel: ?providers.CancelPoll = null,
 
     pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Client {
         var auth_res = try auth_mod.loadForProviderWithHooks(alloc, .openai, hooks);
@@ -67,7 +68,7 @@ pub const Client = struct {
         };
 
         var slp = hc.RealSleeper{ .el = self.el };
-        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .openai, self.ca_file, ar, &slp, buildAuthHeaders, null);
+        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .openai, self.ca_file, ar, &slp, buildAuthHeaders, self.cancel);
 
         if (stream.response.head.status != .ok) {
             try hc.formatErrBody(stream, ar, null);

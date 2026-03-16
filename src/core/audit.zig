@@ -811,10 +811,12 @@ pub fn sealAlloc(
     ent: Entry,
     key: integrity.Key,
     prev: ?integrity.Mac,
+    seq_tracker: ?*integrity.SeqTracker,
 ) ![]u8 {
     const body = try encodeAlloc(alloc, ent);
     defer alloc.free(body);
-    return try integrity.sealAlloc(alloc, key, prev, body);
+    const seq = if (seq_tracker) |st| try st.next() else null;
+    return try integrity.sealAllocSeq(alloc, key, prev, body, seq);
 }
 
 pub fn writeEntry(w: anytype, ent: Entry) !void {

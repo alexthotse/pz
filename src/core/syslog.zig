@@ -108,6 +108,7 @@ pub const SenderOpts = struct {
     transport: Transport = .udp,
     host: []const u8,
     port: u16 = 514,
+    deadline_s: i64 = 10,
     egress: ?policy.Policy = null,
     tool: ?[]const u8 = "syslog",
     allow_private: bool = false,
@@ -120,6 +121,7 @@ pub const Sender = struct {
     transport: Transport,
     host: []u8,
     port: u16,
+    deadline_s: i64,
     allow_private: bool,
     tls_opts: TlsOpts,
     hooks: Hooks,
@@ -143,8 +145,10 @@ pub const Sender = struct {
         const fd = try opts.hooks.open_socket(addr, sock_transport);
         errdefer opts.hooks.close_socket(fd);
 
-        if (opts.transport == .tcp or opts.transport == .tls)
+        if (opts.transport == .tcp or opts.transport == .tls) {
             try opts.hooks.connect(fd, addr);
+            opts.hooks.set_deadlines(fd, opts.deadline_s);
+        }
 
         var tls_state: ?*anyopaque = null;
         if (opts.transport == .tls) {
@@ -156,6 +160,7 @@ pub const Sender = struct {
             .transport = opts.transport,
             .host = host,
             .port = opts.port,
+            .deadline_s = opts.deadline_s,
             .allow_private = opts.allow_private,
             .tls_opts = opts.tls,
             .hooks = opts.hooks,
@@ -210,7 +215,10 @@ pub const Sender = struct {
         const sock_transport: Transport = if (self.transport == .tls) .tcp else self.transport;
         const fd = try self.hooks.open_socket(addr, sock_transport);
         errdefer self.hooks.close_socket(fd);
-        if (self.transport == .tcp or self.transport == .tls) try self.hooks.connect(fd, addr);
+        if (self.transport == .tcp or self.transport == .tls) {
+            try self.hooks.connect(fd, addr);
+            self.hooks.set_deadlines(fd, self.deadline_s);
+        }
 
         var tls_state: ?*anyopaque = null;
         if (self.transport == .tls) {
@@ -259,6 +267,7 @@ const Hooks = struct {
     resolve: *const fn (alloc: std.mem.Allocator, host: []const u8, port: u16) anyerror!std.net.Address = resolve,
     open_socket: *const fn (addr: std.net.Address, transport: Transport) anyerror!std.posix.socket_t = openSocket,
     connect: *const fn (fd: std.posix.socket_t, addr: std.net.Address) anyerror!void = connectSocket,
+    set_deadlines: *const fn (fd: std.posix.socket_t, secs: i64) void = setDeadlines,
     send_udp: *const fn (fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) anyerror!void = sendUdpRaw,
     send_tcp: *const fn (fd: std.posix.socket_t, raw: []const u8) anyerror!void = sendAll,
     close_socket: *const fn (fd: std.posix.socket_t) void = closeSocket,
@@ -470,6 +479,15 @@ fn closeSocket(fd: std.posix.socket_t) void {
     (std.net.Stream{ .handle = fd }).close();
 }
 
+/// Apply SO_SNDTIMEO and SO_RCVTIMEO so TCP/TLS syslog connections
+/// cannot hang indefinitely. Best-effort: failure is non-fatal.
+fn setDeadlines(fd: std.posix.socket_t, secs: i64) void {
+    const tv = std.posix.timeval{ .sec = secs, .usec = 0 };
+    const tv_bytes: []const u8 = std.mem.asBytes(&tv);
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
+}
+
 fn sendUdpRaw(fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) !void {
     const sent = try std.posix.sendto(fd, raw, 0, &addr.any, addr.getOsSockLen());
     if (sent != raw.len) return error.ShortWrite;
@@ -493,6 +511,8 @@ fn tlsSendStub(_: *anyopaque, _: []const u8) !void {
 }
 
 fn tlsCloseStub(_: *anyopaque) void {}
+
+fn noopDeadlines(_: std.posix.socket_t, _: i64) void {}
 
 fn writeTimestamp(writer: anytype, timestamp_ms: i64) !void {
     if (timestamp_ms < 0) return error.InvalidTimestamp;
@@ -992,6 +1012,7 @@ test "tls sender invokes handshake and send hooks" {
             .resolve = Wrap.resolve,
             .open_socket = Wrap.openSocket,
             .connect = Wrap.connect,
+            .set_deadlines = noopDeadlines,
             .send_udp = Wrap.sendUdp,
             .send_tcp = Wrap.sendTcp,
             .close_socket = Wrap.closeSocket,
@@ -1051,6 +1072,7 @@ test "tls sender re-handshakes on refresh" {
             .resolve = Wrap.resolve,
             .open_socket = Wrap.openSocket,
             .connect = Wrap.connect,
+            .set_deadlines = noopDeadlines,
             .send_udp = Wrap.sendUdp,
             .send_tcp = Wrap.sendTcp,
             .close_socket = Wrap.closeSocket,

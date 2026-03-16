@@ -85,7 +85,7 @@ pub const PzState = struct {
     /// Returns null when HOME is unset or state file is absent.
     /// Returns error for corrupt data, permission denied, OOM, etc.
     pub fn loadForHome(alloc: std.mem.Allocator, home_override: ?[]const u8) !?PzState {
-        const path = statePathAlloc(alloc, home_override) orelse return null;
+        const path = (try statePathAlloc(alloc, home_override)) orelse return null;
         defer alloc.free(path);
         const raw = std.fs.cwd().readFileAlloc(alloc, path, 64 * 1024) catch |err| switch (err) {
             error.FileNotFound => return null,
@@ -127,9 +127,9 @@ pub const PzState = struct {
     }
 };
 
-fn statePathAlloc(alloc: std.mem.Allocator, home_override: ?[]const u8) ?[]u8 {
+fn statePathAlloc(alloc: std.mem.Allocator, home_override: ?[]const u8) !?[]u8 {
     const home = home_override orelse return null;
-    return std.fs.path.join(alloc, &.{ home, pz_state_dir, pz_state_file }) catch return null;
+    return try std.fs.path.join(alloc, &.{ home, pz_state_dir, pz_state_file });
 }
 
 pub const Err = anyerror;

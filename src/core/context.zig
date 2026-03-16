@@ -23,7 +23,7 @@ pub fn load(alloc: std.mem.Allocator) !?[]u8 {
     }
 
     // Global: ~/.pz/AGENTS.md
-    if (globalDir(alloc)) |gdir| {
+    if (try globalDir(alloc)) |gdir| {
         defer alloc.free(gdir);
         if (try readContext(alloc, gdir)) |content| {
             try parts.append(alloc, content);
@@ -95,9 +95,9 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
         paths.deinit(alloc);
     }
 
-    if (globalDir(alloc)) |gdir| {
+    if (try globalDir(alloc)) |gdir| {
         defer alloc.free(gdir);
-        if (findFile(alloc, gdir)) |p| try paths.append(alloc, p);
+        if (try findFile(alloc, gdir)) |p| try paths.append(alloc, p);
     }
 
     const cwd = realCwdAlloc(alloc) orelse return try paths.toOwnedSlice(alloc);
@@ -105,7 +105,7 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
 
     var dir: []const u8 = cwd;
     while (true) {
-        if (findFile(alloc, dir)) |p| try paths.append(alloc, p);
+        if (try findFile(alloc, dir)) |p| try paths.append(alloc, p);
         if (parent(dir)) |par| {
             dir = par;
         } else break;
@@ -114,16 +114,19 @@ pub fn discoverPaths(alloc: std.mem.Allocator) ![][]u8 {
     return try paths.toOwnedSlice(alloc);
 }
 
-fn findFile(alloc: std.mem.Allocator, dir: []const u8) ?[]u8 {
+fn findFile(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
     if (!hasSecureFile(dir, "AGENTS.md")) return null;
-    return std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{dir}) catch return null;
+    return try std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{dir});
 }
 
 /// Returns the global config dir (~/.pz), or null when HOME is unset.
-fn globalDir(alloc: std.mem.Allocator) ?[]u8 {
-    const home = std.process.getEnvVarOwned(alloc, "HOME") catch return null;
+fn globalDir(alloc: std.mem.Allocator) !?[]u8 {
+    const home = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => return err,
+    };
     defer alloc.free(home);
-    return std.fmt.allocPrint(alloc, "{s}/.pz", .{home}) catch return null;
+    return try std.fmt.allocPrint(alloc, "{s}/.pz", .{home});
 }
 
 

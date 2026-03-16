@@ -128,9 +128,7 @@ pub const ProcChunk = struct {
     pub fn deinit(self: *ProcChunk) void {
         if (!self.done) {
             self.stdout.close();
-            killAndWait(&self.child) catch |err| {
-                std.debug.print("warning: child cleanup failed: {s}\n", .{@errorName(err)});
-            };
+            killAndWait(&self.child) catch {}; // cleanup: propagation impossible from deinit
             self.done = true;
         }
 
@@ -151,7 +149,7 @@ fn killAndWait(child: *std.process.Child) !void {
             else => return mapProcErr(err),
         };
 
-        // Poll with WNOHANG for ~150ms.
+        // Poll with WNOHANG for ~150ms using posix poll.
         var polls: u32 = 0;
         while (polls < 15) : (polls += 1) {
             const res = std.posix.waitpid(pid, std.c.W.NOHANG);
@@ -159,7 +157,8 @@ fn killAndWait(child: *std.process.Child) !void {
                 child.id = undefined;
                 return;
             }
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            // Use poll with empty fd set as a 10ms sleep replacement.
+            _ = std.posix.poll(&.{}, 10) catch 0;
         }
 
         // Escalate to KILL on the process group.

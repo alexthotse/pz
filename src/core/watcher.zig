@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 const is_macos = builtin.os.tag == .macos;
+const is_linux = builtin.os.tag == .linux;
 
 pub const Kind = enum {
     write,
@@ -35,7 +36,7 @@ pub const InitError = std.fs.Dir.StatFileError || error{
     EmptyPath,
     InvalidPollMs,
     OutOfMemory,
-} || if (is_macos) std.posix.KQueueError || std.posix.OpenError || std.posix.KEventError else error{};
+} || if (is_macos) std.posix.KQueueError || std.posix.OpenError || std.posix.KEventError else if (is_linux) error{InotifyInitFailed} else error{};
 
 const Backend = if (is_macos) struct {
     kq: std.posix.fd_t,
@@ -112,6 +113,77 @@ const Backend = if (is_macos) struct {
             self.fds[idx] = null;
         }
     }
+} else if (is_linux) struct {
+    ifd: std.posix.fd_t,
+    wds: []i32,
+
+    const linux = std.os.linux;
+
+    const in_modify: u32 = 0x00000002;
+    const in_attrib: u32 = 0x00000004;
+    const in_moved_from: u32 = 0x00000040;
+    const in_moved_to: u32 = 0x00000080;
+    const in_create: u32 = 0x00000100;
+    const in_delete: u32 = 0x00000200;
+    const in_delete_self: u32 = 0x00000400;
+    const in_move_self: u32 = 0x00000800;
+    const watch_mask = in_modify | in_attrib | in_moved_from | in_moved_to |
+        in_create | in_delete | in_delete_self | in_move_self;
+    const close_mask = in_delete_self | in_move_self;
+
+    fn init(alloc: std.mem.Allocator, len: usize) InitError!@This() {
+        const wds = try alloc.alloc(i32, len);
+        errdefer alloc.free(wds);
+        @memset(wds, -1);
+
+        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        if (@as(isize, @bitCast(rc)) < 0) return error.InotifyInitFailed;
+        const ifd: std.posix.fd_t = @intCast(rc);
+        errdefer std.posix.close(ifd);
+
+        return .{
+            .ifd = ifd,
+            .wds = wds,
+        };
+    }
+
+    fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        for (self.wds) |wd| {
+            if (wd >= 0) _ = linux.inotify_rm_watch(self.ifd, wd);
+        }
+        alloc.free(self.wds);
+        std.posix.close(self.ifd);
+        self.* = undefined;
+    }
+
+    fn ensurePath(self: *@This(), idx: usize, path: []const u8) !bool {
+        if (self.wds[idx] >= 0) return true;
+
+        const sentinel = std.posix.toPosixPath(path) catch return false;
+        const rc = linux.inotify_add_watch(self.ifd, &sentinel, watch_mask);
+        const signed: isize = @bitCast(rc);
+        if (signed < 0) {
+            const err: linux.E = @enumFromInt(@as(u32, @truncate(-% @as(u64, @bitCast(signed)))));
+            if (err == .NOENT) return false;
+            return error.InotifyInitFailed;
+        }
+        self.wds[idx] = @intCast(rc);
+        return true;
+    }
+
+    fn drop(self: *@This(), idx: usize) void {
+        if (self.wds[idx] >= 0) {
+            _ = linux.inotify_rm_watch(self.ifd, self.wds[idx]);
+            self.wds[idx] = -1;
+        }
+    }
+
+    fn findIdx(self: *const @This(), wd: i32) ?usize {
+        for (self.wds, 0..) |w, i| {
+            if (w == wd) return i;
+        }
+        return null;
+    }
 } else struct {};
 
 pub const Watcher = struct {
@@ -161,8 +233,8 @@ pub const Watcher = struct {
             while (n < i) : (n += 1) alloc.free(paths[n]);
         }
 
-        var backend: Backend = if (is_macos) try Backend.init(alloc, cfg.paths.len) else .{};
-        errdefer if (is_macos) backend.deinit(alloc);
+        var backend: Backend = if (is_macos) try Backend.init(alloc, cfg.paths.len) else if (is_linux) try Backend.init(alloc, cfg.paths.len) else .{};
+        errdefer if (is_macos or is_linux) backend.deinit(alloc);
 
         while (i < cfg.paths.len) : (i += 1) {
             const raw = cfg.paths[i];
@@ -172,7 +244,7 @@ pub const Watcher = struct {
             states[i] = .{
                 .snap = try snapPath(paths[i]),
             };
-            if (is_macos and states[i].snap.exists) {
+            if ((is_macos or is_linux) and states[i].snap.exists) {
                 const opened = try backend.ensurePath(i, paths[i]);
                 if (!opened) states[i].snap = .{};
             }
@@ -191,6 +263,7 @@ pub const Watcher = struct {
 
     pub fn watchLoop(self: *Self, stop: *const std.atomic.Value(bool), snk: anytype) !void {
         if (is_macos) return self.watchLoopKqueue(stop, snk);
+        if (is_linux) return self.watchLoopInotify(stop, snk);
 
         while (!stop.load(.acquire)) {
             const now = std.time.nanoTimestamp();
@@ -203,7 +276,7 @@ pub const Watcher = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (is_macos) self.backend.deinit(self.alloc);
+        if (is_macos or is_linux) self.backend.deinit(self.alloc);
         for (self.paths) |path| self.alloc.free(path);
         self.alloc.free(self.paths);
         self.alloc.free(self.states);
@@ -273,6 +346,75 @@ pub const Watcher = struct {
         if (!self.states[idx].snap.exists) self.backend.drop(idx);
     }
 
+    fn watchLoopInotify(self: *Self, stop: *const std.atomic.Value(bool), snk: anytype) !void {
+        var buf: [4096]u8 align(@alignOf(InotifyEvent)) = undefined;
+
+        while (!stop.load(.acquire)) {
+            const pre_wait = std.time.nanoTimestamp();
+
+            var i: usize = 0;
+            while (i < self.paths.len) : (i += 1) {
+                try self.refreshLinuxPath(i, pre_wait);
+                self.flushOne(i, pre_wait, snk);
+            }
+
+            // Poll inotify fd with timeout.
+            var pfd = [_]std.posix.pollfd{.{
+                .fd = self.backend.ifd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            const poll_ms: i32 = @intCast(self.poll_ns / std.time.ns_per_ms);
+            _ = try std.posix.poll(&pfd, poll_ms);
+            const now = std.time.nanoTimestamp();
+
+            if ((pfd[0].revents & std.posix.POLL.IN) != 0) {
+                const len = std.posix.read(self.backend.ifd, &buf) catch |err| switch (err) {
+                    error.WouldBlock => continue,
+                    else => return err,
+                };
+                var off: usize = 0;
+                while (off < len) {
+                    const ev: *const InotifyEvent = @ptrCast(@alignCast(buf[off..]));
+                    try self.handleInotifyEvent(ev, now);
+                    off += @sizeOf(InotifyEvent) + ev.len;
+                }
+            }
+
+            i = 0;
+            while (i < self.paths.len) : (i += 1) self.flushOne(i, now, snk);
+        }
+    }
+
+    const InotifyEvent = extern struct {
+        wd: i32,
+        mask: u32,
+        cookie: u32,
+        len: u32,
+    };
+
+    fn refreshLinuxPath(self: *Self, idx: usize, now: i128) !void {
+        if (self.backend.wds[idx] >= 0) return;
+
+        const next = try snapPath(self.paths[idx]);
+        if (changeKind(self.states[idx].snap, next)) |kind| self.queueKind(idx, now, kind);
+        self.states[idx].snap = next;
+        if (!next.exists) return;
+
+        const opened = try self.backend.ensurePath(idx, self.paths[idx]);
+        if (!opened) self.states[idx].snap = .{};
+    }
+
+    fn handleInotifyEvent(self: *Self, ev: *const InotifyEvent, now: i128) !void {
+        const idx = self.backend.findIdx(ev.wd) orelse return;
+
+        if (inotifyKind(ev.mask)) |kind| self.queueKind(idx, now, kind);
+        if ((ev.mask & Backend.close_mask) != 0) self.backend.drop(idx);
+
+        self.states[idx].snap = try snapPath(self.paths[idx]);
+        if (!self.states[idx].snap.exists) self.backend.drop(idx);
+    }
+
     fn queueKind(self: *Self, idx: usize, now: i128, kind: Kind) void {
         var state = &self.states[idx];
         if (state.pending) |pending| {
@@ -335,6 +477,14 @@ fn vnodeKind(fflags: u32) ?Kind {
     if ((fflags & (Backend.note_delete | Backend.note_revoke)) != 0) return .delete;
     if ((fflags & Backend.note_rename) != 0) return .rename;
     if ((fflags & (Backend.note_write | Backend.note_extend | Backend.note_attrib)) != 0) return .write;
+    return null;
+}
+
+fn inotifyKind(mask: u32) ?Kind {
+    if (!is_linux) return null;
+    if ((mask & (Backend.in_delete | Backend.in_delete_self)) != 0) return .delete;
+    if ((mask & (Backend.in_moved_from | Backend.in_moved_to | Backend.in_move_self)) != 0) return .rename;
+    if ((mask & (Backend.in_modify | Backend.in_attrib | Backend.in_create)) != 0) return .write;
     return null;
 }
 
