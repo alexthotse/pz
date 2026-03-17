@@ -40,4 +40,5 @@ comptime {
     _ = @import("test/provider_mock.zig");
     _ = @import("test/pty_harness.zig");
     _ = @import("test/utf8_e2e.zig");
+    _ = @import("test/api_e2e.zig");
 }

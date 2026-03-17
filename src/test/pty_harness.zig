@@ -1806,3 +1806,62 @@ test "real-env PTY: pz starts and exits without crash" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+test "real PTY: hello gets response" {
+    const api_key = std.posix.getenv("ANTHROPIC_API_KEY") orelse return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pi/agent");
+    const cwd_abs = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home_abs);
+
+    // Write auth.json with the real API key (value is safe — it's our own test env).
+    const auth_json = try std.fmt.allocPrint(alloc,
+        \\{{"anthropic":{{"type":"api_key","key":"{s}"}}}}
+    , .{api_key});
+    defer alloc.free(auth_json);
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pi/agent/auth.json", .data = auth_json });
+
+    var env = try baseEnv(alloc, home_abs);
+    defer env.deinit();
+    try env.put("ANTHROPIC_API_KEY", api_key);
+
+    const pz_bin = try pzBinAlloc(alloc);
+    defer alloc.free(pz_bin);
+
+    // Use print mode to avoid TUI complexity — send a prompt, get text back.
+    var out = try runProc(
+        alloc,
+        cwd_abs,
+        &env,
+        &.{
+            pz_bin,
+            "--no-session",
+            "--mode",
+            "print",
+            "--model",
+            "claude-sonnet-4-20250514",
+            "--prompt",
+            "Say exactly: PZTEST_OK",
+        },
+        "",
+    );
+    defer out.deinit(alloc);
+
+    switch (out.term) {
+        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => {
+            if (out.stderr.len > 0) {
+                std.debug.print("stderr: {s}\n", .{out.stderr});
+            }
+            return error.TestUnexpectedResult;
+        },
+    }
+    // Verify we got some response text (the model should include PZTEST_OK).
+    try std.testing.expect(out.stdout.len > 0);
+}

@@ -57,8 +57,6 @@ pub const Client = struct {
 
         const ar = stream.arena.allocator();
 
-        hc.tryProactiveRefresh(self.alloc, &self.auth, .anthropic, self.ca_file, ar);
-
         const body = try buildBody(ar, req);
         var hdrs = try buildAuthHeaders(&self.auth, ar);
 

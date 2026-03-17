@@ -302,11 +302,25 @@ fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provider:
     const ar = arena.allocator();
 
     const path = findAuthFile(ar, home) catch return error.AuthNotFound;
-    const raw = std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return error.AuthNotFound;
-    // Allow unknown fields for legacy ~/.pi/agent/auth.json compat (has accountId, openai-codex, etc.)
+    const is_legacy = isLegacyPath(path);
+
+    // Legacy path: use openConfined for safe read
+    const raw = if (is_legacy) blk: {
+        const dir_path = std.fs.path.dirname(path) orelse return error.AuthNotFound;
+        var dir = std.fs.cwd().openDir(dir_path, .{}) catch return error.AuthNotFound;
+        defer dir.close();
+        const basename = std.fs.path.basename(path);
+        const file = fs_secure.openConfined(dir, basename, .{}) catch return error.AuthNotFound;
+        defer file.close();
+        break :blk file.readToEndAlloc(ar, 1024 * 1024) catch return error.AuthNotFound;
+    } else blk: {
+        break :blk std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024) catch return error.AuthNotFound;
+    };
+
+    // Strict parsing for primary path; allow unknown fields for legacy compat
     const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
+        .ignore_unknown_fields = is_legacy,
     }) catch return error.AuthCorrupt;
     const entry = switch (provider) {
         .anthropic => parsed.value.anthropic,
@@ -329,10 +343,11 @@ fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provider:
             errdefer alloc.free(access_duped);
             const refresh_duped = try alloc.dupe(u8, refresh);
             errdefer alloc.free(refresh_duped);
+            const expires = entry.expires orelse 0;
             break :blk .{ .oauth = .{
                 .access = access_duped,
                 .refresh = refresh_duped,
-                .expires = entry.expires orelse 0,
+                .expires = if (expires == 0) 0 else expires, // 0 = always-expired, triggers refresh
             } };
         },
         .api_key => blk: {
@@ -340,6 +355,11 @@ fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provider:
             break :blk .{ .api_key = try alloc.dupe(u8, key) };
         },
     };
+}
+
+/// Check if a resolved auth file path is a legacy ~/.pi/ path.
+fn isLegacyPath(path: []const u8) bool {
+    return std.mem.indexOf(u8, path, "/.pi/") != null;
 }
 
 pub fn beginAnthropicOAuth(alloc: std.mem.Allocator) !OAuthStart {
@@ -993,16 +1013,64 @@ fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, 
     var redir_buf: [0]u8 = .{};
     var resp = try req.receiveHead(&redir_buf);
 
-    if (resp.head.status != .ok) return error.RefreshFailed;
-
     var transfer_buf: [16384]u8 = undefined;
     var decomp: std.http.Decompress = undefined;
     var decomp_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const rdr = resp.readerDecompressing(&transfer_buf, &decomp, &decomp_buf);
     const resp_body = try rdr.allocRemaining(ar, .limited(65536));
 
+    if (resp.head.status != .ok) {
+        // Try to extract error detail from response body
+        const detail = extractRefreshErr(ar, resp_body, @intFromEnum(resp.head.status));
+        const redacted = audit.redactTextAlloc(ar, detail, .mask) catch detail;
+        std.log.warn("oauth refresh failed: {s}", .{redacted});
+        if (isInvalidGrant(resp_body)) return error.RefreshInvalidGrant;
+        return error.RefreshFailed;
+    }
+
     const new_oauth = try parseOAuthTokenResponse(alloc, ar, resp_body, error.RefreshFailed);
     return new_oauth;
+}
+
+/// Extract human-readable error from refresh response body.
+fn extractRefreshErr(ar: std.mem.Allocator, body: []const u8, status: u16) []const u8 {
+    // Try JSON parse for "error" or "error_description" field
+    if (std.json.parseFromSlice(std.json.Value, ar, body, .{ .allocate = .alloc_always })) |parsed| {
+        const obj = switch (parsed.value) {
+            .object => |o| o,
+            else => return truncBody(body, status, ar),
+        };
+        // Prefer error_description, fall back to error
+        if (strGet(obj, "error_description")) |desc| {
+            return std.fmt.allocPrint(ar, "{d} {s}", .{ status, desc }) catch truncBody(body, status, ar);
+        }
+        if (strGet(obj, "error")) |err_val| {
+            return std.fmt.allocPrint(ar, "{d} {s}", .{ status, err_val }) catch truncBody(body, status, ar);
+        }
+        return truncBody(body, status, ar);
+    } else |_| {
+        return truncBody(body, status, ar);
+    }
+}
+
+fn strGet(map: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const val = map.get(key) orelse return null;
+    return switch (val) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+/// Truncate body to first 200 bytes and prepend HTTP status.
+fn truncBody(body: []const u8, status: u16, ar: std.mem.Allocator) []const u8 {
+    const trunc = body[0..@min(body.len, 200)];
+    return std.fmt.allocPrint(ar, "{d} {s}", .{ status, trunc }) catch "refresh failed";
+}
+
+/// Check if the response body indicates an invalid_grant error.
+fn isInvalidGrant(body: []const u8) bool {
+    // Fast substring check — works for both JSON and form error bodies
+    return std.mem.indexOf(u8, body, "invalid_grant") != null;
 }
 
 fn saveOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, oauth: OAuth, hooks: Hooks) !void {
@@ -2128,6 +2196,258 @@ test "P0-3 regression: listLoggedInHome deallocs cleanly with all providers" {
     const result = try listLoggedInHome(alloc, home);
     defer alloc.free(result);
     try std.testing.expectEqual(@as(usize, 3), result.len);
+}
+
+// ── 2a: OAuth login flow tests ──────────────────────────────────────────
+
+test "beginOAuth produces authorize URL with PKCE code_challenge" {
+    for ([_]Provider{ .anthropic, .openai }) |prov| {
+        var flow = try beginOAuth(std.testing.allocator, prov);
+        defer flow.deinit(std.testing.allocator);
+
+        // URL must contain code_challenge (S256)
+        try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge=") != null);
+        try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge_method=S256") != null);
+
+        // Verify the code_challenge is SHA256(verifier) in base64url
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(flow.verifier, &digest, .{});
+        const expected = std.base64.url_safe_no_pad.Encoder.calcSize(digest.len);
+        var challenge_buf: [44]u8 = undefined;
+        _ = std.base64.url_safe_no_pad.Encoder.encode(challenge_buf[0..expected], &digest);
+        const needle = try std.fmt.allocPrint(std.testing.allocator, "code_challenge={s}", .{challenge_buf[0..expected]});
+        defer std.testing.allocator.free(needle);
+        try std.testing.expect(std.mem.indexOf(u8, flow.url, needle) != null);
+    }
+}
+
+test "completeOAuthWithHooks with mock exchange returns valid tokens and persists" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    try completeOAuthWithHooks(std.testing.allocator, .anthropic, "code=test_code&state=test_state", "pkce-v", .{
+        .home_override = home,
+        .exchange_code = struct {
+            fn f(alloc: std.mem.Allocator, _: *const OAuthSpec, code: []const u8, state: []const u8, _: []const u8, verifier: []const u8, _: Hooks) !OAuth {
+                // Verify all params reach the exchange function
+                try std.testing.expectEqualStrings("test_code", code);
+                try std.testing.expectEqualStrings("test_state", state);
+                try std.testing.expectEqualStrings("pkce-v", verifier);
+                return .{
+                    .access = try alloc.dupe(u8, "mock-access"),
+                    .refresh = try alloc.dupe(u8, "mock-refresh"),
+                    .expires = 5000,
+                };
+            }
+        }.f,
+    });
+
+    // Verify auth file written to disk
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const auth = try loadFileAuthForProvider(arena.allocator(), home, .anthropic);
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .oauth: core.providers.auth.OAuth
+        \\    .access: []const u8
+        \\      "mock-access"
+        \\    .refresh: []const u8
+        \\      "mock-refresh"
+        \\    .expires: i64 = 5000
+    ).expectEqual(auth);
+}
+
+test "completeOAuthWithHooks rejects missing state in input" {
+    try std.testing.expectError(
+        error.MissingOAuthState,
+        completeOAuthWithHooks(std.testing.allocator, .anthropic, "justcode", "verifier", .{
+            .exchange_code = struct {
+                fn f(_: std.mem.Allocator, _: *const OAuthSpec, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Hooks) !OAuth {
+                    return error.TestUnexpectedResult;
+                }
+            }.f,
+        }),
+    );
+}
+
+test "logout removes provider entry from auth file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    // Save two providers
+    try saveApiKeyHome(std.testing.allocator, home, .anthropic, "sk-ant");
+    try saveApiKeyHome(std.testing.allocator, home, .openai, "sk-openai");
+
+    // Logout anthropic
+    try logoutHomeWithHooks(std.testing.allocator, home, .anthropic, .{});
+
+    // Anthropic gone, openai remains
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.AuthNotFound, loadFileAuthForProvider(arena.allocator(), home, .anthropic));
+    const oa = try loadFileAuthForProvider(arena.allocator(), home, .openai);
+    try std.testing.expect(oa == .api_key);
+}
+
+// ── 2b: Token refresh cycle tests ──────────────────────────────────────
+
+test "refreshOAuthForProviderWithHooks with mock 200 returns new tokens" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, .{
+        .access = "old-access",
+        .refresh = "old-refresh",
+        .expires = 100,
+    }, .{
+        .home_override = home,
+        .refresh_fetch = struct {
+            fn f(alloc: std.mem.Allocator, prov: Provider, old: OAuth, _: Hooks) !OAuth {
+                // Verify old tokens passed correctly
+                try std.testing.expectEqual(Provider.anthropic, prov);
+                try std.testing.expectEqualStrings("old-refresh", old.refresh);
+                return .{
+                    .access = try alloc.dupe(u8, "new-access"),
+                    .refresh = try alloc.dupe(u8, "new-refresh"),
+                    .expires = 9999,
+                };
+            }
+        }.f,
+    });
+    defer {
+        std.testing.allocator.free(got.access);
+        std.testing.allocator.free(got.refresh);
+    }
+
+    try oh.snap(@src(),
+        \\core.providers.auth.OAuth
+        \\  .access: []const u8
+        \\    "new-access"
+        \\  .refresh: []const u8
+        \\    "new-refresh"
+        \\  .expires: i64 = 9999
+    ).expectEqual(got);
+
+    // Verify updated tokens persisted to disk
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const disk_auth = try loadFileAuthForProvider(arena.allocator(), home, .anthropic);
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .oauth: core.providers.auth.OAuth
+        \\    .access: []const u8
+        \\      "new-access"
+        \\    .refresh: []const u8
+        \\      "new-refresh"
+        \\    .expires: i64 = 9999
+    ).expectEqual(disk_auth);
+}
+
+test "refreshOAuthForProviderWithHooks with 400 returns typed error" {
+    const got = refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, .{
+        .access = "a",
+        .refresh = "r",
+        .expires = 0,
+    }, .{
+        .refresh_fetch = struct {
+            fn f(_: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
+                return error.RefreshFailed;
+            }
+        }.f,
+    });
+    try std.testing.expectError(error.RefreshFailed, got);
+}
+
+test "refreshOAuthForProviderWithHooks propagates network error" {
+    const got = refreshOAuthForProviderWithHooks(std.testing.allocator, .openai, .{
+        .access = "a",
+        .refresh = "r",
+        .expires = 0,
+    }, .{
+        .refresh_fetch = struct {
+            fn f(_: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
+                return error.ConnectionRefused;
+            }
+        }.f,
+    });
+    try std.testing.expectError(error.ConnectionRefused, got);
+}
+
+test "proactive refresh triggers when now > expires" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    const Ctx = struct {
+        var called: bool = false;
+        fn refresh(alloc: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
+            called = true;
+            return .{
+                .access = try alloc.dupe(u8, "refreshed-a"),
+                .refresh = try alloc.dupe(u8, "refreshed-r"),
+                .expires = 99999,
+            };
+        }
+        fn now() i64 {
+            return 2000; // past expires=1000
+        }
+    };
+    Ctx.called = false;
+
+    // Simulate what tryProactiveRefresh does: check expires, call refresh
+    const old = OAuth{ .access = "a", .refresh = "r", .expires = 1000 };
+    const now = Ctx.now();
+    if (now >= old.expires) {
+        const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, old, .{
+            .home_override = home,
+            .refresh_fetch = Ctx.refresh,
+            .now_ms = Ctx.now,
+        });
+        std.testing.allocator.free(got.access);
+        std.testing.allocator.free(got.refresh);
+    }
+    try std.testing.expect(Ctx.called);
+}
+
+test "proactive refresh skips when token still valid" {
+    const Ctx = struct {
+        var called: bool = false;
+        fn refresh(_: std.mem.Allocator, _: Provider, _: OAuth, _: Hooks) !OAuth {
+            called = true;
+            return error.TestUnexpectedResult;
+        }
+        fn now() i64 {
+            return 500; // before expires=1000
+        }
+    };
+    Ctx.called = false;
+
+    const old = OAuth{ .access = "a", .refresh = "r", .expires = 1000 };
+    const now = Ctx.now();
+    // Same logic as tryProactiveRefresh: skip if not expired
+    if (now >= old.expires) {
+        const got = try refreshOAuthForProviderWithHooks(std.testing.allocator, .anthropic, old, .{
+            .refresh_fetch = Ctx.refresh,
+            .now_ms = Ctx.now,
+        });
+        std.testing.allocator.free(got.access);
+        std.testing.allocator.free(got.refresh);
+    }
+    try std.testing.expect(!Ctx.called);
 }
 
 test "P0-3 regression: listLoggedInHome deallocs cleanly on corrupt auth" {

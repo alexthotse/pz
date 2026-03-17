@@ -247,6 +247,30 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
             .next = "reduce prompt size or use /compact to shrink the conversation",
         },
     },
+    .{
+        "RefreshFailed", Rule{
+            .summary = "OAuth token refresh failed",
+            .next = "run /login to re-authenticate",
+        },
+    },
+    .{
+        "RefreshInvalidGrant", Rule{
+            .summary = "OAuth refresh token expired or revoked",
+            .next = "run /login to re-authenticate",
+        },
+    },
+    .{
+        "AuthNotFound", Rule{
+            .summary = "no credentials found",
+            .next = "run /login or set ANTHROPIC_API_KEY",
+        },
+    },
+    .{
+        "AuthCorrupt", Rule{
+            .summary = "credentials file is corrupt",
+            .next = "delete ~/.pz/auth.json and run /login",
+        },
+    },
 });
 
 fn lookup(err: anyerror) Rule {

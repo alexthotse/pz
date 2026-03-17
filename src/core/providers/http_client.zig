@@ -96,18 +96,22 @@ pub fn refreshAuth(
 }
 
 /// Proactive pre-request refresh: if token looks expired, try refreshing.
-/// Failure is non-fatal — the 401 retry handler will surface real errors.
+/// When refresh fails AND the token is expired, propagates the error
+/// (sending an expired token is pointless). When the token might still
+/// be valid, logs and continues.
 pub fn tryProactiveRefresh(
     alloc: std.mem.Allocator,
     auth: *auth_mod.Result,
     tag: auth_mod.Provider,
     ca_file: ?[]const u8,
     ar: std.mem.Allocator,
-) void {
+) !void {
     if (auth.auth != .oauth) return;
     const now = std.time.milliTimestamp();
     if (now < auth.auth.oauth.expires) return;
     refreshAuth(alloc, auth, tag, ca_file, ar) catch |err| {
+        // Token is expired and refresh failed — no point sending it
+        if (now >= auth.auth.oauth.expires) return err;
         std.log.warn("proactive oauth refresh failed: {}", .{err});
     };
 }
@@ -189,6 +193,9 @@ pub fn retryLoop(
     rebuildHdrs: *const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header),
     cancel: ?providers.CancelPoll,
 ) !void {
+    // Proactive refresh: check token expiry before first attempt
+    try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
+
     var attempt: u32 = 0;
     var did_refresh = false;
     while (true) : (attempt += 1) {
@@ -214,12 +221,13 @@ pub fn retryLoop(
         // On 401 with OAuth, try refreshing token once
         if (status_int == 401 and auth.auth == .oauth and !did_refresh) {
             did_refresh = true;
-            const refreshed = if (refreshAuth(alloc, auth, tag, ca_file, ar)) true else |_| false;
-            if (refreshed) {
+            if (refreshAuth(alloc, auth, tag, ca_file, ar)) {
                 drainResponse(stream, ar);
                 stream.req.deinit();
                 hdrs.* = try rebuildHdrs(auth, ar);
                 continue;
+            } else |_| {
+                return error.RefreshFailed;
             }
         }
 
