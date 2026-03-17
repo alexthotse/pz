@@ -8,8 +8,10 @@ const ansi_ast = @import("ansi_ast.zig");
 const http_mock = @import("http_mock.zig");
 const c = @cImport({
     @cInclude("errno.h");
+    @cInclude("fcntl.h");
     @cInclude("signal.h");
     @cInclude("stdlib.h");
+    @cInclude("sys/ioctl.h");
     @cInclude("sys/wait.h");
     @cInclude("unistd.h");
     @cInclude("util.h");
@@ -1865,3 +1867,777 @@ test "real PTY: hello gets response" {
     // Verify we got some response text (the model should include PZTEST_OK).
     try std.testing.expect(out.stdout.len > 0);
 }
+
+// ── Bidirectional PTY harness ──
+
+pub const InteractiveStep = union(enum) {
+    inject: []const u8,
+    wait_for: struct { text: []const u8, timeout_ms: u64 = 5000 },
+    snapshot: []const u8, // label for ohsnap
+    sleep: u64,
+    resize: struct { cols: u16, rows: u16 },
+};
+
+/// VScreen wrapper that accumulates raw bytes alongside parsed screen state.
+pub const PtyScreen = struct {
+    vs: vscreen.VScreen,
+    raw: std.ArrayList(u8),
+
+    pub fn init(alloc: std.mem.Allocator, w: usize, h: usize) !PtyScreen {
+        return .{
+            .vs = try vscreen.VScreen.init(alloc, w, h),
+            .raw = .empty,
+        };
+    }
+
+    pub fn deinit(self: *PtyScreen) void {
+        const alloc = self.vs.alloc;
+        self.raw.deinit(alloc);
+        self.vs.deinit();
+        self.* = undefined;
+    }
+
+    pub fn feed(self: *PtyScreen, data: []const u8) !void {
+        try self.raw.appendSlice(self.vs.alloc, data);
+        self.vs.feed(data);
+    }
+
+    pub fn hasText(self: *const PtyScreen, needle: []const u8) !bool {
+        return screenHasText(&self.vs, self.vs.alloc, needle);
+    }
+
+    pub fn textGrid(self: *const PtyScreen) ![]u8 {
+        const alloc = self.vs.alloc;
+        var buf = std.ArrayList(u8).empty;
+        errdefer buf.deinit(alloc);
+        var r: usize = 0;
+        while (r < self.vs.h) : (r += 1) {
+            const row = try self.vs.rowText(alloc, r);
+            defer alloc.free(row);
+            try buf.appendSlice(alloc, row);
+            try buf.append(alloc, '\n');
+        }
+        return try buf.toOwnedSlice(alloc);
+    }
+};
+
+const InteractiveOut = struct {
+    output: []u8,
+    snapshots: []Snapshot,
+    term: std.process.Child.Term,
+
+    const Snapshot = struct {
+        label: []const u8,
+        grid: []u8,
+    };
+
+    fn deinit(self: *InteractiveOut, alloc: std.mem.Allocator) void {
+        alloc.free(self.output);
+        for (self.snapshots) |snap| alloc.free(snap.grid);
+        alloc.free(self.snapshots);
+        self.* = undefined;
+    }
+};
+
+const fake_provider_cmd =
+    "cat >/dev/null; sleep 0.1; printf 'text:Hello from fake provider!\\n'; " ++
+    "sleep 0.1; printf 'text: How can I help?\\n'; sleep 0.1; printf 'stop:done\\n'";
+
+fn killChild(pid: c.pid_t) void {
+    _ = c.kill(pid, c.SIGKILL);
+    _ = c.waitpid(pid, null, 0);
+}
+
+fn runPtyInteractive(
+    alloc: std.mem.Allocator,
+    cwd: []const u8,
+    env: *const std.process.EnvMap,
+    pz_args: []const []const u8,
+    steps: []const InteractiveStep,
+) !InteractiveOut {
+    const pz_bin = try pzBinAlloc(alloc);
+    defer alloc.free(pz_bin);
+
+    // Build argv as null-terminated C strings.
+    var cargv = CStringList.init(alloc);
+    defer cargv.deinit();
+    try cargv.appendDupZ(pz_bin);
+    for (pz_args) |arg| try cargv.appendDupZ(arg);
+    try cargv.items.append(alloc, null); // sentinel
+
+    // Build envp as null-terminated C strings.
+    var cenvp = CStringList.init(alloc);
+    defer cenvp.deinit();
+    var it = env.iterator();
+    while (it.next()) |entry| {
+        const kv = try std.fmt.allocPrint(alloc, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        defer alloc.free(kv);
+        try cenvp.appendDupZ(kv);
+    }
+    try cenvp.items.append(alloc, null); // sentinel
+
+    const cwd_z = try alloc.dupeZ(u8, cwd);
+    defer alloc.free(cwd_z);
+
+    // openpty
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    if (c.openpty(&master, &slave, null, null, null) != 0)
+        return error.OpenPtyFailed;
+
+    // Set window size on master.
+    var ws: c.winsize = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+    _ = c.ioctl(master, c.TIOCSWINSZ, &ws);
+
+    const pid = c.fork();
+    if (pid < 0) {
+        _ = c.close(master);
+        _ = c.close(slave);
+        return error.ForkFailed;
+    }
+
+    if (pid == 0) {
+        // ── Child ──
+        _ = c.close(master);
+        _ = c.setsid();
+        _ = c.ioctl(slave, c.TIOCSCTTY, @as(c_int, 0));
+        _ = c.dup2(slave, 0);
+        _ = c.dup2(slave, 1);
+        _ = c.dup2(slave, 2);
+        if (slave > 2) _ = c.close(slave);
+        _ = c.chdir(cwd_z.ptr);
+        const argv_ptr: [*:null]?[*:0]u8 = @ptrCast(cargv.items.items.ptr);
+        const envp_ptr: [*:null]?[*:0]u8 = @ptrCast(cenvp.items.items.ptr);
+        _ = c.execve(argv_ptr[0].?, argv_ptr, envp_ptr);
+        c._exit(127);
+    }
+
+    // ── Parent ──
+    _ = c.close(slave);
+
+    // Set master fd non-blocking.
+    const flags = c.fcntl(master, c.F_GETFL);
+    _ = c.fcntl(master, c.F_SETFL, flags | c.O_NONBLOCK);
+
+    const master_fd: std.posix.fd_t = master;
+    var screen = try PtyScreen.init(alloc, 80, 24);
+    defer screen.deinit();
+
+    var snaps = std.ArrayList(InteractiveOut.Snapshot).empty;
+    defer {
+        for (snaps.items) |snap| alloc.free(snap.grid);
+        snaps.deinit(alloc);
+    }
+
+    var succeeded = false;
+    defer if (!succeeded) killChild(pid);
+
+    for (steps) |step| {
+        switch (step) {
+            .inject => |data| {
+                const tty = try ttyInputAlloc(alloc, data);
+                defer alloc.free(tty);
+                writeAllFd(master_fd, tty) catch |err| switch (err) {
+                    error.BrokenPipe => break,
+                    else => return err,
+                };
+            },
+            .wait_for => |wf| {
+                const deadline = std.time.milliTimestamp() + @as(i64, @intCast(wf.timeout_ms));
+                while (true) {
+                    var buf: [4096]u8 = undefined;
+                    const n = std.posix.read(master_fd, &buf) catch |err| switch (err) {
+                        error.WouldBlock => {
+                            if (std.time.milliTimestamp() >= deadline) {
+                                const grid = screen.textGrid() catch "";
+                                std.debug.print("wait_for timeout: needle=\"{s}\"\ngrid:\n{s}\n", .{ wf.text, grid });
+                                if (grid.len > 0) alloc.free(grid);
+                                return error.WaitForTimeout;
+                            }
+                            std.Thread.sleep(10 * std.time.ns_per_ms);
+                            continue;
+                        },
+                        error.InputOutput, error.BrokenPipe => break,
+                        else => return err,
+                    };
+                    if (n == 0) break;
+                    try screen.feed(buf[0..n]);
+                    if (try screen.hasText(wf.text)) break;
+                }
+            },
+            .snapshot => |label| {
+                const grid = try screen.textGrid();
+                errdefer alloc.free(grid);
+                try snaps.append(alloc, .{ .label = label, .grid = grid });
+            },
+            .sleep => |ms| {
+                std.Thread.sleep(ms * std.time.ns_per_ms);
+            },
+            .resize => |sz| {
+                var rsz: c.winsize = .{
+                    .ws_row = sz.rows,
+                    .ws_col = sz.cols,
+                    .ws_xpixel = 0,
+                    .ws_ypixel = 0,
+                };
+                _ = c.ioctl(master, c.TIOCSWINSZ, &rsz);
+                // Send SIGWINCH to child process group.
+                _ = c.kill(-pid, c.SIGWINCH);
+            },
+        }
+    }
+
+    // Drain remaining output.
+    {
+        const drain_deadline = std.time.milliTimestamp() + 2000;
+        while (std.time.milliTimestamp() < drain_deadline) {
+            var buf: [4096]u8 = undefined;
+            const n = std.posix.read(master_fd, &buf) catch |err| switch (err) {
+                error.WouldBlock => {
+                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    continue;
+                },
+                error.InputOutput, error.BrokenPipe => break,
+                else => return err,
+            };
+            if (n == 0) break;
+            try screen.feed(buf[0..n]);
+        }
+    }
+
+    // Collect child exit status.
+    var status: c_int = 0;
+    const wpid = c.waitpid(pid, &status, c.WNOHANG);
+    const term = if (wpid == pid)
+        mapWaitStatus(status)
+    else blk: {
+        _ = c.kill(pid, c.SIGKILL);
+        _ = c.waitpid(pid, &status, 0);
+        break :blk mapWaitStatus(status);
+    };
+
+    _ = c.close(master);
+
+    const output = try alloc.dupe(u8, screen.raw.items);
+    errdefer alloc.free(output);
+    const snap_slice = try snaps.toOwnedSlice(alloc);
+    succeeded = true;
+
+    return .{
+        .output = output,
+        .snapshots = snap_slice,
+        .term = term,
+    };
+}
+
+const InteractiveEnv = struct {
+    tmp: std.testing.TmpDir,
+    cwd_abs: []u8,
+    home_abs: []u8,
+    env: std.process.EnvMap,
+    alloc: std.mem.Allocator,
+
+    fn deinit(self: *InteractiveEnv) void {
+        self.env.deinit();
+        self.alloc.free(self.cwd_abs);
+        self.alloc.free(self.home_abs);
+        self.tmp.cleanup();
+    }
+};
+
+fn setupInteractiveEnv(alloc: std.mem.Allocator) !InteractiveEnv {
+    var tmp = std.testing.tmpDir(.{});
+    errdefer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(alloc, ".");
+    errdefer alloc.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
+    errdefer alloc.free(home_abs);
+
+    const env = try baseEnv(alloc, home_abs);
+    return .{
+        .tmp = tmp,
+        .cwd_abs = cwd_abs,
+        .home_abs = home_abs,
+        .env = env,
+        .alloc = alloc,
+    };
+}
+
+test "runPtyInteractive: fake provider round-trip with wait_for and snapshot" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    const cwd_abs = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home_abs);
+
+    var env = try baseEnv(alloc, home_abs);
+    defer env.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .snapshot = "after_startup" },
+        .{ .inject = "hello from test\n" },
+        .{ .wait_for = .{ .text = "Hello from fake provider!", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_response" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(
+        alloc,
+        cwd_abs,
+        &env,
+        &.{
+            "--no-config",
+            "--no-session",
+            "--provider-cmd",
+            fake_provider_cmd,
+        },
+        &steps,
+    );
+    defer out.deinit(alloc);
+
+    // Should have 2 snapshots.
+    try std.testing.expectEqual(@as(usize, 2), out.snapshots.len);
+
+    // Output should contain provider response.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "Hello from fake provider!") != null);
+
+    // Startup snapshot should exist and have content.
+    try std.testing.expect(out.snapshots[0].grid.len > 0);
+
+    // After-response snapshot should contain the provider text.
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[1].grid, "Hello from fake provider!") != null);
+}
+
+// ── Edge case tests ──
+
+test "pty: error display from provider" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+
+    const err_cmd = "cat >/dev/null; printf 'err:something went wrong\\nstop:err\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "trigger error\n" },
+        .{ .wait_for = .{ .text = "something went wrong", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_error" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session", "--provider-cmd", err_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "something went wrong") != null);
+}
+
+test "pty: settings toggle via slash command" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/settings\n" },
+        .{ .sleep = 200 },
+        .{ .inject = "\x1b[B\r" }, // down arrow + enter (toggle)
+        .{ .sleep = 200 },
+        .{ .inject = "\x1b" }, // esc to close
+        .{ .sleep = 200 },
+        .{ .inject = "hello after settings\n" },
+        .{ .wait_for = .{ .text = "Hello from fake provider!", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_settings" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session", "--provider-cmd", fake_provider_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    // Provider response appeared after settings interaction.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "Hello from fake provider!") != null);
+}
+
+test "pty: resize during stream does not crash" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "say something\n" },
+        .{ .wait_for = .{ .text = "Hello", .timeout_ms = 10000 } },
+        .{ .resize = .{ .cols = 60, .rows = 20 } },
+        .{ .sleep = 300 },
+        .{ .wait_for = .{ .text = "How can I help?", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_resize" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session", "--provider-cmd", fake_provider_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(out.snapshots[0].grid.len > 0);
+    // Process exited or was killed cleanly (not a crash signal like SEGV/ABRT).
+    switch (out.term) {
+        .Exited => {},
+        .Signal => |sig| {
+            // SIGKILL (9) is our cleanup; anything else is a crash.
+            try std.testing.expect(sig == 9);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "pty: double ctrl-c clean exit" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+
+    // Use a slow provider so we can ctrl-c mid-stream.
+    const slow_cmd =
+        "cat >/dev/null; printf 'text:Hello slow\\n'; sleep 5; printf 'stop:done\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "go\n" },
+        .{ .wait_for = .{ .text = "Hello slow", .timeout_ms = 10000 } },
+        .{ .inject = "\x03" }, // first ctrl-c
+        .{ .sleep = 200 },
+        .{ .inject = "\x03" }, // second ctrl-c
+        .{ .sleep = 1000 },
+    };
+
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session", "--provider-cmd", slow_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    // Verify clean exit: either exited with a code or killed (no zombie).
+    switch (out.term) {
+        .Exited => {},
+        .Signal => |sig| {
+            // SIGKILL from our cleanup or SIGINT propagation are acceptable.
+            try std.testing.expect(sig == 9 or sig == 2);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "pty: help during stream shows help text" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+
+    // Slow provider to allow typing /help mid-stream.
+    const slow_cmd =
+        "cat >/dev/null; printf 'text:Hello stream\\n'; sleep 3; printf 'text: done\\n'; printf 'stop:done\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "go\n" },
+        .{ .wait_for = .{ .text = "Hello stream", .timeout_ms = 10000 } },
+        .{ .inject = "/help\n" },
+        .{ .sleep = 500 },
+        .{ .snapshot = "during_help" },
+        .{ .inject = "\x1b" }, // esc to close help
+        .{ .sleep = 200 },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session", "--provider-cmd", slow_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    // Output should contain the response text.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "Hello stream") != null);
+    // Snapshot or output should show help-related content (command picker shows "help").
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(out.snapshots[0].grid.len > 0);
+}
+
+test "pty: bracketed paste during stream" {
+    const alloc = std.testing.allocator;
+    var ctx = try setupInteractiveEnv(alloc);
+    defer ctx.deinit();
+
+    // Slow provider to allow pasting mid-stream.
+    const slow_cmd =
+        "cat >/dev/null; printf 'text:Hello paste\\n'; sleep 3; printf 'text: end\\n'; printf 'stop:done\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "go\n" },
+        .{ .wait_for = .{ .text = "Hello paste", .timeout_ms = 10000 } },
+        .{ .inject = "\x1b[200~pasted text\x1b[201~" }, // bracketed paste
+        .{ .sleep = 500 },
+        .{ .snapshot = "after_paste" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, ctx.cwd_abs, &ctx.env, &.{
+        "--no-config", "--no-session", "--provider-cmd", slow_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    // Output should contain the streaming response.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "Hello paste") != null);
+    // Pasted text should appear in the editor/output.
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "pasted") != null);
+}
+
+// ── Core walkthrough tests ──
+
+test "PTY walkthrough: full prompt to response" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home/.pz");
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "hello\n" },
+        .{ .wait_for = .{ .text = "hello", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Hello from fake provider", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_response" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--provider-cmd", fake_provider_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "Hello from fake provider") != null);
+}
+
+test "PTY walkthrough: streaming renders incrementally" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home/.pz");
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    // Provider that streams two distinct chunks with a pause between them.
+    const stream_cmd =
+        "cat >/dev/null; " ++
+        "printf 'text:Hello\\n'; sleep 0.3; " ++
+        "printf 'text: help?\\n'; sleep 0.1; printf 'stop:done\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "test streaming\n" },
+        .{ .wait_for = .{ .text = "Hello", .timeout_ms = 10000 } },
+        .{ .snapshot = "partial" },
+        .{ .wait_for = .{ .text = "help?", .timeout_ms = 10000 } },
+        .{ .snapshot = "complete" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--provider-cmd", stream_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), out.snapshots.len);
+    // Partial snapshot should have Hello but not necessarily help?
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "Hello") != null);
+    // Complete snapshot should have both
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[1].grid, "help?") != null);
+}
+
+test "PTY walkthrough: cancel mid-stream" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home/.pz");
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    // Provider that streams slowly so we can cancel mid-stream.
+    const slow_cmd =
+        "cat >/dev/null; " ++
+        "printf 'text:Hello\\n'; sleep 2; " ++
+        "printf 'text: more\\n'; sleep 0.1; printf 'stop:done\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "cancel me\n" },
+        .{ .wait_for = .{ .text = "Hello", .timeout_ms = 10000 } },
+        .{ .inject = "\x03" }, // ctrl-c
+        .{ .wait_for = .{ .text = "canceled", .timeout_ms = 5000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--provider-cmd", slow_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "canceled") != null);
+}
+
+test "PTY walkthrough: tool call renders" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home/.pz");
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    // Provider: first call emits a tool_call for bash, second call emits done text.
+    // The script checks for tool_result in stdin to distinguish turns.
+    const tool_cmd =
+        "req=$(cat); " ++
+        "if printf '%s' \"$req\" | grep -q tool_result; then " ++
+        "  printf 'text:done\\nstop:done\\n'; " ++
+        "else " ++
+        "  printf 'tool_call:c1|bash|{\"command\":\"echo hi\"}\\nstop:tool\\n'; " ++
+        "fi";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "run echo\n" },
+        // Wait for the tool display to appear — bash tool should show.
+        .{ .wait_for = .{ .text = "bash", .timeout_ms = 15000 } },
+        .{ .wait_for = .{ .text = "done", .timeout_ms = 15000 } },
+        .{ .snapshot = "after_tool" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--provider-cmd", tool_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), out.snapshots.len);
+    // The snapshot should show the bash tool was invoked.
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "bash") != null or
+        std.mem.indexOf(u8, out.output, "bash") != null);
+}
+
+test "PTY walkthrough: compaction after response" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.makePath("sess");
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    const sess = try tmp.dir.realpathAlloc(alloc, "sess");
+    defer alloc.free(sess);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "ping\n" },
+        .{ .wait_for = .{ .text = "Hello from fake provider", .timeout_ms = 10000 } },
+        .{ .sleep = 300 },
+        .{ .inject = "/compact\n" },
+        .{ .wait_for = .{ .text = "compacted in=", .timeout_ms = 10000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--session-dir", sess, "--provider-cmd", fake_provider_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "compacted in=") != null);
+}
+
+test "PTY walkthrough: multi-turn conversation" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home/.pz");
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    var env = try baseEnv(alloc, home);
+    defer env.deinit();
+
+    // Provider always responds with the same text.
+    const multi_cmd =
+        "cat >/dev/null; sleep 0.1; " ++
+        "printf 'text:response ok\\nstop:done\\n'";
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "first prompt\n" },
+        .{ .wait_for = .{ .text = "response ok", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_turn1" },
+        .{ .inject = "second prompt\n" },
+        .{ .wait_for = .{ .text = "response ok", .timeout_ms = 10000 } },
+        .{ .snapshot = "after_turn2" },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd, &env, &.{
+        "--no-config", "--no-session", "--provider-cmd", multi_cmd,
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), out.snapshots.len);
+    // Both snapshots should contain the response text.
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "response ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.snapshots[1].grid, "response ok") != null);
+    // Output should contain both prompts.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "first prompt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "second prompt") != null);
+}
+

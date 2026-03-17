@@ -16,6 +16,8 @@ pub const VScreen = struct {
     row: usize = 0,
     col: usize = 0,
     style: Style = .{},
+    pending: [32]u8 = undefined,
+    pending_len: u8 = 0,
 
     pub fn init(alloc: std.mem.Allocator, w: usize, h: usize) !VScreen {
         const cells = try alloc.alloc(Cell, w * h);
@@ -62,15 +64,62 @@ pub const VScreen = struct {
     // ── Feeding ──
 
     /// Feed raw ANSI bytes (renderer output with cursor movements).
+    /// Handles partial ANSI escapes and UTF-8 sequences split across calls.
     pub fn feed(self: *VScreen, data: []const u8) void {
+        // Fast path: no pending bytes.
+        if (self.pending_len == 0) {
+            self.feedInner(data);
+            return;
+        }
+        // Merge pending + new data into a contiguous buffer.
+        const plen: usize = self.pending_len;
+        // Determine how many new bytes to pull in: enough to complete the
+        // sequence, but at most what fills the pending buf.
+        const avail = @min(data.len, self.pending.len - plen);
+        @memcpy(self.pending[plen .. plen + avail], data[0..avail]);
+        const merged_len = plen + avail;
+        self.pending_len = 0;
+        // Process merged prefix.
+        self.feedInner(self.pending[0..merged_len]);
+        // If feedInner stashed new pending bytes from the merged buf, those
+        // are already in self.pending. Process remaining new data.
+        if (avail < data.len) {
+            self.feedInner(data[avail..]);
+        }
+    }
+
+    fn feedInner(self: *VScreen, data: []const u8) void {
         var i: usize = 0;
         while (i < data.len) {
             if (data[i] == 0x1b) {
-                i = self.parseEsc(data, i);
+                const next = self.parseEsc(data, i);
+                if (next > data.len) {
+                    // Incomplete escape — stash remainder.
+                    self.stashPending(data[i..]);
+                    return;
+                }
+                i = next;
+            } else if (data[i] >= 0x80) {
+                // Multi-byte UTF-8: check if sequence is complete.
+                const seq_len = std.unicode.utf8ByteSequenceLength(data[i]) catch {
+                    i += 1;
+                    continue;
+                };
+                if (i + seq_len > data.len) {
+                    self.stashPending(data[i..]);
+                    return;
+                }
+                self.putByte(data, &i);
             } else {
                 self.putByte(data, &i);
             }
         }
+    }
+
+    fn stashPending(self: *VScreen, tail: []const u8) void {
+        const n = @min(tail.len, self.pending.len);
+        @memcpy(self.pending[0..n], tail[0..n]);
+        self.pending_len = @intCast(n);
     }
 
     /// Feed component output lines (one per row, starting at row 0).
@@ -130,11 +179,13 @@ pub const VScreen = struct {
         i.* += n;
     }
 
+    /// Returns index past the consumed sequence, or data.len+1 if incomplete.
     fn parseEsc(self: *VScreen, data: []const u8, start: usize) usize {
         var i = start + 1; // skip ESC
-        if (i >= data.len) return i;
+        if (i >= data.len) return data.len + 1; // incomplete
         if (data[i] != '[') return i; // Only CSI supported.
         i += 1; // skip '['
+        if (i >= data.len) return data.len + 1; // incomplete
 
         // Skip DEC private mode prefix (?  >  =)
         const is_private = i < data.len and (data[i] == '?' or data[i] == '>' or data[i] == '=');
@@ -156,7 +207,7 @@ pub const VScreen = struct {
                 break;
             }
         }
-        if (i >= data.len) return i;
+        if (i >= data.len) return data.len + 1; // incomplete: no final byte
         pc += 1; // param count
 
         const final = data[i];
@@ -491,4 +542,27 @@ test "vscreen handles newline and carriage return" {
     try vs.expectText(0, 0, "abc");
     try vs.expectText(1, 0, "def");
     try vs.expectText(2, 0, "XY");
+}
+
+test "vscreen split ANSI escape across feeds" {
+    var vs = try VScreen.init(std.testing.allocator, 20, 1);
+    defer vs.deinit();
+
+    // Feed partial CSI: ESC [ 3
+    vs.feed("\x1b[3");
+    // Complete: 1 m H e l l o
+    vs.feed("1mHello");
+    try vs.expectText(0, 0, "Hello");
+    try vs.expectFg(0, 0, .{ .idx = 1 }); // red (SGR 31)
+}
+
+test "vscreen split UTF-8 across feeds" {
+    var vs = try VScreen.init(std.testing.allocator, 20, 1);
+    defer vs.deinit();
+
+    // U+2603 SNOWMAN = E2 98 83 (3-byte UTF-8)
+    vs.feed("\xe2"); // first byte only
+    vs.feed("\x98\x83"); // remaining two
+    const cp = vs.cellAt(0, 0).cp;
+    try std.testing.expectEqual(@as(u21, 0x2603), cp);
 }
