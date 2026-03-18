@@ -15,12 +15,14 @@ pub fn build(b: *std.Build) void {
     ) orelse "2d6f7455d97b4a3a10d7293909d1a4f2058cb9a370e43fa8154bb280db839083";
     // zcheck's package build still shells out to git; import the module directly.
     const zcheck_mod = depMod(b, "zcheck", "src/zcheck.zig", target, optimize);
+    const ohsnap_mod = if (b.lazyDependency("ohsnap", dep_opt)) |d| d.module("ohsnap") else null;
 
     // Build options: version, VCS hash, changelog
     const options = b.addOptions();
-    options.addOption([]const u8, "version", pkg.version);
     const test_options = b.addOptions();
-    test_options.addOption([]const u8, "version", pkg.version);
+
+    const opts_pair = .{ options, test_options };
+    addSharedOpt(opts_pair, []const u8, "version", pkg.version);
 
     const is_release = switch (optimize) {
         .Debug => false,
@@ -38,15 +40,10 @@ pub fn build(b: *std.Build) void {
             std.debug.print("error: release build requires -Dgit-hash=<hash>\n", .{});
             std.process.exit(1);
         };
-        options.addOption([]const u8, "git_hash", git_hash);
-        test_options.addOption([]const u8, "git_hash", git_hash);
+        addSharedOpt(opts_pair, []const u8, "git_hash", git_hash);
         // State tracker key: version for release (matches ## [ver] headings).
-        options.addOption([]const u8, "build_id", pkg.version);
-        test_options.addOption([]const u8, "build_id", pkg.version);
-
-        const cl_embed = @embedFile("CHANGELOG.md");
-        options.addOption([]const u8, "changelog", cl_embed);
-        test_options.addOption([]const u8, "changelog", cl_embed);
+        addSharedOpt(opts_pair, []const u8, "build_id", pkg.version);
+        addSharedOpt(opts_pair, []const u8, "changelog", @embedFile("CHANGELOG.md"));
     } else {
         // Debug builds: VCS shell-out for convenience.
         var code: u8 = 0;
@@ -56,11 +53,9 @@ pub fn build(b: *std.Build) void {
             .Ignore,
         ) catch "dev";
         const vcs_hash = std.mem.trimRight(u8, vcs_hash_raw, "\n\r ");
-        options.addOption([]const u8, "git_hash", vcs_hash);
-        test_options.addOption([]const u8, "git_hash", vcs_hash);
+        addSharedOpt(opts_pair, []const u8, "git_hash", vcs_hash);
         // State tracker key: hash for dev (matches line-start in VCS log).
-        options.addOption([]const u8, "build_id", vcs_hash);
-        test_options.addOption([]const u8, "build_id", vcs_hash);
+        addSharedOpt(opts_pair, []const u8, "build_id", vcs_hash);
 
         const vcs_log_raw = b.runAllowFail(
             &.{
@@ -76,11 +71,9 @@ pub fn build(b: *std.Build) void {
             .Ignore,
         ) catch "";
         const vcs_log = std.mem.trimRight(u8, vcs_log_raw, "\n\r ");
-        options.addOption([]const u8, "changelog", vcs_log);
-        test_options.addOption([]const u8, "changelog", vcs_log);
+        addSharedOpt(opts_pair, []const u8, "changelog", vcs_log);
     }
-    options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
-    test_options.addOption([]const u8, "policy_pk_hex", policy_pk_hex);
+    addSharedOpt(opts_pair, []const u8, "policy_pk_hex", policy_pk_hex);
 
     const core_agent_mod = b.createModule(.{
         .root_source_file = b.path("src/core/agent.zig"),
@@ -135,10 +128,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
-        exe_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
-    }
-    exe_tests.root_module.addImport("zcheck", zcheck_mod);
+    configTestMod(exe_tests.root_module, ohsnap_mod, zcheck_mod, null);
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const suite_tests = b.addTest(.{
@@ -148,11 +138,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    suite_tests.root_module.addOptions("build_options", test_options);
-    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
-        suite_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
-    }
-    suite_tests.root_module.addImport("zcheck", zcheck_mod);
+    configTestMod(suite_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_suite_tests = b.addRunArtifact(suite_tests);
 
     const test_step = b.step("test", "Run unit tests");
@@ -183,11 +169,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    if (b.lazyDependency("ohsnap", dep_opt)) |ohsnap_dep| {
-        perf_tests.root_module.addImport("ohsnap", ohsnap_dep.module("ohsnap"));
-    }
-    perf_tests.root_module.addImport("zcheck", zcheck_mod);
-    perf_tests.root_module.addOptions("build_options", test_options);
+    configTestMod(perf_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_perf_tests = b.addRunArtifact(perf_tests);
     const perf_step = b.step("perf", "Run performance budget tests");
     perf_step.dependOn(&run_perf_tests.step);
@@ -198,6 +180,27 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&exe_tests.step);
     check_step.dependOn(&suite_tests.step);
     check_step.dependOn(&perf_tests.step);
+}
+
+fn addSharedOpt(
+    opts: struct { *std.Build.Step.Options, *std.Build.Step.Options },
+    comptime T: type,
+    key: []const u8,
+    value: T,
+) void {
+    opts[0].addOption(T, key, value);
+    opts[1].addOption(T, key, value);
+}
+
+fn configTestMod(
+    mod: *std.Build.Module,
+    ohsnap_mod: ?*std.Build.Module,
+    zcheck_mod: *std.Build.Module,
+    build_options: ?*std.Build.Step.Options,
+) void {
+    if (ohsnap_mod) |m| mod.addImport("ohsnap", m);
+    mod.addImport("zcheck", zcheck_mod);
+    if (build_options) |opts| mod.addOptions("build_options", opts);
 }
 
 fn depMod(

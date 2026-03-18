@@ -179,24 +179,24 @@ pub const light = Theme{
     .bash_mode = .{ .rgb = 0x859900 },
 };
 
-var active: *const Theme = &dark;
+var active: std.atomic.Value(*const Theme) = std.atomic.Value(*const Theme).init(&dark);
 
 pub fn init(name: ?[]const u8) void {
     if (name) |raw| {
-        active = themeByName(raw) orelse &dark;
+        active.store(themeByName(raw) orelse &dark, .release);
         return;
     }
 
     if (std.posix.getenv("PZ_THEME")) |val| {
-        active = themeByName(val) orelse &dark;
+        active.store(themeByName(val) orelse &dark, .release);
         return;
     }
     if (std.posix.getenv("PI_THEME")) |val| {
-        active = themeByName(val) orelse &dark;
+        active.store(themeByName(val) orelse &dark, .release);
         return;
     }
 
-    active = &dark;
+    var theme: *const Theme = &dark;
     // Auto-detect from COLORFGBG: "fg;bg" — high bg number means light bg
     if (std.posix.getenv("COLORFGBG")) |val| {
         if (std.mem.lastIndexOfScalar(u8, val, ';')) |sep| {
@@ -204,20 +204,21 @@ pub fn init(name: ?[]const u8) void {
             if (std.fmt.parseInt(u8, bg_str, 10)) |bg| {
                 // bg >= 8 typically means a light background
                 if (bg >= 8) {
-                    active = &light;
+                    theme = &light;
                 }
             } else |_| {}
         }
     }
+    active.store(theme, .release);
 }
 
 pub fn get() *const Theme {
-    return active;
+    return active.load(.acquire);
 }
 
 // For tests: override active theme temporarily
 pub fn setActive(t: *const Theme) void {
-    active = t;
+    active.store(t, .release);
 }
 
 fn themeByName(name: []const u8) ?*const Theme {
@@ -237,9 +238,9 @@ test "dark and light differ" {
 
 test "init selects dark by default" {
     // Save and restore
-    const prev = active;
-    defer active = prev;
-    active = &light;
+    const prev = active.load(.acquire);
+    defer active.store(prev, .release);
+    active.store(&light, .release);
     // With no env vars set in test, init should leave dark or detect
     // Just verify get() returns a valid pointer
     init(null);
@@ -248,8 +249,8 @@ test "init selects dark by default" {
 }
 
 test "init honors explicit theme name" {
-    const prev = active;
-    defer active = prev;
+    const prev = active.load(.acquire);
+    defer active.store(prev, .release);
 
     init("light");
     try std.testing.expect(get() == &light);
@@ -258,8 +259,8 @@ test "init honors explicit theme name" {
 }
 
 test "init falls back to dark on unknown explicit theme" {
-    const prev = active;
-    defer active = prev;
+    const prev = active.load(.acquire);
+    defer active.store(prev, .release);
 
     init("custom-unknown");
     try std.testing.expect(get() == &dark);

@@ -160,13 +160,16 @@ fn parseOsc(alloc: std.mem.Allocator, data: []const u8, start: usize) !OscParse 
 
 pub const SummaryOpts = struct {
     include_text: bool = true,
+    max_entries: ?usize = null,
 };
 
 pub fn summaryAlloc(alloc: std.mem.Allocator, ops: []const Op, opts: SummaryOpts) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
+    var kept: usize = 0;
 
     for (ops) |op| {
+        if (opts.max_entries) |max| if (kept >= max) break;
         switch (op) {
             .text => |text| {
                 if (!opts.include_text) continue;
@@ -193,6 +196,7 @@ pub fn summaryAlloc(alloc: std.mem.Allocator, ops: []const Op, opts: SummaryOpts
                 try out.writer(alloc).print("esc {d}\n", .{raw.len});
             },
         }
+        kept += 1;
     }
 
     return try out.toOwnedSlice(alloc);

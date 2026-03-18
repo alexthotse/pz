@@ -87,7 +87,7 @@ const HttpResult = union(enum) {
 };
 
 fn initHttpClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
-    return try app_tls.initRuntimeClient(alloc);
+    return try app_tls.initRuntimeClient(alloc, null);
 }
 
 pub fn run(alloc: std.mem.Allocator, home: ?[]const u8) ![]u8 {
@@ -1399,7 +1399,7 @@ const UpdateClientTap = struct {
 
     fn init(ctx: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
         const tap: *UpdateClientTap = @ptrCast(@alignCast(ctx.?));
-        var http = try app_tls.initRuntimeClient(alloc);
+        var http = try app_tls.initRuntimeClient(alloc, null);
         tap.fetch_ct += 1;
         if (http.ca_bundle.map.size == 0) tap.no_ca_ct += 1;
         if (@atomicLoad(bool, &http.next_https_rescan_certs, .acquire)) tap.rescan_ct += 1;
@@ -1429,7 +1429,7 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
-    var server = try http_mock.Server.initSeq(&resps);
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &resps);
     defer server.deinit();
 
     const base_url = try server.urlAlloc(std.testing.allocator, "");
@@ -1558,7 +1558,7 @@ test "update invalid runtime CA bundle fails before transport" {
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
 
-    var server = try http_mock.Server.initSeq(&.{.{ .headers = &.{"Content-Type: application/json"}, .body = "{\"tag_name\":\"v9.9.9\",\"assets\":[]}" }});
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &.{.{ .headers = &.{"Content-Type: application/json"}, .body = "{\"tag_name\":\"v9.9.9\",\"assets\":[]}" }});
     defer server.deinit();
 
     const base_url = try server.urlAlloc(std.testing.allocator, "");
@@ -1798,7 +1798,7 @@ test "update e2e verify fail stays local and audits deterministically" {
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
-    var server = try http_mock.Server.initSeq(&resps);
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &resps);
     defer server.deinit();
 
     const base_url = try server.urlAlloc(std.testing.allocator, "");
@@ -1932,7 +1932,7 @@ test "update e2e verify success installs via local redirects and audits determin
     const archive = try makeTarGzAlloc(std.testing.allocator, "bin/pz", "next-pz\n");
     defer std.testing.allocator.free(archive);
     var resps = [_]http_mock.Response{ .{}, .{}, .{}, .{}, .{}, .{} };
-    var server = try http_mock.Server.initSeq(&resps);
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &resps);
     defer server.deinit();
 
     const base_url = try server.urlAlloc(std.testing.allocator, "");
@@ -2293,7 +2293,7 @@ test "UX10: httpGetResult follows 302 redirect and returns final body" {
             .body = "redirect-ok",
         },
     };
-    var server = try http_mock.Server.initSeq(&resps);
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &resps);
     defer server.deinit();
 
     const url = try server.urlAlloc(std.testing.allocator, "/start");

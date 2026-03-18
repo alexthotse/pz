@@ -362,37 +362,10 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
     const ops = try ansi_ast.parseAlloc(std.testing.allocator, out.stdout);
     defer ansi_ast.freeOps(std.testing.allocator, ops);
 
-    var ctl_buf = std.ArrayList(u8).empty;
-    defer ctl_buf.deinit(std.testing.allocator);
-    var kept: usize = 0;
-    for (ops) |op| {
-        if (kept >= 10) break;
-        switch (op) {
-            .text => continue,
-            .csi => |csi| {
-                try ctl_buf.appendSlice(std.testing.allocator, "csi ");
-                if (csi.prefix) |p| try ctl_buf.append(std.testing.allocator, p);
-                try ctl_buf.append(std.testing.allocator, csi.final);
-                try ctl_buf.append(std.testing.allocator, ' ');
-                for (csi.params, 0..) |param, idx| {
-                    if (idx > 0) try ctl_buf.append(std.testing.allocator, ',');
-                    try ctl_buf.writer(std.testing.allocator).print("{d}", .{param});
-                }
-                try ctl_buf.append(std.testing.allocator, '\n');
-            },
-            .osc => |payload| {
-                const head = std.mem.indexOfScalar(u8, payload, ';') orelse payload.len;
-                try ctl_buf.appendSlice(std.testing.allocator, "osc ");
-                try ctl_buf.appendSlice(std.testing.allocator, payload[0..head]);
-                try ctl_buf.append(std.testing.allocator, '\n');
-            },
-            .esc => |raw| {
-                try ctl_buf.writer(std.testing.allocator).print("esc {d}\n", .{raw.len});
-            },
-        }
-        kept += 1;
-    }
-    const ctl = try ctl_buf.toOwnedSlice(std.testing.allocator);
+    const ctl = try ansi_ast.summaryAlloc(std.testing.allocator, ops, .{
+        .include_text = false,
+        .max_entries = 10,
+    });
     defer std.testing.allocator.free(ctl);
 
     try oh.snap(@src(),
@@ -444,7 +417,7 @@ test "real pz PTY startup survives live version check" {
     _ = env.remove("PZ_SKIP_VERSION_CHECK");
     try env.put("PZ_FORCE_VERSION_CHECK", "1");
 
-    var server = try http_mock.Server.initSeq(&.{.{
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &.{.{
         .headers = &.{"Content-Type: application/json"},
         .body = "{\"tag_name\":\"v9.9.9\"}",
     }});

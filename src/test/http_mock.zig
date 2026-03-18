@@ -21,6 +21,7 @@ pub const Step = struct {
 pub const Server = struct {
     const max_reqs = 16;
 
+    alloc: std.mem.Allocator,
     server: std.net.Server,
     steps: []const Step = &.{},
     resps: []const Response = &.{},
@@ -30,21 +31,23 @@ pub const Server = struct {
     failure: ?anyerror = null,
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    pub fn init(_: std.mem.Allocator, steps: []const Step) !Server {
+    pub fn init(alloc: std.mem.Allocator, steps: []const Step) !Server {
         if (steps.len == 0 or steps.len > max_reqs) return error.InvalidResponseCount;
         const addr = try std.net.Address.parseIp("127.0.0.1", 0);
         const server = try addr.listen(.{ .reuse_address = true });
         return .{
+            .alloc = alloc,
             .server = server,
             .steps = steps,
         };
     }
 
-    pub fn initSeq(resps: []const Response) !Server {
+    pub fn initSeq(alloc: std.mem.Allocator, resps: []const Response) !Server {
         if (resps.len == 0 or resps.len > max_reqs) return error.InvalidResponseCount;
         const addr = try std.net.Address.parseIp("127.0.0.1", 0);
         const server = try addr.listen(.{ .reuse_address = true });
         return .{
+            .alloc = alloc,
             .server = server,
             .resps = resps,
         };
@@ -107,7 +110,7 @@ fn run(self: *Server) void {
                 self.failure = error.UnexpectedRequest;
                 return;
             }
-            writeResponse(conn.stream.handle, self.steps[i].resp) catch |err| {
+            writeResponse(self.alloc, conn.stream.handle, self.steps[i].resp) catch |err| {
                 self.failure = err;
                 return;
             };
@@ -127,7 +130,7 @@ fn run(self: *Server) void {
             return;
         };
         self.req_count = i + 1;
-        writeResponse(conn.stream.handle, resp) catch |err| {
+        writeResponse(self.alloc, conn.stream.handle, resp) catch |err| {
             self.failure = err;
             return;
         };
@@ -215,9 +218,9 @@ fn matchesExpect(raw: []const u8, exp: Expect) bool {
     return true;
 }
 
-fn writeResponse(fd: std.posix.socket_t, resp: Response) !void {
-    const prefix = try std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\n", .{resp.status});
-    defer std.heap.page_allocator.free(prefix);
+fn writeResponse(alloc: std.mem.Allocator, fd: std.posix.socket_t, resp: Response) !void {
+    const prefix = try std.fmt.allocPrint(alloc, "HTTP/1.1 {s}\r\n", .{resp.status});
+    defer alloc.free(prefix);
     _ = try std.posix.write(fd, prefix);
     var saw_len = false;
     for (resp.headers) |hdr| {
@@ -226,8 +229,8 @@ fn writeResponse(fd: std.posix.socket_t, resp: Response) !void {
         _ = try std.posix.write(fd, "\r\n");
     }
     if (!saw_len) {
-        const len = try std.fmt.allocPrint(std.heap.page_allocator, "Content-Length: {d}\r\n", .{resp.body.len});
-        defer std.heap.page_allocator.free(len);
+        const len = try std.fmt.allocPrint(alloc, "Content-Length: {d}\r\n", .{resp.body.len});
+        defer alloc.free(len);
         _ = try std.posix.write(fd, len);
     }
     _ = try std.posix.write(fd, "\r\n");
@@ -314,7 +317,7 @@ test "http mock serves sequential responses and captures each request" {
             .body = "done",
         },
     };
-    var server = try Server.initSeq(&resps);
+    var server = try Server.initSeq(std.testing.allocator, &resps);
     defer server.deinit();
 
     const thr = try server.spawn();

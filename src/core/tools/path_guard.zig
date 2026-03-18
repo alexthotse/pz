@@ -201,51 +201,40 @@ fn leafName(name: []const u8) ![]const u8 {
     return name;
 }
 
-fn openFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.OpenFlags) !std.fs.File {
-    var os_flags: posix.O = switch (native_os) {
-        .wasi => .{
-            .read = flags.mode != .write_only,
-            .write = flags.mode != .read_only,
-        },
-        else => .{
-            .ACCMODE = switch (flags.mode) {
-                .read_only => .RDONLY,
-                .write_only => .WRONLY,
-                .read_write => .RDWR,
-            },
-            .NOFOLLOW = true,
-        },
-    };
+fn setPortableFlags(os_flags: *posix.O) void {
     if (@hasField(posix.O, "CLOEXEC")) os_flags.CLOEXEC = true;
     if (@hasField(posix.O, "LARGEFILE")) os_flags.LARGEFILE = true;
-    if (@hasField(posix.O, "NOCTTY")) os_flags.NOCTTY = !flags.allow_ctty;
+}
 
-    const has_flock_open_flags = @hasField(posix.O, "EXLOCK");
-    if (has_flock_open_flags) switch (flags.lock) {
+const LockKind = enum { none, shared, exclusive };
+
+fn setFlockOpenFlags(os_flags: *posix.O, lock: LockKind, nonblocking: bool) bool {
+    const has = @hasField(posix.O, "EXLOCK");
+    if (has) switch (lock) {
         .none => {},
         .shared => {
             os_flags.SHLOCK = true;
-            os_flags.NONBLOCK = flags.lock_nonblocking;
+            os_flags.NONBLOCK = nonblocking;
         },
         .exclusive => {
             os_flags.EXLOCK = true;
-            os_flags.NONBLOCK = flags.lock_nonblocking;
+            os_flags.NONBLOCK = nonblocking;
         },
     };
+    return has;
+}
 
-    const fd = try posix.openat(dir_fd, path, os_flags, 0);
-    errdefer posix.close(fd);
-
-    if (@TypeOf(posix.system.flock) != void and !has_flock_open_flags and flags.lock != .none) {
-        const lock_nonblocking: i32 = if (flags.lock_nonblocking) posix.LOCK.NB else 0;
-        try posix.flock(fd, switch (flags.lock) {
+fn applyFlock(fd: posix.fd_t, has_flock_open_flags: bool, lock: LockKind, nonblocking: bool) !void {
+    if (@TypeOf(posix.system.flock) != void and !has_flock_open_flags and lock != .none) {
+        const nb: i32 = if (nonblocking) posix.LOCK.NB else 0;
+        try posix.flock(fd, switch (lock) {
             .none => unreachable,
-            .shared => posix.LOCK.SH | lock_nonblocking,
-            .exclusive => posix.LOCK.EX | lock_nonblocking,
+            .shared => posix.LOCK.SH | nb,
+            .exclusive => posix.LOCK.EX | nb,
         });
     }
 
-    if (has_flock_open_flags and flags.lock_nonblocking) {
+    if (has_flock_open_flags and nonblocking) {
         var fl_flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| switch (err) {
             error.FileBusy => unreachable,
             error.Locked => unreachable,
@@ -264,7 +253,37 @@ fn openFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.OpenFlags
             else => |e| return e,
         };
     }
+}
 
+fn openFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.OpenFlags) !std.fs.File {
+    var os_flags: posix.O = switch (native_os) {
+        .wasi => .{
+            .read = flags.mode != .write_only,
+            .write = flags.mode != .read_only,
+        },
+        else => .{
+            .ACCMODE = switch (flags.mode) {
+                .read_only => .RDONLY,
+                .write_only => .WRONLY,
+                .read_write => .RDWR,
+            },
+            .NOFOLLOW = true,
+        },
+    };
+    setPortableFlags(&os_flags);
+    if (@hasField(posix.O, "NOCTTY")) os_flags.NOCTTY = !flags.allow_ctty;
+
+    const lock: LockKind = switch (flags.lock) {
+        .none => .none,
+        .shared => .shared,
+        .exclusive => .exclusive,
+    };
+    const has_flock_open = setFlockOpenFlags(&os_flags, lock, flags.lock_nonblocking);
+
+    const fd = try posix.openat(dir_fd, path, os_flags, 0);
+    errdefer posix.close(fd);
+
+    try applyFlock(fd, has_flock_open, lock, flags.lock_nonblocking);
     try maybeRace(dir_fd, path);
     try ensureStableFile(dir_fd, path, fd);
 
@@ -279,34 +298,19 @@ fn createFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.CreateF
         .EXCL = flags.exclusive,
         .NOFOLLOW = true,
     };
-    if (@hasField(posix.O, "LARGEFILE")) os_flags.LARGEFILE = true;
-    if (@hasField(posix.O, "CLOEXEC")) os_flags.CLOEXEC = true;
+    setPortableFlags(&os_flags);
 
-    const has_flock_open_flags = @hasField(posix.O, "EXLOCK");
-    if (has_flock_open_flags) switch (flags.lock) {
-        .none => {},
-        .shared => {
-            os_flags.SHLOCK = true;
-            os_flags.NONBLOCK = flags.lock_nonblocking;
-        },
-        .exclusive => {
-            os_flags.EXLOCK = true;
-            os_flags.NONBLOCK = flags.lock_nonblocking;
-        },
+    const lock: LockKind = switch (flags.lock) {
+        .none => .none,
+        .shared => .shared,
+        .exclusive => .exclusive,
     };
+    const has_flock_open = setFlockOpenFlags(&os_flags, lock, flags.lock_nonblocking);
 
     const fd = try posix.openat(dir_fd, path, os_flags, flags.mode);
     errdefer posix.close(fd);
 
-    if (@TypeOf(posix.system.flock) != void and !has_flock_open_flags and flags.lock != .none) {
-        const lock_nonblocking: i32 = if (flags.lock_nonblocking) posix.LOCK.NB else 0;
-        try posix.flock(fd, switch (flags.lock) {
-            .none => unreachable,
-            .shared => posix.LOCK.SH | lock_nonblocking,
-            .exclusive => posix.LOCK.EX | lock_nonblocking,
-        });
-    }
-
+    try applyFlock(fd, has_flock_open, lock, flags.lock_nonblocking);
     try maybeRace(dir_fd, path);
     try ensureStableFile(dir_fd, path, fd);
     if (flags.truncate) {

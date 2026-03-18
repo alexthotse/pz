@@ -80,7 +80,7 @@ const Deps = struct {
 };
 
 fn initClientRuntime(_: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
-    return try app_tls.initRuntimeClient(alloc);
+    return try app_tls.initRuntimeClient(alloc, null);
 }
 
 /// Checker GitHub releases for a newer version. Returns version string if newer, null otherwise.
@@ -171,7 +171,7 @@ const ClientTap = struct {
 
     fn init(ctx: ?*anyopaque, alloc: std.mem.Allocator) !std.http.Client {
         const tap: *ClientTap = @ptrCast(@alignCast(ctx.?));
-        var http = try app_tls.initRuntimeClient(alloc);
+        var http = try app_tls.initRuntimeClient(alloc, null);
         tap.ca_len = http.ca_bundle.map.size;
         tap.rescan_disabled = !@atomicLoad(bool, &http.next_https_rescan_certs, .acquire);
         return http;
@@ -273,7 +273,7 @@ test "checkLatest uses runtime CA bundle for version checks" {
     var guard = try CwdGuard.enter(tmp.dir);
     defer guard.deinit();
 
-    var server = try http_mock.Server.initSeq(&.{.{
+    var server = try http_mock.Server.initSeq(std.testing.allocator, &.{.{
         .headers = &.{"Content-Type: application/json"},
         .body = "{\"tag_name\":\"v9.9.9\"}",
     }});
