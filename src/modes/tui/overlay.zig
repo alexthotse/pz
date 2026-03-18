@@ -448,19 +448,7 @@ fn shortLabel(model: []const u8) []const u8 {
 }
 
 fn clipCols(text: []const u8, cols: usize) []const u8 {
-    if (cols == 0 or text.len == 0) return text[0..0];
-    var i: usize = 0;
-    var used: usize = 0;
-    while (i < text.len) {
-        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch break;
-        if (i + n > text.len) break;
-        const cp = std.unicode.utf8Decode(text[i .. i + n]) catch break;
-        const cw = wc.wcwidth(cp);
-        if (used + cw > cols) break;
-        used += cw;
-        i += n;
-    }
-    return text[0..i];
+    return frame_mod.clipCols(text, cols) catch text[0..0];
 }
 
 fn writeRight(frm: *Frame, x: usize, cols: usize, y: usize, text: []const u8, st: Style) !void {

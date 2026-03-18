@@ -4,6 +4,7 @@ const frame = @import("frame.zig");
 const theme = @import("theme.zig");
 const syntax = @import("syntax.zig");
 const wc = @import("wcwidth.zig");
+const tbl = @import("table_layout.zig");
 
 pub const Renderer = struct {
     in_code_block: bool = false,
@@ -27,8 +28,8 @@ pub const Renderer = struct {
         }
         // Track table state even for skipped lines
         if (!self.in_code_block) {
-            if (isTableLine(line)) {
-                if (isTableSep(line)) {
+            if (tbl.isTableLine(line)) {
+                if (tbl.isSepLine(line)) {
                     self.saw_table_sep = true;
                 }
                 self.in_table = true;
@@ -69,8 +70,8 @@ pub const Renderer = struct {
         }
 
         // Table line (must be checked before hrule since "|---|" looks like hrule-ish)
-        if (isTableLine(line)) {
-            const is_sep = isTableSep(line);
+        if (tbl.isTableLine(line)) {
+            const is_sep = tbl.isSepLine(line);
             const is_header = self.in_table == false and !is_sep;
             self.in_table = true;
             if (is_sep) self.saw_table_sep = true;
@@ -165,52 +166,6 @@ fn cellsSnapAlloc(alloc: std.mem.Allocator, n: usize, buf: []const []const u8) !
     return out.toOwnedSlice(alloc);
 }
 
-// -- Table helpers --
-
-fn isTableLine(line: []const u8) bool {
-    const t = trimLeadingSpaces(line);
-    return t.len >= 1 and t[0] == '|';
-}
-
-fn isTableSep(line: []const u8) bool {
-    const t = trimLeadingSpaces(line);
-    if (t.len < 3 or t[0] != '|') return false;
-    // Must contain only |, -, :, and spaces
-    for (t) |c| {
-        switch (c) {
-            '|', '-', ':', ' ', '\t' => {},
-            else => return false,
-        }
-    }
-    // Must have at least one dash
-    return std.mem.indexOfScalar(u8, t, '-') != null;
-}
-
-/// Split "|a|b|c|" into cells ["a", "b", "c"] (trimmed).
-/// Returns count written to buf. Strips leading/trailing pipes.
-fn splitCells(line: []const u8, buf: *[64][]const u8) usize {
-    const t = trimLeadingSpaces(line);
-    // Strip leading |
-    var rest = t;
-    if (rest.len > 0 and rest[0] == '|') rest = rest[1..];
-    // Strip trailing |
-    if (rest.len > 0 and rest[rest.len - 1] == '|') rest = rest[0 .. rest.len - 1];
-
-    var n: usize = 0;
-    while (rest.len > 0 and n < buf.len) {
-        if (std.mem.indexOfScalar(u8, rest, '|')) |pipe| {
-            buf[n] = std.mem.trim(u8, rest[0..pipe], " \t");
-            n += 1;
-            rest = rest[pipe + 1 ..];
-        } else {
-            buf[n] = std.mem.trim(u8, rest, " \t");
-            n += 1;
-            break;
-        }
-    }
-    return n;
-}
-
 fn renderTableLine(
     frm: *frame.Frame,
     x: usize,
@@ -238,8 +193,8 @@ fn renderTableLine(
     }
 
     // Header or data row — render cells with │ borders
-    var cell_buf: [64][]const u8 = undefined;
-    const ncells = splitCells(line, &cell_buf);
+    var cell_buf: [tbl.max_cols][]const u8 = undefined;
+    const ncells = tbl.splitCells(line, &cell_buf);
     const cells = cell_buf[0..ncells];
 
     var col: usize = 0;
@@ -984,18 +939,18 @@ test "table state resets on non-table line" {
 }
 
 test "isTableSep detects separator lines" {
-    try testing.expect(isTableSep("|---|---|"));
-    try testing.expect(isTableSep("| --- | :---: |"));
-    try testing.expect(isTableSep("|:---|---:|"));
-    try testing.expect(!isTableSep("| data | here |"));
-    try testing.expect(!isTableSep("---"));
+    try testing.expect(tbl.isSepLine("|---|---|"));
+    try testing.expect(tbl.isSepLine("| --- | :---: |"));
+    try testing.expect(tbl.isSepLine("|:---|---:|"));
+    try testing.expect(!tbl.isSepLine("| data | here |"));
+    try testing.expect(!tbl.isSepLine("---"));
 }
 
 test "splitCells parses pipe-delimited cells" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var buf: [64][]const u8 = undefined;
-    const n = splitCells("| hello | world | 42 |", &buf);
+    var buf: [tbl.max_cols][]const u8 = undefined;
+    const n = tbl.splitCells("| hello | world | 42 |", &buf);
     const snap = try cellsSnapAlloc(testing.allocator, n, buf[0..]);
     defer testing.allocator.free(snap);
     try oh.snap(@src(),
@@ -1010,8 +965,8 @@ test "splitCells parses pipe-delimited cells" {
 test "splitCells handles no trailing pipe" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var buf: [64][]const u8 = undefined;
-    const n = splitCells("| a | b", &buf);
+    var buf: [tbl.max_cols][]const u8 = undefined;
+    const n = tbl.splitCells("| a | b", &buf);
     const snap = try cellsSnapAlloc(testing.allocator, n, buf[0..]);
     defer testing.allocator.free(snap);
     try oh.snap(@src(),

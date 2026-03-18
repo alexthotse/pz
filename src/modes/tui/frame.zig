@@ -47,6 +47,35 @@ pub const Style = struct {
     }
 };
 
+pub const Rect = struct {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+
+    pub fn endX(self: Rect, frm: *const Frame) Frame.PosError!usize {
+        const x_end = std.math.add(usize, self.x, self.w) catch return error.OutOfBounds;
+        if (x_end > frm.w) return error.OutOfBounds;
+        return x_end;
+    }
+
+    pub fn endY(self: Rect, frm: *const Frame) Frame.PosError!usize {
+        const y_end = std.math.add(usize, self.y, self.h) catch return error.OutOfBounds;
+        if (y_end > frm.h) return error.OutOfBounds;
+        return y_end;
+    }
+
+    pub fn clear(self: Rect, frm: *Frame) Frame.PosError!void {
+        var y: usize = 0;
+        while (y < self.h) : (y += 1) {
+            var x: usize = 0;
+            while (x < self.w) : (x += 1) {
+                try frm.set(self.x + x, self.y + y, ' ', .{});
+            }
+        }
+    }
+};
+
 pub const Cell = struct {
     cp: u21 = ' ',
     style: Style = .{},
@@ -152,6 +181,29 @@ pub const Frame = struct {
         return true;
     }
 };
+
+// -- Shared UTF-8 / display-width utilities --
+
+pub fn ensureUtf8(text: []const u8) error{InvalidUtf8}!void {
+    _ = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
+}
+
+pub fn clipCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
+    if (cols == 0 or text.len == 0) return text[0..0];
+
+    var i: usize = 0;
+    var used: usize = 0;
+    while (i < text.len) {
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch return error.InvalidUtf8;
+        if (i + n > text.len) return error.InvalidUtf8;
+        const cp = std.unicode.utf8Decode(text[i .. i + n]) catch return error.InvalidUtf8;
+        const w = wcwidth(cp);
+        if (used + w > cols) break;
+        i += n;
+        used += w;
+    }
+    return text[0..i];
+}
 
 test "frame write clips utf8 input at row width" {
     const OhSnap = @import("ohsnap");

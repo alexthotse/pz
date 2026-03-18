@@ -653,20 +653,6 @@ fn viewportSlice(text: []const u8, skip_cols: usize, cols: usize) error{InvalidU
     return text[start..i];
 }
 
-fn clipCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
-    if (cols == 0 or text.len == 0) return text[0..0];
-
-    var i: usize = 0;
-    var used: usize = 0;
-    while (i < text.len) {
-        const step = (try Ui.nextCpStrict(text, &i)) orelse break;
-        if (used + step.w > cols) break;
-        i += step.n;
-        used += step.w;
-    }
-    return text[0..i];
-}
-
 const TestBuf = @import("test_buf.zig").TestBuf;
 
 fn findAsciiSeqX(frm: *const frame.Frame, y: usize, needle: []const u8) ?usize {

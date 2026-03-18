@@ -6,12 +6,7 @@ const tool_display = @import("tool_display.zig");
 const theme = @import("theme.zig");
 const spinner = @import("spinner.zig");
 
-pub const Rect = struct {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-};
+pub const Rect = frame.Rect;
 
 pub const RunState = enum {
     idle,
@@ -259,9 +254,9 @@ pub const Panels = struct {
     pub fn renderFooter(self: *const Panels, frm: *frame.Frame, rect: Rect) RenderError!void {
         if (rect.w == 0 or rect.h == 0) return;
 
-        const x_end = try rectEndX(frm, rect);
-        _ = try rectEndY(frm, rect);
-        try clearRect(frm, rect);
+        const x_end = try rect.endX(frm);
+        _ = try rect.endY(frm);
+        try rect.clear(frm);
 
         const dim_st = frame.Style{ .fg = theme.get().dim };
         const y1 = rect.y;
@@ -639,27 +634,8 @@ fn isTerminal(st: RunState) bool {
     return st == .done or st == .canceled or st == .failed;
 }
 
-fn ensureUtf8(text: []const u8) error{InvalidUtf8}!void {
-    _ = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
-}
-
-fn clipCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
-    if (cols == 0 or text.len == 0) return text[0..0];
-    const wc = @import("wcwidth.zig");
-
-    var i: usize = 0;
-    var used: usize = 0;
-    while (i < text.len) {
-        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch return error.InvalidUtf8;
-        if (i + n > text.len) return error.InvalidUtf8;
-        const cp = std.unicode.utf8Decode(text[i .. i + n]) catch return error.InvalidUtf8;
-        const w = wc.wcwidth(cp);
-        if (used + w > cols) break;
-        i += n;
-        used += w;
-    }
-    return text[0..i];
-}
+const ensureUtf8 = frame.ensureUtf8;
+const clipCols = frame.clipCols;
 
 fn clipLeftCols(text: []const u8, cols: usize) error{InvalidUtf8}![]const u8 {
     if (cols == 0 or text.len == 0) return text[0..0];
@@ -694,27 +670,6 @@ fn writePart(
     x.* += try frm.write(x.*, y, fit, st);
 }
 
-fn rectEndX(frm: *const frame.Frame, rect: Rect) frame.Frame.PosError!usize {
-    const x_end = std.math.add(usize, rect.x, rect.w) catch return error.OutOfBounds;
-    if (x_end > frm.w) return error.OutOfBounds;
-    return x_end;
-}
-
-fn rectEndY(frm: *const frame.Frame, rect: Rect) frame.Frame.PosError!usize {
-    const y_end = std.math.add(usize, rect.y, rect.h) catch return error.OutOfBounds;
-    if (y_end > frm.h) return error.OutOfBounds;
-    return y_end;
-}
-
-fn clearRect(frm: *frame.Frame, rect: Rect) frame.Frame.PosError!void {
-    var y: usize = 0;
-    while (y < rect.h) : (y += 1) {
-        var x: usize = 0;
-        while (x < rect.w) : (x += 1) {
-            try frm.set(rect.x + x, rect.y + y, ' ', .{});
-        }
-    }
-}
 
 fn rowAscii(frm: *const frame.Frame, y: usize, out: []u8) ![]const u8 {
     std.debug.assert(out.len >= frm.w);
