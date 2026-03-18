@@ -959,6 +959,11 @@ fn e2eFrameOpts() core.audit.FrameOpts {
 }
 
 fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []const []const u8) !void {
+    var tracker = core.audit_integrity.SeqTracker.init(null);
+    return shipAuditRowsWithTracker(alloc, sender, rows, &tracker);
+}
+
+fn shipAuditRowsWithTracker(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []const []const u8, seq_tracker: *core.audit_integrity.SeqTracker) !void {
     const key = e2eAuditKey();
     var prev: ?core.audit_integrity.Mac = null;
 
@@ -969,7 +974,8 @@ fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []
         });
         defer hdr.deinit();
 
-        const sealed = try core.audit_integrity.sealAlloc(alloc, key, prev, row);
+        const seq = try seq_tracker.next();
+        const sealed = try core.audit_integrity.sealAllocSeq(alloc, key, prev, row, seq);
         defer alloc.free(sealed);
 
         const doc = try std.json.parseFromSlice(AuditSealDoc, alloc, sealed, .{

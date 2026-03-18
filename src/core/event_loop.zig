@@ -105,7 +105,7 @@ pub const EventLoop = struct {
 
     /// Interrupt a blocking wait() from another thread or signal handler.
     pub fn wake(self: *EventLoop) void {
-        _ = posix.write(self.wake_w, "\x01") catch return;
+        _ = posix.write(self.wake_w, "\x01") catch return; // cleanup: propagation impossible
     }
 
     // -- platform impl --
@@ -228,7 +228,7 @@ fn epollWait(epfd: posix.fd_t, events: []std.os.linux.epoll_event, timeout_ms: i
 fn drain(fd: posix.fd_t) void {
     var buf: [64]u8 = undefined;
     while (true) {
-        _ = posix.read(fd, &buf) catch return;
+        _ = posix.read(fd, &buf) catch return; // cleanup: propagation impossible
     }
 }
 

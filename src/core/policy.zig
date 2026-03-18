@@ -814,7 +814,7 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
     if (home) |home_path| {
         const path = try std.fs.path.join(alloc, &.{ home_path, policy_rel_path });
         defer alloc.free(path);
-        if (try loadSignedDocFile(alloc, path)) |doc| {
+        if (try loadSignedDocFile(alloc, path, home)) |doc| {
             docs[doc_n] = doc;
             doc_n += 1;
         }
@@ -822,7 +822,7 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
     if (cwd) |cwd_path| {
         const path = try std.fs.path.join(alloc, &.{ cwd_path, policy_rel_path });
         defer alloc.free(path);
-        if (try loadSignedDocFile(alloc, path)) |doc| {
+        if (try loadSignedDocFile(alloc, path, home)) |doc| {
             docs[doc_n] = doc;
             doc_n += 1;
         }
@@ -903,7 +903,7 @@ pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) a
     return resolved.doc.lock;
 }
 
-fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8) anyerror!?SignedDoc {
+fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8, home: ?[]const u8) anyerror!?SignedDoc {
     if (!std.fs.path.isAbsolute(path)) return error.InvalidPolicy;
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -914,8 +914,11 @@ fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8) anyerror!?Signe
     const raw = try file.readToEndAlloc(alloc, 256 * 1024);
     defer alloc.free(raw);
 
-    return parseSignedDoc(alloc, raw) catch |err| switch (err) {
+    return verifySignedPolicyAt(alloc, raw, std.time.timestamp(), home) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.PolicyExpired => return error.PolicyExpired,
+        error.GenerationRollback => return error.GenerationRollback,
+        error.GenerationPersistFailed => return error.GenerationPersistFailed,
         else => return error.InvalidPolicy,
     };
 }

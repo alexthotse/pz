@@ -142,16 +142,16 @@ pub const PzState = struct {
 
     pub fn saveForHome(self: PzState, alloc: std.mem.Allocator, home_override: ?[]const u8) void {
         const home = home_override orelse return;
-        const dir_path = std.fs.path.join(alloc, &.{ home, pz_state_dir }) catch return;
+        const dir_path = std.fs.path.join(alloc, &.{ home, pz_state_dir }) catch return; // best-effort: void return
         defer alloc.free(dir_path);
-        core.fs_secure.ensureDirPath(dir_path) catch return;
-        const path = std.fs.path.join(alloc, &.{ dir_path, pz_state_file }) catch return;
+        core.fs_secure.ensureDirPath(dir_path) catch return; // best-effort: void return
+        const path = std.fs.path.join(alloc, &.{ dir_path, pz_state_file }) catch return; // best-effort: void return
         defer alloc.free(path);
-        const json = std.json.Stringify.valueAlloc(alloc, self, .{}) catch return;
+        const json = std.json.Stringify.valueAlloc(alloc, self, .{}) catch return; // best-effort: void return
         defer alloc.free(json);
-        const file = core.fs_secure.createFilePath(path, .{ .truncate = true }) catch return;
+        const file = core.fs_secure.createFilePath(path, .{ .truncate = true }) catch return; // best-effort: void return
         defer file.close();
-        file.writeAll(json) catch return;
+        file.writeAll(json) catch return; // best-effort: void return
     }
 
     pub fn deinit(self: *PzState, alloc: std.mem.Allocator) void {

@@ -5210,7 +5210,6 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
     // Denial text contains meaningful content
     const denial = mode_impl.denial_text orelse return error.TestUnexpectedResult;
-    std.debug.print("\n[DEBUG UX9-bash] denial_text='{s}'\n", .{denial});
     try std.testing.expect(std.mem.indexOf(u8, denial, "approval denied") != null);
     try std.testing.expect(std.mem.indexOf(u8, denial, "bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, denial, "curl evil.com") != null);
@@ -5737,7 +5736,6 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
 
     // Mode received "blocked by policy" denial
     const denial = mode_impl.denial_text orelse return error.TestUnexpectedResult;
-    std.debug.print("\n[DEBUG UX9-web] denial_text='{s}'\n", .{denial});
     try std.testing.expect(std.mem.indexOf(u8, denial, "blocked by policy") != null);
 
     // Store persisted denial tool_result with is_err=true

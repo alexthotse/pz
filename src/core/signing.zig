@@ -73,12 +73,12 @@ pub const Seed = struct {
         return .{ .raw = buf };
     }
 
-    pub fn bytes(self: Seed) [seed_len]u8 {
+    fn bytes(self: Seed) [seed_len]u8 {
         return self.raw;
     }
 
     /// Read-only pointer to raw seed bytes (internal use only).
-    pub fn rawSlice(self: *const Seed) *const [seed_len]u8 {
+    fn rawSlice(self: *const Seed) *const [seed_len]u8 {
         return &self.raw;
     }
 

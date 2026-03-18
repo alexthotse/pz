@@ -481,7 +481,7 @@ pub const ChildProc = struct {
     fn killEscalate(self: *ChildProc) void {
         const b = @import("builtin");
         if (b.os.tag == .windows or b.os.tag == .wasi) return;
-        std.posix.kill(-self.proc.id, std.posix.SIG.KILL) catch {};
+        std.posix.kill(-self.proc.id, std.posix.SIG.KILL) catch {}; // cleanup: propagation impossible
     }
 
     fn send(self: *ChildProc, frame: Frame) !void {

@@ -1646,6 +1646,7 @@ const AuditHooks = struct {
     ca_file: ?[]const u8 = null,
     share_gist: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = shareGist,
     run_upgrade: *const fn (std.mem.Allocator, update_mod.AuditHooks) anyerror!update_mod.Outcome = update_mod.runOutcomeAudited,
+    seq_tracker: ?*core.audit_integrity.SeqTracker = null,
 
     fn auth(self: AuditHooks) core.providers.auth.Hooks {
         return .{
@@ -1991,6 +1992,15 @@ fn execWithIoTuiHooks(
     const home = run_cmd.home;
     var pol = try RuntimePolicy.load(alloc, home);
     defer pol.deinit();
+
+    // Durable audit sequence tracker: persists high-water mark so
+    // replayed audit entries are detected across process restarts.
+    var seq_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const seq_path: ?[]const u8 = if (home) |h| blk: {
+        break :blk std.fmt.bufPrint(&seq_path_buf, "{s}/.pz/audit_seq", .{h}) catch null;
+    } else null;
+    var seq_tracker = core.audit_integrity.SeqTracker.init(seq_path);
+    hooks.seq_tracker = &seq_tracker;
 
     // Shared event loop for TUI mode — providers and tools use it
     // instead of creating per-call instances.
@@ -5566,8 +5576,24 @@ fn restoreSessionIntoUi(
     var rdr = try core.session.ReplayReader.init(alloc, dir, sid, .{});
     defer rdr.deinit();
 
-    ui.clearTranscript();
+    // Save transcript block count for atomicity: replay appends new
+    // blocks after existing ones. On success we remove the old prefix;
+    // on failure we truncate back, preserving the prior transcript.
+    const saved_count = ui.tr.blocks.items.len;
+    const saved_scroll = ui.tr.scroll_off;
+
     ui.panels.resetSessionView();
+
+    errdefer {
+        // Replay failed: free partially-replayed new blocks, keep old.
+        var i = ui.tr.blocks.items.len;
+        while (i > saved_count) {
+            i -= 1;
+            ui.tr.blocks.items[i].deinit(alloc);
+        }
+        ui.tr.blocks.items.len = saved_count;
+        ui.tr.scroll_off = saved_scroll;
+    }
 
     while (try rdr.next()) |ev| {
         // Session JSONL may contain non-UTF-8 bytes from corrupted files
@@ -5631,6 +5657,15 @@ fn restoreSessionIntoUi(
             },
         }
     }
+
+    // Replay succeeded: remove the old transcript prefix.
+    for (ui.tr.blocks.items[0..saved_count]) |*b| b.deinit(alloc);
+    const new_len = ui.tr.blocks.items.len - saved_count;
+    const items = ui.tr.blocks.items;
+    for (0..new_len) |i| {
+        items[i] = items[saved_count + i];
+    }
+    ui.tr.blocks.items.len = new_len;
 
     ui.panels.run_state = .idle;
     ui.tr.scrollToBottom();
