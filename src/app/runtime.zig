@@ -1314,11 +1314,11 @@ const LiveTurn = struct {
         self.mu.lock();
         defer self.mu.unlock();
         const req = self.last_req orelse return null;
-        return try dupStoredReq(alloc, req);
+        return try dupeReq(alloc, req);
     }
 
     fn start(self: *LiveTurn, tctx: *const TurnCtx, opts: TurnCtx.TurnOpts) !void {
-        var saved_req = try dupReq(self.alloc, opts);
+        var saved_req = try dupeReq(self.alloc, opts);
         errdefer saved_req.deinit(self.alloc);
 
         self.mu.lock();
@@ -1355,7 +1355,7 @@ const LiveTurn = struct {
         ctx.* = .{
             .live = self,
             .tctx = tctx,
-            .req = try dupReq(self.alloc, opts),
+            .req = try dupeReq(self.alloc, opts),
         };
 
         const thr = std.Thread.spawn(.{}, runThread, .{ctx}) catch |spawn_err| {
@@ -1429,16 +1429,16 @@ const LiveAskCtx = struct {
     }
 };
 
-fn dupReq(alloc: std.mem.Allocator, opts: TurnCtx.TurnOpts) !LiveTurn.Req {
-    const sid = try alloc.dupe(u8, opts.sid);
+fn dupeReq(alloc: std.mem.Allocator, src: anytype) !LiveTurn.Req {
+    const sid = try alloc.dupe(u8, src.sid);
     errdefer alloc.free(sid);
-    const prompt = try alloc.dupe(u8, opts.prompt);
+    const prompt = try alloc.dupe(u8, src.prompt);
     errdefer alloc.free(prompt);
-    const model = try alloc.dupe(u8, opts.model);
+    const model = try alloc.dupe(u8, src.model);
     errdefer alloc.free(model);
-    const provider_label = try alloc.dupe(u8, opts.provider_label);
+    const provider_label = try alloc.dupe(u8, src.provider_label);
     errdefer alloc.free(provider_label);
-    const system_prompt = if (opts.system_prompt) |sp| try alloc.dupe(u8, sp) else null;
+    const system_prompt = if (src.system_prompt) |sp| try alloc.dupe(u8, sp) else null;
     errdefer if (system_prompt) |sp| alloc.free(sp);
 
     return .{
@@ -1446,29 +1446,7 @@ fn dupReq(alloc: std.mem.Allocator, opts: TurnCtx.TurnOpts) !LiveTurn.Req {
         .prompt = prompt,
         .model = model,
         .provider_label = provider_label,
-        .provider_opts = opts.provider_opts,
-        .system_prompt = system_prompt,
-    };
-}
-
-fn dupStoredReq(alloc: std.mem.Allocator, req: LiveTurn.Req) !LiveTurn.Req {
-    const sid = try alloc.dupe(u8, req.sid);
-    errdefer alloc.free(sid);
-    const prompt = try alloc.dupe(u8, req.prompt);
-    errdefer alloc.free(prompt);
-    const model = try alloc.dupe(u8, req.model);
-    errdefer alloc.free(model);
-    const provider_label = try alloc.dupe(u8, req.provider_label);
-    errdefer alloc.free(provider_label);
-    const system_prompt = if (req.system_prompt) |sp| try alloc.dupe(u8, sp) else null;
-    errdefer if (system_prompt) |sp| alloc.free(sp);
-
-    return .{
-        .sid = sid,
-        .prompt = prompt,
-        .model = model,
-        .provider_label = provider_label,
-        .provider_opts = req.provider_opts,
+        .provider_opts = src.provider_opts,
         .system_prompt = system_prompt,
     };
 }
@@ -1721,9 +1699,9 @@ const PolicyToolAudit = struct {
             .outcome = .deny,
             .actor = .{ .kind = .sys },
             .res = .{
-                .kind = auditResKind(call.kind),
+                .kind = auditResMap(call.kind).kind,
                 .name = .{ .text = name, .vis = .@"pub" },
-                .op = auditResOp(call.kind),
+                .op = auditResMap(call.kind).op,
             },
             .msg = .{ .text = policy_denied_msg, .vis = .@"pub" },
             .data = .{
@@ -1736,28 +1714,24 @@ const PolicyToolAudit = struct {
     }
 };
 
-fn auditResKind(kind: core.tools.Kind) core.audit.ResourceKind {
-    return switch (kind) {
-        .read, .write, .edit, .grep, .find, .ls => .file,
-        .web => .net,
-        .agent, .bash, .skill => .cmd,
-        .ask => .cfg,
-    };
-}
+const AuditResMap = struct {
+    kind: core.audit.ResourceKind,
+    op: []const u8,
+};
 
-fn auditResOp(kind: core.tools.Kind) []const u8 {
+fn auditResMap(kind: core.tools.Kind) AuditResMap {
     return switch (kind) {
-        .read => "read",
-        .write => "write",
-        .edit => "edit",
-        .grep => "grep",
-        .find => "find",
-        .ls => "list",
-        .web => "request",
-        .agent => "spawn",
-        .bash => "run",
-        .skill => "run",
-        .ask => "prompt",
+        .read => .{ .kind = .file, .op = "read" },
+        .write => .{ .kind = .file, .op = "write" },
+        .edit => .{ .kind = .file, .op = "edit" },
+        .grep => .{ .kind = .file, .op = "grep" },
+        .find => .{ .kind = .file, .op = "find" },
+        .ls => .{ .kind = .file, .op = "list" },
+        .web => .{ .kind = .net, .op = "request" },
+        .agent => .{ .kind = .cmd, .op = "spawn" },
+        .bash => .{ .kind = .cmd, .op = "run" },
+        .skill => .{ .kind = .cmd, .op = "run" },
+        .ask => .{ .kind = .cfg, .op = "prompt" },
     };
 }
 
@@ -1798,62 +1772,37 @@ fn updateAuditHooks(hooks: AuditHooks, home: ?[]const u8) update_mod.AuditHooks 
     };
 }
 
-fn runtimeCtlStart(
-    audit: *RuntimeCtlAudit,
-    alloc: std.mem.Allocator,
-    op: []const u8,
-    res_kind: core.audit.ResourceKind,
-    res_name: core.audit.Str,
-    argv: ?core.audit.Str,
-    attrs: []const core.audit.Attribute,
-) !void {
-    try audit.emit(alloc, .{
-        .op = op,
-        .res_kind = res_kind,
-        .res_name = res_name,
-        .msg = .{ .text = "runtime control start", .vis = .@"pub" },
-        .argv = argv,
-        .attrs = attrs,
-    });
-}
+const CtlOutcome = enum { start, ok, fail };
 
-fn runtimeCtlSuccess(
-    audit: *RuntimeCtlAudit,
+fn runtimeCtlAudit(
+    audit: anytype,
     alloc: std.mem.Allocator,
     op: []const u8,
     res_kind: core.audit.ResourceKind,
     res_name: core.audit.Str,
     argv: ?core.audit.Str,
+    outcome: CtlOutcome,
+    msg: ?core.audit.Str,
     attrs: []const core.audit.Attribute,
 ) !void {
     try audit.emit(alloc, .{
         .op = op,
         .res_kind = res_kind,
         .res_name = res_name,
-        .severity = .notice,
-        .msg = .{ .text = "runtime control success", .vis = .@"pub" },
-        .argv = argv,
-        .attrs = attrs,
-    });
-}
-
-fn runtimeCtlFail(
-    audit: *RuntimeCtlAudit,
-    alloc: std.mem.Allocator,
-    op: []const u8,
-    res_kind: core.audit.ResourceKind,
-    res_name: core.audit.Str,
-    argv: ?core.audit.Str,
-    msg: core.audit.Str,
-    attrs: []const core.audit.Attribute,
-) !void {
-    try audit.emit(alloc, .{
-        .op = op,
-        .res_kind = res_kind,
-        .res_name = res_name,
-        .outcome = .fail,
-        .severity = .err,
-        .msg = msg,
+        .outcome = switch (outcome) {
+            .start, .ok => .ok,
+            .fail => .fail,
+        },
+        .severity = switch (outcome) {
+            .start => .info,
+            .ok => .notice,
+            .fail => .err,
+        },
+        .msg = msg orelse switch (outcome) {
+            .start => .{ .text = "runtime control start", .vis = .@"pub" },
+            .ok => .{ .text = "runtime control success", .vis = .@"pub" },
+            .fail => .{ .text = "runtime control failure", .vis = .@"pub" },
+        },
         .argv = argv,
         .attrs = attrs,
     });
@@ -1884,15 +1833,16 @@ fn reloadContextWithAudit(
     load_fn: *const fn (std.mem.Allocator, ?[]const u8) anyerror!?[]u8,
     home: ?[]const u8,
 ) !ReloadRes {
-    try runtimeCtlStart(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &.{});
+    try runtimeCtlAudit(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, .start, null, &.{});
     const next_ctx = load_fn(alloc, home) catch |err| {
-        try runtimeCtlFail(
+        try runtimeCtlAudit(
             audit,
             alloc,
             "reload",
             .cfg,
             runtimeCfgResName(),
             null,
+            .fail,
             .{ .text = @errorName(err), .vis = .mask },
             &.{},
         );
@@ -1909,7 +1859,7 @@ fn reloadContextWithAudit(
                 .val = .{ .bool = true },
             },
         };
-        try runtimeCtlSuccess(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &attrs);
+        try runtimeCtlAudit(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, .ok, null, &attrs);
         return .loaded;
     }
     if (sys_prompt_owned.*) |old| alloc.free(old);
@@ -1922,7 +1872,7 @@ fn reloadContextWithAudit(
             .val = .{ .bool = false },
         },
     };
-    try runtimeCtlSuccess(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, &attrs);
+    try runtimeCtlAudit(audit, alloc, "reload", .cfg, runtimeCfgResName(), null, .ok, null, &attrs);
     return .empty;
 }
 
@@ -2029,140 +1979,125 @@ fn execWithIoTuiHooks(
 
     const writer = if (out) |w| w else std.fs.File.stdout().deprecatedWriter().any();
     const reader = if (in) |r| r else std.fs.File.stdin().deprecatedReader().any();
-    const ExecState = enum {
-        init_provider,
-        init_store,
-        dispatch,
-        done,
-    };
-    var st: ExecState = .init_provider;
 
-    fsm: while (true) switch (st) {
-        .init_provider => {
-            if (run_cmd.cfg.provider_cmd) |provider_cmd| {
-                try provider_rt.init(alloc, provider_cmd);
-                has_provider_rt = true;
-                provider = provider_rt.client.asProvider();
-            } else {
-                const provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
-                if (parseNativeProviderKind(provider_name)) |native_kind| {
-                    if (NativeProviderRuntime.init(alloc, native_kind, hooks.auth())) |nr| {
-                        native_rt = nr;
-                        has_native_rt = true;
-                        if (el) |*e| native_rt.setEventLoop(e);
-                        provider = native_rt.asProvider();
-                    } else |err| {
-                        missing_provider.msg = missingProviderMsgForInitErr(native_kind, err);
-                        provider = missing_provider.asProvider();
-                    }
-                } else {
-                    missing_provider.msg = unsupported_native_provider_msg;
-                    provider = missing_provider.asProvider();
-                }
+    // Init provider
+    if (run_cmd.cfg.provider_cmd) |provider_cmd| {
+        try provider_rt.init(alloc, provider_cmd);
+        has_provider_rt = true;
+        provider = provider_rt.client.asProvider();
+    } else {
+        const provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
+        if (parseNativeProviderKind(provider_name)) |native_kind| {
+            if (NativeProviderRuntime.init(alloc, native_kind, hooks.auth())) |nr| {
+                native_rt = nr;
+                has_native_rt = true;
+                if (el) |*e| native_rt.setEventLoop(e);
+                provider = native_rt.asProvider();
+            } else |err| {
+                missing_provider.msg = missingProviderMsgForInitErr(native_kind, err);
+                provider = missing_provider.asProvider();
             }
-            st = .init_store;
-            continue :fsm;
-        },
-        .init_store => {
-            // Headless modes (print/json) disable durable session writes
-            // by default. The user must opt in via --continue, --resume,
-            // or an explicit session ID.  --no-session always wins.
-            const headless_default = run_cmd.session == .auto and
-                core.policy.SessionPersist.forMode(run_cmd.mode) == .off;
-            if (run_cmd.no_session or headless_default) {
-                sid = try newSid(alloc);
-                store = null_store_impl.asSessionStore();
-            } else {
-                const plan = try resolveSessionPlan(alloc, run_cmd);
-                sid = plan.sid;
-                session_dir_path = plan.dir_path;
+        } else {
+            missing_provider.msg = unsupported_native_provider_msg;
+            provider = missing_provider.asProvider();
+        }
+    }
 
-                try core.fs_secure.ensureDirPath(plan.dir_path);
-                var session_dir = try std.fs.cwd().openDir(plan.dir_path, .{ .iterate = true });
-                errdefer session_dir.close();
-                core.session.cleanOrphanTmpFiles(session_dir);
-                fs_store_impl = try core.session.fs_store.Store.init(.{
-                    .alloc = alloc,
-                    .dir = session_dir,
-                    .flush = .{
-                        .always = {},
-                    },
-                    .replay = .{},
-                });
-                store = fs_store_impl.asSessionStore();
-            }
-            st = .dispatch;
-            continue :fsm;
-        },
-        .dispatch => {
-            const sess_store = store.?;
-            const sys_prompt = try buildSystemPrompt(alloc, run_cmd, home);
-            defer if (sys_prompt) |sp| alloc.free(sp);
+    // Init store
+    // Headless modes (print/json) disable durable session writes
+    // by default. The user must opt in via --continue, --resume,
+    // or an explicit session ID.  --no-session always wins.
+    const headless_default = run_cmd.session == .auto and
+        core.policy.SessionPersist.forMode(run_cmd.mode) == .off;
+    if (run_cmd.no_session or headless_default) {
+        sid = try newSid(alloc);
+        store = null_store_impl.asSessionStore();
+    } else {
+        const plan = try resolveSessionPlan(alloc, run_cmd);
+        sid = plan.sid;
+        session_dir_path = plan.dir_path;
 
-            switch (run_cmd.mode) {
-                .print => try runPrint(
-                    alloc,
-                    run_cmd,
-                    sid,
-                    provider,
-                    sess_store,
-                    &pol,
-                    &tools_rt,
-                    writer,
-                    sys_prompt,
-                    audit_hooks,
-                ),
-                .json => try runJson(
-                    alloc,
-                    run_cmd,
-                    sid,
-                    provider,
-                    sess_store,
-                    &pol,
-                    &tools_rt,
-                    reader,
-                    writer,
-                    sys_prompt,
-                    hooks,
-                ),
-                .tui => try runTui(
-                    alloc,
-                    run_cmd,
-                    &sid,
-                    provider,
-                    sess_store,
-                    &pol,
-                    &tools_rt,
-                    reader,
-                    writer,
-                    session_dir_path,
-                    run_cmd.no_session,
-                    sys_prompt,
-                    has_native_rt and native_rt.isSub(),
-                    hooks,
-                    tui_hooks,
-                ),
-                .rpc => try runRpc(
-                    alloc,
-                    run_cmd,
-                    &sid,
-                    provider,
-                    sess_store,
-                    &pol,
-                    &tools_rt,
-                    reader,
-                    writer,
-                    session_dir_path,
-                    run_cmd.no_session,
-                    sys_prompt,
-                    hooks,
-                ),
-            }
-            st = .done;
-            continue :fsm;
-        },
-        .done => break :fsm,
-    };
+        try core.fs_secure.ensureDirPath(plan.dir_path);
+        var session_dir = try std.fs.cwd().openDir(plan.dir_path, .{ .iterate = true });
+        errdefer session_dir.close();
+        core.session.cleanOrphanTmpFiles(session_dir);
+        fs_store_impl = try core.session.fs_store.Store.init(.{
+            .alloc = alloc,
+            .dir = session_dir,
+            .flush = .{
+                .always = {},
+            },
+            .replay = .{},
+        });
+        store = fs_store_impl.asSessionStore();
+    }
+
+    // Dispatch
+    {
+        const sess_store = store.?;
+        const sys_prompt = try buildSystemPrompt(alloc, run_cmd, home);
+        defer if (sys_prompt) |sp| alloc.free(sp);
+
+        switch (run_cmd.mode) {
+            .print => try runPrint(
+                alloc,
+                run_cmd,
+                sid,
+                provider,
+                sess_store,
+                &pol,
+                &tools_rt,
+                writer,
+                sys_prompt,
+                audit_hooks,
+            ),
+            .json => try runJson(
+                alloc,
+                run_cmd,
+                sid,
+                provider,
+                sess_store,
+                &pol,
+                &tools_rt,
+                reader,
+                writer,
+                sys_prompt,
+                hooks,
+            ),
+            .tui => try runTui(
+                alloc,
+                run_cmd,
+                &sid,
+                provider,
+                sess_store,
+                &pol,
+                &tools_rt,
+                reader,
+                writer,
+                session_dir_path,
+                run_cmd.no_session,
+                sys_prompt,
+                has_native_rt and native_rt.isSub(),
+                hooks,
+                tui_hooks,
+            ),
+            .rpc => try runRpc(
+                alloc,
+                run_cmd,
+                &sid,
+                provider,
+                sess_store,
+                &pol,
+                &tools_rt,
+                reader,
+                writer,
+                session_dir_path,
+                run_cmd.no_session,
+                sys_prompt,
+                hooks,
+            ),
+        }
+    }
 
     return sid;
 }
@@ -2612,9 +2547,9 @@ fn runTui(
             ui.clearTranscript();
         }
         if (cmd == .copy) {
-            try runtimeCtlStart(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
+            try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .start, null, &.{});
             try copyLastResponse(alloc, &ui);
-            try runtimeCtlSuccess(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
+            try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
         }
         if (cmd == .cost) {
             try showCost(alloc, &ui);
@@ -2773,7 +2708,7 @@ fn runTui(
                                 switch (ui.ov.?.kind) {
                                     .model => {
                                         const argv: core.audit.Str = .{ .text = sel, .vis = .@"pub" };
-                                        try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
+                                        try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
                                         try replaceOwnedText(alloc, &model, &model_owned, sel);
                                         const attrs = [_]core.audit.Attribute{
                                             .{
@@ -2782,7 +2717,7 @@ fn runTui(
                                                 .val = .{ .str = provider_label },
                                             },
                                         };
-                                        try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
+                                        try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
                                         ui.panels.ctx_limit = modelCtxWindow(model);
                                         try ui.setModel(model);
                                         ui.ov.?.deinit(alloc);
@@ -2790,7 +2725,7 @@ fn runTui(
                                     },
                                     .session => {
                                         const argv: core.audit.Str = .{ .text = sel, .vis = .mask };
-                                        try runtimeCtlStart(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+                                        try runtimeCtlAudit(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, .start, null, &.{});
                                         const next_sid = try alloc.dupe(u8, sel);
                                         const prev_sid = sid.*;
                                         sid.* = next_sid;
@@ -2802,7 +2737,7 @@ fn runTui(
                                         };
                                         alloc.free(prev_sid);
                                         if (ok) {
-                                            try runtimeCtlSuccess(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+                                            try runtimeCtlAudit(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, .ok, null, &.{});
                                             const msg = try std.fmt.allocPrint(alloc, "resumed session {s}", .{sid.*});
                                             defer alloc.free(msg);
                                             try ui.tr.infoText(msg);
@@ -2816,7 +2751,7 @@ fn runTui(
                                         applySettingsToggle(&ui, ui.ov.?.sel, ui.ov.?.getToggle(ui.ov.?.sel) orelse false, &auto_compact_on);
                                     },
                                     .fork => {
-                                        try runtimeCtlStart(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, &.{});
+                                        try runtimeCtlAudit(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, .start, null, &.{});
                                         const next_sid = try newSid(alloc);
                                         errdefer alloc.free(next_sid);
                                         if (session_dir_path) |sdp| {
@@ -2830,7 +2765,7 @@ fn runTui(
                                         };
                                         alloc.free(prev_sid);
                                         try ui.tr.infoText("[forked session]");
-                                        try runtimeCtlSuccess(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, &.{});
+                                        try runtimeCtlAudit(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), null, .ok, null, &.{});
                                         ui.ov.?.deinit(alloc);
                                         ui.ov = null;
                                     },
@@ -2982,9 +2917,9 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .copy) {
-                                try runtimeCtlStart(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
+                                try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .start, null, &.{});
                                 try copyLastResponse(alloc, &ui);
-                                try runtimeCtlSuccess(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
+                                try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
                                 try ui.draw(out);
                                 continue;
                             }
@@ -3163,7 +3098,7 @@ fn runTui(
                         },
                         .ext_editor => {
                             if (pre) |p| alloc.free(p);
-                            try runtimeCtlStart(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, &.{});
+                            try runtimeCtlAudit(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, .start, null, &.{});
                             tui_term.restore(stdin_fd);
                             const ed_result = openExtEditor(alloc, ui.editorText());
                             _ = tui_term.enableRaw(stdin_fd);
@@ -3172,14 +3107,14 @@ fn runTui(
                                     defer alloc.free(txt);
                                     try ui.ed.setText(txt);
                                 }
-                                try runtimeCtlSuccess(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, &.{});
+                                try runtimeCtlAudit(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
                             } else |err| {
                                 const detail = try report.inlineMsg(alloc, err);
                                 defer alloc.free(detail);
                                 const msg = try std.fmt.allocPrint(alloc, "[editor failed: {s}]", .{detail});
                                 defer alloc.free(msg);
                                 try ui.tr.infoText(msg);
-                                try runtimeCtlFail(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, .{ .text = "editor failed", .vis = .@"pub" }, &.{});
+                                try runtimeCtlAudit(&ctl_audit, alloc, "editor", .cmd, runtimeCfgResName(), null, .fail, .{ .text = "editor failed", .vis = .@"pub" }, &.{});
                             }
                             try ui.draw(out);
                         },
@@ -3446,9 +3381,9 @@ fn runTui(
                 continue;
             }
             if (cmd == .copy) {
-                try runtimeCtlStart(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .start, null, &.{});
                 try copyLastResponse(alloc, &ui);
-                try runtimeCtlSuccess(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
                 try ui.draw(out);
                 cmd_ct += 1;
                 continue;
@@ -3682,18 +3617,19 @@ fn runRpc(
                             .val = .{ .str = req.provider.? },
                         },
                     };
-                    try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &start_attrs);
+                    try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &start_attrs);
                 } else {
-                    try runtimeCtlStart(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
+                    try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
                 }
                 if (next.len == 0) {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "model",
                         .cfg,
                         runtimeCfgResName(),
                         null,
+                        .fail,
                         .{ .text = "missing model value", .vis = .mask },
                         &.{},
                     );
@@ -3716,7 +3652,7 @@ fn runRpc(
                         .val = .{ .str = provider_label },
                     },
                 };
-                try runtimeCtlSuccess(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &done_attrs);
+                try runtimeCtlAudit(&ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &done_attrs);
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -3728,15 +3664,16 @@ fn runRpc(
             .provider => {
                 const next = req.provider orelse req.arg orelse "";
                 const argv = if (next.len > 0) core.audit.Str{ .text = next, .vis = .@"pub" } else null;
-                try runtimeCtlStart(&ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
                 if (next.len == 0) {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "provider",
                         .cfg,
                         runtimeCfgResName(),
                         null,
+                        .fail,
                         .{ .text = "missing provider value", .vis = .mask },
                         &.{},
                     );
@@ -3749,7 +3686,7 @@ fn runRpc(
                     continue;
                 }
                 try replaceOwnedText(alloc, &provider_label, &provider_owned, next);
-                try runtimeCtlSuccess(&ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .ok, null, &.{});
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -3761,15 +3698,16 @@ fn runRpc(
                 const raw = req.tools orelse req.arg orelse "";
                 if (raw.len != 0) {
                     const argv: core.audit.Str = .{ .text = raw, .vis = .@"pub" };
-                    try runtimeCtlStart(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &.{});
+                    try runtimeCtlAudit(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
                     const mask = parseCmdToolMask(raw) catch {
-                        try runtimeCtlFail(
+                        try runtimeCtlAudit(
                             &ctl_audit,
                             alloc,
                             "tools",
                             .cfg,
                             runtimeCfgResName(),
                             argv,
+                            .fail,
                             .{ .text = "invalid tools value", .vis = .mask },
                             &.{},
                         );
@@ -3794,7 +3732,7 @@ fn runRpc(
                             .val = .{ .str = tool_csv },
                         },
                     };
-                    try runtimeCtlSuccess(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &attrs);
+                    try runtimeCtlAudit(&ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
                 }
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
@@ -3855,15 +3793,16 @@ fn runRpc(
                 });
             },
             .upgrade => {
-                try runtimeCtlStart(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, .start, null, &.{});
                 const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks, home)) catch |err| {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "upgrade",
                         .cmd,
                         runtimeUpgradeResName(),
                         null,
+                        .fail,
                         .{ .text = @errorName(err), .vis = .mask },
                         &.{},
                     );
@@ -3879,7 +3818,7 @@ fn runRpc(
                 };
                 defer outcome.deinit(alloc);
                 if (outcome.ok) {
-                    try runtimeCtlSuccess(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+                    try runtimeCtlAudit(&ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, .ok, null, &.{});
                     try writeJsonLine(alloc, out, .{
                         .type = "rpc_upgrade",
                         .id = req.id,
@@ -3887,13 +3826,14 @@ fn runRpc(
                         .msg = outcome.msg,
                     });
                 } else {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "upgrade",
                         .cmd,
                         runtimeUpgradeResName(),
                         null,
+                        .fail,
                         .{ .text = outcome.msg, .vis = .mask },
                         &.{},
                     );
@@ -3906,11 +3846,11 @@ fn runRpc(
                 }
             },
             .new => {
-                try runtimeCtlStart(&ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, .start, null, &.{});
                 const next_sid = try newSid(alloc);
                 alloc.free(sid.*);
                 sid.* = next_sid;
-                try runtimeCtlSuccess(&ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, .ok, null, &.{});
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_ack",
                     .id = req.id,
@@ -3922,16 +3862,17 @@ fn runRpc(
                 const token = req.session_path orelse req.session orelse req.sid orelse req.arg;
                 if (token) |raw| {
                     const argv: core.audit.Str = .{ .text = raw, .vis = .mask };
-                    try runtimeCtlStart(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+                    try runtimeCtlAudit(&ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, .start, null, &.{});
                 }
                 applyResumeSid(alloc, sid, session_dir_path, no_session, token) catch |err| {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "resume",
                         .sess,
                         runtimeSessResName(),
                         if (token) |raw| .{ .text = raw, .vis = .mask } else null,
+                        .fail,
                         .{ .text = @errorName(err), .vis = .mask },
                         &.{},
                     );
@@ -3945,13 +3886,15 @@ fn runRpc(
                     });
                     continue;
                 };
-                try runtimeCtlSuccess(
+                try runtimeCtlAudit(
                     &ctl_audit,
                     alloc,
                     "resume",
                     .sess,
                     runtimeSessResName(),
                     if (token) |raw| .{ .text = raw, .vis = .mask } else null,
+                    .ok,
+                    null,
                     &.{},
                 );
                 try writeJsonLine(alloc, out, .{
@@ -4004,16 +3947,17 @@ fn runRpc(
                 const fork_arg = req.sid orelse req.arg;
                 if (fork_arg) |raw| {
                     const argv: core.audit.Str = .{ .text = raw, .vis = .mask };
-                    try runtimeCtlStart(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, &.{});
+                    try runtimeCtlAudit(&ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, .start, null, &.{});
                 }
                 applyForkSid(alloc, sid, session_dir_path, no_session, req.sid orelse req.arg) catch |err| {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "fork",
                         .sess,
                         runtimeSessResName(),
                         if (fork_arg) |raw| .{ .text = raw, .vis = .mask } else null,
+                        .fail,
                         .{ .text = @errorName(err), .vis = .mask },
                         &.{},
                     );
@@ -4027,13 +3971,15 @@ fn runRpc(
                     });
                     continue;
                 };
-                try runtimeCtlSuccess(
+                try runtimeCtlAudit(
                     &ctl_audit,
                     alloc,
                     "fork",
                     .sess,
                     runtimeSessResName(),
                     if (fork_arg) |raw| .{ .text = raw, .vis = .mask } else null,
+                    .ok,
+                    null,
                     &.{},
                 );
                 try writeJsonLine(alloc, out, .{
@@ -4044,15 +3990,16 @@ fn runRpc(
                 });
             },
             .compact => {
-                try runtimeCtlStart(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &.{});
+                try runtimeCtlAudit(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, .start, null, &.{});
                 const session_dir = requireSessionDir(session_dir_path, no_session) catch {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "compact",
                         .sess,
                         runtimeSessResName(),
                         null,
+                        .fail,
                         .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
                         &.{},
                     );
@@ -4069,13 +4016,14 @@ fn runRpc(
                 var dir = try std.fs.cwd().openDir(session_dir, .{});
                 defer dir.close();
                 const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms()) catch |err| {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         &ctl_audit,
                         alloc,
                         "compact",
                         .sess,
                         runtimeSessResName(),
                         null,
+                        .fail,
                         .{ .text = @errorName(err), .vis = .mask },
                         &.{},
                     );
@@ -4093,7 +4041,7 @@ fn runRpc(
                         .val = .{ .uint = @intCast(ck.out_lines) },
                     },
                 };
-                try runtimeCtlSuccess(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &attrs);
+                try runtimeCtlAudit(&ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, .ok, null, &attrs);
                 try writeJsonLine(alloc, out, .{
                     .type = "rpc_compact",
                     .id = req.id,
@@ -4529,7 +4477,7 @@ fn handleSlashCommand(
         .model => {
             if (arg.len == 0) return .select_model;
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
-            try runtimeCtlStart(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
             try replaceOwnedText(alloc, model, model_owned, arg);
             const attrs = [_]core.audit.Attribute{
                 .{
@@ -4538,7 +4486,7 @@ fn handleSlashCommand(
                     .val = .{ .str = provider.* },
                 },
             };
-            try runtimeCtlSuccess(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, &attrs);
+            try runtimeCtlAudit(ctl_audit, alloc, "model", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
             try writeTextLine(alloc, out, "model set to {s}\n", .{model.*});
         },
         .provider => {
@@ -4547,23 +4495,24 @@ fn handleSlashCommand(
                 return .handled;
             }
             const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
-            try runtimeCtlStart(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
             try replaceOwnedText(alloc, provider, provider_owned, arg);
-            try runtimeCtlSuccess(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "provider", .cfg, runtimeCfgResName(), argv, .ok, null, &.{});
             try writeTextLine(alloc, out, "provider set to {s}\n", .{provider.*});
         },
         .tools => {
             if (arg.len != 0) {
                 const argv: core.audit.Str = .{ .text = arg, .vis = .@"pub" };
-                try runtimeCtlStart(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &.{});
+                try runtimeCtlAudit(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, .start, null, &.{});
                 const mask = parseCmdToolMask(arg) catch {
-                    try runtimeCtlFail(
+                    try runtimeCtlAudit(
                         ctl_audit,
                         alloc,
                         "tools",
                         .cfg,
                         runtimeCfgResName(),
                         argv,
+                        .fail,
                         .{ .text = "invalid tools value", .vis = .mask },
                         &.{},
                     );
@@ -4580,7 +4529,7 @@ fn handleSlashCommand(
                         .val = .{ .str = tool_csv },
                     },
                 };
-                try runtimeCtlSuccess(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, &attrs);
+                try runtimeCtlAudit(ctl_audit, alloc, "tools", .cfg, runtimeCfgResName(), argv, .ok, null, &attrs);
                 try writeTextLine(alloc, out, "tools set to {s}\n", .{tool_csv});
                 return .handled;
             }
@@ -4606,15 +4555,16 @@ fn handleSlashCommand(
             try out.writeAll(bg_out);
         },
         .upgrade => {
-            try runtimeCtlStart(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, .start, null, &.{});
             const outcome = audit_hooks.run_upgrade(alloc, updateAuditHooks(audit_hooks, home)) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "upgrade",
                     .cmd,
                     runtimeUpgradeResName(),
                     null,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4622,15 +4572,16 @@ fn handleSlashCommand(
             };
             defer outcome.deinit(alloc);
             if (outcome.ok) {
-                try runtimeCtlSuccess(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, &.{});
+                try runtimeCtlAudit(ctl_audit, alloc, "upgrade", .cmd, runtimeUpgradeResName(), null, .ok, null, &.{});
             } else {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "upgrade",
                     .cmd,
                     runtimeUpgradeResName(),
                     null,
+                    .fail,
                     .{ .text = outcome.msg, .vis = .mask },
                     &.{},
                 );
@@ -4638,25 +4589,26 @@ fn handleSlashCommand(
             try out.writeAll(outcome.msg);
         },
         .new => {
-            try runtimeCtlStart(ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, .start, null, &.{});
             const next_sid = try newSid(alloc);
             alloc.free(sid.*);
             sid.* = next_sid;
-            try runtimeCtlSuccess(ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "new", .sess, runtimeSessResName(), null, .ok, null, &.{});
             try writeTextLine(alloc, out, "new session {s}\n", .{sid.*});
         },
         .@"resume" => {
             if (arg.len == 0) return .select_session;
             const argv: core.audit.Str = .{ .text = arg, .vis = .mask };
-            try runtimeCtlStart(ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, .start, null, &.{});
             applyResumeSid(alloc, sid, session_dir_path, no_session, arg) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "resume",
                     .sess,
                     runtimeSessResName(),
                     argv,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4665,7 +4617,7 @@ fn handleSlashCommand(
                 try out.writeAll(em);
                 return .handled;
             };
-            try runtimeCtlSuccess(ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "resume", .sess, runtimeSessResName(), argv, .ok, null, &.{});
             try writeTextLine(alloc, out, "resumed session {s}\n", .{sid.*});
             return .resumed;
         },
@@ -4684,15 +4636,16 @@ fn handleSlashCommand(
         .fork => {
             if (arg.len == 0) return .select_fork;
             const argv: core.audit.Str = .{ .text = arg, .vis = .mask };
-            try runtimeCtlStart(ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, .start, null, &.{});
             applyForkSid(alloc, sid, session_dir_path, no_session, arg) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "fork",
                     .sess,
                     runtimeSessResName(),
                     argv,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4701,19 +4654,20 @@ fn handleSlashCommand(
                 try out.writeAll(em);
                 return .handled;
             };
-            try runtimeCtlSuccess(ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "fork", .sess, runtimeSessResName(), argv, .ok, null, &.{});
             try writeTextLine(alloc, out, "forked session {s}\n", .{sid.*});
         },
         .compact => {
-            try runtimeCtlStart(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, .start, null, &.{});
             const session_dir = requireSessionDir(session_dir_path, no_session) catch {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "compact",
                     .sess,
                     runtimeSessResName(),
                     null,
+                    .fail,
                     .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
                     &.{},
                 );
@@ -4725,13 +4679,14 @@ fn handleSlashCommand(
             var dir = try std.fs.cwd().openDir(session_dir, .{});
             defer dir.close();
             const ck = core.session.compactSession(alloc, dir, sid.*, audit_hooks.now_ms()) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "compact",
                     .sess,
                     runtimeSessResName(),
                     null,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4749,21 +4704,22 @@ fn handleSlashCommand(
                     .val = .{ .uint = @intCast(ck.out_lines) },
                 },
             };
-            try runtimeCtlSuccess(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, &attrs);
+            try runtimeCtlAudit(ctl_audit, alloc, "compact", .sess, runtimeSessResName(), null, .ok, null, &attrs);
             try writeTextLine(alloc, out, "compacted in={d} out={d}\n", .{ ck.in_lines, ck.out_lines });
             return .compacted;
         },
         .@"export" => {
             const argv = if (arg.len > 0) core.audit.Str{ .text = arg, .vis = .mask } else null;
-            try runtimeCtlStart(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, .start, null, &.{});
             const session_dir = requireSessionDir(session_dir_path, no_session) catch {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "export",
                     .file,
                     runtimeExportResName(),
                     argv,
+                    .fail,
                     .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
                     &.{},
                 );
@@ -4776,13 +4732,14 @@ fn handleSlashCommand(
             defer dir.close();
             const out_path = if (arg.len > 0) arg else null;
             const path = core.session.@"export".toMarkdownAudited(alloc, dir, sid.*, out_path, exportAuditHooks(audit_hooks)) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "export",
                     .file,
                     runtimeExportResName(),
                     argv,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4799,7 +4756,7 @@ fn handleSlashCommand(
                     .val = .{ .str = path },
                 },
             };
-            try runtimeCtlSuccess(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, &attrs);
+            try runtimeCtlAudit(ctl_audit, alloc, "export", .file, runtimeExportResName(), argv, .ok, null, &attrs);
             try writeTextLine(alloc, out, "exported to {s}\n", .{path});
         },
         .settings => return .select_settings,
@@ -4914,15 +4871,16 @@ fn handleSlashCommand(
         },
         .reload => return .reload,
         .share => {
-            try runtimeCtlStart(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, &.{});
+            try runtimeCtlAudit(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, .start, null, &.{});
             const session_dir = requireSessionDir(session_dir_path, no_session) catch {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "share",
                     .net,
                     runtimeShareResName(),
                     null,
+                    .fail,
                     .{ .text = @errorName(error.SessionDisabled), .vis = .mask },
                     &.{},
                 );
@@ -4934,13 +4892,14 @@ fn handleSlashCommand(
             var dir = try std.fs.cwd().openDir(session_dir, .{});
             defer dir.close();
             const md_path = core.session.@"export".toMarkdownAudited(alloc, dir, sid.*, null, exportAuditHooks(audit_hooks)) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "share",
                     .net,
                     runtimeShareResName(),
                     null,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4951,13 +4910,14 @@ fn handleSlashCommand(
             };
             defer alloc.free(md_path);
             const gist_url = audit_hooks.share_gist(alloc, md_path) catch |err| {
-                try runtimeCtlFail(
+                try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
                     "share",
                     .net,
                     runtimeShareResName(),
                     null,
+                    .fail,
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
@@ -4974,7 +4934,7 @@ fn handleSlashCommand(
                     .val = .{ .str = gist_url },
                 },
             };
-            try runtimeCtlSuccess(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, &attrs);
+            try runtimeCtlAudit(ctl_audit, alloc, "share", .net, runtimeShareResName(), null, .ok, null, &attrs);
             try writeTextLine(alloc, out, "shared: {s}\n", .{gist_url});
         },
         .changelog => {

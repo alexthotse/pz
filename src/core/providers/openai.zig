@@ -2,364 +2,247 @@
 const std = @import("std");
 const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
-const audit = @import("../audit.zig");
-const utf8 = @import("../utf8.zig");
 const hc = @import("http_client.zig");
 
-const api_host = "api.openai.com";
-const api_path = "/v1/responses";
 const default_max_output_tokens: u32 = 16384;
 
-pub const Client = struct {
-    alloc: std.mem.Allocator,
-    auth: auth_mod.Result,
-    http: std.http.Client,
-    ca_file: ?[]u8,
-    el: ?*hc.EventLoop = null,
-    cancel: ?providers.CancelPoll = null,
+pub const Cfg = struct {
+    pub const provider_tag = auth_mod.Provider.openai;
+    pub const api_host = "api.openai.com";
+    pub const api_path = "/v1/responses";
 
-    pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Client {
-        var auth_res = try auth_mod.loadForProviderWithHooks(alloc, .openai, hooks);
-        errdefer auth_res.deinit();
-        const ca_dup = if (hooks.ca_file) |path| try alloc.dupe(u8, path) else null;
-        errdefer if (ca_dup) |path| alloc.free(path);
-        return .{
-            .alloc = alloc,
-            .auth = auth_res,
-            .http = .{ .allocator = alloc },
-            .ca_file = ca_dup,
-        };
+    pub const ExtFields = struct {
+        saw_tool_call: bool,
+        tool_call_id: std.ArrayListUnmanaged(u8),
+    };
+
+    pub fn ext_init() ExtFields {
+        return .{ .saw_tool_call = false, .tool_call_id = .{} };
     }
 
-    pub fn deinit(self: *Client) void {
-        self.http.deinit();
-        self.auth.deinit();
-        if (self.ca_file) |path| self.alloc.free(path);
+    pub fn ext_deinit(self: *Stream, alloc: std.mem.Allocator) void {
+        self.ext.tool_call_id.deinit(alloc);
     }
 
-    pub fn isSub(self: *const Client) bool {
-        return self.auth.auth == .oauth;
+    pub fn ext_reset(self: *Stream) void {
+        self.ext.saw_tool_call = false;
+        self.ext.tool_call_id.clearRetainingCapacity();
     }
 
-    pub fn asProvider(self: *Client) providers.Provider {
-        return providers.Provider.from(Client, self, Client.start);
-    }
-
-    fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
-        const stream = try self.alloc.create(SseStream);
-        stream.* = SseStream.initFields(self.alloc);
-        stream.el = self.el;
-        errdefer {
-            stream.arena.deinit();
-            self.alloc.destroy(stream);
+    pub fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
+        var hdrs = std.ArrayListUnmanaged(std.http.Header){};
+        try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
+        switch (auth.auth) {
+            .oauth => |oauth| {
+                const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
+                try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+            },
+            .api_key => |key| {
+                const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{key});
+                try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+            },
         }
+        return hdrs;
+    }
 
-        const ar = stream.arena.allocator();
+    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request) anyerror![]u8 {
+        return buildBodyImpl(alloc, req);
+    }
 
-        const body = try buildBody(ar, req);
-        var hdrs = try buildAuthHeaders(&self.auth, ar);
-
-        const uri = std.Uri{
-            .scheme = "https",
-            .host = .{ .raw = api_host },
-            .path = .{ .raw = api_path },
-        };
-
-        var slp = hc.RealSleeper{ .el = self.el };
-        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .openai, self.ca_file, ar, &slp, buildAuthHeaders, self.cancel);
-
-        if (stream.response.head.status != .ok) {
-            try hc.formatErrBody(stream, ar, null);
-        } else {
-            stream.body_rdr = stream.response.reader(&stream.transfer_buf);
-            stream.conn_fd = hc.connFd(stream);
-            if (stream.el) |el| {
-                if (stream.conn_fd) |fd| el.register(fd, .read) catch {}; // cleanup: propagation impossible
-            }
-        }
-
-        return providers.Stream.fromAbortable(SseStream, stream, SseStream.next, SseStream.deinit, SseStream.abort);
+    pub fn parseSseData(self: *Stream, data: []const u8) anyerror!?providers.Event {
+        return parseSseDataImpl(self, data);
     }
 };
 
-fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
-    var hdrs = std.ArrayListUnmanaged(std.http.Header){};
-    try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
-    switch (auth.auth) {
-        .oauth => |oauth| {
-            const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
-            try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
-        },
-        .api_key => |key| {
-            const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{key});
-            try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
-        },
-    }
-    return hdrs;
-}
-
-const SseStream = struct {
-    alloc: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
-    req: std.http.Client.Request,
-    response: std.http.Client.Response,
-    send_buf: [1024]u8,
-    transfer_buf: [16384]u8,
-    redir_buf: [0]u8,
-    body_rdr: ?*std.Io.Reader,
-
-    // Event loop integration
-    el: ?*hc.EventLoop,
-    conn_fd: ?std.posix.fd_t,
-
-    in_tok: u64,
-    out_tok: u64,
-    cache_read: u64,
-    saw_tool_call: bool,
-    tool_call_id: std.ArrayListUnmanaged(u8),
-    tool_name: std.ArrayListUnmanaged(u8),
-    tool_args: std.ArrayListUnmanaged(u8),
-    in_tool: bool,
-    done: bool,
-    err_mode: bool,
-    err_text: ?[]const u8,
-    pending: ?providers.Event,
-
-    fn initFields(alloc: std.mem.Allocator) SseStream {
-        return .{
-            .alloc = alloc,
-            .arena = std.heap.ArenaAllocator.init(alloc),
-            .req = undefined,
-            .response = undefined,
-            .send_buf = undefined,
-            .transfer_buf = undefined,
-            .redir_buf = .{},
-            .body_rdr = null,
-            .el = null,
-            .conn_fd = null,
-            .in_tok = 0,
-            .out_tok = 0,
-            .cache_read = 0,
-            .saw_tool_call = false,
-            .tool_call_id = .{},
-            .tool_name = .{},
-            .tool_args = .{},
-            .in_tool = false,
-            .done = false,
-            .err_mode = false,
-            .err_text = null,
-            .pending = null,
-        };
-    }
-
-    fn next(self: *SseStream) anyerror!?providers.Event {
-        return hc.sseNext(self);
-    }
-
-    pub fn parseSseData(self: *SseStream, data: []const u8) !?providers.Event {
-        const ar = self.arena.allocator();
-        var parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
-            .allocate = .alloc_always,
-        }) catch return null;
-        _ = &parsed;
-
-        const root = switch (parsed.value) {
-            .object => |obj| obj,
-            else => return null,
-        };
-
-        const ev_type = strGet(root, "type") orelse return null;
-        const EventType = enum {
-            output_item_added,
-            output_item_done,
-            tool_args_delta,
-            tool_args_done,
-            output_text_delta,
-            refusal_delta,
-            reasoning_delta,
-            completed,
-            failed,
-            error_ev,
-        };
-        const event_map = std.StaticStringMap(EventType).initComptime(.{
-            .{ "response.output_item.added", .output_item_added },
-            .{ "response.output_item.done", .output_item_done },
-            .{ "response.function_call_arguments.delta", .tool_args_delta },
-            .{ "response.function_call_arguments.done", .tool_args_done },
-            .{ "response.output_text.delta", .output_text_delta },
-            .{ "response.refusal.delta", .refusal_delta },
-            .{ "response.reasoning_summary_text.delta", .reasoning_delta },
-            .{ "response.completed", .completed },
-            .{ "response.failed", .failed },
-            .{ "error", .error_ev },
-        });
-
-        const resolved = event_map.get(ev_type) orelse return null;
-        return switch (resolved) {
-            .output_item_added => self.onOutputItemAdded(root),
-            .output_item_done => self.onOutputItemDone(root),
-            .tool_args_delta => self.onToolArgsDelta(root),
-            .tool_args_done => self.onToolArgsDone(root),
-            .output_text_delta => self.onTextDelta(root),
-            .refusal_delta => self.onTextDelta(root),
-            .reasoning_delta => self.onReasoningDelta(root),
-            .completed => self.onCompleted(root),
-            .failed => self.onFailed(),
-            .error_ev => self.onError(root),
-        };
-    }
-
-    fn onOutputItemAdded(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const item = objGet(root, "item") orelse return null;
-        const item_type = strGet(item, "type") orelse return null;
-        if (!std.mem.eql(u8, item_type, "function_call")) return null;
-
-        self.tool_call_id.clearRetainingCapacity();
-        self.tool_name.clearRetainingCapacity();
-        self.tool_args.clearRetainingCapacity();
-
-        if (strGet(item, "call_id")) |call_id| try self.tool_call_id.appendSlice(self.alloc, call_id);
-        if (strGet(item, "name")) |name| try self.tool_name.appendSlice(self.alloc, name);
-        if (strGet(item, "arguments")) |args| try self.tool_args.appendSlice(self.alloc, args);
-        self.in_tool = true;
-        return null;
-    }
-
-    fn onToolArgsDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        if (!self.in_tool) return null;
-        const delta = strGet(root, "delta") orelse return null;
-        try self.tool_args.appendSlice(self.alloc, delta);
-        return null;
-    }
-
-    fn onToolArgsDone(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        if (!self.in_tool) return null;
-        const args = strGet(root, "arguments") orelse return null;
-        self.tool_args.clearRetainingCapacity();
-        try self.tool_args.appendSlice(self.alloc, args);
-        return null;
-    }
-
-    fn onOutputItemDone(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const item = objGet(root, "item") orelse return null;
-        const item_type = strGet(item, "type") orelse return null;
-        if (!std.mem.eql(u8, item_type, "function_call")) return null;
-
-        if (strGet(item, "call_id")) |call_id| {
-            self.tool_call_id.clearRetainingCapacity();
-            try self.tool_call_id.appendSlice(self.alloc, call_id);
-        }
-        if (strGet(item, "name")) |name| {
-            self.tool_name.clearRetainingCapacity();
-            try self.tool_name.appendSlice(self.alloc, name);
-        }
-        if (strGet(item, "arguments")) |args| {
-            self.tool_args.clearRetainingCapacity();
-            try self.tool_args.appendSlice(self.alloc, args);
-        }
-
-        const id = self.tool_call_id.items;
-        if (id.len == 0) return null;
-
-        const name = self.tool_name.items;
-        const args = if (self.tool_args.items.len > 0) self.tool_args.items else "{}";
-
-        self.in_tool = false;
-        self.saw_tool_call = true;
-
-        const ar = self.arena.allocator();
-        return .{ .tool_call = .{
-            .id = try ar.dupe(u8, id),
-            .name = try ar.dupe(u8, name),
-            .args = try ar.dupe(u8, args),
-        } };
-    }
-
-    fn onTextDelta(_: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const delta = strGet(root, "delta") orelse return null;
-        return .{ .text = delta };
-    }
-
-    fn onReasoningDelta(_: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const delta = strGet(root, "delta") orelse return null;
-        return .{ .thinking = delta };
-    }
-
-    fn onCompleted(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const response = objGet(root, "response") orelse return null;
-        const usage = objGet(response, "usage");
-
-        const in_tok = if (usage) |u| jsonU64(u.get("input_tokens")) else 0;
-        const out_tok = if (usage) |u| jsonU64(u.get("output_tokens")) else 0;
-        const total_tok = if (usage) |u| jsonU64(u.get("total_tokens")) else 0;
-        const cache_read = if (usage) |u| blk: {
-            const details = objGet(u, "input_tokens_details") orelse break :blk 0;
-            break :blk jsonU64(details.get("cached_tokens"));
-        } else 0;
-
-        self.in_tok = in_tok;
-        self.out_tok = out_tok;
-        self.cache_read = cache_read;
-
-        var stop_reason = mapStopStatus(strGet(response, "status"));
-        if (self.saw_tool_call and stop_reason == .done) stop_reason = .tool;
-
-        self.pending = .{ .stop = .{ .reason = stop_reason } };
-        self.done = true;
-
-        const usage_ev: providers.Event = .{ .usage = .{
-            .in_tok = in_tok,
-            .out_tok = out_tok,
-            .tot_tok = if (total_tok > 0) total_tok else in_tok + out_tok + cache_read,
-            .cache_read = cache_read,
-            .cache_write = 0,
-        } };
-        return usage_ev;
-    }
-
-    fn onFailed(self: *SseStream) !?providers.Event {
-        self.done = true;
-        self.pending = .{ .stop = .{ .reason = .err } };
-        return .{ .err = "response failed" };
-    }
-
-    fn onError(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const err_obj = objGet(root, "error");
-        const msg = if (strGet(root, "message")) |m|
-            m
-        else if (err_obj) |eo|
-            strGet(eo, "message") orelse "unknown error"
-        else
-            "unknown error";
-        self.done = true;
-        self.pending = .{ .stop = .{ .reason = .err } };
-        return .{ .err = msg };
-    }
-
-    fn deinit(self: *SseStream) void {
-        if (self.el) |el| {
-            if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
-        }
-        const alloc = self.alloc;
-        self.tool_call_id.deinit(alloc);
-        self.tool_name.deinit(alloc);
-        self.tool_args.deinit(alloc);
-        self.req.deinit();
-        self.arena.deinit();
-        alloc.destroy(self);
-    }
-
-    fn abort(self: *SseStream) void {
-        if (self.req.connection) |conn| {
-            std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
-        }
-    }
-};
+pub const Client = hc.SseClient(Cfg);
+const Stream = hc.SseStream(Cfg);
 
 const objGet = hc.objGet;
 const strGet = hc.strGet;
 const jsonU64 = hc.jsonU64;
 const sanitizeUtf8 = hc.sanitizeUtf8;
+const writeJsonLossy = hc.writeJsonLossy;
+
+// ── SSE parsing ────────────────────────────────────────────────────────
+
+fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
+    const ar = self.arena.allocator();
+    const parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
+        .allocate = .alloc_always,
+    }) catch return null;
+
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return null,
+    };
+
+    const ev_type = strGet(root, "type") orelse return null;
+    const EventType = enum {
+        output_item_added,
+        output_item_done,
+        tool_args_delta,
+        tool_args_done,
+        output_text_delta,
+        refusal_delta,
+        reasoning_delta,
+        completed,
+        failed,
+        error_ev,
+    };
+    const event_map = std.StaticStringMap(EventType).initComptime(.{
+        .{ "response.output_item.added", .output_item_added },
+        .{ "response.output_item.done", .output_item_done },
+        .{ "response.function_call_arguments.delta", .tool_args_delta },
+        .{ "response.function_call_arguments.done", .tool_args_done },
+        .{ "response.output_text.delta", .output_text_delta },
+        .{ "response.refusal.delta", .refusal_delta },
+        .{ "response.reasoning_summary_text.delta", .reasoning_delta },
+        .{ "response.completed", .completed },
+        .{ "response.failed", .failed },
+        .{ "error", .error_ev },
+    });
+
+    const resolved = event_map.get(ev_type) orelse return null;
+    return switch (resolved) {
+        .output_item_added => onOutputItemAdded(self, root),
+        .output_item_done => onOutputItemDone(self, root),
+        .tool_args_delta => onToolArgsDelta(self, root),
+        .tool_args_done => onToolArgsDone(self, root),
+        .output_text_delta => onTextDelta(root),
+        .refusal_delta => onTextDelta(root),
+        .reasoning_delta => onReasoningDelta(root),
+        .completed => onCompleted(self, root),
+        .failed => onFailed(self),
+        .error_ev => onError(self, root),
+    };
+}
+
+fn onOutputItemAdded(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const item = objGet(root, "item") orelse return null;
+    const item_type = strGet(item, "type") orelse return null;
+    if (!std.mem.eql(u8, item_type, "function_call")) return null;
+
+    self.ext.tool_call_id.clearRetainingCapacity();
+    self.tool_name.clearRetainingCapacity();
+    self.tool_args.clearRetainingCapacity();
+
+    if (strGet(item, "call_id")) |call_id| try self.ext.tool_call_id.appendSlice(self.alloc, call_id);
+    if (strGet(item, "name")) |name| try self.tool_name.appendSlice(self.alloc, name);
+    if (strGet(item, "arguments")) |args| try self.tool_args.appendSlice(self.alloc, args);
+    self.in_tool = true;
+    return null;
+}
+
+fn onToolArgsDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    if (!self.in_tool) return null;
+    const delta = strGet(root, "delta") orelse return null;
+    try self.tool_args.appendSlice(self.alloc, delta);
+    return null;
+}
+
+fn onToolArgsDone(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    if (!self.in_tool) return null;
+    const args = strGet(root, "arguments") orelse return null;
+    self.tool_args.clearRetainingCapacity();
+    try self.tool_args.appendSlice(self.alloc, args);
+    return null;
+}
+
+fn onOutputItemDone(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const item = objGet(root, "item") orelse return null;
+    const item_type = strGet(item, "type") orelse return null;
+    if (!std.mem.eql(u8, item_type, "function_call")) return null;
+
+    if (strGet(item, "call_id")) |call_id| {
+        self.ext.tool_call_id.clearRetainingCapacity();
+        try self.ext.tool_call_id.appendSlice(self.alloc, call_id);
+    }
+    if (strGet(item, "name")) |name| {
+        self.tool_name.clearRetainingCapacity();
+        try self.tool_name.appendSlice(self.alloc, name);
+    }
+    if (strGet(item, "arguments")) |args| {
+        self.tool_args.clearRetainingCapacity();
+        try self.tool_args.appendSlice(self.alloc, args);
+    }
+
+    const id = self.ext.tool_call_id.items;
+    if (id.len == 0) return null;
+
+    const name = self.tool_name.items;
+    const args = if (self.tool_args.items.len > 0) self.tool_args.items else "{}";
+
+    self.in_tool = false;
+    self.ext.saw_tool_call = true;
+
+    const ar = self.arena.allocator();
+    return .{ .tool_call = .{
+        .id = try ar.dupe(u8, id),
+        .name = try ar.dupe(u8, name),
+        .args = try ar.dupe(u8, args),
+    } };
+}
+
+fn onTextDelta(root: std.json.ObjectMap) !?providers.Event {
+    const delta = strGet(root, "delta") orelse return null;
+    return .{ .text = delta };
+}
+
+fn onReasoningDelta(root: std.json.ObjectMap) !?providers.Event {
+    const delta = strGet(root, "delta") orelse return null;
+    return .{ .thinking = delta };
+}
+
+fn onCompleted(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const response = objGet(root, "response") orelse return null;
+    const usage = objGet(response, "usage");
+
+    const in_tok = if (usage) |u| jsonU64(u.get("input_tokens")) else 0;
+    const out_tok = if (usage) |u| jsonU64(u.get("output_tokens")) else 0;
+    const total_tok = if (usage) |u| jsonU64(u.get("total_tokens")) else 0;
+    const cache_read = if (usage) |u| blk: {
+        const details = objGet(u, "input_tokens_details") orelse break :blk 0;
+        break :blk jsonU64(details.get("cached_tokens"));
+    } else 0;
+
+    self.in_tok = in_tok;
+    self.out_tok = out_tok;
+    self.cache_read = cache_read;
+
+    var stop_reason = mapStopStatus(strGet(response, "status"));
+    if (self.ext.saw_tool_call and stop_reason == .done) stop_reason = .tool;
+
+    self.pending = .{ .stop = .{ .reason = stop_reason } };
+    self.done = true;
+
+    const usage_ev: providers.Event = .{ .usage = .{
+        .in_tok = in_tok,
+        .out_tok = out_tok,
+        .tot_tok = if (total_tok > 0) total_tok else in_tok + out_tok + cache_read,
+        .cache_read = cache_read,
+        .cache_write = 0,
+    } };
+    return usage_ev;
+}
+
+fn onFailed(self: *Stream) !?providers.Event {
+    self.done = true;
+    self.pending = .{ .stop = .{ .reason = .err } };
+    return .{ .err = "response failed" };
+}
+
+fn onError(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const err_obj = objGet(root, "error");
+    const msg = if (strGet(root, "message")) |m|
+        m
+    else if (err_obj) |eo|
+        strGet(eo, "message") orelse "unknown error"
+    else
+        "unknown error";
+    self.done = true;
+    self.pending = .{ .stop = .{ .reason = .err } };
+    return .{ .err = msg };
+}
 
 fn mapStopStatus(status: ?[]const u8) providers.StopReason {
     const st = status orelse return .done;
@@ -373,6 +256,8 @@ fn mapStopStatus(status: ?[]const u8) providers.StopReason {
     });
     return map.get(st) orelse .done;
 }
+
+// ── Body building ──────────────────────────────────────────────────────
 
 fn callIdFromToolId(id: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, id, '|')) |idx| return id[0..idx];
@@ -393,7 +278,7 @@ fn reasoningEffort(opts: providers.Opts) ?[]const u8 {
     };
 }
 
-fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
+fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -450,8 +335,6 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
 
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
-
-const writeJsonLossy = hc.writeJsonLossy;
 
 fn writeInput(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     try js.beginArray();
@@ -585,39 +468,23 @@ fn writeTools(alloc: std.mem.Allocator, js: *std.json.Stringify, tools: []const 
 const testing = std.testing;
 const utf8_case = @import("../../test/utf8_case.zig");
 
-fn testStream() SseStream {
-    return SseStream.initFields(testing.allocator);
+fn testStream() Stream {
+    return hc.testStream(Cfg);
 }
 
-fn testParse(stream: *SseStream, data: []const u8) !?providers.Event {
-    const ar = stream.arena.allocator();
-    const copy = try ar.dupe(u8, data);
-    return stream.parseSseData(copy);
+fn testParse(stream: *Stream, data: []const u8) !?providers.Event {
+    return hc.testParse(Cfg, stream, data);
 }
 
-const randSafeToken = hc.randSafeToken;
-
-fn resetParserState(stream: *SseStream) void {
-    _ = stream.arena.reset(.retain_capacity);
-    stream.in_tok = 0;
-    stream.out_tok = 0;
-    stream.cache_read = 0;
-    stream.saw_tool_call = false;
-    stream.in_tool = false;
-    stream.done = false;
-    stream.err_mode = false;
-    stream.err_text = null;
-    stream.pending = null;
-    stream.tool_call_id.clearRetainingCapacity();
-    stream.tool_name.clearRetainingCapacity();
-    stream.tool_args.clearRetainingCapacity();
+fn resetParserState(stream: *Stream) void {
+    hc.resetParserState(Cfg, stream);
 }
 
 fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    try oh.snap(src, want).expectEqual(got);
+    try hc.expectSnap(src, got, want);
 }
+
+const randSafeToken = hc.randSafeToken;
 
 test "mapStopStatus maps known statuses" {
     try testing.expectEqual(providers.StopReason.done, mapStopStatus("completed"));
@@ -642,6 +509,7 @@ test "sanitizeUtf8 property: valid utf8 is preserved" {
 }
 
 test "provider error text redacts secret-bearing body" {
+    const audit = @import("../audit.zig");
     const safe = try sanitizeUtf8(testing.allocator, "authorization: bearer sk-live");
     const redacted = try audit.redactTextAlloc(testing.allocator, safe, .@"pub");
     defer testing.allocator.free(redacted);
@@ -687,7 +555,7 @@ test "parseSseData function call lifecycle emits tool_call" {
     const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
-    defer stream.tool_call_id.deinit(testing.allocator);
+    defer stream.ext.tool_call_id.deinit(testing.allocator);
     defer stream.tool_name.deinit(testing.allocator);
     defer stream.tool_args.deinit(testing.allocator);
 
@@ -761,7 +629,7 @@ test "parseSseData completed maps tool stop when tool call seen" {
     const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
-    stream.saw_tool_call = true;
+    stream.ext.saw_tool_call = true;
     const ev = try testParse(&stream,
         \\{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
     );
@@ -838,7 +706,7 @@ test "buildBody minimal request has model stream and input" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "gpt-5",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -854,7 +722,7 @@ test "buildBody includes reasoning for adaptive and budget" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const adaptive = try buildBody(testing.allocator, .{
+    const adaptive = try buildBodyImpl(testing.allocator, .{
         .model = "gpt-5",
         .msgs = &msgs,
         .opts = .{ .thinking = .adaptive },
@@ -865,7 +733,7 @@ test "buildBody includes reasoning for adaptive and budget" {
         \\  "{"model":"gpt-5","stream":true,"store":false,"max_output_tokens":16384,"reasoning":{"effort":"medium","summary":"auto"},"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"
     );
 
-    const budget = try buildBody(testing.allocator, .{
+    const budget = try buildBodyImpl(testing.allocator, .{
         .model = "gpt-5",
         .msgs = &msgs,
         .opts = .{ .thinking = .budget, .thinking_budget = 500 },
@@ -894,7 +762,7 @@ test "buildBody includes system assistant tool history and tool definitions" {
     const tools = [_]providers.Tool{
         .{ .name = "bash", .desc = "Run shell", .schema = "{\"type\":\"object\"}" },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "gpt-5",
         .msgs = &msgs,
         .tools = &tools,
@@ -920,7 +788,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
             .output = utf8_case.bad_tool_out[0..],
         } }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "gpt-5",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -935,7 +803,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
 test "parseSseData property randomized tool lifecycle preserves args and tool stop" {
     var stream = testStream();
     defer stream.arena.deinit();
-    defer stream.tool_call_id.deinit(testing.allocator);
+    defer stream.ext.tool_call_id.deinit(testing.allocator);
     defer stream.tool_name.deinit(testing.allocator);
     defer stream.tool_args.deinit(testing.allocator);
 
@@ -1073,7 +941,7 @@ test "parseSseData failed emits err and stop" {
 test "parseSseData fuzz random payloads do not crash parser state" {
     var stream = testStream();
     defer stream.arena.deinit();
-    defer stream.tool_call_id.deinit(testing.allocator);
+    defer stream.ext.tool_call_id.deinit(testing.allocator);
     defer stream.tool_name.deinit(testing.allocator);
     defer stream.tool_args.deinit(testing.allocator);
 

@@ -2,321 +2,185 @@
 const std = @import("std");
 const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
-const audit = @import("../audit.zig");
-const utf8 = @import("../utf8.zig");
 const hc = @import("http_client.zig");
 
 const api_version = "2023-06-01";
-const api_host = "api.anthropic.com";
-const api_path = "/v1/messages";
 const default_max_tokens: u32 = 16384;
 
-pub const Client = struct {
-    alloc: std.mem.Allocator,
-    auth: auth_mod.Result,
-    http: std.http.Client,
-    ca_file: ?[]u8,
-    el: ?*hc.EventLoop = null,
-    cancel: ?providers.CancelPoll = null,
+pub const Cfg = struct {
+    pub const provider_tag = auth_mod.Provider.anthropic;
+    pub const api_host = "api.anthropic.com";
+    pub const api_path = "/v1/messages";
 
-    pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Client {
-        var auth_res = try auth_mod.loadForProviderWithHooks(alloc, .anthropic, hooks);
-        errdefer auth_res.deinit();
-        const ca_dup = if (hooks.ca_file) |path| try alloc.dupe(u8, path) else null;
-        errdefer if (ca_dup) |path| alloc.free(path);
-        return .{
-            .alloc = alloc,
-            .auth = auth_res,
-            .http = .{ .allocator = alloc },
-            .ca_file = ca_dup,
-        };
+    pub const ExtFields = struct {
+        cache_write: u64,
+        tool_id: std.ArrayListUnmanaged(u8),
+    };
+
+    pub fn ext_init() ExtFields {
+        return .{ .cache_write = 0, .tool_id = .{} };
     }
 
-    pub fn deinit(self: *Client) void {
-        self.http.deinit();
-        self.auth.deinit();
-        if (self.ca_file) |path| self.alloc.free(path);
+    pub fn ext_deinit(self: *Stream, alloc: std.mem.Allocator) void {
+        self.ext.tool_id.deinit(alloc);
     }
 
-    pub fn isSub(self: *const Client) bool {
-        return self.auth.auth == .oauth;
+    pub fn ext_reset(self: *Stream) void {
+        self.ext.cache_write = 0;
+        self.ext.tool_id.clearRetainingCapacity();
     }
 
-    pub fn asProvider(self: *Client) providers.Provider {
-        return providers.Provider.from(Client, self, Client.start);
-    }
+    pub fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
+        var hdrs = std.ArrayListUnmanaged(std.http.Header){};
+        try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
+        try hdrs.append(ar, .{ .name = "anthropic-version", .value = api_version });
 
-    fn start(self: *Client, req: providers.Request) anyerror!providers.Stream {
-        const stream = try self.alloc.create(SseStream);
-        stream.* = SseStream.initFields(self.alloc);
-        stream.el = self.el;
-        errdefer {
-            stream.arena.deinit();
-            self.alloc.destroy(stream);
-        }
-
-        const ar = stream.arena.allocator();
-
-        const body = try buildBody(ar, req);
-        var hdrs = try buildAuthHeaders(&self.auth, ar);
-
-        const uri = std.Uri{
-            .scheme = "https",
-            .host = .{ .raw = api_host },
-            .path = .{ .raw = api_path },
-        };
-
-        var slp = hc.RealSleeper{ .el = self.el };
-        try hc.retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, .anthropic, self.ca_file, ar, &slp, buildAuthHeaders, self.cancel);
-
-        if (stream.response.head.status != .ok) {
-            try hc.formatErrBody(stream, ar, extractApiErrMsg);
-        } else {
-            stream.body_rdr = stream.response.reader(&stream.transfer_buf);
-            stream.conn_fd = hc.connFd(stream);
-            if (stream.el) |el| {
-                if (stream.conn_fd) |fd| el.register(fd, .read) catch {}; // cleanup: propagation impossible
-            }
-        }
-
-        return providers.Stream.fromAbortable(SseStream, stream, SseStream.next, SseStream.deinit, SseStream.abort);
-    }
-};
-
-fn buildAuthHeaders(auth: *auth_mod.Result, ar: std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header) {
-    var hdrs = std.ArrayListUnmanaged(std.http.Header){};
-    try hdrs.append(ar, .{ .name = "content-type", .value = "application/json" });
-    try hdrs.append(ar, .{ .name = "anthropic-version", .value = api_version });
-
-    switch (auth.auth) {
-        .oauth => |oauth| {
-            const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
-            try hdrs.append(ar, .{ .name = "anthropic-beta", .value = "oauth-2025-04-20" });
-            try hdrs.append(ar, .{ .name = "anthropic-dangerous-direct-browser-access", .value = "true" });
-            try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
-        },
-        .api_key => |key| {
-            try hdrs.append(ar, .{ .name = "x-api-key", .value = key });
-        },
-    }
-    return hdrs;
-}
-
-const SseStream = struct {
-    alloc: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
-    req: std.http.Client.Request,
-    response: std.http.Client.Response,
-    send_buf: [1024]u8,
-    transfer_buf: [16384]u8,
-    redir_buf: [0]u8,
-    body_rdr: ?*std.Io.Reader,
-
-    // Event loop integration
-    el: ?*hc.EventLoop,
-    conn_fd: ?std.posix.fd_t,
-
-    // SSE state
-    in_tok: u64,
-    out_tok: u64,
-    cache_read: u64,
-    cache_write: u64,
-    tool_id: std.ArrayListUnmanaged(u8),
-    tool_name: std.ArrayListUnmanaged(u8),
-    tool_args: std.ArrayListUnmanaged(u8),
-    in_tool: bool,
-    done: bool,
-    err_mode: bool,
-    err_text: ?[]const u8,
-    pending: ?providers.Event,
-
-    fn initFields(alloc: std.mem.Allocator) SseStream {
-        return .{
-            .alloc = alloc,
-            .arena = std.heap.ArenaAllocator.init(alloc),
-            .req = undefined,
-            .response = undefined,
-            .send_buf = undefined,
-            .transfer_buf = undefined,
-            .redir_buf = .{},
-            .body_rdr = null,
-            .el = null,
-            .conn_fd = null,
-            .in_tok = 0,
-            .out_tok = 0,
-            .cache_read = 0,
-            .cache_write = 0,
-            .tool_id = .{},
-            .tool_name = .{},
-            .tool_args = .{},
-            .in_tool = false,
-            .done = false,
-            .err_mode = false,
-            .err_text = null,
-            .pending = null,
-        };
-    }
-
-    fn next(self: *SseStream) anyerror!?providers.Event {
-        return hc.sseNext(self);
-    }
-
-    pub fn parseSseData(self: *SseStream, data: []const u8) !?providers.Event {
-        const ar = self.arena.allocator();
-
-        var parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
-            .allocate = .alloc_always,
-        }) catch return null;
-        _ = &parsed;
-
-        const root = switch (parsed.value) {
-            .object => |obj| obj,
-            else => return null,
-        };
-
-        const ev_type = switch (root.get("type") orelse return null) {
-            .string => |s| s,
-            else => return null,
-        };
-
-        const SseEvType = enum { message_start, content_block_start, content_block_delta, content_block_stop, message_delta };
-        const ev_map = std.StaticStringMap(SseEvType).initComptime(.{
-            .{ "message_start", .message_start },
-            .{ "content_block_start", .content_block_start },
-            .{ "content_block_delta", .content_block_delta },
-            .{ "content_block_stop", .content_block_stop },
-            .{ "message_delta", .message_delta },
-        });
-
-        const resolved = ev_map.get(ev_type) orelse return null;
-        return switch (resolved) {
-            .message_start => self.onMessageStart(root),
-            .content_block_start => self.onBlockStart(root),
-            .content_block_delta => self.onBlockDelta(root),
-            .content_block_stop => self.onBlockStop(),
-            .message_delta => self.onMessageDelta(root),
-        };
-    }
-
-    fn onMessageStart(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const msg = objGet(root, "message") orelse return null;
-        const usage = objGet(msg, "usage") orelse return null;
-        self.in_tok = jsonU64(usage.get("input_tokens"));
-        self.cache_read = jsonU64(usage.get("cache_read_input_tokens"));
-        self.cache_write = jsonU64(usage.get("cache_creation_input_tokens"));
-        return null;
-    }
-
-    fn onBlockStart(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const cb = objGet(root, "content_block") orelse return null;
-        const cb_type = strGet(cb, "type") orelse return null;
-
-        if (!std.mem.eql(u8, cb_type, "tool_use")) return null;
-
-        self.tool_id.clearRetainingCapacity();
-        self.tool_name.clearRetainingCapacity();
-        self.tool_args.clearRetainingCapacity();
-
-        if (strGet(cb, "id")) |id| try self.tool_id.appendSlice(self.alloc, id);
-        if (strGet(cb, "name")) |name| try self.tool_name.appendSlice(self.alloc, name);
-        self.in_tool = true;
-        return null;
-    }
-
-    fn onBlockDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        const delta = objGet(root, "delta") orelse return null;
-        const delta_type = strGet(delta, "type") orelse return null;
-
-        const DeltaType = enum { text_delta, thinking_delta, input_json_delta };
-        const delta_map = std.StaticStringMap(DeltaType).initComptime(.{
-            .{ "text_delta", .text_delta },
-            .{ "thinking_delta", .thinking_delta },
-            .{ "input_json_delta", .input_json_delta },
-        });
-
-        const dt = delta_map.get(delta_type) orelse return null;
-        switch (dt) {
-            .text_delta => if (strGet(delta, "text")) |text| return .{ .text = text },
-            .thinking_delta => if (strGet(delta, "thinking")) |text| return .{ .thinking = text },
-            .input_json_delta => if (self.in_tool) {
-                if (strGet(delta, "partial_json")) |pj|
-                    try self.tool_args.appendSlice(self.alloc, pj);
+        switch (auth.auth) {
+            .oauth => |oauth| {
+                const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
+                try hdrs.append(ar, .{ .name = "anthropic-beta", .value = "oauth-2025-04-20" });
+                try hdrs.append(ar, .{ .name = "anthropic-dangerous-direct-browser-access", .value = "true" });
+                try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+            },
+            .api_key => |key| {
+                try hdrs.append(ar, .{ .name = "x-api-key", .value = key });
             },
         }
-        return null;
+        return hdrs;
     }
 
-    fn onBlockStop(self: *SseStream) !?providers.Event {
-        if (!self.in_tool) return null;
-        self.in_tool = false;
-        const ar = self.arena.allocator();
-        return .{ .tool_call = .{
-            .id = try ar.dupe(u8, self.tool_id.items),
-            .name = try ar.dupe(u8, self.tool_name.items),
-            .args = try ar.dupe(u8, self.tool_args.items),
-        } };
+    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request) anyerror![]u8 {
+        return buildBodyImpl(alloc, req);
     }
 
-    fn onMessageDelta(self: *SseStream, root: std.json.ObjectMap) !?providers.Event {
-        if (objGet(root, "usage")) |usage| {
-            self.out_tok = jsonU64(usage.get("output_tokens"));
-        }
-        const delta = objGet(root, "delta") orelse return null;
-        const reason_str = strGet(delta, "stop_reason") orelse return null;
-
-        const usage_ev: providers.Event = .{ .usage = .{
-            .in_tok = self.in_tok,
-            .out_tok = self.out_tok,
-            .tot_tok = self.in_tok + self.out_tok,
-            .cache_read = self.cache_read,
-            .cache_write = self.cache_write,
-        } };
-        self.pending = .{ .stop = .{ .reason = mapStopReason(reason_str) } };
-        self.done = true;
-        return usage_ev;
-    }
-
-    fn deinit(self: *SseStream) void {
-        if (self.el) |el| {
-            if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
-        }
-        const alloc = self.alloc;
-        self.tool_id.deinit(alloc);
-        self.tool_name.deinit(alloc);
-        self.tool_args.deinit(alloc);
-        self.req.deinit();
-        self.arena.deinit();
-        alloc.destroy(self);
-    }
-
-    fn abort(self: *SseStream) void {
-        if (self.req.connection) |conn| {
-            std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
-        }
+    pub fn parseSseData(self: *Stream, data: []const u8) anyerror!?providers.Event {
+        return parseSseDataImpl(self, data);
     }
 };
+
+pub const Client = hc.SseClient(Cfg);
+const Stream = hc.SseStream(Cfg);
 
 const objGet = hc.objGet;
 const strGet = hc.strGet;
+const jsonU64 = hc.jsonU64;
+const sanitizeUtf8 = hc.sanitizeUtf8;
+const writeJsonLossy = hc.writeJsonLossy;
 
-fn supportsThinking(model: []const u8) bool {
-    // Models that support extended thinking
-    return std.mem.indexOf(u8, model, "opus") != null or
-        std.mem.indexOf(u8, model, "sonnet-4") != null;
+// ── SSE parsing ────────────────────────────────────────────────────────
+
+fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
+    const ar = self.arena.allocator();
+
+    const parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
+        .allocate = .alloc_always,
+    }) catch return null;
+
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return null,
+    };
+
+    const ev_type = switch (root.get("type") orelse return null) {
+        .string => |s| s,
+        else => return null,
+    };
+
+    const SseEvType = enum { message_start, content_block_start, content_block_delta, content_block_stop, message_delta };
+    const ev_map = std.StaticStringMap(SseEvType).initComptime(.{
+        .{ "message_start", .message_start },
+        .{ "content_block_start", .content_block_start },
+        .{ "content_block_delta", .content_block_delta },
+        .{ "content_block_stop", .content_block_stop },
+        .{ "message_delta", .message_delta },
+    });
+
+    const resolved = ev_map.get(ev_type) orelse return null;
+    return switch (resolved) {
+        .message_start => onMessageStart(self, root),
+        .content_block_start => onBlockStart(self, root),
+        .content_block_delta => onBlockDelta(self, root),
+        .content_block_stop => onBlockStop(self),
+        .message_delta => onMessageDelta(self, root),
+    };
 }
 
-const sanitizeUtf8 = hc.sanitizeUtf8;
+fn onMessageStart(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const msg = objGet(root, "message") orelse return null;
+    const usage = objGet(msg, "usage") orelse return null;
+    self.in_tok = jsonU64(usage.get("input_tokens"));
+    self.cache_read = jsonU64(usage.get("cache_read_input_tokens"));
+    self.ext.cache_write = jsonU64(usage.get("cache_creation_input_tokens"));
+    return null;
+}
 
-/// Extract "message" from Anthropic JSON error: {"type":"error","error":{"message":"..."}}
-/// Returns a slice into the input body (the JSON string value is unescaped in-place by the parser,
-/// but we just scan for the key and extract the raw value to avoid lifetime issues).
-fn extractApiErrMsg(body: []const u8) ?[]const u8 {
-    // Find "message":" and extract until closing quote (handles the common case without allocation)
-    const needle = "\"message\":\"";
-    const start = (std.mem.indexOf(u8, body, needle) orelse return null) + needle.len;
-    const end = std.mem.indexOfScalarPos(u8, body, start, '"') orelse return null;
-    const msg = body[start..end];
-    return if (msg.len > 0) msg else null;
+fn onBlockStart(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const cb = objGet(root, "content_block") orelse return null;
+    const cb_type = strGet(cb, "type") orelse return null;
+
+    if (!std.mem.eql(u8, cb_type, "tool_use")) return null;
+
+    self.ext.tool_id.clearRetainingCapacity();
+    self.tool_name.clearRetainingCapacity();
+    self.tool_args.clearRetainingCapacity();
+
+    if (strGet(cb, "id")) |id| try self.ext.tool_id.appendSlice(self.alloc, id);
+    if (strGet(cb, "name")) |name| try self.tool_name.appendSlice(self.alloc, name);
+    self.in_tool = true;
+    return null;
+}
+
+fn onBlockDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    const delta = objGet(root, "delta") orelse return null;
+    const delta_type = strGet(delta, "type") orelse return null;
+
+    const DeltaType = enum { text_delta, thinking_delta, input_json_delta };
+    const delta_map = std.StaticStringMap(DeltaType).initComptime(.{
+        .{ "text_delta", .text_delta },
+        .{ "thinking_delta", .thinking_delta },
+        .{ "input_json_delta", .input_json_delta },
+    });
+
+    const dt = delta_map.get(delta_type) orelse return null;
+    switch (dt) {
+        .text_delta => if (strGet(delta, "text")) |text| return .{ .text = text },
+        .thinking_delta => if (strGet(delta, "thinking")) |text| return .{ .thinking = text },
+        .input_json_delta => if (self.in_tool) {
+            if (strGet(delta, "partial_json")) |pj|
+                try self.tool_args.appendSlice(self.alloc, pj);
+        },
+    }
+    return null;
+}
+
+fn onBlockStop(self: *Stream) !?providers.Event {
+    if (!self.in_tool) return null;
+    self.in_tool = false;
+    const ar = self.arena.allocator();
+    return .{ .tool_call = .{
+        .id = try ar.dupe(u8, self.ext.tool_id.items),
+        .name = try ar.dupe(u8, self.tool_name.items),
+        .args = try ar.dupe(u8, self.tool_args.items),
+    } };
+}
+
+fn onMessageDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+    if (objGet(root, "usage")) |usage| {
+        self.out_tok = jsonU64(usage.get("output_tokens"));
+    }
+    const delta = objGet(root, "delta") orelse return null;
+    const reason_str = strGet(delta, "stop_reason") orelse return null;
+
+    const usage_ev: providers.Event = .{ .usage = .{
+        .in_tok = self.in_tok,
+        .out_tok = self.out_tok,
+        .tot_tok = self.in_tok + self.out_tok,
+        .cache_read = self.cache_read,
+        .cache_write = self.ext.cache_write,
+    } };
+    self.pending = .{ .stop = .{ .reason = mapStopReason(reason_str) } };
+    self.done = true;
+    return usage_ev;
 }
 
 fn mapStopReason(reason: []const u8) providers.StopReason {
@@ -330,9 +194,14 @@ fn mapStopReason(reason: []const u8) providers.StopReason {
     return map.get(reason) orelse .done;
 }
 
-const jsonU64 = hc.jsonU64;
+// ── Body building ──────────────────────────────────────────────────────
 
-fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
+fn supportsThinking(model: []const u8) bool {
+    return std.mem.indexOf(u8, model, "opus") != null or
+        std.mem.indexOf(u8, model, "sonnet-4") != null;
+}
+
+fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -436,8 +305,6 @@ fn buildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
 
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
-
-const writeJsonLossy = hc.writeJsonLossy;
 
 fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
     // Count total system text parts for cache_control on last one
@@ -569,39 +436,23 @@ fn writeMessages(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []cons
 const testing = std.testing;
 const utf8_case = @import("../../test/utf8_case.zig");
 
-fn testStream() SseStream {
-    return SseStream.initFields(testing.allocator);
+fn testStream() Stream {
+    return hc.testStream(Cfg);
 }
 
-fn testParse(stream: *SseStream, data: []const u8) !?providers.Event {
-    const ar = stream.arena.allocator();
-    const copy = try ar.dupe(u8, data);
-    return stream.parseSseData(copy);
+fn testParse(stream: *Stream, data: []const u8) !?providers.Event {
+    return hc.testParse(Cfg, stream, data);
 }
 
-const randSafeToken = hc.randSafeToken;
-
-fn resetParserState(stream: *SseStream) void {
-    _ = stream.arena.reset(.retain_capacity);
-    stream.in_tok = 0;
-    stream.out_tok = 0;
-    stream.cache_read = 0;
-    stream.cache_write = 0;
-    stream.in_tool = false;
-    stream.done = false;
-    stream.err_mode = false;
-    stream.err_text = null;
-    stream.pending = null;
-    stream.tool_id.clearRetainingCapacity();
-    stream.tool_name.clearRetainingCapacity();
-    stream.tool_args.clearRetainingCapacity();
+fn resetParserState(stream: *Stream) void {
+    hc.resetParserState(Cfg, stream);
 }
 
 fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    try oh.snap(src, want).expectEqual(got);
+    try hc.expectSnap(src, got, want);
 }
+
+const randSafeToken = hc.randSafeToken;
 
 test "mapStopReason known values" {
     try testing.expectEqual(providers.StopReason.done, mapStopReason("end_turn"));
@@ -626,10 +477,11 @@ test "sanitizeUtf8 property: valid utf8 is preserved" {
 }
 
 test "provider api message redacts secret-bearing body" {
+    const audit = @import("../audit.zig");
     const safe = try sanitizeUtf8(testing.allocator,
         \\{"error":{"message":"authorization: bearer sk-live"}}
     );
-    const msg = extractApiErrMsg(safe) orelse return error.TestUnexpectedResult;
+    const msg = hc.extractJsonErrMsg(safe) orelse return error.TestUnexpectedResult;
     const redacted = try audit.redactTextAlloc(testing.allocator, msg, .@"pub");
     defer testing.allocator.free(redacted);
     const err = try std.fmt.allocPrint(testing.allocator, "401 {s}", .{redacted});
@@ -671,7 +523,7 @@ test "parseSseData message_start extracts usage" {
     try testing.expect(ev == null);
     try testing.expectEqual(@as(u64, 100), stream.in_tok);
     try testing.expectEqual(@as(u64, 50), stream.cache_read);
-    try testing.expectEqual(@as(u64, 25), stream.cache_write);
+    try testing.expectEqual(@as(u64, 25), stream.ext.cache_write);
 }
 
 test "parseSseData tool_use block accumulates" {
@@ -679,7 +531,7 @@ test "parseSseData tool_use block accumulates" {
     const oh = OhSnap{};
     var stream = testStream();
     defer stream.arena.deinit();
-    defer stream.tool_id.deinit(testing.allocator);
+    defer stream.ext.tool_id.deinit(testing.allocator);
     defer stream.tool_name.deinit(testing.allocator);
     defer stream.tool_args.deinit(testing.allocator);
 
@@ -697,7 +549,7 @@ test "parseSseData tool_use block accumulates" {
     );
     const state_snap = try std.fmt.allocPrint(testing.allocator, "in_tool={any}\nid={s}\nname={s}\nargs={s}\n", .{
         stream.in_tool,
-        stream.tool_id.items,
+        stream.ext.tool_id.items,
         stream.tool_name.items,
         stream.tool_args.items,
     });
@@ -775,7 +627,7 @@ test "parseSseData message_delta stop reason and usage" {
 test "parseSseData property randomized tool_use lifecycle preserves args and tool stop" {
     var stream = testStream();
     defer stream.arena.deinit();
-    defer stream.tool_id.deinit(testing.allocator);
+    defer stream.ext.tool_id.deinit(testing.allocator);
     defer stream.tool_name.deinit(testing.allocator);
     defer stream.tool_args.deinit(testing.allocator);
 
@@ -869,7 +721,7 @@ test "parseSseData invalid json returns null" {
 test "parseSseData fuzz random payloads do not crash parser state" {
     var stream = testStream();
     defer stream.arena.deinit();
-    defer stream.tool_id.deinit(testing.allocator);
+    defer stream.ext.tool_id.deinit(testing.allocator);
     defer stream.tool_name.deinit(testing.allocator);
     defer stream.tool_args.deinit(testing.allocator);
 
@@ -907,7 +759,7 @@ test "buildBody minimal request" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -924,7 +776,7 @@ test "buildBody includes temp top_p and stop sequences" {
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
     const stops = [_][]const u8{ "END", "STOP" };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{
@@ -946,7 +798,7 @@ test "buildBody with system message and cache_control" {
         .{ .role = .system, .parts = &.{.{ .text = "You are helpful." }} },
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -965,7 +817,7 @@ test "buildBody with tools" {
     const tools = [_]providers.Tool{
         .{ .name = "bash", .desc = "Run commands", .schema = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}}}" },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .tools = &tools,
@@ -982,7 +834,7 @@ test "buildBody thinking adaptive" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-opus-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .adaptive },
@@ -998,7 +850,7 @@ test "buildBody thinking budget" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .budget, .thinking_budget = 8192 },
@@ -1014,7 +866,7 @@ test "buildBody thinking budget exceeds max_tokens" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-opus-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .budget, .thinking_budget = 32768 },
@@ -1032,7 +884,7 @@ test "buildBody message merging same roles" {
         .{ .role = .user, .parts = &.{.{ .text = "two" }} },
         .{ .role = .assistant, .parts = &.{.{ .text = "reply" }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -1057,7 +909,7 @@ test "buildBody tool_call and tool_result" {
             .output = "file.txt",
         } }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -1083,7 +935,7 @@ test "buildBody tool_result error flag" {
             .is_err = true,
         } }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -1108,7 +960,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
             .output = utf8_case.bad_tool_out[0..],
         } }} },
     };
-    const body = try buildBody(testing.allocator, .{
+    const body = try buildBodyImpl(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -1176,17 +1028,4 @@ test "SseStream done returns null" {
     defer stream.arena.deinit();
     stream.done = true;
     try testing.expect((try stream.next()) == null);
-}
-
-test "extractApiErrMsg extracts message from error JSON" {
-    const msg = extractApiErrMsg(
-        \\{"type":"error","error":{"type":"invalid_request","message":"bad input"}}
-    );
-    try testing.expect(msg != null);
-    try testing.expectEqualStrings("bad input", msg.?);
-}
-
-test "extractApiErrMsg returns null on non-error JSON" {
-    try testing.expect(extractApiErrMsg("{}") == null);
-    try testing.expect(extractApiErrMsg("plain text") == null);
 }

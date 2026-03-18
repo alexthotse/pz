@@ -377,7 +377,244 @@ pub fn connFd(stream: anytype) ?std.posix.fd_t {
     return conn.stream_reader.getStream().handle;
 }
 
+// ── Shared JSON error extraction ───────────────────────────────────────
+
+/// Extract "message" from JSON error bodies. Works for both Anthropic
+/// `{"type":"error","error":{"message":"..."}}` and OpenAI
+/// `{"error":{"message":"..."}}` formats.
+///
+/// Handles escaped quotes in the message value by scanning for the
+/// closing unescaped `"`.
+pub fn extractJsonErrMsg(body: []const u8) ?[]const u8 {
+    const needle = "\"message\":\"";
+    const start = (std.mem.indexOf(u8, body, needle) orelse return null) + needle.len;
+    // Scan for unescaped closing quote
+    var i: usize = start;
+    while (i < body.len) : (i += 1) {
+        if (body[i] == '\\') {
+            i += 1; // skip escaped char
+            continue;
+        }
+        if (body[i] == '"') {
+            const msg = body[start..i];
+            return if (msg.len > 0) msg else null;
+        }
+    }
+    return null;
+}
+
+// ── SseClient generic ─────────────────────────────────────────────────
+
+/// Comptime generic that provides a shared Client + SseStream for any
+/// provider. Config must supply:
+///   - `provider_tag: auth_mod.Provider` — .anthropic or .openai
+///   - `api_host: []const u8`, `api_path: []const u8`
+///   - `ExtFields: type` — provider-specific SseStream fields
+///   - `ext_init: fn() ExtFields` — initializer for ext fields
+///   - `ext_deinit: fn(*Self, std.mem.Allocator) void` — cleanup
+///   - `ext_reset: fn(*Self) void` — reset for test reuse
+///   - `buildAuthHeaders: fn(*auth_mod.Result, std.mem.Allocator) anyerror!HdrList`
+///   - `buildBody: fn(std.mem.Allocator, providers.Request) anyerror![]u8`
+///   - `parseSseData: fn(*Self, []const u8) anyerror!?providers.Event`
+pub fn SseClient(comptime Cfg: type) type {
+    return struct {
+        const Self = @This();
+
+        pub const Stream = SseStream(Cfg);
+
+        alloc: std.mem.Allocator,
+        auth: auth_mod.Result,
+        http: std.http.Client,
+        ca_file: ?[]u8,
+        el: ?*EventLoop = null,
+        cancel: ?providers.CancelPoll = null,
+
+        pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Self {
+            var auth_res = try auth_mod.loadForProviderWithHooks(alloc, Cfg.provider_tag, hooks);
+            errdefer auth_res.deinit();
+            const ca_dup = if (hooks.ca_file) |path| try alloc.dupe(u8, path) else null;
+            errdefer if (ca_dup) |path| alloc.free(path);
+            return .{
+                .alloc = alloc,
+                .auth = auth_res,
+                .http = .{ .allocator = alloc },
+                .ca_file = ca_dup,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.http.deinit();
+            self.auth.deinit();
+            if (self.ca_file) |path| self.alloc.free(path);
+        }
+
+        pub fn isSub(self: *const Self) bool {
+            return self.auth.auth == .oauth;
+        }
+
+        pub fn asProvider(self: *Self) providers.Provider {
+            return providers.Provider.from(Self, self, Self.start);
+        }
+
+        fn start(self: *Self, req: providers.Request) anyerror!providers.Stream {
+            const stream = try self.alloc.create(Stream);
+            stream.* = Stream.initFields(self.alloc);
+            stream.el = self.el;
+            errdefer {
+                stream.arena.deinit();
+                self.alloc.destroy(stream);
+            }
+
+            const ar = stream.arena.allocator();
+
+            const body = try Cfg.buildBody(ar, req);
+            var hdrs = try Cfg.buildAuthHeaders(&self.auth, ar);
+
+            const uri = std.Uri{
+                .scheme = "https",
+                .host = .{ .raw = Cfg.api_host },
+                .path = .{ .raw = Cfg.api_path },
+            };
+
+            var slp = RealSleeper{ .el = self.el };
+            try retryLoop(stream, &self.http, uri, body, &hdrs, &self.auth, self.alloc, Cfg.provider_tag, self.ca_file, ar, &slp, Cfg.buildAuthHeaders, self.cancel);
+
+            if (stream.response.head.status != .ok) {
+                try formatErrBody(stream, ar, extractJsonErrMsg);
+            } else {
+                stream.body_rdr = stream.response.reader(&stream.transfer_buf);
+                stream.conn_fd = connFd(stream);
+                if (stream.el) |el| {
+                    if (stream.conn_fd) |fd| el.register(fd, .read) catch {}; // cleanup: propagation impossible
+                }
+            }
+
+            return providers.Stream.fromAbortable(Stream, stream, Stream.next, Stream.deinit, Stream.abort);
+        }
+    };
+}
+
+/// Comptime generic SseStream with shared fields + provider-specific ext.
+pub fn SseStream(comptime Cfg: type) type {
+    return struct {
+        const Self = @This();
+
+        // Shared fields
+        alloc: std.mem.Allocator,
+        arena: std.heap.ArenaAllocator,
+        req: std.http.Client.Request,
+        response: std.http.Client.Response,
+        send_buf: [1024]u8,
+        transfer_buf: [16384]u8,
+        redir_buf: [0]u8,
+        body_rdr: ?*std.Io.Reader,
+
+        // Event loop integration
+        el: ?*EventLoop,
+        conn_fd: ?std.posix.fd_t,
+
+        // Common SSE state
+        in_tok: u64,
+        out_tok: u64,
+        cache_read: u64,
+        tool_name: std.ArrayListUnmanaged(u8),
+        tool_args: std.ArrayListUnmanaged(u8),
+        in_tool: bool,
+        done: bool,
+        err_mode: bool,
+        err_text: ?[]const u8,
+        pending: ?providers.Event,
+
+        // Provider-specific fields
+        ext: Cfg.ExtFields,
+
+        pub fn initFields(alloc: std.mem.Allocator) Self {
+            return .{
+                .alloc = alloc,
+                .arena = std.heap.ArenaAllocator.init(alloc),
+                .req = undefined,
+                .response = undefined,
+                .send_buf = undefined,
+                .transfer_buf = undefined,
+                .redir_buf = .{},
+                .body_rdr = null,
+                .el = null,
+                .conn_fd = null,
+                .in_tok = 0,
+                .out_tok = 0,
+                .cache_read = 0,
+                .tool_name = .{},
+                .tool_args = .{},
+                .in_tool = false,
+                .done = false,
+                .err_mode = false,
+                .err_text = null,
+                .pending = null,
+                .ext = Cfg.ext_init(),
+            };
+        }
+
+        pub fn next(self: *Self) anyerror!?providers.Event {
+            return sseNext(self);
+        }
+
+        pub fn parseSseData(self: *Self, data: []const u8) anyerror!?providers.Event {
+            return Cfg.parseSseData(self, data);
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.el) |el| {
+                if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
+            }
+            const alloc = self.alloc;
+            Cfg.ext_deinit(self, alloc);
+            self.tool_name.deinit(alloc);
+            self.tool_args.deinit(alloc);
+            self.req.deinit();
+            self.arena.deinit();
+            alloc.destroy(self);
+        }
+
+        pub fn abort(self: *Self) void {
+            if (self.req.connection) |conn| {
+                std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
+            }
+        }
+    };
+}
+
 // ── Test helpers ───────────────────────────────────────────────────────
+
+pub fn testStream(comptime Cfg: type) SseStream(Cfg) {
+    return SseStream(Cfg).initFields(testing.allocator);
+}
+
+pub fn testParse(comptime Cfg: type, stream: *SseStream(Cfg), data: []const u8) !?providers.Event {
+    const ar = stream.arena.allocator();
+    const copy = try ar.dupe(u8, data);
+    return stream.parseSseData(copy);
+}
+
+pub fn resetParserState(comptime Cfg: type, stream: *SseStream(Cfg)) void {
+    _ = stream.arena.reset(.retain_capacity);
+    stream.in_tok = 0;
+    stream.out_tok = 0;
+    stream.cache_read = 0;
+    stream.in_tool = false;
+    stream.done = false;
+    stream.err_mode = false;
+    stream.err_text = null;
+    stream.pending = null;
+    stream.tool_name.clearRetainingCapacity();
+    stream.tool_args.clearRetainingCapacity();
+    Cfg.ext_reset(stream);
+}
+
+pub fn expectSnap(comptime src: std.builtin.SourceLocation, got: []u8, comptime want: []const u8) !void {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    try oh.snap(src, want).expectEqual(got);
+}
 
 pub fn randSafeToken(rnd: std.Random, buf: []u8) []const u8 {
     const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -432,4 +669,33 @@ test "sanitizeUtf8 replaces invalid bytes" {
 test "sanitizeUtf8 passes through valid" {
     const result = try sanitizeUtf8(testing.allocator, "hello");
     try testing.expectEqualStrings("hello", result);
+}
+
+test "extractJsonErrMsg extracts message from error JSON" {
+    const msg = extractJsonErrMsg(
+        \\{"type":"error","error":{"type":"invalid_request","message":"bad input"}}
+    );
+    try testing.expect(msg != null);
+    try testing.expectEqualStrings("bad input", msg.?);
+}
+
+test "extractJsonErrMsg handles escaped quotes" {
+    const msg = extractJsonErrMsg(
+        \\{"error":{"message":"got a \"quoted\" thing"}}
+    );
+    try testing.expect(msg != null);
+    try testing.expectEqualStrings("got a \\\"quoted\\\" thing", msg.?);
+}
+
+test "extractJsonErrMsg returns null on non-error JSON" {
+    try testing.expect(extractJsonErrMsg("{}") == null);
+    try testing.expect(extractJsonErrMsg("plain text") == null);
+}
+
+test "extractJsonErrMsg openai format" {
+    const msg = extractJsonErrMsg(
+        \\{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}
+    );
+    try testing.expect(msg != null);
+    try testing.expectEqualStrings("rate limit exceeded", msg.?);
 }
