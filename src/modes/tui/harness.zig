@@ -99,11 +99,12 @@ pub const Ui = struct {
     }
 
     fn onProviderInner(self: *Ui, seq: ?u64, ev: core.providers.Event) !void {
-        if (seq) |n| {
-            try self.tr.appendSeq(n, ev);
-        } else {
-            try self.tr.append(ev);
-        }
+        // Map provider-local seq to transcript-global seq space.
+        // The provider's seq starts at 1 per turn, but the transcript's
+        // internal counter may be much higher. Use the transcript's own
+        // seq counter to ensure new blocks append at the end.
+        _ = seq;
+        try self.tr.append(ev);
         try self.panels.append(ev);
         if (ev == .stop and ev.stop.reason == .max_out) {
             try self.tr.infoText("[max tokens reached]");
