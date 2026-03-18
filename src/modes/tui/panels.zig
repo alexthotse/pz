@@ -261,41 +261,14 @@ pub const Panels = struct {
         const dim_st = frame.Style{ .fg = theme.get().dim };
         const y1 = rect.y;
 
-        // --- Line 1: dim(project path + branch) ---
+        // --- Line 1: dim(project path + branch) + right-aligned hint ---
         {
             var x = rect.x;
-            if (self.branch.len == 0) {
-                if (self.cwd.len > 0) try writePart(frm, &x, x_end, y1, self.cwd, dim_st);
-            } else {
-                const branch_cols = cpCountSlice(self.branch) + 2; // "(" + branch + ")"
-                const has_cwd = self.cwd.len > 0;
-                const sep_cols: usize = if (has_cwd) 1 else 0;
-                const reserve_cols = branch_cols + sep_cols;
-                if (reserve_cols >= rect.w) {
-                    // Extremely narrow terminal: render branch only.
-                    try writePart(frm, &x, x_end, y1, "(", dim_st);
-                    try writePart(frm, &x, x_end, y1, self.branch, dim_st);
-                    try writePart(frm, &x, x_end, y1, ")", dim_st);
-                } else {
-                    var path_text = self.cwd;
-                    const path_cols = cpCountSlice(path_text);
-                    const max_path_cols = rect.w - reserve_cols;
-                    if (path_cols > max_path_cols) path_text = try clipLeftCols(path_text, max_path_cols);
-                    if (path_text.len > 0) {
-                        try writePart(frm, &x, x_end, y1, path_text, dim_st);
-                        try writePart(frm, &x, x_end, y1, " ", dim_st);
-                    }
-                    try writePart(frm, &x, x_end, y1, "(", dim_st);
-                    try writePart(frm, &x, x_end, y1, self.branch, dim_st);
-                    try writePart(frm, &x, x_end, y1, ")", dim_st);
-                }
-            }
+            try self.renderPathBranch(frm, &x, x_end, y1, rect.w, dim_st);
 
-            // Right-align hint on line 1
             const hint = "shift+drag: select";
-            const hint_cols = hint.len;
-            if (hint_cols + 1 < rect.w) {
-                var hx = x_end - hint_cols;
+            if (hint.len + 1 < rect.w) {
+                var hx = x_end - hint.len;
                 if (hx > x + 1) {
                     try writePart(frm, &hx, x_end, y1, hint, dim_st);
                 }
@@ -308,112 +281,197 @@ pub const Panels = struct {
         // --- Line 2: stats on left, model on right ---
         {
             var x = rect.x;
+            try self.renderStats(frm, &x, x_end, y2, dim_st);
+            try self.renderCost(frm, &x, x_end, y2, dim_st);
+            try self.renderContextGauge(frm, &x, x_end, y2, dim_st);
+            try self.renderBgStatus(frm, &x, x_end, y2, dim_st);
+            try self.renderTurns(frm, &x, x_end, y2, dim_st);
+            try self.renderModelInfo(frm, x, x_end, y2, rect.w, dim_st);
+        }
+    }
 
-            // Left: turn count + usage stats
-
-            if (self.has_usage) {
-                try writePart(frm, &x, x_end, y2, "\xe2\x86\x93", dim_st); // ↓
-                var ib: [16]u8 = undefined;
-                const it = fmtCompact(&ib, self.tot_in) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, it, dim_st);
-
-                try writePart(frm, &x, x_end, y2, " \xe2\x86\x91", dim_st); // ↑
-                var ob: [16]u8 = undefined;
-                const ot = fmtCompact(&ob, self.tot_out) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, ot, dim_st);
-
-                // Cache read/write tokens (pi-style: R/W)
-                if (self.tot_cr > 0) {
-                    try writePart(frm, &x, x_end, y2, " R", dim_st);
-                    var rb: [16]u8 = undefined;
-                    const rt = fmtCompact(&rb, self.tot_cr) catch return error.NoSpaceLeft;
-                    try writePart(frm, &x, x_end, y2, rt, dim_st);
-                }
-                if (self.tot_cw > 0) {
-                    try writePart(frm, &x, x_end, y2, " W", dim_st);
-                    var wb: [16]u8 = undefined;
-                    const wt = fmtCompact(&wb, self.tot_cw) catch return error.NoSpaceLeft;
-                    try writePart(frm, &x, x_end, y2, wt, dim_st);
-                }
-
-                // Cost: $N.NNN
-                if (self.cost_micents > 0) {
-                    var cb: [16]u8 = undefined;
-                    const ct = fmtCost(&cb, self.cost_micents) catch return error.NoSpaceLeft;
-                    try writePart(frm, &x, x_end, y2, " $", dim_st);
-                    try writePart(frm, &x, x_end, y2, ct, dim_st);
-                }
-                // Subscription indicator
-                if (self.is_sub) {
-                    try writePart(frm, &x, x_end, y2, " (sub)", dim_st);
-                }
-
-                if (self.ctx_limit > 0) {
-                    // Decimal percent: N.N%
-                    const pct_x10 = self.cum_tok *| 1000 / self.ctx_limit;
-                    const pct = pct_x10 / 10;
-                    const pct_fg = if (pct >= 90) theme.get().err else if (pct >= 70) theme.get().warn else theme.get().accent;
-
-                    try writePart(frm, &x, x_end, y2, " ", dim_st);
-                    var pb: [16]u8 = undefined;
-                    const pt = fmtBuf(&pb, "{d}.{d}%", .{ pct_x10 / 10, pct_x10 % 10 }) catch return error.NoSpaceLeft;
-                    try writePart(frm, &x, x_end, y2, pt, .{ .fg = pct_fg });
-                    var lb: [16]u8 = undefined;
-                    const lt = fmtBuf(&lb, "/{d}k", .{self.ctx_limit / 1000}) catch return error.NoSpaceLeft;
-                    try writePart(frm, &x, x_end, y2, lt, dim_st);
-                }
-            } else if (self.ctx_limit > 0) {
-                // No usage yet — show 0.0%/Nk
-                try writePart(frm, &x, x_end, y2, "0.0%", dim_st);
-                var lb: [16]u8 = undefined;
-                const lt = fmtBuf(&lb, "/{d}k", .{self.ctx_limit / 1000}) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, lt, dim_st);
+    fn renderPathBranch(
+        self: *const Panels,
+        frm: *frame.Frame,
+        x: *usize,
+        x_end: usize,
+        y: usize,
+        w: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        if (self.branch.len == 0) {
+            if (self.cwd.len > 0) try writePart(frm, x, x_end, y, self.cwd, dim_st);
+            return;
+        }
+        const branch_cols = cpCountSlice(self.branch) + 2;
+        const has_cwd = self.cwd.len > 0;
+        const sep_cols: usize = if (has_cwd) 1 else 0;
+        const reserve_cols = branch_cols + sep_cols;
+        if (reserve_cols >= w) {
+            try writePart(frm, x, x_end, y, "(", dim_st);
+            try writePart(frm, x, x_end, y, self.branch, dim_st);
+            try writePart(frm, x, x_end, y, ")", dim_st);
+        } else {
+            var path_text = self.cwd;
+            const path_cols = cpCountSlice(path_text);
+            const max_path_cols = w - reserve_cols;
+            if (path_cols > max_path_cols) path_text = try clipLeftCols(path_text, max_path_cols);
+            if (path_text.len > 0) {
+                try writePart(frm, x, x_end, y, path_text, dim_st);
+                try writePart(frm, x, x_end, y, " ", dim_st);
             }
+            try writePart(frm, x, x_end, y, "(", dim_st);
+            try writePart(frm, x, x_end, y, self.branch, dim_st);
+            try writePart(frm, x, x_end, y, ")", dim_st);
+        }
+    }
 
-            if (self.bg_launched > 0) {
-                try writePart(frm, &x, x_end, y2, " bg L", dim_st);
-                var lbuf: [16]u8 = undefined;
-                const ltxt = fmtBuf(&lbuf, "{d}", .{self.bg_launched}) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, ltxt, dim_st);
-                try writePart(frm, &x, x_end, y2, " R", dim_st);
-                var rbuf: [16]u8 = undefined;
-                const rtxt = fmtBuf(&rbuf, "{d}", .{self.bg_running}) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, rtxt, dim_st);
-                try writePart(frm, &x, x_end, y2, " D", dim_st);
-                var dbuf: [16]u8 = undefined;
-                const dtxt = fmtBuf(&dbuf, "{d}", .{self.bg_done}) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, dtxt, dim_st);
-                if (self.bg_running > 0) {
-                    var sbuf: [4]u8 = undefined;
-                    try writePart(frm, &x, x_end, y2, " ", dim_st);
-                    try writePart(frm, &x, x_end, y2, spinner.utf8(self.bg_spin, &sbuf), dim_st);
-                }
-            }
-            if (self.turns > 0) {
-                var tb: [16]u8 = undefined;
-                const tt = fmtBuf(&tb, "{d}", .{self.turns}) catch return error.NoSpaceLeft;
-                try writePart(frm, &x, x_end, y2, " ", dim_st);
-                try writePart(frm, &x, x_end, y2, tt, dim_st);
-                try writePart(frm, &x, x_end, y2, if (self.turns == 1) " turn" else " turns", dim_st);
-            }
+    fn renderStats(
+        self: *const Panels,
+        frm: *frame.Frame,
+        x: *usize,
+        x_end: usize,
+        y: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        if (!self.has_usage) return;
+        try writePart(frm, x, x_end, y, "\xe2\x86\x93", dim_st); // ↓
+        var ib: [16]u8 = undefined;
+        const it = fmtCompact(&ib, self.tot_in) catch return error.NoSpaceLeft;
+        try writePart(frm, x, x_end, y, it, dim_st);
 
-            // Right: model • thinking-level
-            const model_text = self.model.items;
-            if (model_text.len > 0) {
-                var right_cols = cpCountSlice(model_text);
-                if (self.thinking_label.len > 0)
-                    right_cols += 3 + self.thinking_label.len; // " • " + label
-                if (right_cols < rect.w) {
-                    var rx = x_end - right_cols;
-                    if (rx > x) {
-                        try writePart(frm, &rx, x_end, y2, model_text, dim_st);
-                        if (self.thinking_label.len > 0) {
-                            try writePart(frm, &rx, x_end, y2, " \xe2\x80\xa2 ", dim_st); // " • "
-                            try writePart(frm, &rx, x_end, y2, self.thinking_label, .{ .fg = theme.get().accent });
-                        }
-                    }
-                }
-            }
+        try writePart(frm, x, x_end, y, " \xe2\x86\x91", dim_st); // ↑
+        var ob: [16]u8 = undefined;
+        const ot = fmtCompact(&ob, self.tot_out) catch return error.NoSpaceLeft;
+        try writePart(frm, x, x_end, y, ot, dim_st);
+
+        if (self.tot_cr > 0) {
+            try writePart(frm, x, x_end, y, " R", dim_st);
+            var rb: [16]u8 = undefined;
+            const rt = fmtCompact(&rb, self.tot_cr) catch return error.NoSpaceLeft;
+            try writePart(frm, x, x_end, y, rt, dim_st);
+        }
+        if (self.tot_cw > 0) {
+            try writePart(frm, x, x_end, y, " W", dim_st);
+            var wb: [16]u8 = undefined;
+            const wt = fmtCompact(&wb, self.tot_cw) catch return error.NoSpaceLeft;
+            try writePart(frm, x, x_end, y, wt, dim_st);
+        }
+    }
+
+    fn renderCost(
+        self: *const Panels,
+        frm: *frame.Frame,
+        x: *usize,
+        x_end: usize,
+        y: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        if (!self.has_usage) return;
+        if (self.cost_micents > 0) {
+            var cb: [16]u8 = undefined;
+            const ct = fmtCost(&cb, self.cost_micents) catch return error.NoSpaceLeft;
+            try writePart(frm, x, x_end, y, " $", dim_st);
+            try writePart(frm, x, x_end, y, ct, dim_st);
+        }
+        if (self.is_sub) {
+            try writePart(frm, x, x_end, y, " (sub)", dim_st);
+        }
+    }
+
+    fn renderContextGauge(
+        self: *const Panels,
+        frm: *frame.Frame,
+        x: *usize,
+        x_end: usize,
+        y: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        if (self.has_usage and self.ctx_limit > 0) {
+            const pct_x10 = self.cum_tok *| 1000 / self.ctx_limit;
+            const pct = pct_x10 / 10;
+            const pct_fg = if (pct >= 90) theme.get().err else if (pct >= 70) theme.get().warn else theme.get().accent;
+
+            try writePart(frm, x, x_end, y, " ", dim_st);
+            var pb: [16]u8 = undefined;
+            const pt = fmtBuf(&pb, "{d}.{d}%", .{ pct_x10 / 10, pct_x10 % 10 }) catch return error.NoSpaceLeft;
+            try writePart(frm, x, x_end, y, pt, .{ .fg = pct_fg });
+            var lb: [16]u8 = undefined;
+            const lt = fmtBuf(&lb, "/{d}k", .{self.ctx_limit / 1000}) catch return error.NoSpaceLeft;
+            try writePart(frm, x, x_end, y, lt, dim_st);
+        } else if (!self.has_usage and self.ctx_limit > 0) {
+            try writePart(frm, x, x_end, y, "0.0%", dim_st);
+            var lb: [16]u8 = undefined;
+            const lt = fmtBuf(&lb, "/{d}k", .{self.ctx_limit / 1000}) catch return error.NoSpaceLeft;
+            try writePart(frm, x, x_end, y, lt, dim_st);
+        }
+    }
+
+    fn renderBgStatus(
+        self: *const Panels,
+        frm: *frame.Frame,
+        x: *usize,
+        x_end: usize,
+        y: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        if (self.bg_launched == 0) return;
+        try writePart(frm, x, x_end, y, " bg L", dim_st);
+        var lbuf: [16]u8 = undefined;
+        const ltxt = fmtBuf(&lbuf, "{d}", .{self.bg_launched}) catch return error.NoSpaceLeft;
+        try writePart(frm, x, x_end, y, ltxt, dim_st);
+        try writePart(frm, x, x_end, y, " R", dim_st);
+        var rbuf: [16]u8 = undefined;
+        const rtxt = fmtBuf(&rbuf, "{d}", .{self.bg_running}) catch return error.NoSpaceLeft;
+        try writePart(frm, x, x_end, y, rtxt, dim_st);
+        try writePart(frm, x, x_end, y, " D", dim_st);
+        var dbuf: [16]u8 = undefined;
+        const dtxt = fmtBuf(&dbuf, "{d}", .{self.bg_done}) catch return error.NoSpaceLeft;
+        try writePart(frm, x, x_end, y, dtxt, dim_st);
+        if (self.bg_running > 0) {
+            var sbuf: [4]u8 = undefined;
+            try writePart(frm, x, x_end, y, " ", dim_st);
+            try writePart(frm, x, x_end, y, spinner.utf8(self.bg_spin, &sbuf), dim_st);
+        }
+    }
+
+    fn renderTurns(
+        self: *const Panels,
+        frm: *frame.Frame,
+        x: *usize,
+        x_end: usize,
+        y: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        if (self.turns == 0) return;
+        var tb: [16]u8 = undefined;
+        const tt = fmtBuf(&tb, "{d}", .{self.turns}) catch return error.NoSpaceLeft;
+        try writePart(frm, x, x_end, y, " ", dim_st);
+        try writePart(frm, x, x_end, y, tt, dim_st);
+        try writePart(frm, x, x_end, y, if (self.turns == 1) " turn" else " turns", dim_st);
+    }
+
+    fn renderModelInfo(
+        self: *const Panels,
+        frm: *frame.Frame,
+        left_x: usize,
+        x_end: usize,
+        y: usize,
+        w: usize,
+        dim_st: frame.Style,
+    ) RenderError!void {
+        const model_text = self.model.items;
+        if (model_text.len == 0) return;
+        var right_cols = cpCountSlice(model_text);
+        if (self.thinking_label.len > 0)
+            right_cols += 3 + self.thinking_label.len;
+        if (right_cols >= w) return;
+        var rx = x_end - right_cols;
+        if (rx <= left_x) return;
+        try writePart(frm, &rx, x_end, y, model_text, dim_st);
+        if (self.thinking_label.len > 0) {
+            try writePart(frm, &rx, x_end, y, " \xe2\x80\xa2 ", dim_st);
+            try writePart(frm, &rx, x_end, y, self.thinking_label, .{ .fg = theme.get().accent });
         }
     }
 

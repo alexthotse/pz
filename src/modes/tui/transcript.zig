@@ -260,6 +260,17 @@ pub const Transcript = struct {
         }
     }
 
+    /// Shared state threaded through block render sub-methods.
+    const RenderCtx = struct {
+        frm: *frame.Frame,
+        rect: Rect,
+        content_x: usize,
+        text_w: usize,
+        skip: usize,
+        skipped: usize,
+        row: usize,
+    };
+
     pub fn render(self: *Transcript, frm: *frame.Frame, rect: Rect) RenderError!void {
         self.img_ref_n = 0;
         if (rect.w == 0 or rect.h == 0) return;
@@ -272,9 +283,6 @@ pub const Transcript = struct {
         const avail_w = rect.w - pad;
 
         // Count total display lines at scrollbar-reserved width (single pass).
-        // Using avail_w - 1 means: if overflow, count is already correct;
-        // if no overflow, we use full avail_w for rendering (the slightly
-        // wider width can only reduce line count, so no-overflow is stable).
         const bar_w: usize = if (avail_w >= 2) 1 else 0;
         const count_w = avail_w - bar_w;
         var total: usize = 0;
@@ -307,8 +315,16 @@ pub const Transcript = struct {
         render_again: while (true) {
             self.img_ref_n = 0;
             try rect.clear(frm);
-            var skipped: usize = 0;
-            var row: usize = 0;
+
+            var ctx = RenderCtx{
+                .frm = frm,
+                .rect = rect,
+                .content_x = content_x,
+                .text_w = text_w,
+                .skip = skip,
+                .skipped = 0,
+                .row = 0,
+            };
 
             var md = markdown.Renderer{};
             var first_vis = true;
@@ -319,210 +335,28 @@ pub const Transcript = struct {
 
                 // 1-line gap between blocks
                 if (!first_vis and (prev_rendered == null or needsGap(prev_rendered.?, b))) {
-                    if (skipped < skip) {
-                        skipped += 1;
-                    } else if (row < rect.h) {
-                        row += 1;
+                    if (ctx.skipped < ctx.skip) {
+                        ctx.skipped += 1;
+                    } else if (ctx.row < rect.h) {
+                        ctx.row += 1;
                     }
                 }
                 first_vis = false;
                 prev_rendered = b;
 
-                // Image blocks: header line + reserved rows
                 if (b.kind == .image) {
-                    const blk_h = image.img_rows;
-                    var img_skipped: usize = 0;
-                    var ir: usize = 0;
-                    while (ir < blk_h) : (ir += 1) {
-                        if (skipped < skip) {
-                            skipped += 1;
-                            img_skipped += 1;
-                            continue;
-                        }
-                        if (row >= rect.h) break;
-                        const y = rect.y + row;
-                        if (ir == 0) {
-                            // First visible row: show header
-                            _ = try frm.write(content_x, y, b.text(), b.st);
-                        }
-                        // Record image position (first displayed row)
-                        if (ir == img_skipped and self.img_ref_n < self.img_refs.len) {
-                            self.img_refs[self.img_ref_n] = .{
-                                .path = b.text(),
-                                .y = y,
-                                .w = text_w,
-                            };
-                            self.img_ref_n += 1;
-                        }
-                        row += 1;
-                    }
-                    continue;
-                }
-
-                const txt = self.blockDisplayText(b);
-                const use_md = b.kind == .text or b.kind == .user;
-                if (use_md) {
-                    md = .{};
-                    var md_wit = mdWrapIter(txt, text_w);
-                    var pending_md: ?[]const u8 = null;
-                    while (true) {
-                        const line = if (pending_md) |p| blk: {
-                            pending_md = null;
-                            break :blk p;
-                        } else md_wit.next() orelse break;
-
-                        // Detect a markdown table block (header + separator + rows)
-                        if (tbl.isTableLine(line)) {
-                            if (md_wit.next()) |sep_line| {
-                                if (tbl.isSepLine(sep_line)) {
-                                    var table_lines_buf: [64][]const u8 = undefined;
-                                    var table_n: usize = 0;
-                                    table_lines_buf[table_n] = line;
-                                    table_n += 1;
-                                    table_lines_buf[table_n] = sep_line;
-                                    table_n += 1;
-
-                                    while (md_wit.next()) |tbl_line| {
-                                        if (!tbl.isTableLine(tbl_line)) {
-                                            pending_md = tbl_line;
-                                            break;
-                                        }
-                                        if (table_n < table_lines_buf.len) {
-                                            table_lines_buf[table_n] = tbl_line;
-                                            table_n += 1;
-                                        }
-                                    }
-
-                                    const table_lines = table_lines_buf[0..table_n];
-                                    const layout = tbl.computeLayout(table_lines, text_w);
-                                    const data_n: usize = if (table_lines.len > 2) table_lines.len - 2 else 0;
-
-                                    // top border
-                                    if (skipped < skip) {
-                                        skipped += 1;
-                                    } else if (row < rect.h) {
-                                        const y = rect.y + row;
-                                        if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-                                        try tbl.renderRule(frm, content_x, y, text_w, layout, b.st, .top);
-                                        row += 1;
-                                    }
-
-                                    // header row
-                                    const header_line = table_lines[0];
-                                    if (skipped < skip) {
-                                        skipped += 1;
-                                        md.advanceSkipped(header_line);
-                                    } else if (row < rect.h) {
-                                        const y = rect.y + row;
-                                        if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-                                        try tbl.renderRowAligned(frm, content_x, y, text_w, header_line, layout, b.st, true);
-                                        row += 1;
-                                    }
-
-                                    // header/data separator
-                                    if (skipped < skip) {
-                                        skipped += 1;
-                                    } else if (row < rect.h) {
-                                        const y = rect.y + row;
-                                        if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-                                        try tbl.renderRule(frm, content_x, y, text_w, layout, b.st, .mid);
-                                        row += 1;
-                                    }
-
-                                    var di: usize = 0;
-                                    while (di < data_n) : (di += 1) {
-                                        const data_line = table_lines[2 + di];
-                                        if (skipped < skip) {
-                                            skipped += 1;
-                                            md.advanceSkipped(data_line);
-                                        } else if (row < rect.h) {
-                                            const y = rect.y + row;
-                                            if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-                                            try tbl.renderRowAligned(frm, content_x, y, text_w, data_line, layout, b.st, false);
-                                            row += 1;
-                                        }
-
-                                        if (di + 1 < data_n) {
-                                            if (skipped < skip) {
-                                                skipped += 1;
-                                            } else if (row < rect.h) {
-                                                const y = rect.y + row;
-                                                if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-                                                try tbl.renderRule(frm, content_x, y, text_w, layout, b.st, .mid);
-                                                row += 1;
-                                            }
-                                        }
-                                    }
-
-                                    // bottom border
-                                    if (skipped < skip) {
-                                        skipped += 1;
-                                    } else if (row < rect.h) {
-                                        const y = rect.y + row;
-                                        if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-                                        try tbl.renderRule(frm, content_x, y, text_w, layout, b.st, .bottom);
-                                        row += 1;
-                                    }
-                                    continue;
-                                }
-                                pending_md = sep_line;
-                            }
-                        }
-
-                        if (skipped < skip) {
-                            skipped += 1;
-                            md.advanceSkipped(line);
-                            continue;
-                        }
-                        if (row >= rect.h) break;
-
-                        const y = rect.y + row;
-
-                        if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-
-                        _ = try md.renderLine(frm, content_x, y, line, text_w, b.st);
-                        row += 1;
-                    }
+                    self.renderImageBlock(&ctx, b);
+                } else if (b.kind == .text or b.kind == .user) {
+                    try self.renderMdBlock(&ctx, &md, b);
                 } else if (b.line_mode == .ellipsis) {
-                    if (skipped < skip) {
-                        skipped += 1;
-                        continue;
-                    }
-                    if (row >= rect.h) break;
-
-                    const y = rect.y + row;
-
-                    if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-
-                    _ = try writeEllipsisUtf8(frm, content_x, y, text_w, txt, b.st);
-                    row += 1;
+                    try renderEllipsisBlock(&ctx, b);
                 } else {
-                    var wit = wrapIter(txt, text_w);
-                    while (wit.next()) |line| {
-                        if (skipped < skip) {
-                            skipped += 1;
-                            continue;
-                        }
-                        if (row >= rect.h) break;
-
-                        const y = rect.y + row;
-
-                        if (!b.st.bg.isDefault()) try fillBgRow(frm, rect.x, y, rect.w, b.st.bg);
-
-                        if (b.hasSpans()) {
-                            const base_off = @intFromPtr(line.ptr) - @intFromPtr(txt.ptr);
-                            _ = try writeStyled(frm, content_x, y, line, base_off, b);
-                        } else {
-                            _ = try frm.write(content_x, y, line, b.st);
-                        }
-
-                        row += 1;
-                    }
+                    try renderWrapBlock(&ctx, b);
                 }
             }
 
-            if (row < rect.h) {
-                total_rows = skipped + row;
+            if (ctx.row < rect.h) {
+                total_rows = ctx.skipped + ctx.row;
                 const exact_max_skip = total_rows -| rect.h;
                 if (exact_max_skip < skip) {
                     skip = exact_max_skip;
@@ -534,22 +368,203 @@ pub const Transcript = struct {
 
         // Scroll indicator
         if (has_bar and total_rows > rect.h) {
-            const bar_x = rect.x + rect.w - 1;
-            const bar_st = frame.Style{ .fg = theme.get().border_muted };
-            const track_st = frame.Style{ .fg = theme.get().dim };
+            renderScrollbar(frm, rect, total_rows, skip);
+        }
+    }
 
-            const thumb_h = @max(@as(usize, 1), rect.h * rect.h / total_rows);
-            const scroll_range = total_rows - rect.h;
-            const track_range = if (rect.h > thumb_h) rect.h - thumb_h else 0;
-            const thumb_y = if (scroll_range > 0) skip * track_range / scroll_range else 0;
-
-            var sy: usize = 0;
-            while (sy < rect.h) : (sy += 1) {
-                const is_thumb = sy >= thumb_y and sy < thumb_y + thumb_h;
-                const cp: u21 = if (is_thumb) 0x2588 else 0x2591;
-                const st = if (is_thumb) bar_st else track_st;
-                try frm.set(bar_x, rect.y + sy, cp, st);
+    fn renderImageBlock(self: *Transcript, ctx: *RenderCtx, b: *const Block) void {
+        const blk_h = image.img_rows;
+        var img_skipped: usize = 0;
+        var ir: usize = 0;
+        while (ir < blk_h) : (ir += 1) {
+            if (ctx.skipped < ctx.skip) {
+                ctx.skipped += 1;
+                img_skipped += 1;
+                continue;
             }
+            if (ctx.row >= ctx.rect.h) break;
+            const y = ctx.rect.y + ctx.row;
+            if (ir == 0) {
+                _ = ctx.frm.write(ctx.content_x, y, b.text(), b.st) catch return;
+            }
+            if (ir == img_skipped and self.img_ref_n < self.img_refs.len) {
+                self.img_refs[self.img_ref_n] = .{
+                    .path = b.text(),
+                    .y = y,
+                    .w = ctx.text_w,
+                };
+                self.img_ref_n += 1;
+            }
+            ctx.row += 1;
+        }
+    }
+
+    fn renderMdBlock(self: *Transcript, ctx: *RenderCtx, md: *markdown.Renderer, b: *const Block) RenderError!void {
+        _ = self;
+        const txt = b.text();
+        md.* = .{};
+        var md_wit = mdWrapIter(txt, ctx.text_w);
+        var pending_md: ?[]const u8 = null;
+        while (true) {
+            const line = if (pending_md) |p| blk: {
+                pending_md = null;
+                break :blk p;
+            } else md_wit.next() orelse break;
+
+            if (tbl.isTableLine(line)) {
+                if (md_wit.next()) |sep_line| {
+                    if (tbl.isSepLine(sep_line)) {
+                        try renderTableBlock(ctx, md, b, line, sep_line, &md_wit, &pending_md);
+                        continue;
+                    }
+                    pending_md = sep_line;
+                }
+            }
+
+            if (ctx.skipped < ctx.skip) {
+                ctx.skipped += 1;
+                md.advanceSkipped(line);
+                continue;
+            }
+            if (ctx.row >= ctx.rect.h) break;
+
+            const y = ctx.rect.y + ctx.row;
+            if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+            _ = try md.renderLine(ctx.frm, ctx.content_x, y, line, ctx.text_w, b.st);
+            ctx.row += 1;
+        }
+    }
+
+    fn renderTableBlock(
+        ctx: *RenderCtx,
+        md: *markdown.Renderer,
+        b: *const Block,
+        header: []const u8,
+        sep: []const u8,
+        md_wit: *MdWrapIter,
+        pending_md: *?[]const u8,
+    ) RenderError!void {
+        var table_lines_buf: [64][]const u8 = undefined;
+        var table_n: usize = 0;
+        table_lines_buf[table_n] = header;
+        table_n += 1;
+        table_lines_buf[table_n] = sep;
+        table_n += 1;
+
+        while (md_wit.next()) |tbl_line| {
+            if (!tbl.isTableLine(tbl_line)) {
+                pending_md.* = tbl_line;
+                break;
+            }
+            if (table_n < table_lines_buf.len) {
+                table_lines_buf[table_n] = tbl_line;
+                table_n += 1;
+            }
+        }
+
+        const table_lines = table_lines_buf[0..table_n];
+        const layout = tbl.computeLayout(table_lines, ctx.text_w);
+        const data_n: usize = if (table_lines.len > 2) table_lines.len - 2 else 0;
+
+        // top border
+        try emitRule(ctx, b, layout, .top);
+
+        // header row
+        if (ctx.skipped < ctx.skip) {
+            ctx.skipped += 1;
+            md.advanceSkipped(table_lines[0]);
+        } else if (ctx.row < ctx.rect.h) {
+            const y = ctx.rect.y + ctx.row;
+            if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+            try tbl.renderRowAligned(ctx.frm, ctx.content_x, y, ctx.text_w, table_lines[0], layout, b.st, true);
+            ctx.row += 1;
+        }
+
+        // header/data separator
+        try emitRule(ctx, b, layout, .mid);
+
+        // data rows with mid-rules between them
+        var di: usize = 0;
+        while (di < data_n) : (di += 1) {
+            const data_line = table_lines[2 + di];
+            if (ctx.skipped < ctx.skip) {
+                ctx.skipped += 1;
+                md.advanceSkipped(data_line);
+            } else if (ctx.row < ctx.rect.h) {
+                const y = ctx.rect.y + ctx.row;
+                if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+                try tbl.renderRowAligned(ctx.frm, ctx.content_x, y, ctx.text_w, data_line, layout, b.st, false);
+                ctx.row += 1;
+            }
+            if (di + 1 < data_n) {
+                try emitRule(ctx, b, layout, .mid);
+            }
+        }
+
+        // bottom border
+        try emitRule(ctx, b, layout, .bottom);
+    }
+
+    fn emitRule(ctx: *RenderCtx, b: *const Block, layout: tbl.Layout, pos: tbl.Rule) RenderError!void {
+        if (ctx.skipped < ctx.skip) {
+            ctx.skipped += 1;
+        } else if (ctx.row < ctx.rect.h) {
+            const y = ctx.rect.y + ctx.row;
+            if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+            try tbl.renderRule(ctx.frm, ctx.content_x, y, ctx.text_w, layout, b.st, pos);
+            ctx.row += 1;
+        }
+    }
+
+    fn renderEllipsisBlock(ctx: *RenderCtx, b: *const Block) RenderError!void {
+        if (ctx.skipped < ctx.skip) {
+            ctx.skipped += 1;
+            return;
+        }
+        if (ctx.row >= ctx.rect.h) return;
+        const y = ctx.rect.y + ctx.row;
+        if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+        _ = try writeEllipsisUtf8(ctx.frm, ctx.content_x, y, ctx.text_w, b.text(), b.st);
+        ctx.row += 1;
+    }
+
+    fn renderWrapBlock(ctx: *RenderCtx, b: *const Block) RenderError!void {
+        const txt = b.text();
+        var wit = wrapIter(txt, ctx.text_w);
+        while (wit.next()) |line| {
+            if (ctx.skipped < ctx.skip) {
+                ctx.skipped += 1;
+                continue;
+            }
+            if (ctx.row >= ctx.rect.h) break;
+            const y = ctx.rect.y + ctx.row;
+            if (!b.st.bg.isDefault()) try fillBgRow(ctx.frm, ctx.rect.x, y, ctx.rect.w, b.st.bg);
+            if (b.hasSpans()) {
+                const base_off = @intFromPtr(line.ptr) - @intFromPtr(txt.ptr);
+                _ = try writeStyled(ctx.frm, ctx.content_x, y, line, base_off, b);
+            } else {
+                _ = try ctx.frm.write(ctx.content_x, y, line, b.st);
+            }
+            ctx.row += 1;
+        }
+    }
+
+    fn renderScrollbar(frm: *frame.Frame, rect: Rect, total_rows: usize, skip: usize) void {
+        const bar_x = rect.x + rect.w - 1;
+        const bar_st = frame.Style{ .fg = theme.get().border_muted };
+        const track_st = frame.Style{ .fg = theme.get().dim };
+
+        const thumb_h = @max(@as(usize, 1), rect.h * rect.h / total_rows);
+        const scroll_range = total_rows - rect.h;
+        const track_range = if (rect.h > thumb_h) rect.h - thumb_h else 0;
+        const thumb_y = if (scroll_range > 0) skip * track_range / scroll_range else 0;
+
+        var sy: usize = 0;
+        while (sy < rect.h) : (sy += 1) {
+            const is_thumb = sy >= thumb_y and sy < thumb_y + thumb_h;
+            const cp: u21 = if (is_thumb) 0x2588 else 0x2591;
+            const st = if (is_thumb) bar_st else track_st;
+            frm.set(bar_x, rect.y + sy, cp, st) catch return;
         }
     }
 
@@ -557,10 +572,6 @@ pub const Transcript = struct {
         if (!self.show_tools and b.kind == .tool) return false;
         if (!self.show_thinking and b.kind == .thinking) return false;
         return true;
-    }
-
-    fn blockDisplayText(_: *const Transcript, b: *const Block) []const u8 {
-        return b.text();
     }
 
     fn blockLineCount(b: *const Block, w: usize) usize {
