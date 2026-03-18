@@ -2,6 +2,9 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
+const noop = @import("../../test/noop_sink.zig");
+const Acc = shared.Acc;
 
 pub const Err = error{
     KindMismatch,
@@ -40,7 +43,7 @@ pub const Handler = struct {
         if (args.path.len == 0) return error.InvalidArgs;
 
         var dir = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
-            return mapDirErr(open_err);
+            return shared.mapFsErr(open_err);
         };
         defer dir.close();
 
@@ -51,7 +54,7 @@ pub const Handler = struct {
         }
 
         var it = dir.iterate();
-        while (it.next() catch |next_err| return mapDirErr(next_err)) |ent| {
+        while (it.next() catch |next_err| return shared.mapFsErr(next_err)) |ent| {
             if (!args.all and ent.name.len > 0 and ent.name[0] == '.') continue;
 
             const name = self.alloc.dupe(u8, ent.name) catch return error.OutOfMemory;
@@ -76,58 +79,11 @@ pub const Handler = struct {
         const data = acc.takeOwned() catch return error.OutOfMemory;
         errdefer self.alloc.free(data);
 
-        const meta = tools.truncate.metaFor(self.max_bytes, acc.full_bytes);
-        var meta_chunk: ?[]u8 = null;
-        if (meta) |m| {
-            meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
-        }
-        errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
-
-        const out_len: usize = 1 + @as(usize, @intFromBool(meta_chunk != null));
-        const out = self.alloc.alloc(tools.Output, out_len) catch return error.OutOfMemory;
-        errdefer self.alloc.free(out);
-
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = self.now_ms,
-            .stream = .stdout,
-            .chunk = data,
-            .owned = true,
-            .truncated = meta != null,
-        };
-
-        if (meta_chunk) |chunk| {
-            out[1] = .{
-                .call_id = call.id,
-                .seq = 1,
-                .at_ms = self.now_ms,
-                .stream = .meta,
-                .chunk = chunk,
-                .owned = true,
-                .truncated = false,
-            };
-            meta_chunk = null;
-        }
-
-        return .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{
-                .ok = .{ .code = 0 },
-            },
-        };
+        return shared.buildResult(self.alloc, call.id, self.now_ms, data, self.max_bytes, acc.full_bytes) catch return error.OutOfMemory;
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -140,54 +96,7 @@ fn lessItem(_: void, a: Item, b: Item) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
-const Acc = struct {
-    alloc: std.mem.Allocator,
-    limit: usize,
-    buf: std.ArrayList(u8) = .empty,
-    full_bytes: usize = 0,
 
-    fn init(alloc: std.mem.Allocator, limit: usize) Acc {
-        return .{
-            .alloc = alloc,
-            .limit = limit,
-        };
-    }
-
-    fn deinit(self: *Acc) void {
-        self.buf.deinit(self.alloc);
-        self.* = undefined;
-    }
-
-    fn append(self: *Acc, data: []const u8) !void {
-        self.full_bytes = satAdd(self.full_bytes, data.len);
-        if (self.buf.items.len >= self.limit) return;
-
-        const keep = @min(data.len, self.limit - self.buf.items.len);
-        if (keep == 0) return;
-        try self.buf.appendSlice(self.alloc, data[0..keep]);
-    }
-
-    fn takeOwned(self: *Acc) ![]u8 {
-        const out = try self.buf.toOwnedSlice(self.alloc);
-        self.buf = .empty;
-        return out;
-    }
-};
-
-fn satAdd(a: usize, b: usize) usize {
-    const sum, const ov = @addWithOverflow(a, b);
-    if (ov == 0) return sum;
-    return std.math.maxInt(usize);
-}
-
-fn mapDirErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
 
 test "ls handler lists entries in deterministic order and marks directories" {
     const OhSnap = @import("ohsnap");
@@ -204,11 +113,7 @@ test "ls handler lists entries in deterministic order and marks directories" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -249,11 +154,7 @@ test "ls handler lists entries in deterministic order and marks directories" {
 }
 
 test "ls handler rejects missing path and wrong kind" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -298,11 +199,7 @@ test "ls handler emits truncation metadata when output exceeds limit" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,

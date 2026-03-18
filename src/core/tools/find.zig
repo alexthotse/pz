@@ -2,7 +2,10 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
+const noop = @import("../../test/noop_sink.zig");
+const Acc = shared.Acc;
 
 pub const Err = error{
     KindMismatch,
@@ -42,7 +45,7 @@ pub const Handler = struct {
         if (args.max_results == 0) return error.InvalidArgs;
 
         var root = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
-            return mapFsErr(open_err);
+            return shared.mapFsErr(open_err);
         };
         defer root.close();
 
@@ -52,7 +55,7 @@ pub const Handler = struct {
             matches.deinit(self.alloc);
         }
 
-        const collect_limit = satMul(@as(usize, args.max_results), 8);
+        const collect_limit = shared.satMul(usize, @as(usize, args.max_results), 8);
         var path = std.ArrayList(u8).empty;
         defer path.deinit(self.alloc);
         try collectMatches(self, root, &path, args.name, collect_limit, &matches);
@@ -71,58 +74,11 @@ pub const Handler = struct {
         const data = acc.takeOwned() catch return error.OutOfMemory;
         errdefer self.alloc.free(data);
 
-        const meta = tools.truncate.metaFor(self.max_bytes, acc.full_bytes);
-        var meta_chunk: ?[]u8 = null;
-        if (meta) |m| {
-            meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
-        }
-        errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
-
-        const out_len: usize = 1 + @as(usize, @intFromBool(meta_chunk != null));
-        const out = self.alloc.alloc(tools.Output, out_len) catch return error.OutOfMemory;
-        errdefer self.alloc.free(out);
-
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = self.now_ms,
-            .stream = .stdout,
-            .chunk = data,
-            .owned = true,
-            .truncated = meta != null,
-        };
-
-        if (meta_chunk) |chunk| {
-            out[1] = .{
-                .call_id = call.id,
-                .seq = 1,
-                .at_ms = self.now_ms,
-                .stream = .meta,
-                .chunk = chunk,
-                .owned = true,
-                .truncated = false,
-            };
-            meta_chunk = null;
-        }
-
-        return .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{
-                .ok = .{ .code = 0 },
-            },
-        };
+        return shared.buildResult(self.alloc, call.id, self.now_ms, data, self.max_bytes, acc.full_bytes) catch return error.OutOfMemory;
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -160,70 +116,17 @@ fn collectMatches(
             .iterate = true,
             .access_sub_paths = true,
             .no_follow = true,
-        }) catch |open_err| return mapFsErr(open_err);
+        }) catch |open_err| return shared.mapFsErr(open_err);
         defer child.close();
         try collectMatches(self, child, path, needle, limit, matches);
     }
 }
 
 fn nextEnt(it: *std.fs.Dir.Iterator) Err!?std.fs.Dir.Entry {
-    return it.next() catch |next_err| mapFsErr(next_err);
+    return it.next() catch |next_err| shared.mapFsErr(next_err);
 }
 
-const Acc = struct {
-    alloc: std.mem.Allocator,
-    limit: usize,
-    buf: std.ArrayList(u8) = .empty,
-    full_bytes: usize = 0,
 
-    fn init(alloc: std.mem.Allocator, limit: usize) Acc {
-        return .{
-            .alloc = alloc,
-            .limit = limit,
-        };
-    }
-
-    fn deinit(self: *Acc) void {
-        self.buf.deinit(self.alloc);
-        self.* = undefined;
-    }
-
-    fn append(self: *Acc, data: []const u8) !void {
-        self.full_bytes = satAdd(self.full_bytes, data.len);
-        if (self.buf.items.len >= self.limit) return;
-
-        const keep = @min(data.len, self.limit - self.buf.items.len);
-        if (keep == 0) return;
-        try self.buf.appendSlice(self.alloc, data[0..keep]);
-    }
-
-    fn takeOwned(self: *Acc) ![]u8 {
-        const out = try self.buf.toOwnedSlice(self.alloc);
-        self.buf = .empty;
-        return out;
-    }
-};
-
-fn satAdd(a: usize, b: usize) usize {
-    const sum, const ov = @addWithOverflow(a, b);
-    if (ov == 0) return sum;
-    return std.math.maxInt(usize);
-}
-
-fn satMul(a: usize, b: usize) usize {
-    const out, const ov = @mulWithOverflow(a, b);
-    if (ov == 0) return out;
-    return std.math.maxInt(usize);
-}
-
-fn mapFsErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
 
 test "find handler lists matching paths in sorted order" {
     const OhSnap = @import("ohsnap");
@@ -241,11 +144,7 @@ test "find handler lists matching paths in sorted order" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, "src");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -284,11 +183,7 @@ test "find handler lists matching paths in sorted order" {
 }
 
 test "find handler validates args and handles missing roots" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -336,11 +231,7 @@ test "find handler truncates on high hit count instead of erroring" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, "d");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,

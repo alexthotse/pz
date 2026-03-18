@@ -986,20 +986,7 @@ fn hashPolicyFile(
     return true;
 }
 
-fn writeJsonStr(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
-}
+const writeJsonStr = @import("json.zig").writeJsonStr;
 
 /// Free owned allocations from parseDoc.
 pub fn deinitDoc(alloc: std.mem.Allocator, doc: Doc) void {

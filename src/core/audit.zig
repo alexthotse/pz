@@ -1286,34 +1286,7 @@ fn writeObjKey(w: anytype, first: *bool, key: []const u8) !void {
     try w.writeByte(':');
 }
 
-fn writeJsonStr(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\x08' => try w.writeAll("\\b"),
-            '\x0c' => try w.writeAll("\\f"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0...0x07, 0x0b, 0x0e...0x1f => {
-                const hex = "0123456789abcdef";
-                const esc = [6]u8{
-                    '\\',
-                    'u',
-                    '0',
-                    '0',
-                    hex[c >> 4],
-                    hex[c & 0x0f],
-                };
-                try w.writeAll(&esc);
-            },
-            else => try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
-}
+const writeJsonStr = @import("json.zig").writeJsonStr;
 
 test "snapshot: canonical tool entry encoding" {
     const OhSnap = @import("ohsnap");

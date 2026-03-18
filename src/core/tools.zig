@@ -2,6 +2,7 @@
 const std = @import("std");
 const runtime = @import("tools/runtime.zig");
 pub const truncate = @import("tools/truncate.zig");
+pub const shared = @import("tools/shared.zig");
 pub const builtin = @import("tools/builtin.zig");
 pub const read = @import("tools/read.zig");
 pub const write = @import("tools/write.zig");

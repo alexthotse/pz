@@ -13,6 +13,7 @@ const path_guard = @import("path_guard.zig");
 const skill = @import("skill.zig");
 const web = @import("web.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
+const noop = @import("../../test/noop_sink.zig");
 
 const default_max_bytes: usize = 64 * 1024;
 pub const mask_read: u16 = 1 << 0;
@@ -783,11 +784,7 @@ test "builtin runtime uses call timestamp in result envelope" {
         .max_bytes = 1024,
     });
     const reg = rt.registry();
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const call: tools.Call = .{
         .id = "t1",
@@ -881,11 +878,7 @@ test "agent tool uses runtime hook output" {
     });
     const reg = rt.registry();
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const call: tools.Call = .{
         .id = "agent-hook",
@@ -952,11 +945,7 @@ test "ask tool requires interactive hook" {
     });
     const reg = rt.registry();
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const opts = [_]tools.Call.AskArgs.Option{
         .{ .label = "A" },
@@ -1016,11 +1005,7 @@ test "ask tool rejects empty question list" {
     });
     const reg = rt.registry();
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const call: tools.Call = .{
         .id = "ask-empty",
@@ -1080,11 +1065,7 @@ test "ask tool uses hook output" {
     });
     const reg = rt.registry();
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const opts = [_]tools.Call.AskArgs.Option{
         .{ .label = "A" },
@@ -1162,11 +1143,7 @@ test "ask tool reports hook failure" {
     });
     const reg = rt.registry();
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const opts = [_]tools.Call.AskArgs.Option{
         .{ .label = "A" },
@@ -1235,11 +1212,7 @@ test "ask tool maps cancelled hook output to cancelled final" {
     });
     const reg = rt.registry();
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const opts = [_]tools.Call.AskArgs.Option{
         .{ .label = "A" },

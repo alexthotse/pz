@@ -5,7 +5,9 @@ const policy = @import("../policy.zig");
 const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
+const noop = @import("../../test/noop_sink.zig");
 const event_loop = @import("../event_loop.zig");
 const EventLoop = event_loop.EventLoop;
 
@@ -230,11 +232,7 @@ pub const Handler = struct {
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -576,12 +574,7 @@ fn statusToError(status: u32) ?tools.Result.Failed {
 test "bash handler captures stdout and stderr with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -643,12 +636,7 @@ test "bash handler applies explicit env variables" {
         chunk: []const u8,
         final: tools.Result.Final,
     };
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const env = [_]tools.Call.Env{
         .{
@@ -745,10 +733,6 @@ test "bash handler installs sandbox before bash exec" {
             self.* = undefined;
         }
     };
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("sub");
@@ -756,8 +740,8 @@ test "bash handler installs sandbox before bash exec" {
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
+
     var runner_ctx = RunnerCtx{ .alloc = std.testing.allocator };
     defer runner_ctx.deinit();
 
@@ -823,12 +807,7 @@ test "bash handler installs sandbox before bash exec" {
 test "bash handler returns failed final on non-zero exit" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -873,12 +852,7 @@ test "bash handler returns failed final on non-zero exit" {
 test "bash handler returns failed final on signal exit" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -918,12 +892,7 @@ test "bash handler returns failed final on signal exit" {
 }
 
 test "bash handler returns invalid args on empty command" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -945,12 +914,7 @@ test "bash handler returns invalid args on empty command" {
 }
 
 test "bash handler returns invalid args on bad env key" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const env = [_]tools.Call.Env{
         .{
@@ -979,12 +943,7 @@ test "bash handler returns invalid args on bad env key" {
 }
 
 test "bash handler returns not found for missing cwd" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -1007,12 +966,7 @@ test "bash handler returns not found for missing cwd" {
 }
 
 test "bash handler denies direct protected state access" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -1034,12 +988,7 @@ test "bash handler denies direct protected state access" {
 }
 
 test "bash handler denies wrapped protected state access" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -1063,10 +1012,6 @@ test "bash handler denies wrapped protected state access" {
 test "bash handler denies file reads outside workspace inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const secret = try std.fs.cwd().realpathAlloc(std.testing.allocator, "README.md");
@@ -1076,8 +1021,8 @@ test "bash handler denies file reads outside workspace inside sandbox" {
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
+
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
@@ -1118,10 +1063,6 @@ test "bash handler denies file reads outside workspace inside sandbox" {
 test "bash handler denies process exec outside workspace inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const script_rel = ".zig-cache/p30a-run.sh";
@@ -1137,8 +1078,8 @@ test "bash handler denies process exec outside workspace inside sandbox" {
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
+
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
@@ -1179,10 +1120,6 @@ test "bash handler denies process exec outside workspace inside sandbox" {
 test "bash handler denies network connects inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
     const Server = struct {
         listener: std.net.Server,
         stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -1229,8 +1166,8 @@ test "bash handler denies network connects inside sandbox" {
     const thr = try std.Thread.spawn(.{}, Server.run, .{&server});
     defer server.join(thr);
 
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
+
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
@@ -1267,18 +1204,14 @@ test "bash handler denies network connects inside sandbox" {
 test "bash handler allows workspace file actions inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const path_guard = @import("path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd_guard.deinit();
 
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
+
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
@@ -1314,12 +1247,7 @@ test "bash handler allows workspace file actions inside sandbox" {
 test "bash handler truncates oversized output and emits metadata" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -1355,12 +1283,7 @@ test "bash handler truncates oversized output and emits metadata" {
 }
 
 test "bash handler returns kind mismatch for wrong call kind" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,

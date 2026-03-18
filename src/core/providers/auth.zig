@@ -6,6 +6,7 @@ const audit = @import("../audit.zig");
 const fs_secure = @import("../fs_secure.zig");
 const policy = @import("../policy.zig");
 const core_tls = @import("../tls.zig");
+const url_codec = @import("../url.zig");
 
 pub const Auth = union(enum) {
     oauth: OAuth,
@@ -660,24 +661,7 @@ fn pkceChallenge(alloc: std.mem.Allocator, verifier: []const u8) ![]u8 {
 }
 
 fn encodeQueryComponentAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-
-    for (raw) |c| {
-        const is_unreserved =
-            (c >= 'a' and c <= 'z') or
-            (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or
-            c == '-' or c == '_' or c == '.' or c == '~';
-        if (is_unreserved) {
-            try out.append(alloc, c);
-            continue;
-        }
-        try out.append(alloc, '%');
-        try out.append(alloc, hexUpper((c >> 4) & 0x0f));
-        try out.append(alloc, hexUpper(c & 0x0f));
-    }
-    return out.toOwnedSlice(alloc);
+    return url_codec.encodeComponentAlloc(alloc, raw, false);
 }
 
 fn appendQueryParam(alloc: std.mem.Allocator, out: *std.ArrayList(u8), key: []const u8, value: []const u8) !void {
@@ -690,32 +674,7 @@ fn appendQueryParam(alloc: std.mem.Allocator, out: *std.ArrayList(u8), key: []co
 }
 
 fn encodeFormComponentAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-
-    for (raw) |c| {
-        const is_unreserved =
-            (c >= 'a' and c <= 'z') or
-            (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or
-            c == '-' or c == '_' or c == '.' or c == '~';
-        if (is_unreserved) {
-            try out.append(alloc, c);
-            continue;
-        }
-        if (c == ' ') {
-            try out.append(alloc, '+');
-            continue;
-        }
-        try out.append(alloc, '%');
-        try out.append(alloc, hexUpper((c >> 4) & 0x0f));
-        try out.append(alloc, hexUpper(c & 0x0f));
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-fn hexUpper(v: u8) u8 {
-    return if (v < 10) ('0' + v) else ('A' + (v - 10));
+    return url_codec.encodeComponentAlloc(alloc, raw, true);
 }
 
 const TokenReq = struct {
@@ -916,36 +875,7 @@ fn setSocketDeadlines(conn: *std.http.Client.Connection) void {
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.RCVTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
 }
 
-fn decodeQueryValue(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        const c = raw[i];
-        if (c == '+') {
-            try out.append(alloc, ' ');
-            continue;
-        }
-        if (c != '%') {
-            try out.append(alloc, c);
-            continue;
-        }
-        if (i + 2 >= raw.len) return error.InvalidOAuthInput;
-        const hi = fromHex(raw[i + 1]) orelse return error.InvalidOAuthInput;
-        const lo = fromHex(raw[i + 2]) orelse return error.InvalidOAuthInput;
-        try out.append(alloc, (hi << 4) | lo);
-        i += 2;
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-fn fromHex(c: u8) ?u8 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    return null;
-}
+const decodeQueryValue = url_codec.decodeQueryValue;
 
 /// Refresh an expired OAuth token. Returns new OAuth credentials and saves to disk.
 pub fn refreshOAuth(alloc: std.mem.Allocator, old: OAuth) !OAuth {

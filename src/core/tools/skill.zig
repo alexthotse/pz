@@ -2,6 +2,7 @@
 const std = @import("std");
 const core_skill = @import("../skill.zig");
 const tools = @import("../tools.zig");
+const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -75,11 +76,7 @@ pub const Handler = struct {
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -138,20 +135,7 @@ fn okWithResult(self: Handler, call: tools.Call, result: []const u8) Err!tools.R
     };
 }
 
-fn fail(call: tools.Call, kind: tools.Result.ErrKind, msg: []const u8) tools.Result {
-    return .{
-        .call_id = call.id,
-        .started_at_ms = call.at_ms,
-        .ended_at_ms = call.at_ms,
-        .out = &.{},
-        .final = .{
-            .failed = .{
-                .kind = kind,
-                .msg = msg,
-            },
-        },
-    };
-}
+const fail = shared.fail;
 
 fn dupInfo(
     alloc: std.mem.Allocator,
@@ -170,14 +154,6 @@ fn dupInfo(
         .dir_name = try alloc.dupe(u8, dir_name),
         .source = .project,
     };
-}
-
-fn noopSink() tools.Sink {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    return tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
 }
 
 test "skill handler returns cached body with appended args" {
@@ -209,7 +185,7 @@ test "skill handler returns cached body with appended args" {
         .at_ms = 44,
     };
 
-    const res = try h.run(call, noopSink());
+    const res = try h.run(call, noop.sink());
     defer h.deinitResult(res);
 
     const snap = try std.fmt.allocPrint(std.testing.allocator, "final={s}\nout={s}\n", .{
@@ -253,7 +229,7 @@ test "skill handler blocks model-disabled skills" {
         .at_ms = 45,
     };
 
-    const res = try h.run(call, noopSink());
+    const res = try h.run(call, noop.sink());
     switch (res.final) {
         .failed => |failed| try std.testing.expectEqualStrings("skill disables model invocation", failed.msg),
         else => return error.TestUnexpectedResult,

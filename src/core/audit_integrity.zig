@@ -255,18 +255,7 @@ fn hexEncode(buf: *[mac_len * 2]u8, bytes: *const Mac) []const u8 {
     return buf[0..];
 }
 
-fn writeJsonStr(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => try w.writeByte(c),
-    };
-    try w.writeByte('"');
-}
+const writeJsonStr = @import("json.zig").writeJsonStr;
 
 fn lineJoinAlloc(alloc: std.mem.Allocator, lines: []const []const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;

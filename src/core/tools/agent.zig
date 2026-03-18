@@ -2,6 +2,7 @@
 const std = @import("std");
 const rpc = @import("../agent.zig");
 const tools = @import("../tools.zig");
+const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -135,11 +136,7 @@ pub const Handler = struct {
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -298,14 +295,6 @@ fn fail(call: tools.Call, kind: tools.Result.ErrKind, msg: []const u8) tools.Res
     };
 }
 
-fn noopSink() tools.Sink {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    return tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
-}
-
 test "agent handler renders info block and output" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -347,7 +336,7 @@ test "agent handler renders info block and output" {
         .at_ms = 44,
     };
 
-    const res = try h.run(call, noopSink());
+    const res = try h.run(call, noop.sink());
     defer h.deinitResult(res);
 
     const snap = try std.fmt.allocPrint(std.testing.allocator, "final={s}\nout={s}\n", .{
@@ -410,7 +399,7 @@ test "agent handler truncates deterministically" {
         .at_ms = 45,
     };
 
-    const res = try h.run(call, noopSink());
+    const res = try h.run(call, noop.sink());
     defer h.deinitResult(res);
 
     const snap = try std.fmt.allocPrint(std.testing.allocator, "rows={d}\ntrunc={}\nbody={s}\nmeta={s}\n", .{
@@ -470,7 +459,7 @@ test "agent handler maps rpc error to failed final" {
         .at_ms = 46,
     };
 
-    const res = try h.run(call, noopSink());
+    const res = try h.run(call, noop.sink());
     defer h.deinitResult(res);
 
     const snap = try std.fmt.allocPrint(std.testing.allocator, "final={s}\nmsg={s}\nout={s}\n", .{
@@ -519,7 +508,7 @@ test "agent handler rejects missing policy hash" {
         .src = .model,
         .at_ms = 47,
     };
-    try std.testing.expectError(error.PolicyMismatch, h.run(call, noopSink()));
+    try std.testing.expectError(error.PolicyMismatch, h.run(call, noop.sink()));
 }
 
 test "stream hook emits progress via sink bridge" {

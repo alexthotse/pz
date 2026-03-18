@@ -3,14 +3,7 @@ const std = @import("std");
 const OhSnap = @import("ohsnap");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
-
-fn noopSink() tools.Sink {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    return tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
-}
+const noop = @import("../../test/noop_sink.zig");
 
 const OutSnap = struct {
     call_id: []const u8,
@@ -84,7 +77,7 @@ test "tool contract handlers emit deterministic envelopes" {
         .data = "needle\n",
     });
 
-    const sink = noopSink();
+    const sink = noop.sink();
 
     const rd = @import("read.zig").Handler.init(.{
         .alloc = std.testing.allocator,
@@ -414,7 +407,7 @@ test "tool contract handlers deny nested symlink escapes" {
     const escaped_file = try std.fs.path.join(std.testing.allocator, &.{ cwd_root, "safe/nest/link/secret.txt" });
     defer std.testing.allocator.free(escaped_file);
 
-    const sink = noopSink();
+    const sink = noop.sink();
 
     const rd = @import("read.zig").Handler.init(.{
         .alloc = std.testing.allocator,

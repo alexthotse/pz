@@ -24,6 +24,8 @@ comptime {
     _ = @import("core/shell.zig");
     _ = @import("core/lru.zig");
     _ = @import("core/prop_test.zig");
+    _ = @import("core/json.zig");
+    _ = @import("core/url.zig");
     _ = @import("core/audit.zig");
     _ = @import("core/audit_integrity.zig");
     _ = @import("core/syslog.zig");

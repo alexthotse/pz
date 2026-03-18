@@ -2,6 +2,7 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -102,12 +103,7 @@ test "write handler overwrites file with deterministic timestamps" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "out.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{ .now_ms = 77 });
     const call: tools.Call = .{
@@ -161,12 +157,7 @@ test "write handler appends when append is true" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "out.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{});
     const call: tools.Call = .{
@@ -191,12 +182,7 @@ test "write handler appends when append is true" {
 }
 
 test "write handler returns invalid args for empty path" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{});
     const call: tools.Call = .{
@@ -231,12 +217,7 @@ test "write handler returns not found for missing parent" {
     });
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{});
     const call: tools.Call = .{
@@ -256,12 +237,7 @@ test "write handler returns not found for missing parent" {
 }
 
 test "write handler returns kind mismatch for wrong call kind" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{});
     const call: tools.Call = .{
@@ -297,11 +273,7 @@ test "write handler denies replaced target before truncation" {
     try tmp.dir.writeFile(.{ .sub_path = "victim.txt", .data = "keep\n" });
     try tmp.dir.writeFile(.{ .sub_path = "swap.txt", .data = "swap\n" });
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     var ctx: u8 = 0;
     var hook = path_guard.installRaceHook(&ctx, Hook.run);

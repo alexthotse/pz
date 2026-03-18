@@ -2,7 +2,9 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
+const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{
     KindMismatch,
@@ -42,7 +44,7 @@ pub const Handler = struct {
         if (args.old.len == 0) return error.InvalidArgs;
 
         var src = path_guard.openFile(args.path, .{ .mode = .read_only }) catch |read_err| {
-            return mapReadErr(read_err);
+            return shared.mapFsErr(read_err);
         };
         defer src.close();
         const full = src.readToEndAlloc(self.alloc, self.max_bytes) catch |read_err| switch (read_err) {
@@ -58,18 +60,18 @@ pub const Handler = struct {
         defer self.alloc.free(updated);
 
         var file = path_guard.openFile(args.path, .{ .mode = .write_only }) catch |open_err| {
-            return mapWriteErr(open_err);
+            return shared.mapFsErr(open_err);
         };
         defer file.close();
 
         file.setEndPos(0) catch |truncate_err| {
-            return mapWriteErr(truncate_err);
+            return shared.mapFsErr(truncate_err);
         };
         file.seekTo(0) catch |seek_err| {
-            return mapWriteErr(seek_err);
+            return shared.mapFsErr(seek_err);
         };
         file.writeAll(updated) catch |write_err| {
-            return mapWriteErr(write_err);
+            return shared.mapFsErr(write_err);
         };
 
         return .{
@@ -117,28 +119,7 @@ fn replaceAllAlloc(
     };
 }
 
-fn mapReadErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
-        error.FileTooBig => error.TooLarge,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
 
-fn mapWriteErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound, error.NotDir => error.NotFound,
-        error.AccessDenied,
-        error.PermissionDenied,
-        error.ReadOnlyFileSystem,
-        error.LockViolation,
-        error.SymLinkLoop,
-        => error.Denied,
-        else => error.Io,
-    };
-}
 
 test "edit handler replaces first match with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
@@ -152,12 +133,7 @@ test "edit handler replaces first match with deterministic timestamps" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -207,12 +183,7 @@ test "edit handler replaces all matches when all is true" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -250,12 +221,7 @@ test "edit handler returns not found when old text is absent" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -279,12 +245,7 @@ test "edit handler returns not found when old text is absent" {
 }
 
 test "edit handler returns invalid args for empty old pattern" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -308,12 +269,7 @@ test "edit handler returns invalid args for empty old pattern" {
 }
 
 test "edit handler returns not found for missing file path" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -337,12 +293,7 @@ test "edit handler returns not found for missing file path" {
 }
 
 test "edit handler returns kind mismatch for wrong call kind" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -375,11 +326,7 @@ test "edit handler denies hardlinked file" {
     try tmp.dir.writeFile(.{ .sub_path = "base.txt", .data = "alpha\n" });
     try std.posix.linkat(tmp.dir.fd, "base.txt", tmp.dir.fd, "alias.txt", 0);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,

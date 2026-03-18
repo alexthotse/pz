@@ -165,36 +165,7 @@ fn parseQueryFromHttpRequest(request: []const u8, expected_path: []const u8) ![]
     return target[q + 1 ..];
 }
 
-fn decodeQueryValue(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        const c = raw[i];
-        if (c == '+') {
-            try out.append(alloc, ' ');
-            continue;
-        }
-        if (c != '%') {
-            try out.append(alloc, c);
-            continue;
-        }
-        if (i + 2 >= raw.len) return error.InvalidOAuthInput;
-        const hi = fromHex(raw[i + 1]) orelse return error.InvalidOAuthInput;
-        const lo = fromHex(raw[i + 2]) orelse return error.InvalidOAuthInput;
-        try out.append(alloc, (hi << 4) | lo);
-        i += 2;
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-fn fromHex(c: u8) ?u8 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    return null;
-}
+const decodeQueryValue = @import("../url.zig").decodeQueryValue;
 
 /// True if the peer address is IPv4 127.0.0.0/8 or IPv6 ::1.
 fn isLoopback(addr: std.net.Address) bool {

@@ -2,6 +2,9 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
+const noop = @import("../../test/noop_sink.zig");
+const Acc = shared.Acc;
 
 pub const Err = error{
     KindMismatch,
@@ -50,7 +53,7 @@ pub const Handler = struct {
         if (args.max_results == 0) return error.InvalidArgs;
 
         var root = path_guard.openDir(args.path, .{ .iterate = true }) catch |open_err| {
-            return mapFsErr(open_err);
+            return shared.mapFsErr(open_err);
         };
         defer root.close();
 
@@ -65,58 +68,11 @@ pub const Handler = struct {
         const data = acc.takeOwned() catch return error.OutOfMemory;
         errdefer self.alloc.free(data);
 
-        const meta = tools.truncate.metaFor(self.max_bytes, acc.full_bytes);
-        var meta_chunk: ?[]u8 = null;
-        if (meta) |m| {
-            meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
-        }
-        errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
-
-        const out_len: usize = 1 + @as(usize, @intFromBool(meta_chunk != null));
-        const out = self.alloc.alloc(tools.Output, out_len) catch return error.OutOfMemory;
-        errdefer self.alloc.free(out);
-
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = self.now_ms,
-            .stream = .stdout,
-            .chunk = data,
-            .owned = true,
-            .truncated = meta != null,
-        };
-
-        if (meta_chunk) |chunk| {
-            out[1] = .{
-                .call_id = call.id,
-                .seq = 1,
-                .at_ms = self.now_ms,
-                .stream = .meta,
-                .chunk = chunk,
-                .owned = true,
-                .truncated = false,
-            };
-            meta_chunk = null;
-        }
-
-        return .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{
-                .ok = .{ .code = 0 },
-            },
-        };
+        return shared.buildResult(self.alloc, call.id, self.now_ms, data, self.max_bytes, acc.full_bytes) catch return error.OutOfMemory;
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -143,7 +99,7 @@ fn grepDir(
                     .iterate = true,
                     .access_sub_paths = true,
                     .no_follow = true,
-                }) catch |open_err| return mapFsErr(open_err);
+                }) catch |open_err| return shared.mapFsErr(open_err);
                 defer child.close();
                 try grepDir(self, child, path, args, hit_ct, acc);
             },
@@ -163,17 +119,17 @@ fn grepFile(
     acc: *Acc,
 ) Err!void {
     if (self.pre_open) |hook| {
-        hook.run(hook.ctx, dir, rel_path) catch |hook_err| return mapFsErr(hook_err);
+        hook.run(hook.ctx, dir, rel_path) catch |hook_err| return shared.mapFsErr(hook_err);
     }
 
     var file = path_guard.openFileInDir(dir, name, .{ .mode = .read_only }) catch |open_err| {
-        return mapFsErr(open_err);
+        return shared.mapFsErr(open_err);
     };
     defer file.close();
 
     const full = file.readToEndAlloc(self.alloc, self.max_bytes) catch |read_err| switch (read_err) {
         error.FileTooBig => return error.TooLarge,
-        else => return mapFsErr(read_err),
+        else => return shared.mapFsErr(read_err),
     };
     defer self.alloc.free(full);
 
@@ -197,7 +153,7 @@ fn grepFile(
 }
 
 fn nextEnt(it: *std.fs.Dir.Iterator) Err!?std.fs.Dir.Entry {
-    return it.next() catch |next_err| mapFsErr(next_err);
+    return it.next() catch |next_err| shared.mapFsErr(next_err);
 }
 
 fn trimLine(raw: []const u8) []const u8 {
@@ -235,54 +191,7 @@ fn asciiLower(ch: u8) u8 {
     return ch;
 }
 
-const Acc = struct {
-    alloc: std.mem.Allocator,
-    limit: usize,
-    buf: std.ArrayList(u8) = .empty,
-    full_bytes: usize = 0,
 
-    fn init(alloc: std.mem.Allocator, limit: usize) Acc {
-        return .{
-            .alloc = alloc,
-            .limit = limit,
-        };
-    }
-
-    fn deinit(self: *Acc) void {
-        self.buf.deinit(self.alloc);
-        self.* = undefined;
-    }
-
-    fn append(self: *Acc, data: []const u8) !void {
-        self.full_bytes = satAdd(self.full_bytes, data.len);
-        if (self.buf.items.len >= self.limit) return;
-
-        const keep = @min(data.len, self.limit - self.buf.items.len);
-        if (keep == 0) return;
-        try self.buf.appendSlice(self.alloc, data[0..keep]);
-    }
-
-    fn takeOwned(self: *Acc) ![]u8 {
-        const out = try self.buf.toOwnedSlice(self.alloc);
-        self.buf = .empty;
-        return out;
-    }
-};
-
-fn satAdd(a: usize, b: usize) usize {
-    const sum, const ov = @addWithOverflow(a, b);
-    if (ov == 0) return sum;
-    return std.math.maxInt(usize);
-}
-
-fn mapFsErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
 
 test "grep handler finds matching lines with file and line numbers" {
     const OhSnap = @import("ohsnap");
@@ -303,11 +212,7 @@ test "grep handler finds matching lines with file and line numbers" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, "src");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -342,11 +247,7 @@ test "grep handler finds matching lines with file and line numbers" {
 }
 
 test "grep handler validates args and missing roots" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -391,11 +292,7 @@ test "grep handler denies hardlinked leaf" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, "src");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -447,11 +344,7 @@ test "grep handler keeps trusted dir after ancestor swap" {
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, "src");
     defer std.testing.allocator.free(root);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     var ctx = Hook.Ctx{ .root = try tmp.dir.openDir("src", .{ .access_sub_paths = true }) };
     defer ctx.root.close();

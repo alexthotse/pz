@@ -2,7 +2,10 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
+const noop = @import("../../test/noop_sink.zig");
+const Acc = shared.Acc;
 
 pub const Err = error{
     KindMismatch,
@@ -51,58 +54,11 @@ pub const Handler = struct {
         const selected = try readSelected(self, args.path, from_line, args.to_line);
         errdefer self.alloc.free(selected.chunk);
 
-        const meta = tools.truncate.metaFor(self.max_bytes, selected.full_bytes);
-        var meta_chunk: ?[]u8 = null;
-        if (meta) |m| {
-            meta_chunk = tools.truncate.metaJsonAlloc(self.alloc, .stdout, m) catch return error.OutOfMemory;
-        }
-        errdefer if (meta_chunk) |chunk| self.alloc.free(chunk);
-
-        const out_len: usize = 1 + @as(usize, @intFromBool(meta_chunk != null));
-        const out = self.alloc.alloc(tools.Output, out_len) catch return error.OutOfMemory;
-        errdefer self.alloc.free(out);
-
-        out[0] = .{
-            .call_id = call.id,
-            .seq = 0,
-            .at_ms = self.now_ms,
-            .stream = .stdout,
-            .chunk = selected.chunk,
-            .owned = true,
-            .truncated = meta != null,
-        };
-
-        if (meta_chunk) |chunk| {
-            out[1] = .{
-                .call_id = call.id,
-                .seq = 1,
-                .at_ms = self.now_ms,
-                .stream = .meta,
-                .chunk = chunk,
-                .owned = true,
-                .truncated = false,
-            };
-            meta_chunk = null;
-        }
-
-        return .{
-            .call_id = call.id,
-            .started_at_ms = self.now_ms,
-            .ended_at_ms = self.now_ms,
-            .out = out,
-            .out_owned = true,
-            .final = .{
-                .ok = .{ .code = 0 },
-            },
-        };
+        return shared.buildResult(self.alloc, call.id, self.now_ms, selected.chunk, self.max_bytes, selected.full_bytes) catch return error.OutOfMemory;
     }
 
     pub fn deinitResult(self: Handler, res: tools.Result) void {
-        if (!res.out_owned) return;
-        for (res.out) |out| {
-            if (out.owned) self.alloc.free(out.chunk);
-        }
-        self.alloc.free(res.out);
+        shared.deinitResult(self.alloc, res);
     }
 };
 
@@ -111,40 +67,9 @@ const Selected = struct {
     full_bytes: usize,
 };
 
-const Acc = struct {
-    alloc: std.mem.Allocator,
-    limit: usize,
-    buf: std.ArrayList(u8) = .empty,
-    full_bytes: usize = 0,
-
-    fn init(alloc: std.mem.Allocator, limit: usize) Acc {
-        return .{
-            .alloc = alloc,
-            .limit = limit,
-        };
-    }
-
-    fn deinit(self: *Acc) void {
-        self.buf.deinit(self.alloc);
-        self.* = undefined;
-    }
-
-    fn appendByte(self: *Acc, b: u8) std.mem.Allocator.Error!void {
-        self.full_bytes = satAdd(self.full_bytes, 1);
-        if (self.buf.items.len >= self.limit) return;
-        try self.buf.append(self.alloc, b);
-    }
-
-    fn takeOwned(self: *Acc) std.mem.Allocator.Error![]u8 {
-        const out = try self.buf.toOwnedSlice(self.alloc);
-        self.buf = .empty;
-        return out;
-    }
-};
-
 fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) Err!Selected {
     var file = path_guard.openFile(path, .{ .mode = .read_only }) catch |open_err| {
-        return mapReadErr(open_err);
+        return shared.mapFsErr(open_err);
     };
     defer file.close();
 
@@ -158,7 +83,7 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
     var scratch: [4096]u8 = undefined;
     while (true) {
         const n = file.read(&scratch) catch |read_err| {
-            return mapReadErr(read_err);
+            return shared.mapFsErr(read_err);
         };
         if (n == 0) break;
 
@@ -174,7 +99,7 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
                         .full_bytes = acc.full_bytes,
                     };
                 }
-                line_no = satAddU32(line_no, 1);
+                line_no = shared.satAdd(u32, line_no, 1);
                 in_range = line_no >= from_line and line_no <= last_line;
             }
         }
@@ -186,26 +111,7 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
     };
 }
 
-fn mapReadErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => error.Denied,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
 
-fn satAdd(a: usize, b: usize) usize {
-    const out, const ov = @addWithOverflow(a, b);
-    if (ov == 0) return out;
-    return std.math.maxInt(usize);
-}
-
-fn satAddU32(a: u32, b: u32) u32 {
-    const out, const ov = @addWithOverflow(a, b);
-    if (ov == 0) return out;
-    return std.math.maxInt(u32);
-}
 
 test "read handler returns selected lines with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
@@ -219,12 +125,7 @@ test "read handler returns selected lines with deterministic timestamps" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "in.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -265,11 +166,7 @@ test "read handler returns selected lines with deterministic timestamps" {
 }
 
 test "read handler returns invalid args on reversed line range" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -294,11 +191,7 @@ test "read handler returns invalid args on reversed line range" {
 }
 
 test "read handler returns not found for missing file" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -321,11 +214,7 @@ test "read handler returns not found for missing file" {
 }
 
 test "read handler returns kind mismatch for wrong call kind" {
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -374,11 +263,7 @@ test "read handler truncates oversized output instead of failing TooLarge" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "big.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -439,11 +324,7 @@ test "read handler can target a line in very large file without TooLarge" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "huge.txt");
     defer std.testing.allocator.free(path);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -492,11 +373,7 @@ test "read handler denies hardlinked file" {
     try tmp.dir.writeFile(.{ .sub_path = "base.txt", .data = "secret\n" });
     try std.posix.linkat(tmp.dir.fd, "base.txt", tmp.dir.fd, "alias.txt", 0);
 
-    const SinkImpl = struct {
-        fn push(_: *@This(), _: tools.Event) !void {}
-    };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const sink = noop.sink();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
