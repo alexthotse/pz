@@ -262,20 +262,7 @@ fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.Chil
     return out.toOwnedSlice(alloc);
 }
 
-fn fail(call: tools.Call, kind: tools.Result.ErrKind, msg: []const u8) tools.Result {
-    return .{
-        .call_id = call.id,
-        .started_at_ms = call.at_ms,
-        .ended_at_ms = call.at_ms,
-        .out = &.{},
-        .final = .{
-            .failed = .{
-                .kind = kind,
-                .msg = msg,
-            },
-        },
-    };
-}
+const fail = shared.fail;
 
 test "agent handler renders info block and output" {
     const OhSnap = @import("ohsnap");

@@ -161,7 +161,11 @@ fn statePathAlloc(alloc: std.mem.Allocator, home_override: ?[]const u8) !?[]u8 {
     return try std.fs.path.join(alloc, &.{ home, pz_state_dir, pz_state_file });
 }
 
-pub const Err = anyerror;
+/// Concrete error set covering all `discover()` failure paths:
+/// policy loading, JSON parsing, filesystem access, and config validation.
+pub const Err = @typeInfo(
+    @typeInfo(@TypeOf(discover)).@"fn".return_type.?,
+).error_union.error_set;
 
 fn writeAutoCfg(dir: std.fs.Dir, data: []const u8) !void {
     try dir.makePath(".pz");
@@ -238,7 +242,7 @@ pub fn discover(
     dir: std.fs.Dir,
     parsed: args.Parsed,
     env: Env,
-) Err!Config {
+) !Config {
     var out = Config{
         .mode = .tui,
         .model = try alloc.dupe(u8, model_default),
@@ -376,7 +380,7 @@ fn loadFile(
     alloc: std.mem.Allocator,
     dir: std.fs.Dir,
     cfg_sel: args.ConfigSelection,
-) Err!?std.json.Parsed(FileCfg) {
+) !?std.json.Parsed(FileCfg) {
     const path = switch (cfg_sel) {
         .off => return null,
         .path => |p| p,
@@ -393,7 +397,7 @@ fn loadFile(
     return parsed;
 }
 
-fn loadGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!?std.json.Parsed(SettingsCfg) {
+fn loadGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) !?std.json.Parsed(SettingsCfg) {
     const home_path = home orelse return null;
     if (home_path.len == 0) return null;
     if (std.mem.indexOfScalar(u8, home_path, 0) != null) return null;
@@ -417,7 +421,7 @@ fn loadGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!?std.json
     return parsed;
 }
 
-fn hasGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!bool {
+fn hasGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) !bool {
     const home_path = home orelse return false;
     const path = try std.fs.path.join(alloc, &.{ home_path, auto_cfg_path });
     defer alloc.free(path);
@@ -430,7 +434,7 @@ fn hasGlobalSettings(alloc: std.mem.Allocator, home: ?[]const u8) Err!bool {
     return true;
 }
 
-fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, comptime invalid_mode: anytype) Err!void {
+fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, comptime invalid_mode: anytype) !void {
     try applyRawCfg(
         alloc,
         cfg,
@@ -461,7 +465,7 @@ fn applyRawCfg(
     provider_cmd: ?[]const u8,
     ca_file: ?[]const u8,
     comptime invalid_mode: anytype,
-) Err!void {
+) !void {
     if (model) |v| try replaceStr(alloc, &out.model, v);
     if (provider) |v| try replaceStr(alloc, &out.provider, v);
     if (session_dir) |v| try replaceStr(alloc, &out.session_dir, v);
@@ -472,7 +476,7 @@ fn applyRawCfg(
 }
 
 /// Parse comma-separated model list into enabled_models.
-fn setModels(alloc: std.mem.Allocator, cfg: *Config, csv: []const u8) Err!void {
+fn setModels(alloc: std.mem.Allocator, cfg: *Config, csv: []const u8) !void {
     var list = std.ArrayList([]u8).empty;
     errdefer {
         for (list.items) |m| alloc.free(m);
@@ -494,7 +498,7 @@ fn setModels(alloc: std.mem.Allocator, cfg: *Config, csv: []const u8) Err!void {
 }
 
 /// Set enabled_models from a JSON string array (pi's enabledModels format).
-fn setModelsFromArray(alloc: std.mem.Allocator, cfg: *Config, arr: []const []const u8) Err!void {
+fn setModelsFromArray(alloc: std.mem.Allocator, cfg: *Config, arr: []const []const u8) !void {
     if (arr.len == 0) return;
     var list = try alloc.alloc([]u8, arr.len);
     errdefer {

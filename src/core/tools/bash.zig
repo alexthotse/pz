@@ -85,14 +85,14 @@ pub const Handler = struct {
         if (try deniesProtectedCmd(self.alloc, args.cmd)) return error.Denied;
 
         var env = std.process.getEnvMap(self.alloc) catch |env_err| {
-            return mapEnvErr(env_err);
+            return shared.mapFsErr(env_err);
         };
         defer env.deinit();
 
         sandbox.scrubEnv(&env);
         for (args.env) |kv| {
             env.put(kv.key, kv.val) catch |put_err| {
-                return mapEnvErr(put_err);
+                return shared.mapFsErr(put_err);
             };
         }
         if (args.cwd) |cwd| {
@@ -272,15 +272,15 @@ fn runChild(
     child.env_map = env;
     if (builtin.os.tag != .windows and builtin.os.tag != .wasi) child.pgid = 0;
 
-    child.spawn() catch |spawn_err| return mapProcErr(spawn_err);
+    child.spawn() catch |spawn_err| return shared.mapFsErr(spawn_err);
 
     const stdout_file = child.stdout orelse return error.Io;
     const stderr_file = child.stderr orelse return error.Io;
     child.stdout = null;
     child.stderr = null;
 
-    setNonblock(stdout_file.handle) catch |set_err| return mapProcErr(set_err);
-    setNonblock(stderr_file.handle) catch |set_err| return mapProcErr(set_err);
+    setNonblock(stdout_file.handle) catch |set_err| return shared.mapFsErr(set_err);
+    setNonblock(stderr_file.handle) catch |set_err| return shared.mapFsErr(set_err);
 
     var el = EventLoop.init() catch return error.Io;
     defer el.deinit();
@@ -303,7 +303,7 @@ fn runChild(
     while (stdout_open or stderr_open or final == null) {
         if (cancel) |src| {
             if (final == null and src.isCanceled()) {
-                _ = terminateAndReap(&child) catch |kill_err| return mapProcErr(kill_err);
+                _ = terminateAndReap(&child) catch |kill_err| return shared.mapFsErr(kill_err);
                 final = .{ .cancelled = .{ .reason = .user } };
             }
         }
@@ -337,7 +337,7 @@ fn runChild(
                     &stdout_full,
                     sink,
                     &seq,
-                ) catch |read_err| return mapCollectErr(read_err);
+                ) catch |read_err| return shared.mapFsErr(read_err);
                 if (!stdout_open) el.unregister(stdout_file.handle) catch {}; // cleanup: propagation impossible
             }
             if (ev.fd == stderr_file.handle and stderr_open and ev.readable) {
@@ -352,7 +352,7 @@ fn runChild(
                     &stderr_full,
                     sink,
                     &seq,
-                ) catch |read_err| return mapCollectErr(read_err);
+                ) catch |read_err| return shared.mapFsErr(read_err);
                 if (!stderr_open) el.unregister(stderr_file.handle) catch {}; // cleanup: propagation impossible
             }
         }
@@ -385,7 +385,7 @@ fn runChild(
 }
 
 fn killAndWait(child: *std.process.Child) Err!void {
-    _ = terminateAndReap(child) catch |kill_err| return mapProcErr(kill_err);
+    _ = terminateAndReap(child) catch |kill_err| return shared.mapFsErr(kill_err);
 }
 
 fn setNonblock(fd: std.posix.fd_t) !void {
@@ -415,7 +415,7 @@ fn readFd(
         };
         if (n == 0) return false;
 
-        full_bytes.* = satAdd(full_bytes.*, n);
+        full_bytes.* = shared.satAdd(usize, full_bytes.*, n);
         if (buf.items.len < max_bytes) {
             const keep_len = @min(n, max_bytes - buf.items.len);
             if (keep_len != 0) try buf.appendSlice(alloc, scratch[0..keep_len]);
@@ -483,43 +483,12 @@ fn reapChild(child: *std.process.Child) u32 {
     return res.status;
 }
 
-fn satAdd(a: usize, b: usize) usize {
-    const sum = @addWithOverflow(a, b);
-    if (sum[1] == 0) return sum[0];
-    return std.math.maxInt(usize);
-}
-
 fn isValidEnv(key: []const u8, val: []const u8) bool {
     if (key.len == 0) return false;
     if (std.mem.indexOfScalar(u8, key, '=')) |_| return false;
     if (std.mem.indexOfScalar(u8, key, 0)) |_| return false;
     if (std.mem.indexOfScalar(u8, val, 0)) |_| return false;
     return true;
-}
-
-fn mapEnvErr(err: anyerror) Err {
-    return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
-
-fn mapProcErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound,
-        error.NotDir,
-        => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => error.Denied,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
-
-fn mapCollectErr(err: anyerror) Err {
-    return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
 }
 
 fn statusToFinal(status: u32) tools.Result.Final {

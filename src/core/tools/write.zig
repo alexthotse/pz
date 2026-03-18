@@ -2,6 +2,7 @@
 const std = @import("std");
 const path_guard = @import("path_guard.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{
@@ -9,7 +10,9 @@ pub const Err = error{
     InvalidArgs,
     NotFound,
     Denied,
+    TooLarge,
     Io,
+    OutOfMemory,
 };
 
 pub const Opts = struct {
@@ -35,18 +38,18 @@ pub const Handler = struct {
         var file = path_guard.createFile(args.path, .{
             .truncate = !args.append,
         }) catch |open_err| {
-            return mapOpenErr(open_err);
+            return shared.mapFsErr(open_err);
         };
         defer file.close();
 
         if (args.append) {
             file.seekFromEnd(0) catch |seek_err| {
-                return mapSeekErr(seek_err);
+                return shared.mapFsErr(seek_err);
             };
         }
 
         file.writeAll(args.text) catch |write_err| {
-            return mapWriteErr(write_err);
+            return shared.mapFsErr(write_err);
         };
 
         return .{
@@ -61,31 +64,6 @@ pub const Handler = struct {
     }
 };
 
-fn mapOpenErr(err: anyerror) Err {
-    return switch (err) {
-        error.FileNotFound => error.NotFound,
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem, error.SymLinkLoop => error.Denied,
-        else => error.Io,
-    };
-}
-
-fn mapSeekErr(err: anyerror) Err {
-    return switch (err) {
-        error.AccessDenied, error.PermissionDenied => error.Denied,
-        else => error.Io,
-    };
-}
-
-fn mapWriteErr(err: anyerror) Err {
-    return switch (err) {
-        error.AccessDenied,
-        error.PermissionDenied,
-        error.ReadOnlyFileSystem,
-        error.LockViolation,
-        => error.Denied,
-        else => error.Io,
-    };
-}
 
 test "write handler overwrites file with deterministic timestamps" {
     const OhSnap = @import("ohsnap");

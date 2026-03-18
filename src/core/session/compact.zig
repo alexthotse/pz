@@ -9,6 +9,7 @@ const providers = @import("../providers.zig");
 const prov_api = @import("../providers/api.zig");
 const summary_types = @import("summary.zig");
 const fs_secure = @import("../fs_secure.zig");
+const shared = @import("../tools/shared.zig");
 const log = std.log.scoped(.compact);
 
 pub const checkpoint_version: u16 = 1;
@@ -417,19 +418,10 @@ fn freeSummaryCall(alloc: std.mem.Allocator, call: SummaryCall) void {
     alloc.free(call.msgs);
 }
 
-fn satAddU64(a: u64, b: usize) u64 {
-    return std.math.add(u64, a, @as(u64, @intCast(b))) catch std.math.maxInt(u64);
-}
-
-fn satAddU32(a: u32, b: usize) u32 {
-    const add: u32 = if (b > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(b);
-    return std.math.add(u32, a, add) catch std.math.maxInt(u32);
-}
-
 fn pushTextMeta(meta: *summary_types.SummaryMeta, text: []const u8) void {
-    meta.input_bytes = satAddU64(meta.input_bytes, text.len);
+    meta.input_bytes = shared.satAdd(u64, meta.input_bytes, text.len);
     // Exact provider tokenizers vary; byte count is a deterministic upper bound.
-    meta.input_tokens = satAddU32(meta.input_tokens, text.len);
+    meta.input_tokens = shared.satAdd(u32, meta.input_tokens, text.len);
 }
 
 fn clampCount(n: usize) u32 {
