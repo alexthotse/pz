@@ -536,7 +536,7 @@ fn calcCost(model: []const u8, u: core.providers.Usage) u64 {
 }
 
 /// Format micents as "N.NNN" (dollars with 3 decimal places).
-fn fmtCost(buf: []u8, micents: u64) error{NoSpaceLeft}![]const u8 {
+pub fn fmtCost(buf: []u8, micents: u64) error{NoSpaceLeft}![]const u8 {
     const dollars = micents / 100_000;
     const frac = (micents % 100_000) / 100; // 3 decimal places
     return fmtBuf(buf, "{d}.{d:0>3}", .{ dollars, frac });

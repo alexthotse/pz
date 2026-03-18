@@ -23,6 +23,7 @@ const tui_frame = @import("../modes/tui/frame.zig");
 const tui_theme = @import("../modes/tui/theme.zig");
 const tui_overlay = @import("../modes/tui/overlay.zig");
 const tui_panels = @import("../modes/tui/panels.zig");
+const utf8 = @import("../core/utf8.zig");
 const tui_path_complete = @import("../modes/tui/path_complete.zig");
 const args_mod = @import("args.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
@@ -2978,8 +2979,7 @@ fn runTui(
                                 continue;
                             }
                             if (cmd == .select_login) {
-                                const login_items = [_][]const u8{ "anthropic", "openai", "google" };
-                                var ov = tui_overlay.Overlay.init(&login_items, 0);
+                                var ov = tui_overlay.Overlay.init(&core.providers.auth.provider_names, 0);
                                 ov.title = "Login (set API key)";
                                 ov.kind = .login;
                                 ui.ov = ov;
@@ -6130,7 +6130,7 @@ const model_cycle = [_][]const u8{
     "claude-haiku-4-5-20251001",
 };
 
-const provider_args = [_][]const u8{ "anthropic", "openai", "google" };
+const provider_args = core.providers.auth.provider_names;
 const tool_args = [_][]const u8{ "all", "none", "read", "write", "bash", "edit", "grep", "find", "ls", "agent", "ask", "skill" };
 const bg_args = [_][]const u8{ "run", "list", "show", "stop" };
 const bg_usage = "usage: /bg run <cmd>|list|show <id>|stop <id>\n";
@@ -6436,60 +6436,18 @@ fn infoTextSafe(alloc: std.mem.Allocator, ui: *tui_harness.Ui, text: []const u8)
     };
 }
 
-const Utf8Safe = struct {
-    text: []const u8,
-    owned: ?[]u8 = null,
-};
-
-/// Return `raw` unchanged if valid UTF-8, else allocate a sanitized copy.
-fn ensureUtf8OrSanitize(alloc: std.mem.Allocator, raw: []const u8) !Utf8Safe {
-    if (std.unicode.Utf8View.init(raw)) |_| {
-        return .{ .text = raw };
-    } else |_| {}
-    const owned = try sanitizeUtf8LossyAlloc(alloc, raw);
-    return .{ .text = owned, .owned = owned };
-}
-
-fn sanitizeUtf8LossyAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    if (std.unicode.Utf8View.init(raw)) |_| {
-        return alloc.dupe(u8, raw);
-    } else |_| {}
-
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-
-    var i: usize = 0;
-    while (i < raw.len) {
-        const n = std.unicode.utf8ByteSequenceLength(raw[i]) catch {
-            try out.append(alloc, '?');
-            i += 1;
-            continue;
-        };
-        if (i + n > raw.len) {
-            try out.append(alloc, '?');
-            break;
-        }
-        _ = std.unicode.utf8Decode(raw[i .. i + n]) catch {
-            try out.append(alloc, '?');
-            i += 1;
-            continue;
-        };
-        try out.appendSlice(alloc, raw[i .. i + n]);
-        i += n;
-    }
-    return out.toOwnedSlice(alloc);
-}
+const sanitizeUtf8LossyAlloc = utf8.sanitizeLossyAlloc;
+const ensureUtf8OrSanitize = utf8.Lossy.init;
 
 fn showCost(_: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     const u = ui.panels.usage;
     const mc = ui.panels.cost_micents;
 
-    // Format cost as $N.NNN
     var cost_buf: [24]u8 = undefined;
-    const cost_str = if (mc > 0)
-        std.fmt.bufPrint(&cost_buf, "${d}.{d:0>3}", .{ mc / 100_000, (mc % 100_000) / 100 }) catch "?"
+    const cost_val = if (mc > 0)
+        tui_panels.fmtCost(&cost_buf, mc) catch "?"
     else
-        "$0.000";
+        "0.000";
 
     var buf: [256]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -6497,7 +6455,7 @@ fn showCost(_: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     try w.print("Tokens  in: {d}  out: {d}  total: {d}", .{ u.in_tok, u.out_tok, u.tot_tok });
     if (u.cache_read > 0 or u.cache_write > 0)
         try w.print("\nCache   read: {d}  write: {d}", .{ u.cache_read, u.cache_write });
-    try w.print("\nCost    {s}", .{cost_str});
+    try w.print("\nCost    ${s}", .{cost_val});
     try ui.tr.infoText(fbs.getWritten());
 }
 
@@ -8329,11 +8287,11 @@ test "sanitizeUtf8LossyAlloc replaces invalid bytes" {
     try std.testing.expectEqualStrings("o?k?", out);
 }
 
-test "sanitizeUtf8LossyAlloc truncates incomplete multibyte suffix lossy" {
+test "sanitizeUtf8LossyAlloc replaces incomplete multibyte suffix per-byte" {
     const bad = [_]u8{ 'a', 0xe2, 0x82 };
     const out = try sanitizeUtf8LossyAlloc(std.testing.allocator, bad[0..]);
     defer std.testing.allocator.free(out);
-    try std.testing.expectEqualStrings("a?", out);
+    try std.testing.expectEqualStrings("a??", out);
 }
 
 test "sanitizeUtf8LossyAlloc property: output is valid utf8" {

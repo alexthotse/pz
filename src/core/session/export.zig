@@ -270,9 +270,7 @@ fn emitAudit(alloc: std.mem.Allocator, hooks: AuditHooks, ent: audit.Entry) !voi
     if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, ent);
 }
 
-fn nowMs() i64 {
-    return std.time.milliTimestamp();
-}
+const nowMs = std.time.milliTimestamp;
 
 fn normalizeMd(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     var out = std.ArrayListUnmanaged(u8){};

@@ -784,9 +784,7 @@ const ControlAudit = struct {
     attrs: []const core.audit.Attribute = &.{},
 };
 
-fn nowMs() i64 {
-    return std.time.milliTimestamp();
-}
+const nowMs = std.time.milliTimestamp;
 
 fn copyJob(alloc: std.mem.Allocator, job: Job) !View {
     return .{

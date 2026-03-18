@@ -37,7 +37,7 @@ const AuthEntry = struct {
 };
 
 pub const Provider = enum { anthropic, openai, google };
-const provider_names = [_][]const u8{ "anthropic", "openai", "google" };
+pub const provider_names = [_][]const u8{ "anthropic", "openai", "google" };
 
 pub fn providerName(p: Provider) []const u8 {
     return provider_names[@intFromEnum(p)];
