@@ -31,18 +31,11 @@ pub fn load(alloc: std.mem.Allocator, home: ?[]const u8) !?[]u8 {
     }
 
     // Walk cwd upward
-    const cwd = realCwdAlloc(alloc) orelse return assembleParts(alloc, parts.items);
-    defer alloc.free(cwd);
-
-    var dir: []const u8 = cwd;
-    while (true) {
-        if (try readContext(alloc, dir)) |content| {
-            try parts.append(alloc, content);
+    try walkAncestry(alloc, &parts, struct {
+        fn cb(a: std.mem.Allocator, dir: []const u8, list: *std.ArrayListUnmanaged([]u8)) !void {
+            if (try readContext(a, dir)) |content| try list.append(a, content);
         }
-        if (parent(dir)) |p| {
-            dir = p;
-        } else break;
-    }
+    }.cb);
 
     return assembleParts(alloc, parts.items);
 }
@@ -100,18 +93,29 @@ pub fn discoverPaths(alloc: std.mem.Allocator, home: ?[]const u8) ![][]u8 {
         if (try findFile(alloc, gdir)) |p| try paths.append(alloc, p);
     }
 
-    const cwd = realCwdAlloc(alloc) orelse return try paths.toOwnedSlice(alloc);
+    try walkAncestry(alloc, &paths, struct {
+        fn cb(a: std.mem.Allocator, dir: []const u8, list: *std.ArrayListUnmanaged([]u8)) !void {
+            if (try findFile(a, dir)) |p| try list.append(a, p);
+        }
+    }.cb);
+
+    return try paths.toOwnedSlice(alloc);
+}
+
+/// Walk cwd ancestry (cwd, parent, grandparent, ...) calling `cb` for each dir.
+fn walkAncestry(
+    alloc: std.mem.Allocator,
+    ctx: anytype,
+    cb: *const fn (std.mem.Allocator, []const u8, @TypeOf(ctx)) anyerror!void,
+) !void {
+    const cwd = (try realCwdAlloc(alloc)) orelse return;
     defer alloc.free(cwd);
 
     var dir: []const u8 = cwd;
     while (true) {
-        if (try findFile(alloc, dir)) |p| try paths.append(alloc, p);
-        if (parent(dir)) |par| {
-            dir = par;
-        } else break;
+        try cb(alloc, dir, ctx);
+        dir = parent(dir) orelse break;
     }
-
-    return try paths.toOwnedSlice(alloc);
 }
 
 fn findFile(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
@@ -131,7 +135,7 @@ fn readContext(alloc: std.mem.Allocator, dir: []const u8) !?[]u8 {
 }
 
 fn loadPolicyLock(alloc: std.mem.Allocator, home: ?[]const u8) !policy.Lock {
-    const cwd = realCwdAlloc(alloc) orelse return .{};
+    const cwd = (try realCwdAlloc(alloc)) orelse return .{};
     defer alloc.free(cwd);
     return policy.loadLock(alloc, cwd, home);
 }
@@ -188,8 +192,11 @@ fn readFile(alloc: std.mem.Allocator, dir: []const u8, name: []const u8) !?[]u8 
     return result;
 }
 
-fn realCwdAlloc(alloc: std.mem.Allocator) ?[]u8 {
-    return std.fs.cwd().realpathAlloc(alloc, ".") catch null;
+fn realCwdAlloc(alloc: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
+    return std.fs.cwd().realpathAlloc(alloc, ".") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
 }
 
 fn hasSecureFile(dir: []const u8, name: []const u8) bool {

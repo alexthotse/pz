@@ -959,7 +959,7 @@ fn e2eFrameOpts() core.audit.FrameOpts {
 }
 
 fn shipAuditRows(alloc: std.mem.Allocator, sender: *core.syslog.Sender, rows: []const []const u8) !void {
-    var tracker = core.audit_integrity.SeqTracker.init(null);
+    var tracker = core.audit_integrity.SeqTracker.init(alloc, null);
     return shipAuditRowsWithTracker(alloc, sender, rows, &tracker);
 }
 

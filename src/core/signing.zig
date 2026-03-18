@@ -56,22 +56,31 @@ pub const VerifyError = error{
     SigMismatch,
 };
 
+/// Comptime generic for parse/parseHex on fixed-size byte wrappers.
+/// `T` must have `raw: [len]u8` and be constructable via `.{ .raw = buf }`.
+fn ParseMixin(comptime T: type, comptime len: usize, comptime E: type, comptime bad_len: E) type {
+    return struct {
+        pub fn parse(raw_in: []const u8) E!T {
+            if (raw_in.len != len) return bad_len;
+            var buf: [len]u8 = undefined;
+            @memcpy(buf[0..], raw_in);
+            return .{ .raw = buf };
+        }
+
+        pub fn parseHex(hex: []const u8) E!T {
+            if (hex.len != len * 2) return error.BadHexLen;
+            var buf: [len]u8 = undefined;
+            _ = std.fmt.hexToBytes(buf[0..], hex) catch return error.BadHex;
+            return .{ .raw = buf };
+        }
+    };
+}
+
 pub const Seed = struct {
     raw: [seed_len]u8,
 
-    pub fn parse(raw_in: []const u8) SeedError!Seed {
-        if (raw_in.len != seed_len) return error.BadSeedLen;
-        var buf: [seed_len]u8 = undefined;
-        @memcpy(buf[0..], raw_in);
-        return .{ .raw = buf };
-    }
-
-    pub fn parseHex(hex: []const u8) SeedError!Seed {
-        if (hex.len != seed_len * 2) return error.BadHexLen;
-        var buf: [seed_len]u8 = undefined;
-        _ = std.fmt.hexToBytes(buf[0..], hex) catch return error.BadHex;
-        return .{ .raw = buf };
-    }
+    pub const parse = ParseMixin(Seed, seed_len, SeedError, error.BadSeedLen).parse;
+    pub const parseHex = ParseMixin(Seed, seed_len, SeedError, error.BadSeedLen).parseHex;
 
     fn bytes(self: Seed) [seed_len]u8 {
         return self.raw;
@@ -96,12 +105,12 @@ pub const Seed = struct {
 pub const PublicKey = struct {
     raw: [pk_len]u8,
 
+    const Raw = ParseMixin(PublicKey, pk_len, PkError, error.BadPkLen);
+
     pub fn parse(raw: []const u8) PkError!PublicKey {
-        if (raw.len != pk_len) return error.BadPkLen;
-        var buf: [pk_len]u8 = undefined;
-        @memcpy(buf[0..], raw);
-        _ = Ed25519.PublicKey.fromBytes(buf) catch return error.BadPk;
-        return .{ .raw = buf };
+        const pk = Raw.parse(raw) catch |err| return err;
+        _ = Ed25519.PublicKey.fromBytes(pk.raw) catch return error.BadPk;
+        return pk;
     }
 
     pub fn parseHex(hex: []const u8) PkError!PublicKey {
@@ -195,19 +204,8 @@ fn readSshStr(buf: []const u8, off: *usize) error{BadSsh}![]const u8 {
 pub const Signature = struct {
     raw: [sig_len]u8,
 
-    pub fn parse(raw: []const u8) SigError!Signature {
-        if (raw.len != sig_len) return error.BadSigLen;
-        var buf: [sig_len]u8 = undefined;
-        @memcpy(buf[0..], raw);
-        return .{ .raw = buf };
-    }
-
-    pub fn parseHex(hex: []const u8) SigError!Signature {
-        if (hex.len != sig_len * 2) return error.BadHexLen;
-        var buf: [sig_len]u8 = undefined;
-        _ = std.fmt.hexToBytes(buf[0..], hex) catch return error.BadHex;
-        return .{ .raw = buf };
-    }
+    pub const parse = ParseMixin(Signature, sig_len, SigError, error.BadSigLen).parse;
+    pub const parseHex = ParseMixin(Signature, sig_len, SigError, error.BadSigLen).parseHex;
 
     pub fn bytes(self: Signature) [sig_len]u8 {
         return self.raw;

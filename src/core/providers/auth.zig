@@ -779,7 +779,7 @@ fn exchangeAuthorizationCode(
     });
     defer req.deinit();
 
-    if (req.connection) |conn| setSocketDeadlines(conn);
+    if (req.connection) |conn| try setSocketDeadlines(conn);
 
     req.transfer_encoding = .{ .content_length = token_req.body.len };
     var bw = try req.sendBodyUnflushed(&send_buf);
@@ -813,12 +813,12 @@ fn initHttpClient(alloc: std.mem.Allocator, ca_file: ?[]const u8) !std.http.Clie
 
 /// Apply SO_SNDTIMEO and SO_RCVTIMEO to the underlying socket so auth
 /// HTTP requests cannot hang indefinitely.
-fn setSocketDeadlines(conn: *std.http.Client.Connection) void {
+fn setSocketDeadlines(conn: *std.http.Client.Connection) !void {
     const fd = conn.stream_writer.getStream().handle;
     const tv = std.posix.timeval{ .sec = auth_http_deadline_s, .usec = 0 };
     const tv_bytes: []const u8 = std.mem.asBytes(&tv);
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.SNDTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.RCVTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
+    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.SNDTIMEO, tv_bytes);
+    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.c.SO.RCVTIMEO, tv_bytes);
 }
 
 const decodeQueryValue = url_codec.decodeQueryValue;
@@ -878,7 +878,7 @@ fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provider, 
     });
     defer req.deinit();
 
-    if (req.connection) |conn| setSocketDeadlines(conn);
+    if (req.connection) |conn| try setSocketDeadlines(conn);
 
     req.transfer_encoding = .{ .content_length = req_body.body.len };
     var bw = try req.sendBodyUnflushed(&send_buf);

@@ -266,7 +266,7 @@ pub const Ui = struct {
         return true;
     }
 
-    pub fn updatePreview(self: *Ui) void {
+    pub fn updatePreview(self: *Ui) !void {
         self.picker = null;
 
         const text = self.ed.text();
@@ -288,7 +288,7 @@ pub const Ui = struct {
             const word = text[ws..cur];
             if (word.len > 0 and word[0] == '@') {
                 const pattern = word[1..];
-                self.updatePathCompletion(pattern);
+                try self.updatePathCompletion(pattern);
             } else {
                 self.clearPathItems();
             }
@@ -299,7 +299,7 @@ pub const Ui = struct {
 
     /// Update path completion with caching: if pattern extends cached prefix,
     /// filter in-place instead of re-scanning the filesystem.
-    fn updatePathCompletion(self: *Ui, pattern: []const u8) void {
+    fn updatePathCompletion(self: *Ui, pattern: []const u8) !void {
         // Check if we can filter cached results
         if (self.path_items != null and self.path_prefix != null) {
             const cached = self.path_prefix.?;
@@ -325,18 +325,11 @@ pub const Ui = struct {
                     self.clearPathPrefix();
                     return;
                 }
-                const narrowed = self.alloc.alloc([]u8, keep) catch {
-                    // Fallback: drop cache on allocation failure.
-                    for (items[0..keep]) |item| self.alloc.free(item);
-                    self.alloc.free(items[0..old_len]);
-                    self.path_items = null;
-                    self.clearPathPrefix();
-                    return;
-                };
+                const narrowed = try self.alloc.alloc([]u8, keep);
                 @memcpy(narrowed[0..keep], items[0..keep]);
                 self.alloc.free(items[0..old_len]);
                 self.path_items = narrowed;
-                self.updatePathPrefix(pattern);
+                try self.updatePathPrefix(pattern);
                 self.picker = cmdpicker_mod.Picker.updateArgs(
                     path_complete_mod.asConst(self.path_items.?),
                     pattern,
@@ -349,7 +342,7 @@ pub const Ui = struct {
         self.clearPathItems();
         if (path_complete_mod.list(self.alloc, pattern)) |items| {
             self.path_items = items;
-            self.updatePathPrefix(pattern);
+            try self.updatePathPrefix(pattern);
             self.picker = cmdpicker_mod.Picker.updateArgs(
                 path_complete_mod.asConst(items),
                 pattern,
@@ -357,9 +350,9 @@ pub const Ui = struct {
         }
     }
 
-    fn updatePathPrefix(self: *Ui, pattern: []const u8) void {
+    fn updatePathPrefix(self: *Ui, pattern: []const u8) !void {
         if (self.path_prefix) |p| self.alloc.free(p);
-        self.path_prefix = self.alloc.dupe(u8, pattern) catch null;
+        self.path_prefix = try self.alloc.dupe(u8, pattern);
     }
 
     fn clearPathPrefix(self: *Ui) void {
@@ -945,7 +938,7 @@ test "updatePreview shows file dropdown on @" {
 
     // Type "@src/" — should trigger file completion
     try ui.ed.setText("@src/");
-    ui.updatePreview();
+    try ui.updatePreview();
     try std.testing.expect(ui.picker != null);
     try std.testing.expect(ui.path_items != null);
     try std.testing.expect(ui.path_items.?.len > 0);
@@ -956,7 +949,7 @@ test "updatePreview clears on no @" {
     defer ui.deinit();
 
     try ui.ed.setText("hello");
-    ui.updatePreview();
+    try ui.updatePreview();
     try std.testing.expect(ui.picker == null);
     try std.testing.expect(ui.path_items == null);
 }
@@ -966,7 +959,7 @@ test "updatePreview slash overrides file mode" {
     defer ui.deinit();
 
     try ui.ed.setText("/help");
-    ui.updatePreview();
+    try ui.updatePreview();
     try std.testing.expect(ui.picker != null);
     try std.testing.expect(ui.path_items == null); // not file mode
 }
@@ -976,7 +969,7 @@ test "updatePreview narrows cached path completion prefix" {
     defer ui.deinit();
 
     try ui.ed.setText("@src/");
-    ui.updatePreview();
+    try ui.updatePreview();
     try std.testing.expect(ui.path_items != null);
     const before_len = ui.path_items.?.len;
     try std.testing.expect(ui.path_prefix != null);
@@ -984,7 +977,7 @@ test "updatePreview narrows cached path completion prefix" {
     defer std.testing.allocator.free(first);
 
     try ui.ed.setText("@src/m");
-    ui.updatePreview();
+    try ui.updatePreview();
     try std.testing.expect(ui.path_items != null);
     try std.testing.expect(ui.path_items.?.len <= before_len);
     try std.testing.expect(ui.path_prefix != null);

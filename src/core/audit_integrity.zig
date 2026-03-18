@@ -53,12 +53,13 @@ const Line = struct {
 pub const SeqTracker = struct {
     high: u64,
     path: ?[]const u8,
+    alloc: std.mem.Allocator,
 
-    pub fn init(path: ?[]const u8) SeqTracker {
-        var self = SeqTracker{ .high = 0, .path = path };
+    pub fn init(alloc: std.mem.Allocator, path: ?[]const u8) SeqTracker {
+        var self = SeqTracker{ .high = 0, .path = path, .alloc = alloc };
         if (path) |p| {
-            const raw = std.fs.cwd().readFileAlloc(std.heap.page_allocator, p, 64) catch return self;
-            defer std.heap.page_allocator.free(raw);
+            const raw = std.fs.cwd().readFileAlloc(alloc, p, 64) catch return self;
+            defer alloc.free(raw);
             self.high = std.fmt.parseInt(u64, std.mem.trim(u8, raw, " \t\r\n"), 10) catch 0;
         }
         return self;
@@ -84,13 +85,15 @@ pub const SeqTracker = struct {
         }
     }
 
-    fn persist(self: *const SeqTracker) !void {
+    const PersistError = std.fs.File.OpenError || std.posix.WriteError;
+
+    fn persist(self: *const SeqTracker) PersistError!void {
         const p = self.path orelse return;
         var buf: [20]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d}", .{self.high}) catch return;
-        const file = std.fs.cwd().createFile(p, .{ .truncate = true }) catch return error.SeqPersistFailed;
+        const file = try std.fs.cwd().createFile(p, .{ .truncate = true });
         defer file.close();
-        file.writeAll(s) catch return error.SeqPersistFailed;
+        try file.writeAll(s);
     }
 };
 
@@ -360,7 +363,7 @@ test "seq tracker persists and rejects replayed seq" {
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/seq.hwm", .{dir});
     defer testing.allocator.free(path);
 
-    var tracker = SeqTracker.init(path);
+    var tracker = SeqTracker.init(testing.allocator, path);
     const s1 = try tracker.next();
     try testing.expectEqual(@as(u64, 1), s1);
     const s2 = try tracker.next();
@@ -370,7 +373,7 @@ test "seq tracker persists and rejects replayed seq" {
     try testing.expect(tracker.check(3));
 
     // Reload from disk
-    var tracker2 = SeqTracker.init(path);
+    var tracker2 = SeqTracker.init(testing.allocator, path);
     try testing.expectEqual(@as(u64, 2), tracker2.high);
     try testing.expect(!tracker2.check(2));
     try testing.expect(tracker2.check(3));

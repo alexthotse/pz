@@ -1999,7 +1999,7 @@ fn execWithIoTuiHooks(
     const seq_path: ?[]const u8 = if (home) |h| blk: {
         break :blk std.fmt.bufPrint(&seq_path_buf, "{s}/.pz/audit_seq", .{h}) catch null;
     } else null;
-    var seq_tracker = core.audit_integrity.SeqTracker.init(seq_path);
+    var seq_tracker = core.audit_integrity.SeqTracker.init(alloc, seq_path);
     hooks.seq_tracker = &seq_tracker;
 
     // Shared event loop for TUI mode — providers and tools use it
@@ -2926,7 +2926,7 @@ fn runTui(
                                 }
                                 ui.picker = null;
                                 ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
-                                ui.updatePreview();
+                                try ui.updatePreview();
                                 try ui.draw(out);
                                 continue;
                             },
@@ -3189,7 +3189,7 @@ fn runTui(
                             if (snap2.len > 0) {
                                 try pending.pushFollowUp(alloc, snap2);
                                 ui.ed.clear();
-                                ui.updatePreview();
+                                try ui.updatePreview();
                                 syncInputFooter(&ui, input_mode, pending.total());
                                 try ui.tr.infoText(if (live_turn.isRunning()) "(queued follow-up message)" else "(queued message)");
                             }
@@ -3237,7 +3237,7 @@ fn runTui(
                                 try completeFilePath(alloc, &ui);
                             }
                             ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
-                            ui.updatePreview();
+                            try ui.updatePreview();
                             try ui.draw(out);
                         },
                         .scroll_up => {
@@ -3253,7 +3253,7 @@ fn runTui(
                         .none => {
                             if (pre) |p| alloc.free(p);
                             ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
-                            ui.updatePreview();
+                            try ui.updatePreview();
                             try ui.draw(out);
                         },
                     }
@@ -3376,7 +3376,7 @@ fn runTui(
                             try ui.tr.infoText("[paste: invalid UTF-8]");
                         };
                         ui.arg_src = resolveArgSrc(ui.ed.text(), models_list);
-                        ui.updatePreview();
+                        try ui.updatePreview();
                         try ui.draw(out);
                     }
                 },
@@ -6793,7 +6793,7 @@ const PendingQueue = struct {
         }
 
         try ui.ed.setText(out.items);
-        ui.updatePreview();
+        try ui.updatePreview();
         clearQueueSlice(alloc, &self.steering);
         clearQueueSlice(alloc, &self.follow_up);
         return queued_ct;
@@ -6892,7 +6892,7 @@ fn dequeueQueuedIntoEditor(
     const msg = queue.orderedRemove(idx);
     defer alloc.free(msg);
     try ui.ed.setText(msg);
-    ui.updatePreview();
+    try ui.updatePreview();
     return true;
 }
 

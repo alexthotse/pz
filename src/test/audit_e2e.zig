@@ -57,7 +57,7 @@ fn e2eFrameOpts() audit.FrameOpts {
 }
 
 pub fn shipAuditRows(alloc: std.mem.Allocator, sender: *syslog.Sender, rows: []const []const u8) !void {
-    var tracker = audit_integrity.SeqTracker.init(null);
+    var tracker = audit_integrity.SeqTracker.init(alloc, null);
     return shipAuditRowsWithTracker(alloc, sender, rows, &tracker);
 }
 

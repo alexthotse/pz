@@ -136,24 +136,7 @@ pub const Sender = struct {
         const host = try alloc.dupe(u8, opts.host);
         errdefer alloc.free(host);
 
-        const addr = try opts.hooks.resolve(alloc, opts.host, opts.port);
-
-        if (!opts.allow_private and policy.isBlockedNetAddr(addr))
-            return error.PrivateAddr;
-
-        const sock_transport: Transport = if (opts.transport == .tls) .tcp else opts.transport;
-        const fd = try opts.hooks.open_socket(addr, sock_transport);
-        errdefer opts.hooks.close_socket(fd);
-
-        if (opts.transport == .tcp or opts.transport == .tls) {
-            try opts.hooks.connect(fd, addr);
-            opts.hooks.set_deadlines(fd, opts.deadline_s);
-        }
-
-        var tls_state: ?*anyopaque = null;
-        if (opts.transport == .tls) {
-            tls_state = try opts.hooks.tls_handshake(fd, host, opts.tls);
-        }
+        const conn = try openConn(opts.hooks, alloc, host, opts.port, opts.transport, opts.allow_private, opts.deadline_s, opts.tls);
 
         return .{
             .alloc = alloc,
@@ -164,9 +147,9 @@ pub const Sender = struct {
             .allow_private = opts.allow_private,
             .tls_opts = opts.tls,
             .hooks = opts.hooks,
-            .fd = fd,
-            .addr = addr,
-            .tls_state = tls_state,
+            .fd = conn.fd,
+            .addr = conn.addr,
+            .tls_state = conn.tls_state,
         };
     }
 
@@ -184,52 +167,24 @@ pub const Sender = struct {
     }
 
     pub fn sendRaw(self: *Sender, raw: []const u8) !void {
-        switch (self.transport) {
-            .udp => {
-                self.sendUdp(raw) catch {
-                    try self.refresh();
-                    try self.sendUdp(raw);
-                };
-            },
-            .tcp => {
-                self.sendTcp(raw) catch {
-                    try self.refresh();
-                    try self.sendTcp(raw);
-                };
-            },
-            .tls => {
-                self.sendTls(raw) catch {
-                    try self.refresh();
-                    try self.sendTls(raw);
-                };
-            },
-        }
+        const send_fn: *const fn (*Sender, []const u8) anyerror!void = switch (self.transport) {
+            .udp => &Sender.sendUdp,
+            .tcp => &Sender.sendTcp,
+            .tls => &Sender.sendTls,
+        };
+        send_fn(self, raw) catch {
+            try self.refresh();
+            try send_fn(self, raw);
+        };
     }
 
     fn refresh(self: *Sender) !void {
-        const addr = try self.hooks.resolve(self.alloc, self.host, self.port);
-
-        if (!self.allow_private and policy.isBlockedNetAddr(addr))
-            return error.PrivateAddr;
-
-        const sock_transport: Transport = if (self.transport == .tls) .tcp else self.transport;
-        const fd = try self.hooks.open_socket(addr, sock_transport);
-        errdefer self.hooks.close_socket(fd);
-        if (self.transport == .tcp or self.transport == .tls) {
-            try self.hooks.connect(fd, addr);
-            self.hooks.set_deadlines(fd, self.deadline_s);
-        }
-
-        var tls_state: ?*anyopaque = null;
-        if (self.transport == .tls) {
-            tls_state = try self.hooks.tls_handshake(fd, self.host, self.tls_opts);
-        }
-
+        const conn = try openConn(self.hooks, self.alloc, self.host, self.port, self.transport, self.allow_private, self.deadline_s, self.tls_opts);
         if (self.tls_state) |st| self.hooks.tls_close(st);
         self.hooks.close_socket(self.fd);
-        self.fd = fd;
-        self.addr = addr;
-        self.tls_state = tls_state;
+        self.fd = conn.fd;
+        self.addr = conn.addr;
+        self.tls_state = conn.tls_state;
     }
 
     fn sendUdp(self: *Sender, raw: []const u8) !void {
@@ -253,6 +208,36 @@ pub const Sender = struct {
         try self.hooks.tls_send(st, raw);
     }
 };
+
+const Conn = struct {
+    fd: std.posix.socket_t,
+    addr: std.net.Address,
+    tls_state: ?*anyopaque,
+};
+
+/// Shared socket+connect+TLS logic used by both init and refresh.
+fn openConn(hooks: Hooks, alloc: std.mem.Allocator, host: []const u8, port: u16, transport: Transport, allow_private: bool, deadline_s: i64, tls_opts: TlsOpts) !Conn {
+    const addr = try hooks.resolve(alloc, host, port);
+
+    if (!allow_private and policy.isBlockedNetAddr(addr))
+        return error.PrivateAddr;
+
+    const sock_transport: Transport = if (transport == .tls) .tcp else transport;
+    const fd = try hooks.open_socket(addr, sock_transport);
+    errdefer hooks.close_socket(fd);
+
+    if (transport == .tcp or transport == .tls) {
+        try hooks.connect(fd, addr);
+        hooks.set_deadlines(fd, deadline_s);
+    }
+
+    var tls_state: ?*anyopaque = null;
+    if (transport == .tls) {
+        tls_state = try hooks.tls_handshake(fd, host, tls_opts);
+    }
+
+    return .{ .fd = fd, .addr = addr, .tls_state = tls_state };
+}
 
 fn checkHostAllowed(host: []const u8, egress: policy.Policy, tool: ?[]const u8) error{HostDenied}!void {
     const prefix = "runtime/syslog/";

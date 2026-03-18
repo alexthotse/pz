@@ -192,7 +192,10 @@ pub fn discoverAndRead(alloc: std.mem.Allocator, home: ?[]const u8) ![]SkillInfo
 
     // Project: .pz/skills/*/SKILL.md relative to cwd
     {
-        const cwd_path = std.fs.cwd().realpathAlloc(alloc, ".") catch null;
+        const cwd_path = std.fs.cwd().realpathAlloc(alloc, ".") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        };
         defer if (cwd_path) |p| alloc.free(p);
         if (cwd_path) |cwd| {
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
