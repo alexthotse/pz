@@ -442,6 +442,16 @@ pub const VerifyError = error{
     GenerationPersistFailed,
 };
 
+/// Concrete error set for policy loading functions.
+/// Subset of VerifyError: only errors that load* paths can produce.
+pub const LoadError = error{
+    InvalidPolicy,
+    OutOfMemory,
+    PolicyExpired,
+    GenerationRollback,
+    GenerationPersistFailed,
+};
+
 /// Verify a signed policy bundle against the build-time trusted public key.
 /// Checks expiry (not_after) and generation rollback against stored state.
 /// Returns the parsed SignedDoc on success; caller must deinitSignedDoc.

@@ -77,17 +77,13 @@ fn ParseMixin(comptime T: type, comptime len: usize, comptime E: type, comptime 
 }
 
 pub const Seed = struct {
+    /// SECURITY: Do not access .raw directly — use bytes() or wipe(). Raw seed material.
     raw: [seed_len]u8,
 
     pub const parse = ParseMixin(Seed, seed_len, SeedError, error.BadSeedLen).parse;
     pub const parseHex = ParseMixin(Seed, seed_len, SeedError, error.BadSeedLen).parseHex;
 
-    fn bytes(self: Seed) [seed_len]u8 {
-        return self.raw;
-    }
-
-    /// Read-only pointer to raw seed bytes (internal use only).
-    fn rawSlice(self: *const Seed) *const [seed_len]u8 {
+    pub fn bytes(self: *const Seed) *const [seed_len]u8 {
         return &self.raw;
     }
 
@@ -224,7 +220,7 @@ pub const KeyPair = struct {
     pair: Ed25519.KeyPair,
 
     pub fn fromSeed(seed: Seed) KeyPairError!KeyPair {
-        const pair = Ed25519.KeyPair.generateDeterministic(seed.rawSlice().*) catch return error.BadSeed;
+        const pair = Ed25519.KeyPair.generateDeterministic(seed.bytes().*) catch return error.BadSeed;
         return .{ .pair = pair };
     }
 
@@ -1086,19 +1082,19 @@ test "seed wipe zeroes bytes" {
     var seed = try Seed.parseHex(seed_hex);
     // Confirm non-zero before wipe.
     var any_nonzero = false;
-    for (seed.rawSlice()) |b| if (b != 0) {
+    for (seed.bytes()) |b| if (b != 0) {
         any_nonzero = true;
         break;
     };
     try testing.expect(any_nonzero);
     seed.wipe();
-    for (seed.rawSlice()) |b| try testing.expectEqual(@as(u8, 0), b);
+    for (seed.bytes()) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
 test "seed deinit zeroes bytes" {
     var seed = try Seed.parseHex(seed_hex);
     seed.deinit();
-    for (seed.rawSlice()) |b| try testing.expectEqual(@as(u8, 0), b);
+    for (seed.bytes()) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
 test "keypair wipe zeroes secret key" {
