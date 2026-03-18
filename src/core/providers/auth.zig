@@ -363,28 +363,6 @@ fn isLegacyPath(path: []const u8) bool {
     return std.mem.indexOf(u8, path, "/.pi/") != null;
 }
 
-pub fn beginAnthropicOAuth(alloc: std.mem.Allocator) !OAuthStart {
-    return beginOAuth(alloc, .anthropic);
-}
-
-pub fn beginAnthropicOAuthWithRedirect(
-    alloc: std.mem.Allocator,
-    oauth_redirect_uri: []const u8,
-) !OAuthStart {
-    return beginOAuthWithRedirect(alloc, .anthropic, oauth_redirect_uri);
-}
-
-pub fn beginOpenAICodexOAuth(alloc: std.mem.Allocator) !OAuthStart {
-    return beginOAuth(alloc, .openai);
-}
-
-pub fn beginOpenAICodexOAuthWithRedirect(
-    alloc: std.mem.Allocator,
-    oauth_redirect_uri: []const u8,
-) !OAuthStart {
-    return beginOAuthWithRedirect(alloc, .openai, oauth_redirect_uri);
-}
-
 pub fn beginOAuth(alloc: std.mem.Allocator, provider: Provider) !OAuthStart {
     const spec = oauthSpec(provider) orelse return error.UnsupportedOAuthProvider;
     return beginOAuthWithSpec(alloc, spec, spec.default_redirect_uri);
@@ -435,34 +413,6 @@ fn beginOAuthWithSpec(
         .state = state,
         .verifier = verifier,
     };
-}
-
-pub fn completeAnthropicOAuth(alloc: std.mem.Allocator, input: []const u8, verifier: []const u8) !void {
-    return completeOAuth(alloc, .anthropic, input, verifier);
-}
-
-pub fn completeAnthropicOAuthFromLocalCallback(
-    alloc: std.mem.Allocator,
-    callback: oauth_callback.CodeState,
-    oauth_redirect_uri: []const u8,
-    expected_state: []const u8,
-    verifier: []const u8,
-) !void {
-    return completeOAuthFromLocalCallback(alloc, .anthropic, callback, oauth_redirect_uri, expected_state, verifier);
-}
-
-pub fn completeOpenAICodexOAuth(alloc: std.mem.Allocator, input: []const u8, verifier: []const u8) !void {
-    return completeOAuth(alloc, .openai, input, verifier);
-}
-
-pub fn completeOpenAICodexOAuthFromLocalCallback(
-    alloc: std.mem.Allocator,
-    callback: oauth_callback.CodeState,
-    oauth_redirect_uri: []const u8,
-    expected_state: []const u8,
-    verifier: []const u8,
-) !void {
-    return completeOAuthFromLocalCallback(alloc, .openai, callback, oauth_redirect_uri, expected_state, verifier);
 }
 
 pub fn completeOAuth(alloc: std.mem.Allocator, provider: Provider, input: []const u8, verifier: []const u8) !void {
@@ -542,10 +492,6 @@ pub fn completeOAuthFromLocalCallbackWithHooks(
         return err;
     };
     try emitAuthAudit(alloc, hooks, 2, provider, "login", "oauth", .ok, .notice, .{ .text = "oauth login complete", .vis = .@"pub" });
-}
-
-pub fn parseAnthropicOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeInput {
-    return parseOAuthInput(alloc, input);
 }
 
 pub fn parseOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeInput {
@@ -1010,6 +956,16 @@ fn saveOAuthForProviderWithHooks(alloc: std.mem.Allocator, provider: Provider, o
 }
 
 fn saveOAuthForProviderHome(alloc: std.mem.Allocator, home: []const u8, provider: Provider, oauth: OAuth) !void {
+    return saveAuthEntry(alloc, home, provider, .{
+        .type = "oauth",
+        .access = oauth.access,
+        .refresh = oauth.refresh,
+        .expires = oauth.expires,
+    });
+}
+
+/// Shared read-modify-write for auth entries (OAuth tokens and API keys).
+fn saveAuthEntry(alloc: std.mem.Allocator, home: []const u8, provider: Provider, entry: AuthEntry) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -1030,12 +986,6 @@ fn saveOAuthForProviderHome(alloc: std.mem.Allocator, home: []const u8, provider
         else => return err,
     }
 
-    const entry: AuthEntry = .{
-        .type = "oauth",
-        .access = oauth.access,
-        .refresh = oauth.refresh,
-        .expires = oauth.expires,
-    };
     switch (provider) {
         .anthropic => auth_file.anthropic = entry,
         .openai => auth_file.openai = entry,
@@ -1161,35 +1111,7 @@ fn saveApiKeyHomeWithHooks(alloc: std.mem.Allocator, home: []const u8, provider:
 }
 
 fn saveApiKeyHomeRaw(alloc: std.mem.Allocator, home: []const u8, provider: Provider, key: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const ar = arena.allocator();
-
-    const home_dup = try ar.dupe(u8, home);
-    const dir_path = try primaryAuthDir(ar, home_dup);
-    try fs_secure.ensureDirPath(dir_path);
-    const path = try authFilePath(ar, home_dup);
-
-    var auth_file: AuthFile = .{};
-    if (std.fs.cwd().readFileAlloc(ar, path, 1024 * 1024)) |raw| {
-        auth_file = (try std.json.parseFromSlice(AuthFile, ar, raw, .{
-            .allocate = .alloc_always,
-            .ignore_unknown_fields = false,
-        })).value;
-    } else |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    }
-
-    const entry = AuthEntry{ .type = "api_key", .key = key };
-    switch (provider) {
-        .anthropic => auth_file.anthropic = entry,
-        .openai => auth_file.openai = entry,
-        .google => auth_file.google = entry,
-    }
-
-    const out = try std.json.Stringify.valueAlloc(ar, auth_file, .{ .whitespace = .indent_2 });
-    try atomicAuthWrite(dir_path, "auth.json", out);
+    return saveAuthEntry(alloc, home, provider, .{ .type = "api_key", .key = key });
 }
 
 fn emitAuthAudit(
@@ -1724,8 +1646,8 @@ test "oauth helpers expose provider capabilities and metadata" {
     try std.testing.expect(oauthLoginInfo(.google) == null);
 }
 
-test "beginAnthropicOAuth builds authorization URL with separate state and verifier" {
-    var flow = try beginAnthropicOAuth(std.testing.allocator);
+test "beginOAuth builds authorization URL with separate state and verifier" {
+    var flow = try beginOAuth(std.testing.allocator, .anthropic);
     defer flow.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.startsWith(u8, flow.url, "https://claude.ai/oauth/authorize?"));
@@ -1738,15 +1660,15 @@ test "beginAnthropicOAuth builds authorization URL with separate state and verif
     try std.testing.expect(!std.mem.eql(u8, flow.state, flow.verifier));
 }
 
-test "beginAnthropicOAuthWithRedirect encodes localhost callback URI" {
-    var flow = try beginAnthropicOAuthWithRedirect(std.testing.allocator, "http://127.0.0.1:54321/callback");
+test "beginOAuthWithRedirect encodes localhost callback URI" {
+    var flow = try beginOAuthWithRedirect(std.testing.allocator, .anthropic, "http://127.0.0.1:54321/callback");
     defer flow.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback") != null);
 }
 
-test "beginOpenAICodexOAuthWithRedirect encodes callback URI and codex params" {
-    var flow = try beginOpenAICodexOAuthWithRedirect(std.testing.allocator, "http://127.0.0.1:54321/auth/callback");
+test "beginOAuthWithRedirect encodes callback URI and codex params" {
+    var flow = try beginOAuthWithRedirect(std.testing.allocator, .openai, "http://127.0.0.1:54321/auth/callback");
     defer flow.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.startsWith(u8, flow.url, "https://auth.openai.com/oauth/authorize?"));
@@ -1763,10 +1685,10 @@ test "beginOAuthWithRedirect rejects unsupported provider" {
     );
 }
 
-test "parseAnthropicOAuthInput supports code#state" {
+test "parseOAuthInput supports code#state" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var parsed = try parseAnthropicOAuthInput(std.testing.allocator, "abc123#state456");
+    var parsed = try parseOAuthInput(std.testing.allocator, "abc123#state456");
     defer parsed.deinit(std.testing.allocator);
 
     try oh.snap(@src(),
@@ -1780,11 +1702,11 @@ test "parseAnthropicOAuthInput supports code#state" {
     ).expectEqual(parsed);
 }
 
-test "parseAnthropicOAuthInput supports callback URL query params" {
+test "parseOAuthInput supports callback URL query params" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const input = "http://localhost:64915/callback?code=abc123&state=state%20456";
-    var parsed = try parseAnthropicOAuthInput(std.testing.allocator, input);
+    var parsed = try parseOAuthInput(std.testing.allocator, input);
     defer parsed.deinit(std.testing.allocator);
 
     try oh.snap(@src(),
@@ -1816,10 +1738,10 @@ test "parseOAuthInput decodes escaped callback code and state" {
     ).expectEqual(parsed);
 }
 
-test "parseAnthropicOAuthInput supports raw query params" {
+test "parseOAuthInput supports raw query params" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var parsed = try parseAnthropicOAuthInput(std.testing.allocator, "code=abc123&state=state%20456");
+    var parsed = try parseOAuthInput(std.testing.allocator, "code=abc123&state=state%20456");
     defer parsed.deinit(std.testing.allocator);
 
     try oh.snap(@src(),
@@ -1833,10 +1755,10 @@ test "parseAnthropicOAuthInput supports raw query params" {
     ).expectEqual(parsed);
 }
 
-test "parseAnthropicOAuthInput accepts code-only input" {
+test "parseOAuthInput accepts code-only input" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var parsed = try parseAnthropicOAuthInput(std.testing.allocator, "abc123");
+    var parsed = try parseOAuthInput(std.testing.allocator, "abc123");
     defer parsed.deinit(std.testing.allocator);
 
     try oh.snap(@src(),
@@ -1850,11 +1772,11 @@ test "parseAnthropicOAuthInput accepts code-only input" {
     ).expectEqual(parsed);
 }
 
-test "parseAnthropicOAuthInput rejects empty input" {
-    try std.testing.expectError(error.InvalidOAuthInput, parseAnthropicOAuthInput(std.testing.allocator, " \t\r\n"));
+test "parseOAuthInput rejects empty input" {
+    try std.testing.expectError(error.InvalidOAuthInput, parseOAuthInput(std.testing.allocator, " \t\r\n"));
 }
 
-test "completeAnthropicOAuthFromLocalCallback rejects mismatched state" {
+test "completeOAuthFromLocalCallback rejects mismatched state (anthropic)" {
     const code = try std.testing.allocator.dupe(u8, "c");
     defer std.testing.allocator.free(code);
     const state = try std.testing.allocator.dupe(u8, "state-a");
@@ -1865,8 +1787,9 @@ test "completeAnthropicOAuthFromLocalCallback rejects mismatched state" {
     };
     try std.testing.expectError(
         error.OAuthStateMismatch,
-        completeAnthropicOAuthFromLocalCallback(
+        completeOAuthFromLocalCallback(
             std.testing.allocator,
+            .anthropic,
             cb,
             "http://127.0.0.1:1234/callback",
             "state-b",
@@ -1875,7 +1798,7 @@ test "completeAnthropicOAuthFromLocalCallback rejects mismatched state" {
     );
 }
 
-test "completeOpenAICodexOAuthFromLocalCallback rejects mismatched state" {
+test "completeOAuthFromLocalCallback rejects mismatched state (openai)" {
     const code = try std.testing.allocator.dupe(u8, "c");
     defer std.testing.allocator.free(code);
     const state = try std.testing.allocator.dupe(u8, "state-a");
@@ -1886,8 +1809,9 @@ test "completeOpenAICodexOAuthFromLocalCallback rejects mismatched state" {
     };
     try std.testing.expectError(
         error.OAuthStateMismatch,
-        completeOpenAICodexOAuthFromLocalCallback(
+        completeOAuthFromLocalCallback(
             std.testing.allocator,
+            .openai,
             cb,
             "http://127.0.0.1:1234/auth/callback",
             "state-b",
@@ -1953,7 +1877,7 @@ test "completeOAuthWithHooks uses provided verifier not state" {
 }
 
 test "separate OAuth state and PKCE verifier" {
-    var flow = try beginAnthropicOAuth(std.testing.allocator);
+    var flow = try beginOAuth(std.testing.allocator, .anthropic);
     defer flow.deinit(std.testing.allocator);
 
     // state and verifier must be distinct tokens
