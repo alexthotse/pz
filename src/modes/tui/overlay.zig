@@ -482,15 +482,7 @@ fn writeEllipsis(frm: *Frame, x: usize, x_end: usize, y: usize, text: []const u8
     }
 }
 
-fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
-        @typeName(@TypeOf(actual)),
-        body,
-    });
-    try oh.snap(src, snap).expectEqual(actual);
-}
+const expectSnapText = @import("../../test/helpers.zig").expectSnapText;
 
 fn rowAscii(frm: *const Frame, y: usize, out: []u8) ![]const u8 {
     var x: usize = 0;

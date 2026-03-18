@@ -812,7 +812,7 @@ pub fn hashDoc(alloc: std.mem.Allocator, doc: Doc) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!Resolved {
+pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) LoadError!Resolved {
     var docs: [2]?SignedDoc = .{ null, null };
     var doc_n: usize = 0;
     errdefer {
@@ -907,13 +907,13 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
     };
 }
 
-pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!Lock {
+pub fn loadLock(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) LoadError!Lock {
     const resolved = try loadResolved(alloc, cwd, home);
     defer deinitResolved(alloc, resolved);
     return resolved.doc.lock;
 }
 
-fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8, home: ?[]const u8) anyerror!?SignedDoc {
+fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8, home: ?[]const u8) LoadError!?SignedDoc {
     if (!std.fs.path.isAbsolute(path)) return error.InvalidPolicy;
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -921,7 +921,10 @@ fn loadSignedDocFile(alloc: std.mem.Allocator, path: []const u8, home: ?[]const 
     };
     defer file.close();
 
-    const raw = try file.readToEndAlloc(alloc, 256 * 1024);
+    const raw = file.readToEndAlloc(alloc, 256 * 1024) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
     defer alloc.free(raw);
 
     return verifySignedPolicyAt(alloc, raw, std.time.timestamp(), home) catch |err| switch (err) {
@@ -941,7 +944,7 @@ fn dupRule(alloc: std.mem.Allocator, rule: Rule) !Rule {
     };
 }
 
-pub fn loadApprovalBind(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) anyerror!ApprovalBind {
+pub fn loadApprovalBind(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u8) LoadError!ApprovalBind {
     var sha = std.crypto.hash.sha2.Sha256.init(.{});
     var saw = false;
 
@@ -969,7 +972,7 @@ fn hashPolicyFile(
     sha: *std.crypto.hash.sha2.Sha256,
     tag: []const u8,
     path: []const u8,
-) anyerror!bool {
+) LoadError!bool {
     if (!std.fs.path.isAbsolute(path)) return error.InvalidPolicy;
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -977,7 +980,10 @@ fn hashPolicyFile(
     };
     defer file.close();
 
-    const raw = try file.readToEndAlloc(alloc, 256 * 1024);
+    const raw = file.readToEndAlloc(alloc, 256 * 1024) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPolicy,
+    };
     defer alloc.free(raw);
 
     const doc = parseSignedDoc(alloc, raw) catch |err| switch (err) {

@@ -673,19 +673,7 @@ fn findAsciiSeqInFrame(frm: *const frame.Frame, needle: []const u8) ?struct { x:
     return null;
 }
 
-fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
-        @typeName(@TypeOf(actual)),
-        body,
-    });
-    try oh.snap(src, snap).expectEqual(actual);
-}
-
-test {
-    _ = @import("ohsnap");
-}
+const expectSnapText = @import("../../test/helpers.zig").expectSnapText;
 
 test "harness renders full-width transcript with footer" {
     var ui = try Ui.init(std.testing.allocator, 40, 8, "gpt-x", "prov-a");

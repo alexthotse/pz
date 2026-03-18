@@ -545,15 +545,7 @@ fn u21Eql(a: []const u21, b: []const u21) bool {
     return true;
 }
 
-fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
-        @typeName(@TypeOf(actual)),
-        body,
-    });
-    try oh.snap(src, snap).expectEqual(actual);
-}
+const expectSnapText = @import("../../test/helpers.zig").expectSnapText;
 
 fn appendColorName(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, c: frame.Color) !void {
     switch (c) {

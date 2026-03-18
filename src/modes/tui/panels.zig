@@ -735,19 +735,7 @@ fn footerSegmentsAlloc(alloc: std.mem.Allocator, frm: *const frame.Frame, rect: 
     return out.toOwnedSlice(alloc);
 }
 
-fn expectSnapText(comptime src: std.builtin.SourceLocation, comptime body: []const u8, actual: anytype) !void {
-    const OhSnap = @import("ohsnap");
-    const oh = OhSnap{};
-    const snap = comptime std.fmt.comptimePrint("{s}\n  \"{s}\"", .{
-        @typeName(@TypeOf(actual)),
-        body,
-    });
-    try oh.snap(src, snap).expectEqual(actual);
-}
-
-test {
-    _ = @import("ohsnap");
-}
+const expectSnapText = @import("../../test/helpers.zig").expectSnapText;
 
 test "panels track tool lifecycle and state transitions" {
     var ps = try Panels.init(std.testing.allocator, "gpt-4.1", "prov-a");
