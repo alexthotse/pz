@@ -7,6 +7,7 @@ const app_tls = @import("tls.zig");
 const path_guard = @import("../core/tools/path_guard.zig");
 const version = @import("version.zig");
 const http_mock = @import("../test/http_mock.zig");
+const fixtures = @import("../test/fixtures.zig");
 const time_mock = @import("../test/time_mock.zig");
 
 const ReleaseAsset = struct {
@@ -1406,12 +1407,7 @@ const UpdateClientTap = struct {
     }
 };
 
-fn writeTestCfg(tmp: std.testing.TmpDir, ca_path: []const u8) !void {
-    try tmp.dir.makePath(".pz");
-    const raw = try std.fmt.allocPrint(std.testing.allocator, "{{\"ca_file\":\"{s}\"}}", .{ca_path});
-    defer std.testing.allocator.free(raw);
-    try tmp.dir.writeFile(.{ .sub_path = ".pz/settings.json", .data = raw });
-}
+const writeTestCfg = fixtures.writeCfg;
 
 test "update uses runtime CA bundle for metadata archive and signature fetches" {
     if (targetAssetName() == null) return;

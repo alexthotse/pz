@@ -114,7 +114,7 @@ pub const ParseError = error{
     InvalidMaxTurns,
 };
 
-const mode_map = std.StaticStringMap(Mode).initComptime(.{
+pub const mode_map = std.StaticStringMap(Mode).initComptime(.{
     .{ "tui", .tui },
     .{ "interactive", .tui },
     .{ "print", .print },

@@ -5,6 +5,7 @@ const providers = @import("providers.zig");
 const prov_api = @import("providers/api.zig");
 const session = @import("session.zig");
 const tools = @import("tools.zig");
+const vtable = @import("vtable.zig");
 const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const time_mock = @import("../test/time_mock.zig");
@@ -67,22 +68,8 @@ pub const TimeSrc = struct {
     ctx: *anyopaque,
     now_ms_fn: *const fn (ctx: *anyopaque) i64,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime now_ms_fn: fn (ctx: *T) i64,
-    ) TimeSrc {
-        const Wrap = struct {
-            fn nowMs(raw: *anyopaque) i64 {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return now_ms_fn(typed);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .now_ms_fn = Wrap.nowMs,
-        };
+    pub fn from(comptime T: type, ctx: *T, comptime method: fn (*T) i64) TimeSrc {
+        return .{ .ctx = ctx, .now_ms_fn = vtable.wrap(T, method) };
     }
 
     pub fn nowMs(self: TimeSrc) i64 {
@@ -94,22 +81,8 @@ pub const CancelSrc = struct {
     ctx: *anyopaque,
     is_canceled_fn: *const fn (ctx: *anyopaque) bool,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime is_canceled_fn: fn (ctx: *T) bool,
-    ) CancelSrc {
-        const Wrap = struct {
-            fn isCanceled(raw: *anyopaque) bool {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return is_canceled_fn(typed);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .is_canceled_fn = Wrap.isCanceled,
-        };
+    pub fn from(comptime T: type, ctx: *T, comptime method: fn (*T) bool) CancelSrc {
+        return .{ .ctx = ctx, .is_canceled_fn = vtable.wrap(T, method) };
     }
 
     pub fn isCanceled(self: CancelSrc) bool {

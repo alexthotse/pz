@@ -15,6 +15,7 @@ pub const agent = @import("tools/agent.zig");
 pub const skill = @import("tools/skill.zig");
 pub const web = @import("tools/web.zig");
 pub const contract_test = @import("tools/test.zig");
+const vtable = @import("vtable.zig");
 
 pub const Kind = enum {
     read,
@@ -64,22 +65,8 @@ pub const CancelSrc = struct {
     ctx: *anyopaque,
     is_canceled_fn: *const fn (ctx: *anyopaque) bool,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime is_canceled_fn: fn (ctx: *T) bool,
-    ) CancelSrc {
-        const Wrap = struct {
-            fn isCanceled(raw: *anyopaque) bool {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return is_canceled_fn(typed);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .is_canceled_fn = Wrap.isCanceled,
-        };
+    pub fn from(comptime T: type, ctx: *T, comptime method: fn (*T) bool) CancelSrc {
+        return .{ .ctx = ctx, .is_canceled_fn = vtable.wrap(T, method) };
     }
 
     pub fn isCanceled(self: CancelSrc) bool {

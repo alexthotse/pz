@@ -31,32 +31,26 @@ pub const Env = struct {
 
     pub fn fromProcess(alloc: std.mem.Allocator) !Env {
         return .{
-            .model = dupEnv(alloc, "PZ_MODEL"),
-            .models = dupEnv(alloc, "PZ_MODELS"),
-            .provider = dupEnv(alloc, "PZ_PROVIDER"),
-            .session_dir = dupEnv(alloc, "PZ_SESSION_DIR"),
-            .mode = dupEnv(alloc, "PZ_MODE"),
-            .theme = dupEnv(alloc, "PZ_THEME"),
-            .provider_cmd = dupEnv(alloc, "PZ_PROVIDER_CMD"),
-            .home = validatedHome(alloc),
-            .tmp_dir = dupEnv(alloc, "TMPDIR"),
-            .state_dir = dupEnv(alloc, "PZ_STATE_DIR"),
-            .xdg_state_home = dupEnv(alloc, "XDG_STATE_HOME"),
+            .model = try dupEnv(alloc, "PZ_MODEL"),
+            .models = try dupEnv(alloc, "PZ_MODELS"),
+            .provider = try dupEnv(alloc, "PZ_PROVIDER"),
+            .session_dir = try dupEnv(alloc, "PZ_SESSION_DIR"),
+            .mode = try dupEnv(alloc, "PZ_MODE"),
+            .theme = try dupEnv(alloc, "PZ_THEME"),
+            .provider_cmd = try dupEnv(alloc, "PZ_PROVIDER_CMD"),
+            .home = try validatedHome(alloc),
+            .tmp_dir = try dupEnv(alloc, "TMPDIR"),
+            .state_dir = try dupEnv(alloc, "PZ_STATE_DIR"),
+            .xdg_state_home = try dupEnv(alloc, "XDG_STATE_HOME"),
         };
     }
 
     pub fn deinit(self: *Env, alloc: std.mem.Allocator) void {
-        if (self.model) |v| alloc.free(v);
-        if (self.models) |v| alloc.free(v);
-        if (self.provider) |v| alloc.free(v);
-        if (self.session_dir) |v| alloc.free(v);
-        if (self.mode) |v| alloc.free(v);
-        if (self.theme) |v| alloc.free(v);
-        if (self.provider_cmd) |v| alloc.free(v);
-        if (self.home) |v| alloc.free(v);
-        if (self.tmp_dir) |v| alloc.free(v);
-        if (self.state_dir) |v| alloc.free(v);
-        if (self.xdg_state_home) |v| alloc.free(v);
+        inline for (@typeInfo(Env).@"struct".fields) |f| {
+            if (f.type == ?[]const u8) {
+                if (@field(self, f.name)) |v| alloc.free(v);
+            }
+        }
         self.* = undefined;
     }
 };
@@ -73,15 +67,17 @@ pub const Config = struct {
     policy_lock: core.policy.Lock = .{},
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
-        alloc.free(self.model);
-        alloc.free(self.provider);
-        alloc.free(self.session_dir);
-        if (self.theme) |v| alloc.free(v);
-        if (self.provider_cmd) |v| alloc.free(v);
-        if (self.ca_file) |v| alloc.free(v);
-        if (self.enabled_models) |models| {
-            for (models) |m| alloc.free(m);
-            alloc.free(models);
+        inline for (@typeInfo(Config).@"struct".fields) |f| {
+            if (f.type == []u8) {
+                alloc.free(@field(self, f.name));
+            } else if (f.type == ?[]u8) {
+                if (@field(self, f.name)) |v| alloc.free(v);
+            } else if (f.type == ?[][]u8) {
+                if (@field(self, f.name)) |models| {
+                    for (models) |m| alloc.free(m);
+                    alloc.free(models);
+                }
+            }
         }
         self.* = undefined;
     }
@@ -97,8 +93,8 @@ pub fn validateHome(home: ?[]const u8) ?[]const u8 {
 }
 
 /// Read and validate HOME from env, allocating a copy. Called once at startup.
-fn validatedHome(alloc: std.mem.Allocator) ?[]const u8 {
-    const raw = dupEnv(alloc, "HOME") orelse return null;
+fn validatedHome(alloc: std.mem.Allocator) error{OutOfMemory}!?[]const u8 {
+    const raw = try dupEnv(alloc, "HOME") orelse return null;
     if (validateHome(raw) != null) return raw;
     alloc.free(raw);
     return null;
@@ -136,22 +132,22 @@ pub const PzState = struct {
         };
     }
 
-    pub fn save(self: PzState, alloc: std.mem.Allocator, home: ?[]const u8) void {
-        self.saveForHome(alloc, home);
+    pub fn save(self: PzState, alloc: std.mem.Allocator, home: ?[]const u8) !void {
+        try self.saveForHome(alloc, home);
     }
 
-    pub fn saveForHome(self: PzState, alloc: std.mem.Allocator, home_override: ?[]const u8) void {
+    pub fn saveForHome(self: PzState, alloc: std.mem.Allocator, home_override: ?[]const u8) !void {
         const home = home_override orelse return;
-        const dir_path = std.fs.path.join(alloc, &.{ home, pz_state_dir }) catch return; // best-effort: void return
+        const dir_path = try std.fs.path.join(alloc, &.{ home, pz_state_dir });
         defer alloc.free(dir_path);
-        core.fs_secure.ensureDirPath(dir_path) catch return; // best-effort: void return
-        const path = std.fs.path.join(alloc, &.{ dir_path, pz_state_file }) catch return; // best-effort: void return
+        try core.fs_secure.ensureDirPath(dir_path);
+        const path = try std.fs.path.join(alloc, &.{ dir_path, pz_state_file });
         defer alloc.free(path);
-        const json = std.json.Stringify.valueAlloc(alloc, self, .{}) catch return; // best-effort: void return
+        const json = try std.json.Stringify.valueAlloc(alloc, self, .{});
         defer alloc.free(json);
-        const file = core.fs_secure.createFilePath(path, .{ .truncate = true }) catch return; // best-effort: void return
+        const file = try core.fs_secure.createFilePath(path, .{ .truncate = true });
         defer file.close();
-        file.writeAll(json) catch return; // best-effort: void return
+        try file.writeAll(json);
     }
 
     pub fn deinit(self: *PzState, alloc: std.mem.Allocator) void {
@@ -200,7 +196,7 @@ test "pz state save and load are home-overrideable" {
 
     var state = PzState{ .last_hash = try std.testing.allocator.dupe(u8, "abc123") };
     defer state.deinit(std.testing.allocator);
-    state.saveForHome(std.testing.allocator, home);
+    try state.saveForHome(std.testing.allocator, home);
 
     var loaded = (try PzState.loadForHome(std.testing.allocator, home)) orelse return error.TestUnexpectedResult;
     defer loaded.deinit(std.testing.allocator);
@@ -219,7 +215,7 @@ test "pz state save locks dir and file modes" {
 
     var state = PzState{ .last_hash = try std.testing.allocator.dupe(u8, "abc123") };
     defer state.deinit(std.testing.allocator);
-    state.saveForHome(std.testing.allocator, home);
+    try state.saveForHome(std.testing.allocator, home);
 
     const dir_path = try std.fs.path.join(std.testing.allocator, &.{ home, pz_state_dir });
     defer std.testing.allocator.free(dir_path);
@@ -531,14 +527,7 @@ fn hasFile(dir: std.fs.Dir, path: []const u8) !bool {
 }
 
 fn parseMode(raw: []const u8, comptime invalid: anytype) @TypeOf(invalid)!args.Mode {
-    const map = std.StaticStringMap(args.Mode).initComptime(.{
-        .{ "tui", .tui },
-        .{ "interactive", .tui },
-        .{ "print", .print },
-        .{ "json", .json },
-        .{ "rpc", .rpc },
-    });
-    return map.get(raw) orelse invalid;
+    return args.mode_map.get(raw) orelse invalid;
 }
 
 fn replaceStr(
@@ -561,12 +550,11 @@ fn replaceOptStr(
     dst.* = next;
 }
 
-fn dupEnv(alloc: std.mem.Allocator, key: []const u8) ?[]const u8 {
-    const val = std.process.getEnvVarOwned(alloc, key) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
-        else => return null,
+fn dupEnv(alloc: std.mem.Allocator, key: []const u8) error{OutOfMemory}!?[]const u8 {
+    return std.process.getEnvVarOwned(alloc, key) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound, error.InvalidWtf8 => return null,
+        error.OutOfMemory => return error.OutOfMemory,
     };
-    return val;
 }
 
 test "config uses defaults when no sources are present" {
@@ -991,7 +979,7 @@ test "PzState works with null HOME (env isolation)" {
     try std.testing.expect((try PzState.loadForHome(std.testing.allocator, null)) == null);
 
     var state = PzState{ .last_hash = null };
-    state.saveForHome(std.testing.allocator, null); // should not crash
+    try state.saveForHome(std.testing.allocator, null); // should not crash
 }
 
 fn testPolicyKeyPair() !core.signing.KeyPair {
