@@ -1,5 +1,6 @@
 //! Comptime tool registry: kind-keyed dispatch table generation.
 const std = @import("std");
+const vtable = @import("../vtable.zig");
 
 pub fn bind(
     comptime Kind: type,
@@ -38,21 +39,12 @@ pub fn bind(
                 ctx: *T,
                 comptime push_fn: fn (ctx: *T, ev: Event) anyerror!void,
             ) Sink {
-                const Wrap = struct {
-                    fn push(raw: *anyopaque, ev: Event) anyerror!void {
-                        const typed: *T = @ptrCast(@alignCast(raw));
-                        return push_fn(typed, ev);
-                    }
-
+                const Gen = struct {
                     const vt = Vt{
-                        .push = @This().push,
+                        .push = vtable.wrap(T, push_fn),
                     };
                 };
-
-                return .{
-                    .ctx = ctx,
-                    .vt = &Wrap.vt,
-                };
+                return .{ .ctx = ctx, .vt = &Gen.vt };
             }
 
             pub fn push(self: Sink, ev: Event) !void {
@@ -73,21 +65,12 @@ pub fn bind(
                 ctx: *T,
                 comptime run_fn: fn (ctx: *T, call: Call, sink: Sink) anyerror!Result,
             ) Dispatch {
-                const Wrap = struct {
-                    fn run(raw: *anyopaque, call: Call, sink: Sink) anyerror!Result {
-                        const typed: *T = @ptrCast(@alignCast(raw));
-                        return run_fn(typed, call, sink);
-                    }
-
+                const Gen = struct {
                     const vt = Vt{
-                        .run = @This().run,
+                        .run = vtable.wrap(T, run_fn),
                     };
                 };
-
-                return .{
-                    .ctx = ctx,
-                    .vt = &Wrap.vt,
-                };
+                return .{ .ctx = ctx, .vt = &Gen.vt };
             }
 
             pub fn run(self: Dispatch, call: Call, sink: Sink) !Result {

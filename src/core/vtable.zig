@@ -39,7 +39,17 @@ pub fn wrap(comptime T: type, comptime method: anytype) ErasedPtr(@TypeOf(method
                 return method(@ptrCast(@alignCast(raw)), a0, a1, a2);
             }
         },
-        else => @compileError("wrap: too many params (max 4)"),
+        5 => struct {
+            fn call(raw: *anyopaque, a0: params[1].type.?, a1: params[2].type.?, a2: params[3].type.?, a3: params[4].type.?) Ret {
+                return method(@ptrCast(@alignCast(raw)), a0, a1, a2, a3);
+            }
+        },
+        6 => struct {
+            fn call(raw: *anyopaque, a0: params[1].type.?, a1: params[2].type.?, a2: params[3].type.?, a3: params[4].type.?, a4: params[5].type.?) Ret {
+                return method(@ptrCast(@alignCast(raw)), a0, a1, a2, a3, a4);
+            }
+        },
+        else => @compileError("wrap: too many params (max 6)"),
     }).call;
 }
 
@@ -54,7 +64,9 @@ fn ErasedPtr(comptime M: type) type {
         2 => fn (*anyopaque, params[1].type.?) Ret,
         3 => fn (*anyopaque, params[1].type.?, params[2].type.?) Ret,
         4 => fn (*anyopaque, params[1].type.?, params[2].type.?, params[3].type.?) Ret,
-        else => @compileError("ErasedPtr: too many params (max 4)"),
+        5 => fn (*anyopaque, params[1].type.?, params[2].type.?, params[3].type.?, params[4].type.?) Ret,
+        6 => fn (*anyopaque, params[1].type.?, params[2].type.?, params[3].type.?, params[4].type.?, params[5].type.?) Ret,
+        else => @compileError("ErasedPtr: too many params (max 6)"),
     };
 }
 

@@ -1,6 +1,7 @@
 //! Child agent RPC protocol: spawn, message framing, version negotiation.
 const std = @import("std");
 const signing = @import("signing.zig");
+const vtable = @import("vtable.zig");
 const event_loop = @import("event_loop.zig");
 const EventLoop = event_loop.EventLoop;
 const testing = std.testing;
@@ -794,13 +795,7 @@ pub const ProgressCb = struct {
         ctx: *T,
         comptime push_fn: fn (ctx: *T, ev: ProgressEvent) void,
     ) ProgressCb {
-        const Wrap = struct {
-            fn call(raw: *anyopaque, ev: ProgressEvent) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                push_fn(typed, ev);
-            }
-        };
-        return .{ .ctx = ctx, .push_fn = Wrap.call };
+        return .{ .ctx = ctx, .push_fn = vtable.wrap(T, push_fn) };
     }
 
     pub fn push(self: ProgressCb, ev: ProgressEvent) void {

@@ -2,6 +2,7 @@
 const std = @import("std");
 const rpc = @import("../agent.zig");
 const tools = @import("../tools.zig");
+const vtable = @import("../vtable.zig");
 const shared = @import("shared.zig");
 const noop = @import("../../test/noop_sink.zig");
 
@@ -21,17 +22,7 @@ pub const Hook = struct {
         ctx: *T,
         comptime run_fn: fn (ctx: *T, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult,
     ) Hook {
-        const Wrap = struct {
-            fn call(raw: *anyopaque, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return run_fn(typed, args);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .run_fn = Wrap.call,
-        };
+        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
     }
 
     pub fn run(self: Hook, args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
@@ -57,17 +48,7 @@ pub const StreamHook = struct {
             cb: rpc.ProgressCb,
         ) anyerror!rpc.ChildProc.RunResult,
     ) StreamHook {
-        const Wrap = struct {
-            fn call(
-                raw: *anyopaque,
-                args: tools.Call.AgentArgs,
-                cb: rpc.ProgressCb,
-            ) anyerror!rpc.ChildProc.RunResult {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return run_fn(typed, args, cb);
-            }
-        };
-        return .{ .ctx = ctx, .run_fn = Wrap.call };
+        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
     }
 
     pub fn run(self: StreamHook, args: tools.Call.AgentArgs, cb: rpc.ProgressCb) !rpc.ChildProc.RunResult {

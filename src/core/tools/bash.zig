@@ -5,6 +5,7 @@ const policy = @import("../policy.zig");
 const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const tools = @import("../tools.zig");
+const vtable = @import("../vtable.zig");
 const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 const noop = @import("../../test/noop_sink.zig");
@@ -42,18 +43,9 @@ pub const Runner = struct {
     pub fn from(
         comptime T: type,
         ctx: *T,
-        comptime run_fn: *const fn (*T, Handler, Launch) Err!RunOut,
+        comptime run_fn: fn (*T, Handler, Launch) Err!RunOut,
     ) Runner {
-        const Wrap = struct {
-            fn call(ptr: *anyopaque, handler: Handler, launch: Launch) Err!RunOut {
-                const self: *T = @ptrCast(@alignCast(ptr));
-                return run_fn(self, handler, launch);
-            }
-        };
-        return .{
-            .ctx = ctx,
-            .run_fn = Wrap.call,
-        };
+        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
     }
 
     fn exec(self: Runner, handler: Handler, launch: Launch) Err!RunOut {

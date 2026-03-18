@@ -1,6 +1,7 @@
 //! Structured audit log: events, severity, HMAC-chained integrity.
 const std = @import("std");
 const testing = std.testing;
+const vtable = @import("vtable.zig");
 const Allocator = std.mem.Allocator;
 const integrity = @import("audit_integrity.zig");
 const signing = @import("signing.zig");
@@ -251,21 +252,13 @@ pub const Connection = struct {
         comptime send_fn: fn (ctx: *T, raw: []const u8) anyerror!void,
         comptime deinit_fn: fn (ctx: *T) void,
     ) Connection {
-        const Wrap = struct {
-            fn send(raw: *anyopaque, data: []const u8) anyerror!void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return send_fn(typed, data);
-            }
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
+        const Gen = struct {
             const vt = ConnectionVTable{
-                .sendRaw = send,
-                .deinit = @This().deinit,
+                .sendRaw = vtable.wrap(T, send_fn),
+                .deinit = vtable.wrap(T, deinit_fn),
             };
         };
-        return .{ .ctx = ctx, .vtable = &Wrap.vt };
+        return .{ .ctx = ctx, .vtable = &Gen.vt };
     }
 
     pub fn sendRaw(self: Connection, raw: []const u8) !void {
@@ -286,13 +279,7 @@ pub const Connector = struct {
         ctx: *T,
         comptime connect_fn: fn (ctx: *T) anyerror!Connection,
     ) Connector {
-        const Wrap = struct {
-            fn connect(raw: *anyopaque) anyerror!Connection {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return connect_fn(typed);
-            }
-        };
-        return .{ .ctx = ctx, .connect = Wrap.connect };
+        return .{ .ctx = ctx, .connect = vtable.wrap(T, connect_fn) };
     }
 };
 

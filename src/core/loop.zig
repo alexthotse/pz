@@ -42,21 +42,12 @@ pub const ModeSink = struct {
         ctx: *T,
         comptime push_fn: fn (ctx: *T, ev: ModeEv) anyerror!void,
     ) ModeSink {
-        const Wrap = struct {
-            fn push(raw: *anyopaque, ev: ModeEv) anyerror!void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return push_fn(typed, ev);
-            }
-
+        const Gen = struct {
             const vt = Vt{
-                .push = @This().push,
+                .push = vtable.wrap(T, push_fn),
             };
         };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
+        return .{ .ctx = ctx, .vt = &Gen.vt };
     }
 
     pub fn push(self: ModeSink, ev: ModeEv) !void {
@@ -99,17 +90,7 @@ pub const Compactor = struct {
         ctx: *T,
         comptime run_fn: fn (ctx: *T, sid: []const u8, at_ms: i64) anyerror!void,
     ) Compactor {
-        const Wrap = struct {
-            fn run(raw: *anyopaque, sid: []const u8, at_ms: i64) anyerror!void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return run_fn(typed, sid, at_ms);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .run_fn = Wrap.run,
-        };
+        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
     }
 
     pub fn run(self: Compactor, sid: []const u8, at_ms: i64) !void {
@@ -386,17 +367,7 @@ pub const Approver = struct {
         ctx: *T,
         comptime check_fn: fn (ctx: *T, key: CmdCache.Key, cached: bool) anyerror!void,
     ) Approver {
-        const Wrap = struct {
-            fn check(raw: *anyopaque, key: CmdCache.Key, cached: bool) anyerror!void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return check_fn(typed, key, cached);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .check_fn = Wrap.check,
-        };
+        return .{ .ctx = ctx, .check_fn = vtable.wrap(T, check_fn) };
     }
 
     pub fn check(self: Approver, key: CmdCache.Key, cached: bool) !void {
@@ -413,17 +384,7 @@ pub const ToolAuth = struct {
         ctx: *T,
         comptime check_fn: fn (ctx: *T, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) anyerror!void,
     ) ToolAuth {
-        const Wrap = struct {
-            fn check(raw: *anyopaque, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) anyerror!void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return check_fn(typed, call_id, name, kind, kind_str, parsed_args);
-            }
-        };
-
-        return .{
-            .ctx = ctx,
-            .check_fn = Wrap.check,
-        };
+        return .{ .ctx = ctx, .check_fn = vtable.wrap(T, check_fn) };
     }
 
     pub fn check(self: ToolAuth, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) !void {

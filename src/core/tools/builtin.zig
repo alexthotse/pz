@@ -1,6 +1,7 @@
 //! Built-in tool specs: parameter schemas and metadata.
 const std = @import("std");
 const tools = @import("../tools.zig");
+const vtable = @import("../vtable.zig");
 const read = @import("read.zig");
 const write = @import("write.zig");
 const bash = @import("bash.zig");
@@ -141,16 +142,7 @@ pub const AskHook = struct {
         ctx: *T,
         comptime run_fn: fn (ctx: *T, args: tools.Call.AskArgs) anyerror![]u8,
     ) AskHook {
-        const Wrap = struct {
-            fn call(raw: *anyopaque, args: tools.Call.AskArgs) anyerror![]u8 {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return run_fn(typed, args);
-            }
-        };
-        return .{
-            .ctx = ctx,
-            .run_fn = Wrap.call,
-        };
+        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
     }
 
     pub fn run(self: AskHook, args: tools.Call.AskArgs) ![]u8 {

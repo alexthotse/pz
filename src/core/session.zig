@@ -1,5 +1,6 @@
 //! Session layer: JSONL persistence, replay, compaction, export.
 const std = @import("std");
+const vtable = @import("vtable.zig");
 const schema = @import("session/schema.zig");
 pub const writer = @import("session/writer.zig");
 pub const reader = @import("session/reader.zig");
@@ -54,27 +55,13 @@ pub const Reader = struct {
         comptime next_fn: fn (ctx: *T) anyerror!?Event,
         comptime deinit_fn: fn (ctx: *T) void,
     ) Reader {
-        const Wrap = struct {
-            fn next(raw: *anyopaque) anyerror!?Event {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return next_fn(typed);
-            }
-
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
-
+        const Gen = struct {
             const vt = Vt{
-                .next = @This().next,
-                .deinit = @This().deinit,
+                .next = vtable.wrap(T, next_fn),
+                .deinit = vtable.wrap(T, deinit_fn),
             };
         };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
+        return .{ .ctx = ctx, .vt = &Gen.vt };
     }
 
     pub fn next(self: *Reader) !?Event {
@@ -103,33 +90,14 @@ pub const SessionStore = struct {
         comptime replay_fn: fn (ctx: *T, sid: []const u8) anyerror!Reader,
         comptime deinit_fn: fn (ctx: *T) void,
     ) SessionStore {
-        const Wrap = struct {
-            fn append(raw: *anyopaque, sid: []const u8, ev: Event) anyerror!void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return append_fn(typed, sid, ev);
-            }
-
-            fn replay(raw: *anyopaque, sid: []const u8) anyerror!Reader {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return replay_fn(typed, sid);
-            }
-
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
-
+        const Gen = struct {
             const vt = Vt{
-                .append = @This().append,
-                .replay = @This().replay,
-                .deinit = @This().deinit,
+                .append = vtable.wrap(T, append_fn),
+                .replay = vtable.wrap(T, replay_fn),
+                .deinit = vtable.wrap(T, deinit_fn),
             };
         };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
+        return .{ .ctx = ctx, .vt = &Gen.vt };
     }
 
     pub fn append(self: SessionStore, sid: []const u8, ev: Event) !void {
