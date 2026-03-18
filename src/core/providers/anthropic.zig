@@ -3,6 +3,7 @@ const std = @import("std");
 const providers = @import("api.zig");
 const auth_mod = @import("auth.zig");
 const hc = @import("http_client.zig");
+const models = @import("models.zig");
 
 const api_version = "2023-06-01";
 const default_max_tokens: u32 = 16384;
@@ -197,8 +198,7 @@ fn mapStopReason(reason: []const u8) providers.StopReason {
 // ── Body building ──────────────────────────────────────────────────────
 
 fn supportsThinking(model: []const u8) bool {
-    return std.mem.indexOf(u8, model, "opus") != null or
-        std.mem.indexOf(u8, model, "sonnet-4") != null;
+    return models.supportsThinking(model);
 }
 
 fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {

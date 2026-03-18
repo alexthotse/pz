@@ -571,24 +571,15 @@ pub const Panels = struct {
 };
 
 /// Cost in micents (1/100000 $) from usage + model name.
-/// Prices per million tokens: opus in=$15 out=$75, sonnet in=$3 out=$15, haiku in=$0.80 out=$4.
-/// Cache read: opus=$1.50, sonnet=$0.30, haiku=$0.08. Cache write: opus=$18.75, sonnet=$3.75, haiku=$1.00.
+/// Looks up rates from the central model registry; falls back to sonnet rates for unknown models.
 /// Returns micents to add to cumulative total.
 fn calcCost(model: []const u8, u: core.providers.Usage) u64 {
-    // Detect model tier from name substring.
-    // Rates in micents per million tokens (1 micent = 1/100000 $).
-    const Rates = struct { in: u64, out: u64, cr: u64, cw: u64 };
-    const opus: Rates = .{ .in = 1500, .out = 7500, .cr = 150, .cw = 1875 };
-    const haiku: Rates = .{ .in = 80, .out = 400, .cr = 8, .cw = 100 };
-    const sonnet: Rates = .{ .in = 300, .out = 1500, .cr = 30, .cw = 375 };
-    const rates = if (std.mem.indexOf(u8, model, "opus") != null)
-        opus
-    else if (std.mem.indexOf(u8, model, "haiku") != null)
-        haiku
-    else
-        sonnet;
+    const models = @import("../../core/providers/models.zig");
+    // Sonnet rates as fallback for unknown models.
+    const fallback: models.CostRates = .{ .in = 300, .out = 1500, .cr = 30, .cw = 375 };
+    const rates = models.costRates(model) orelse fallback;
 
-    // rates in cents/MTok. micents = tokens * cents / MTok * (100000/100) = tokens * rate / 1000
+    // micents = tokens * rate_per_MTok / 1000
     // Use saturating math to prevent overflow on extreme token counts
     return (u.in_tok *| rates.in +| u.out_tok *| rates.out +| u.cache_read *| rates.cr +| u.cache_write *| rates.cw) / 1000;
 }
