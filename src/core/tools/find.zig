@@ -12,6 +12,7 @@ pub const Err = error{
     InvalidArgs,
     NotFound,
     Denied,
+    TooLarge,
     Io,
     OutOfMemory,
 };

@@ -5,13 +5,10 @@ const tools = @import("../tools.zig");
 // ── Saturating arithmetic ──────────────────────────────────────────
 
 pub fn satAdd(comptime T: type, a: T, b: anytype) T {
-    const B = @TypeOf(b);
-    const wide: T = if (B == T)
+    const wide: T = if (@TypeOf(b) == T)
         b
-    else if (@typeInfo(B) == .int)
-        (if (b > std.math.maxInt(T)) return std.math.maxInt(T) else @intCast(b))
     else
-        @compileError("satAdd: unsupported b type");
+        std.math.cast(T, b) orelse return std.math.maxInt(T);
     const sum, const ov = @addWithOverflow(a, wide);
     if (ov == 0) return sum;
     return std.math.maxInt(T);

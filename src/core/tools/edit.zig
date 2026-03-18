@@ -49,7 +49,7 @@ pub const Handler = struct {
         defer src.close();
         const full = src.readToEndAlloc(self.alloc, self.max_bytes) catch |read_err| switch (read_err) {
             error.FileTooBig => return error.TooLarge,
-            else => return mapReadErr(read_err),
+            else => return shared.mapFsErr(read_err),
         };
         defer self.alloc.free(full);
 

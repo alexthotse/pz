@@ -2,6 +2,7 @@
 const std = @import("std");
 const core_skill = @import("../skill.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{

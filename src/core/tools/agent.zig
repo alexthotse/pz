@@ -2,6 +2,7 @@
 const std = @import("std");
 const rpc = @import("../agent.zig");
 const tools = @import("../tools.zig");
+const shared = @import("shared.zig");
 const noop = @import("../../test/noop_sink.zig");
 
 pub const Err = error{
