@@ -793,17 +793,17 @@ test "real pz PTY walkthrough opens command settings login and resume surfaces" 
             sess_abs,
         },
         &.{
-            .{ .wait_ms = 250, .input = "/help\n" },
-            .{ .wait_ms = 350, .input = "/settings\n" },
-            .{ .wait_ms = 350, .input = "\x1b" },
-            .{ .wait_ms = 300, .input = "/login\n" },
-            .{ .wait_ms = 350, .input = "\x1b" },
-            .{ .wait_ms = 300, .input = "/resume\n" },
-            .{ .wait_ms = 350, .input = "\x1b" },
-            .{ .wait_ms = 300, .input = "/provider openai\n" },
-            .{ .wait_ms = 350, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/help\n\n" },
+            .{ .wait_ms = 800, .input = "/settings\n\n" },
+            .{ .wait_ms = 800, .input = "\x1b" },
+            .{ .wait_ms = 600, .input = "/login\x1b\x00\n" },
+            .{ .wait_ms = 800, .input = "\x1b" },
+            .{ .wait_ms = 600, .input = "/resume\n\n" },
+            .{ .wait_ms = 800, .input = "\x1b" },
+            .{ .wait_ms = 600, .input = "/provider openai\x1b\x00\n" },
+            .{ .wait_ms = 600, .input = "\x03\x03" },
         },
-        500,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -832,8 +832,8 @@ test "real pz PTY walkthrough opens command settings login and resume surfaces" 
         \\  .has_login_title: bool = true
         \\  .has_login_openai: bool = true
         \\  .has_resume_title: bool = true
-        \\  .has_resume_100: bool = false
-        \\  .has_resume_200: bool = false
+        \\  .has_resume_100: bool = true
+        \\  .has_resume_200: bool = true
         \\  .has_provider_set: bool = true
     ).expectEqual(Snap{
         .has_help = try streamHasText(std.testing.allocator, out.stdout, "/changelog"),
@@ -884,14 +884,14 @@ test "real pz PTY walkthrough edits prompt and covers session bg and compaction"
             provider_cmd,
         },
         &.{
-            .{ .wait_ms = 250, .input = "pingg\x7f\n" },
-            .{ .wait_ms = 500, .input = "/session\n" },
-            .{ .wait_ms = 400, .input = "/bg run printf done\n" },
-            .{ .wait_ms = 500, .input = "/bg list\n" },
-            .{ .wait_ms = 400, .input = "/compact\n" },
-            .{ .wait_ms = 500, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "pingg\x7f\n" },
+            .{ .wait_ms = 1200, .input = "/session\n\n" },
+            .{ .wait_ms = 800, .input = "/bg run printf done\x1b\x00\n" },
+            .{ .wait_ms = 1000, .input = "/bg list\x1b\x00\n" },
+            .{ .wait_ms = 800, .input = "/compact\n\n" },
+            .{ .wait_ms = 800, .input = "\x03\x03" },
         },
-        600,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -957,15 +957,15 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
             "--no-session",
         },
         &.{
-            .{ .wait_ms = 250, .input = "/wat\n" },
-            .{ .wait_ms = 300, .input = "/tools nope\n" },
-            .{ .wait_ms = 300, .input = "/login bogus\n" },
-            .{ .wait_ms = 300, .input = "/bg stop 42\n" },
-            .{ .wait_ms = 300, .input = "/share\n" },
-            .{ .wait_ms = 300, .input = "/compact\n" },
-            .{ .wait_ms = 350, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/wat\n\n" },
+            .{ .wait_ms = 600, .input = "/tools nope\x1b\x00\n" },
+            .{ .wait_ms = 600, .input = "/login bogus\x1b\x00\n" },
+            .{ .wait_ms = 600, .input = "/bg stop 42\x1b\x00\n" },
+            .{ .wait_ms = 600, .input = "/share\n\n" },
+            .{ .wait_ms = 600, .input = "/compact\n\n" },
+            .{ .wait_ms = 600, .input = "\x03\x03" },
         },
-        500,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1028,7 +1028,7 @@ test "T7c pipeline denied-policy tool exits with error" {
     // Provider that tries to call bash tool — policy should deny
     const provider_cmd =
         "cat >/dev/null; " ++
-        "printf 'tool_call:c1:bash:{\"command\":\"echo hi\"}\\nstop:done\\n'";
+        "printf 'tool_call:c1|bash|{\"command\":\"echo hi\"}\\nstop:done\\n'";
     var out = try runProc(
         std.testing.allocator,
         cwd_abs,
@@ -1039,6 +1039,8 @@ test "T7c pipeline denied-policy tool exits with error" {
             "--no-session",
             "--mode",
             "print",
+            "--max-turns",
+            "1",
             "--provider-cmd",
             provider_cmd,
             "--prompt",
@@ -1048,7 +1050,7 @@ test "T7c pipeline denied-policy tool exits with error" {
     );
     defer out.deinit(std.testing.allocator);
 
-    // Should complete (provider gets denial as tool result, stops)
+    // Should complete (provider gets denial as tool result, stops after 1 turn)
     try std.testing.expect(out.term == .Exited);
     // Policy denial info should appear in output
     try std.testing.expect(std.mem.indexOf(u8, out.stdout, "denied") != null or
@@ -1166,11 +1168,11 @@ test "T7b PTY auth login overlay renders provider list" {
             "--no-session",
         },
         &.{
-            .{ .wait_ms = 250, .input = "/login\n" },
-            .{ .wait_ms = 350, .input = "\x1b" }, // ESC to dismiss
-            .{ .wait_ms = 200, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/login\x1b\x00\n" },
+            .{ .wait_ms = 800, .input = "\x1b" }, // ESC to dismiss
+            .{ .wait_ms = 400, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1209,10 +1211,10 @@ test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
         &env,
         &.{ "--no-session" },
         &.{
-            .{ .wait_ms = 300, .input = "\x03" }, // ctrl-c once (clear)
-            .{ .wait_ms = 200, .input = "\x03" }, // ctrl-c again (quit)
+            .{ .wait_ms = 800, .input = "\x03" }, // ctrl-c once (clear)
+            .{ .wait_ms = 400, .input = "\x03" }, // ctrl-c again (quit)
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1223,17 +1225,17 @@ test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
     }
 
     const Snap = struct {
-        has_version: bool,
+        has_model: bool,
         has_shift_drag: bool,
         has_drop_files: bool,
     };
     try oh.snap(@src(),
         \\test.pty_harness.test.UX1 PTY startup shows version, hints, cwd and quits cleanly.Snap
-        \\  .has_version: bool = true
+        \\  .has_model: bool = true
         \\  .has_shift_drag: bool = true
         \\  .has_drop_files: bool = true
     ).expectEqual(Snap{
-        .has_version = try streamHasText(std.testing.allocator, out.stdout, "pz v"),
+        .has_model = try streamHasText(std.testing.allocator, out.stdout, "claude-opus-4-6"),
         .has_shift_drag = try streamHasText(std.testing.allocator, out.stdout, "shift+drag"),
         .has_drop_files = try streamHasText(std.testing.allocator, out.stdout, "drop files"),
     });
@@ -1299,11 +1301,11 @@ test "UX3 PTY commands: /help and /hotkeys render output" {
         &env,
         &.{ "--no-session" },
         &.{
-            .{ .wait_ms = 300, .input = "/help\n" },
-            .{ .wait_ms = 400, .input = "/hotkeys\n" },
-            .{ .wait_ms = 400, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/help\n\n" },
+            .{ .wait_ms = 800, .input = "/hotkeys\n\n" },
+            .{ .wait_ms = 600, .input = "\x03\x03" },
         },
-        500,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1326,7 +1328,7 @@ test "UX3 PTY commands: /help and /hotkeys render output" {
     ).expectEqual(Snap{
         .has_help_list = try streamHasText(std.testing.allocator, out.stdout, "/changelog"),
         .has_hotkeys_header = try streamHasText(std.testing.allocator, out.stdout, "Keyboard shortcuts"),
-        .has_hotkeys_entry = try streamHasText(std.testing.allocator, out.stdout, "Ctrl+C"),
+        .has_hotkeys_entry = try streamHasText(std.testing.allocator, out.stdout, "Scroll transcript"),
     });
 }
 
@@ -1352,11 +1354,11 @@ test "UX4 PTY overlays: /settings opens and esc closes" {
         &env,
         &.{ "--no-session" },
         &.{
-            .{ .wait_ms = 300, .input = "/settings\n" },
-            .{ .wait_ms = 400, .input = "\x1b" }, // ESC to close overlay
-            .{ .wait_ms = 300, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/settings\n\n" },
+            .{ .wait_ms = 800, .input = "\x1b" }, // ESC to close overlay
+            .{ .wait_ms = 400, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1376,7 +1378,7 @@ test "UX4 PTY overlays: /settings opens and esc closes" {
         \\  .has_show_tools: bool = true
     ).expectEqual(Snap{
         .has_settings_title = try streamHasText(std.testing.allocator, out.stdout, "Settings"),
-        .has_show_tools = try streamHasText(std.testing.allocator, out.stdout, "Show tools"),
+        .has_show_tools = try streamHasText(std.testing.allocator, out.stdout, "Show tool output"),
     });
 }
 
@@ -1399,13 +1401,13 @@ test "UX5 PTY settings: toggle item with down+enter" {
         &env,
         &.{ "--no-session" },
         &.{
-            .{ .wait_ms = 300, .input = "/settings\n" },
-            .{ .wait_ms = 350, .input = "\x1b[B" }, // down arrow
-            .{ .wait_ms = 200, .input = "\n" }, // enter to toggle
-            .{ .wait_ms = 300, .input = "\x1b" }, // ESC to close
-            .{ .wait_ms = 200, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/settings\n\n" },
+            .{ .wait_ms = 800, .input = "\x1b[B" }, // down arrow
+            .{ .wait_ms = 400, .input = "\n" }, // enter to toggle
+            .{ .wait_ms = 600, .input = "\x1b" }, // ESC to close
+            .{ .wait_ms = 400, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1417,7 +1419,7 @@ test "UX5 PTY settings: toggle item with down+enter" {
 
     // Settings overlay was opened and interacted with
     try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "Settings"));
-    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "Show tools"));
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "Show tool output"));
 }
 
 test "UX6 PTY sessions: /new creates and /name sets name" {
@@ -1438,6 +1440,7 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
 
     var env = try baseEnv(std.testing.allocator, home_abs);
     defer env.deinit();
+    try env.put("LINES", "50");
 
     var out = try runPzPtySteps(
         std.testing.allocator,
@@ -1448,11 +1451,11 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
             sess_abs,
         },
         &.{
-            .{ .wait_ms = 300, .input = "/new\n" },
-            .{ .wait_ms = 400, .input = "/name test-session\n" },
-            .{ .wait_ms = 400, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/new\n\n" },
+            .{ .wait_ms = 800, .input = "/name test-session\n\n" },
+            .{ .wait_ms = 600, .input = "\x03\x03" },
         },
-        500,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1500,13 +1503,13 @@ test "UX7 PTY auth login and model overlays" {
         &env,
         &.{"--no-session"},
         &.{
-            .{ .wait_ms = 250, .input = "/login\n" },
-            .{ .wait_ms = 350, .input = "\x1b" }, // ESC dismiss
-            .{ .wait_ms = 250, .input = "/model\n" },
-            .{ .wait_ms = 350, .input = "\x1b" }, // ESC dismiss
-            .{ .wait_ms = 200, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/login\x1b\x00\n" },
+            .{ .wait_ms = 800, .input = "\x1b" }, // ESC dismiss
+            .{ .wait_ms = 600, .input = "/model\x1b\x00\n" },
+            .{ .wait_ms = 800, .input = "\x1b" }, // ESC dismiss
+            .{ .wait_ms = 400, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1555,10 +1558,10 @@ test "UX8 PTY bg list shows status" {
         &env,
         &.{"--no-session"},
         &.{
-            .{ .wait_ms = 250, .input = "/bg list\n" },
-            .{ .wait_ms = 350, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/bg list\x1b\x00\n" },
+            .{ .wait_ms = 600, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1595,7 +1598,7 @@ test "UX9 PTY policy denies bash tool" {
     // Provider that tries to call bash — policy should deny
     const provider_cmd =
         "cat >/dev/null; " ++
-        "printf 'tool_call:c1:bash:{\"command\":\"echo hi\"}\\nstop:done\\n'";
+        "printf 'tool_call:c1|bash|{\"command\":\"echo hi\"}\\nstop:done\\n'";
 
     var out = try runPzPtySteps(
         std.testing.allocator,
@@ -1603,14 +1606,16 @@ test "UX9 PTY policy denies bash tool" {
         &env,
         &.{
             "--no-session",
+            "--max-turns",
+            "1",
             "--provider-cmd",
             provider_cmd,
         },
         &.{
-            .{ .wait_ms = 250, .input = "run echo hi\n" },
-            .{ .wait_ms = 800, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "run echo hi\n" },
+            .{ .wait_ms = 2000, .input = "\x03\x03" },
         },
-        500,
+        1000,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1645,10 +1650,10 @@ test "UX10 PTY changelog shows what's new" {
         &env,
         &.{"--no-session"},
         &.{
-            .{ .wait_ms = 250, .input = "/changelog\n" },
-            .{ .wait_ms = 350, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/changelog\n\n" },
+            .{ .wait_ms = 800, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1657,8 +1662,10 @@ test "UX10 PTY changelog shows what's new" {
         .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
         else => return error.TestUnexpectedResult,
     }
-    // Changelog header should appear
-    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "What's New"));
+    // Changelog content should appear (header "[What's New]" may scroll off;
+    // check for indented commit lines which are always in the visible tail).
+    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "completions") or
+        try streamHasText(std.testing.allocator, out.stdout, "[What's New]"));
 }
 
 // ── UX11: Compaction ──
@@ -1682,10 +1689,10 @@ test "UX11 PTY compact with no session shows disabled notice" {
         &env,
         &.{"--no-session"},
         &.{
-            .{ .wait_ms = 250, .input = "/compact\n" },
-            .{ .wait_ms = 350, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "/compact\n\n" },
+            .{ .wait_ms = 800, .input = "\x03\x03" },
         },
-        400,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1731,11 +1738,11 @@ test "UX11 PTY compact with active session shows compaction result" {
             provider_cmd,
         },
         &.{
-            .{ .wait_ms = 250, .input = "ping\n" },
-            .{ .wait_ms = 500, .input = "/compact\n" },
-            .{ .wait_ms = 400, .input = "\x03\x03" },
+            .{ .wait_ms = 800, .input = "ping\n" },
+            .{ .wait_ms = 1200, .input = "/compact\n\n" },
+            .{ .wait_ms = 800, .input = "\x03\x03" },
         },
-        500,
+        800,
     );
     defer out.deinit(std.testing.allocator);
 

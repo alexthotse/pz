@@ -118,7 +118,7 @@ pub const VScreen = struct {
 
     fn stashPending(self: *VScreen, tail: []const u8) void {
         const n = @min(tail.len, self.pending.len);
-        @memcpy(self.pending[0..n], tail[0..n]);
+        std.mem.copyForwards(u8, self.pending[0..n], tail[0..n]);
         self.pending_len = @intCast(n);
     }
 
