@@ -338,7 +338,7 @@ test "export session to markdown" {
         \\## User
         \\
         \\```
-        \\[secret:427dbdce96c1386f]
+        \\[secret:<^[0-9a-f]{16}$>]
         \\```
         \\
         \\## Assistant
@@ -359,7 +359,7 @@ test "export session to markdown" {
         \\### Tool: bash
         \\
         \\```
-        \\[path:edaee5b4fbed2103]
+        \\[path:<^[0-9a-f]{16}$>]
         \\```
         \\
         \\#### Result
@@ -434,7 +434,7 @@ test "export markdown redacts secrets and neutralizes markdown" {
         \\## User
         \\
         \\```
-        \\[secret:f5576993961d7f31]
+        \\[secret:<^[0-9a-f]{16}$>]
         \\```
         \\
         \\## Assistant
@@ -447,13 +447,13 @@ test "export markdown redacts secrets and neutralizes markdown" {
         \\### Tool: bash
         \\
         \\```
-        \\[path:edaee5b4fbed2103]
+        \\[path:<^[0-9a-f]{16}$>]
         \\```
         \\
         \\#### Error
         \\
         \\```
-        \\[secret:7ac2c068fc811ef1]
+        \\[secret:<^[0-9a-f]{16}$>]
         \\```"
     ).expectEqual(snap);
 }
@@ -626,7 +626,7 @@ test "export audit emits failure entry on write failure" {
     try oh.snap(@src(),
         \\[]u8
         \\  "{"v":1,"ts_ms":456,"sid":"ex3","seq":1,"kind":"ctrl","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"export start","vis":"pub"},"data":{"op":"export","target":{"text":"ex3","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}
-        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"ctrl","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"[mask:e0d43158cc95b24d]","vis":"mask"},"data":{"op":"export","target":{"text":"ex3","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
+        \\{"v":1,"ts_ms":456,"sid":"ex3","seq":2,"kind":"ctrl","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"file","name":{"text":"[mask:PATH]","vis":"mask"},"op":"write"},"msg":{"text":"[mask:<^[0-9a-f]{16}$>]","vis":"mask"},"data":{"op":"export","target":{"text":"ex3","vis":"pub"},"detail":{"text":"[mask:PATH]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(scrubbed);
 }
 

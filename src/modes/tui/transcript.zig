@@ -2285,6 +2285,34 @@ test "bash tool call row truncates with ellipsis and stays single-line" {
     try std.testing.expect(std.mem.trim(u8, r1, " ").len == 0);
 }
 
+/// Replace 16-char hex redaction hashes with "HEX" for stable snapshots.
+fn scrubHex(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i + 16 <= text.len and isHex16(text[i .. i + 16])) {
+            // Check context: preceded by ':' (part of [tag:hex])
+            if (i > 0 and text[i - 1] == ':') {
+                try out.appendSlice(alloc, "HEX");
+                i += 16;
+                continue;
+            }
+        }
+        try out.append(alloc, text[i]);
+        i += 1;
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn isHex16(s: []const u8) bool {
+    if (s.len != 16) return false;
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
 test "bash tool call row redacts sensitive command fragments" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
@@ -2303,10 +2331,12 @@ test "bash tool call row redacts sensitive command fragments" {
 
     var raw: [64]u8 = undefined;
     const r0 = try rowAscii(&frm, 0, raw[0..]);
+    const scrubbed = try scrubHex(std.testing.allocator, r0);
+    defer std.testing.allocator.free(scrubbed);
     try oh.snap(@src(),
-        \\[]const u8
-        \\  "  $ curl '[secret:f46ae11f145e0f15]' [path:7bb914945c8f6207]    "
-    ).expectEqual(r0);
+        \\[]u8
+        \\  "  $ curl '[secret:HEX]' [path:HEX]    "
+    ).expectEqual(scrubbed);
 }
 
 test "tool call recolors to error with failed result" {

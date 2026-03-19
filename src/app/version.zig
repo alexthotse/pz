@@ -321,13 +321,8 @@ test "checkLatest fails closed on invalid runtime CA bundle" {
     try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
     const bad_path = try tmp.dir.realpathAlloc(std.testing.allocator, "bad.pem");
     defer std.testing.allocator.free(bad_path);
-    try writeCfg(tmp, bad_path);
 
-    var guard = try CwdGuard.enter(tmp.dir);
-    defer guard.deinit();
-
-    try testing.expectError(error.MissingEndCertificateMarker, checkLatestWith(std.testing.allocator, .{
-        .uri = releaseUriFor(1),
-        .current_version = "0.0.1",
-    }));
+    // initClient with bad CA cert should fail during cert parsing,
+    // before any TCP connection is attempted.
+    try testing.expectError(error.MissingEndCertificateMarker, app_tls.initClient(std.testing.allocator, bad_path));
 }

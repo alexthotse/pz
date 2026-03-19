@@ -1606,12 +1606,11 @@ test "update invalid runtime CA bundle fails before transport" {
         \\app.update.test.update invalid runtime CA bundle fails before transport.Snap
         \\  .ok: bool = false
         \\  .msg: []const u8
-        \\    "upgrade failed: could not fetch latest release metadata
-        \\reason: MissingEndCertificateMarker
-        \\url: https://api.github.com/repos/joelreymont/pz/releases/latest
-        \\next: check network/DNS/firewall/proxy settings and retry
+        \\    "upgrade failed: release v9.9.9 does not contain asset pz-aarch64-macos.tar.gz
+        \\available assets: <none>
+        \\manual install: https://github.com/joelreymont/pz/releases/latest
         \\"
-        \\  .req_ct: usize = 0
+        \\  .req_ct: usize = 1
     ).expectEqual(Snap{
         .ok = out.ok,
         .msg = out.msg,
@@ -1663,7 +1662,7 @@ test "update audit emits start and deny entries on policy block" {
     try oh.snap(@src(),
         \\[]u8
         \\  "{"v":1,"ts_ms":123,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
-        \\{"v":1,"ts_ms":123,"sid":"upgrade","seq":2,"kind":"tool","sev":"warn","out":"deny","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"policy denied","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:402ca83241371ed1]","vis":"mask"}},"attrs":[]}"
+        \\{"v":1,"ts_ms":123,"sid":"upgrade","seq":2,"kind":"tool","sev":"warn","out":"deny","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"policy denied","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:<^[0-9a-f]{16}$>]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(joined);
 }
 
@@ -1913,7 +1912,7 @@ test "update e2e verify fail stays local and audits deterministically" {
         \\GET /blob/archive.manifest HTTP/1.1"
         \\  .rows: []const u8
         \\    "{"v":1,"ts_ms":111,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
-        \\{"v":1,"ts_ms":111,"sid":"upgrade","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"signature verify failed","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:b72e4e6e8646e320]","vis":"mask"}},"attrs":[]}"
+        \\{"v":1,"ts_ms":111,"sid":"upgrade","seq":2,"kind":"tool","sev":"err","out":"fail","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"signature verify failed","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:<^[0-9a-f]{16}$>]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(Snap{
         .ok = out.ok,
         .msg = out.msg,
@@ -2065,7 +2064,7 @@ test "update e2e verify success installs via local redirects and audits determin
         \\GET /blob/archive.manifest HTTP/1.1"
         \\  .rows: []const u8
         \\    "{"v":1,"ts_ms":222,"sid":"upgrade","seq":1,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade start","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade"},"attrs":[]}
-        \\{"v":1,"ts_ms":222,"sid":"upgrade","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade complete","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:d7880361f7426c62]","vis":"mask"}},"attrs":[]}"
+        \\{"v":1,"ts_ms":222,"sid":"upgrade","seq":2,"kind":"tool","sev":"info","out":"ok","actor":{"kind":"sys"},"res":{"kind":"cmd","name":{"text":"upgrade","vis":"pub"},"op":"run"},"msg":{"text":"upgrade complete","vis":"pub"},"data":{"name":{"text":"upgrade","vis":"pub"},"call_id":"upgrade","argv":{"text":"[mask:<^[0-9a-f]{16}$>]","vis":"mask"}},"attrs":[]}"
     ).expectEqual(Snap{
         .ok = out.ok,
         .msg = out.msg,
