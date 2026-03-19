@@ -1966,7 +1966,7 @@ fn runPtyInteractive(
         return error.OpenPtyFailed;
 
     // Set window size on master.
-    var ws: c.winsize = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+    var ws: c.winsize = .{ .ws_row = 40, .ws_col = 120, .ws_xpixel = 0, .ws_ypixel = 0 };
     _ = c.ioctl(master, c.TIOCSWINSZ, &ws);
 
     const pid = c.fork();
@@ -2000,7 +2000,7 @@ fn runPtyInteractive(
     _ = c.fcntl(master, c.F_SETFL, flags | c.O_NONBLOCK);
 
     const master_fd: std.posix.fd_t = master;
-    var screen = try PtyScreen.init(alloc, 80, 24);
+    var screen = try PtyScreen.init(alloc, 120, 40);
     defer screen.deinit();
 
     var snaps = std.ArrayList(InteractiveOut.Snapshot).empty;
@@ -2042,7 +2042,11 @@ fn runPtyInteractive(
                     };
                     if (n == 0) break;
                     try screen.feed(buf[0..n]);
+                    // Check both vscreen grid (visible viewport) and raw accumulated
+                    // output. Text that scrolled off the top of the viewport is only
+                    // findable in the raw buffer.
                     if (try screen.hasText(wf.text)) break;
+                    if (std.mem.indexOf(u8, screen.raw.items, wf.text) != null) break;
                 }
             },
             .snapshot => |label| {
