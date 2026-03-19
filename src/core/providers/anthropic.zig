@@ -39,9 +39,11 @@ pub const Cfg = struct {
         switch (auth.auth) {
             .oauth => |oauth| {
                 const bearer = try std.fmt.allocPrint(ar, "Bearer {s}", .{oauth.access});
-                try hdrs.append(ar, .{ .name = "anthropic-beta", .value = "oauth-2025-04-20" });
+                try hdrs.append(ar, .{ .name = "anthropic-beta", .value = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14" });
                 try hdrs.append(ar, .{ .name = "anthropic-dangerous-direct-browser-access", .value = "true" });
                 try hdrs.append(ar, .{ .name = "authorization", .value = bearer });
+                try hdrs.append(ar, .{ .name = "user-agent", .value = "claude-cli/2.1.79 (external, cli)" });
+                try hdrs.append(ar, .{ .name = "x-app", .value = "cli" });
             },
             .api_key => |key| {
                 try hdrs.append(ar, .{ .name = "x-api-key", .value = key });
@@ -50,8 +52,8 @@ pub const Cfg = struct {
         return hdrs;
     }
 
-    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request) anyerror![]u8 {
-        return buildBodyImpl(alloc, req);
+    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, is_oauth: bool) anyerror![]u8 {
+        return buildBodyImpl(alloc, req, is_oauth);
     }
 
     pub fn parseSseData(self: *Stream, data: []const u8) anyerror!?providers.Event {
@@ -201,7 +203,11 @@ fn supportsThinking(model: []const u8) bool {
     return models.supportsThinking(model);
 }
 
-fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
+fn testBuildBody(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
+    return buildBodyImpl(alloc, req, false);
+}
+
+fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request, is_oauth: bool) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -270,8 +276,9 @@ fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
         },
     }
 
-    // Extract system messages as top-level "system" field
-    try writeSystem(ar, &js, req.msgs);
+    // Extract system messages as top-level "system" field.
+    // OAuth tokens MUST include Claude Code identity system prompt.
+    try writeSystem(ar, &js, req.msgs, is_oauth);
 
     try js.objectField("messages");
     try writeMessages(ar, &js, req.msgs);
@@ -306,7 +313,9 @@ fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request) ![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg) !void {
+const claude_code_identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const providers.Msg, is_oauth: bool) !void {
     // Count total system text parts for cache_control on last one
     var total: usize = 0;
     for (msgs) |msg| {
@@ -315,11 +324,31 @@ fn writeSystem(alloc: std.mem.Allocator, js: *std.json.Stringify, msgs: []const 
             if (part == .text) total += 1;
         }
     }
+    // OAuth tokens require Claude Code identity system prompt
+    if (is_oauth) total += 1;
     if (total == 0) return;
 
     try js.objectField("system");
     try js.beginArray();
     var idx: usize = 0;
+
+    // OAuth: prepend Claude Code identity (required by API)
+    if (is_oauth) {
+        try js.beginObject();
+        try js.objectField("type");
+        try js.write("text");
+        try js.objectField("text");
+        try js.write(claude_code_identity);
+        idx += 1;
+        if (idx == total) {
+            try js.objectField("cache_control");
+            try js.beginObject();
+            try js.objectField("type");
+            try js.write("ephemeral");
+            try js.endObject();
+        }
+        try js.endObject();
+    }
     for (msgs) |msg| {
         if (msg.role != .system) continue;
         for (msg.parts) |part| {
@@ -759,7 +788,7 @@ test "buildBody minimal request" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -776,7 +805,7 @@ test "buildBody includes temp top_p and stop sequences" {
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
     const stops = [_][]const u8{ "END", "STOP" };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{
@@ -798,7 +827,7 @@ test "buildBody with system message and cache_control" {
         .{ .role = .system, .parts = &.{.{ .text = "You are helpful." }} },
         .{ .role = .user, .parts = &.{.{ .text = "hi" }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -817,7 +846,7 @@ test "buildBody with tools" {
     const tools = [_]providers.Tool{
         .{ .name = "bash", .desc = "Run commands", .schema = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}}}" },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .tools = &tools,
@@ -834,7 +863,7 @@ test "buildBody thinking adaptive" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-opus-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .adaptive },
@@ -850,7 +879,7 @@ test "buildBody thinking budget" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .budget, .thinking_budget = 8192 },
@@ -866,7 +895,7 @@ test "buildBody thinking budget exceeds max_tokens" {
     const msgs = [_]providers.Msg{
         .{ .role = .user, .parts = &.{.{ .text = "think" }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-opus-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .budget, .thinking_budget = 32768 },
@@ -884,7 +913,7 @@ test "buildBody message merging same roles" {
         .{ .role = .user, .parts = &.{.{ .text = "two" }} },
         .{ .role = .assistant, .parts = &.{.{ .text = "reply" }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -909,7 +938,7 @@ test "buildBody tool_call and tool_result" {
             .output = "file.txt",
         } }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -935,7 +964,7 @@ test "buildBody tool_result error flag" {
             .is_err = true,
         } }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },
@@ -960,7 +989,7 @@ test "buildBody replaces invalid utf8 tool output lossy" {
             .output = utf8_case.bad_tool_out[0..],
         } }} },
     };
-    const body = try buildBodyImpl(testing.allocator, .{
+    const body = try testBuildBody(testing.allocator, .{
         .model = "claude-sonnet-4-20250514",
         .msgs = &msgs,
         .opts = .{ .thinking = .off },

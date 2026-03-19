@@ -351,6 +351,9 @@ pub const Opts = struct {
     tool_auth: ?ToolAuth = null,
     approval: ?ApprovalCtx = null,
     approver: ?Approver = null,
+    /// Skip <untrusted-input> wrapping on user prompts and prompt_guard
+    /// system injection. Required for OAuth API compatibility.
+    skip_prompt_guard: bool = false,
 };
 
 pub const ApprovalCtx = struct {
@@ -616,7 +619,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
             _ = turn_arena.reset(.retain_capacity);
             const turn_alloc = turn_arena.allocator();
 
-            const req_msgs = buildReqMsgs(turn_alloc, hist.items.items, opts.system_prompt) catch |msg_err| {
+            const req_msgs = buildReqMsgs(turn_alloc, hist.items.items, opts.system_prompt, opts.skip_prompt_guard) catch |msg_err| {
                 return failWithReport(opts, .provider_start, msg_err);
             };
 
@@ -826,9 +829,13 @@ fn buildReqMsgs(
     alloc: std.mem.Allocator,
     hist: []const HistEnt,
     system_prompt: ?[]const u8,
+    skip_guard: bool,
 ) ![]providers.Msg {
-    const sys_msg_ct: usize = 1;
-    const sys_part_ct: usize = 1 + (if (system_prompt != null) @as(usize, 1) else 0);
+    const has_guard = !skip_guard;
+    const guard_ct: usize = if (has_guard) 1 else 0;
+    const sp_ct: usize = if (system_prompt != null) 1 else 0;
+    const sys_part_ct: usize = guard_ct + sp_ct;
+    const sys_msg_ct: usize = if (sys_part_ct > 0) 1 else 0;
     var start: usize = 0;
     for (hist, 0..) |ent, idx| {
         if (ent == .clear) start = idx + 1;
@@ -842,14 +849,21 @@ fn buildReqMsgs(
     const msgs = try alloc.alloc(providers.Msg, live_len + sys_msg_ct);
     const parts = try alloc.alloc(providers.Part, live_len + sys_part_ct);
 
-    parts[0] = .{ .text = prov_api.prompt_guard };
-    if (system_prompt) |sp| {
-        parts[1] = .{ .text = sp };
+    var pi: usize = 0;
+    if (has_guard) {
+        parts[pi] = .{ .text = prov_api.prompt_guard };
+        pi += 1;
     }
-    msgs[0] = .{
-        .role = .system,
-        .parts = parts[0..sys_part_ct],
-    };
+    if (system_prompt) |sp| {
+        parts[pi] = .{ .text = sp };
+        pi += 1;
+    }
+    if (sys_msg_ct > 0) {
+        msgs[0] = .{
+            .role = .system,
+            .parts = parts[0..sys_part_ct],
+        };
+    }
 
     var msg_idx: usize = sys_msg_ct;
     var part_idx: usize = sys_part_ct;
@@ -858,7 +872,7 @@ fn buildReqMsgs(
             .item => |item| item,
             .clear => continue,
         };
-        parts[part_idx] = try cloneReqPart(alloc, item.role, item.part);
+        parts[part_idx] = try cloneReqPart(alloc, item.role, item.part, skip_guard);
         msgs[msg_idx] = .{
             .role = item.role,
             .parts = parts[part_idx .. part_idx + 1],
@@ -874,9 +888,10 @@ fn cloneReqPart(
     alloc: std.mem.Allocator,
     role: providers.Role,
     part: providers.Part,
+    skip_guard: bool,
 ) !providers.Part {
     return switch (part) {
-        .text => |text| .{ .text = try cloneReqText(alloc, role, text) },
+        .text => |text| .{ .text = try cloneReqText(alloc, role, text, skip_guard) },
         .tool_call => |tc| .{
             .tool_call = .{
                 .id = try alloc.dupe(u8, tc.id),
@@ -898,7 +913,9 @@ fn cloneReqText(
     alloc: std.mem.Allocator,
     role: providers.Role,
     text: []const u8,
+    skip_guard: bool,
 ) ![]const u8 {
+    if (skip_guard) return try alloc.dupe(u8, text);
     return switch (role) {
         .user => try prov_api.wrapUntrusted(alloc, "user-prompt", text),
         else => try alloc.dupe(u8, text),
@@ -2888,7 +2905,7 @@ test "buildReqMsgs HistClear resets request history to the last segment" {
         .is_err = false,
     });
 
-    const msgs = try buildReqMsgs(std.testing.allocator, hist.items.items, "sys");
+    const msgs = try buildReqMsgs(std.testing.allocator, hist.items.items, "sys", false);
     defer freeReqMsgsOwned(std.testing.allocator, msgs);
 
     const snap = try fmtReqMsgs(std.testing.allocator, msgs);
@@ -2921,7 +2938,7 @@ test "buildReqMsgs HistClear with trailing clear drops all live history" {
     try hist.pushTextDup(.assistant, "old-assistant");
     try hist.clear();
 
-    const msgs = try buildReqMsgs(std.testing.allocator, hist.items.items, "sys");
+    const msgs = try buildReqMsgs(std.testing.allocator, hist.items.items, "sys", false);
     defer freeReqMsgsOwned(std.testing.allocator, msgs);
 
     const snap = try fmtReqMsgs(std.testing.allocator, msgs);

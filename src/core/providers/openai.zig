@@ -45,7 +45,7 @@ pub const Cfg = struct {
         return hdrs;
     }
 
-    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request) anyerror![]u8 {
+    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, _: bool) anyerror![]u8 {
         return buildBodyImpl(alloc, req);
     }
 

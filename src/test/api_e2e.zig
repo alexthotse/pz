@@ -72,7 +72,7 @@ test "real API: simple prompt returns text" {
 
     const stats = try drainStream(&stream);
     // Skip if auth expired (no text, has error = auth failure)
-    if (stats.text == 0 and stats.has_err) return error.SkipZigTest;
+    // API key auth is guaranteed by loadAuthOrSkip — errors are real failures.
     try std.testing.expect(stats.text > 0);
     try std.testing.expect(!stats.has_err);
 }
@@ -108,7 +108,7 @@ test "real API: streaming delivers events" {
     defer stream.deinit();
 
     const stats = try drainStream(&stream);
-    if (stats.text == 0 and stats.has_err) return error.SkipZigTest;
+    // API key auth is guaranteed by loadAuthOrSkip — errors are real failures.
     try std.testing.expect(stats.total > 1);
     try std.testing.expect(stats.text > 0);
 }

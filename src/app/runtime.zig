@@ -2051,6 +2051,7 @@ fn execWithIoTuiHooks(
                 writer,
                 sys_prompt,
                 audit_hooks,
+                has_native_rt and native_rt.isSub(),
             ),
             .json => try runJson(
                 alloc,
@@ -2064,6 +2065,7 @@ fn execWithIoTuiHooks(
                 writer,
                 sys_prompt,
                 hooks,
+                has_native_rt and native_rt.isSub(),
             ),
             .tui => try runTui(
                 alloc,
@@ -2096,6 +2098,7 @@ fn execWithIoTuiHooks(
                 run_cmd.no_session,
                 sys_prompt,
                 hooks,
+                has_native_rt and native_rt.isSub(),
             ),
         }
     }
@@ -2114,6 +2117,7 @@ fn runPrint(
     out: std.Io.AnyWriter,
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
+    is_oauth: bool,
 ) !void {
     const home = run_cmd.home;
     const prompt = run_cmd.prompt orelse return error.EmptyPrompt;
@@ -2167,6 +2171,7 @@ fn runPrint(
             .loc = approval_loc,
             .policy = approval_bind,
         },
+        .skip_prompt_guard = is_oauth, // OAuth: API rejects <untrusted-input> wrapping
     });
 
     try sink_impl.fmt.finish();
@@ -2288,6 +2293,7 @@ fn runJson(
     out: std.Io.AnyWriter,
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
+    is_oauth: bool,
 ) !void {
     const home = run_cmd.home;
     var sink_impl = JsonSink{
@@ -2314,6 +2320,7 @@ fn runJson(
         .approval_bind = approval_bind,
         .approval_loc = approval_loc,
         .audit_hooks = audit_hooks,
+        .skip_prompt_guard = is_oauth,
     };
 
     if (run_cmd.prompt) |prompt| {
@@ -2485,6 +2492,7 @@ fn runTui(
         .approval_bind = approval_bind,
         .approval_loc = approval_loc,
         .approver = prompt_approver,
+        .skip_prompt_guard = is_sub,
     };
     defer tools_rt.ask_hook = null;
     var thinking = run_cmd.thinking;
@@ -2659,6 +2667,7 @@ fn runTui(
             .cmd_cache = &live_cmd_cache,
             .approval_bind = live_approval_bind,
             .approval_loc = live_approval_loc,
+            .skip_prompt_guard = is_sub,
         };
         var reader = tui_input.Reader.initWithNotify2(stdin_fd, bg_mgr.wakeFd(), live_turn.wakeFd());
         var live_ask_ctx = LiveAskCtx{
@@ -3450,6 +3459,7 @@ fn runRpc(
     no_session: bool,
     sys_prompt: ?[]const u8,
     audit_hooks: AuditHooks,
+    is_oauth: bool,
 ) !void {
     const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
@@ -3483,6 +3493,7 @@ fn runRpc(
         .cmd_cache = &cmd_cache,
         .approval_bind = approval_bind,
         .approval_loc = approval_loc,
+        .skip_prompt_guard = is_oauth,
     };
     var bg_mgr = try bg.Manager.initWithOpts(alloc, .{
         .home = home,
@@ -7125,6 +7136,7 @@ const TurnCtx = struct {
     approval_loc: ?core.loop.CmdCache.Loc = null,
     approver: ?core.loop.Approver = null,
     audit_hooks: AuditHooks = .{},
+    skip_prompt_guard: bool = false,
 
     const TurnOpts = struct {
         sid: []const u8,
@@ -7187,6 +7199,7 @@ const TurnCtx = struct {
                 .policy = self.approval_bind,
             } else null,
             .approver = self.approver,
+            .skip_prompt_guard = self.skip_prompt_guard,
         });
     }
 };

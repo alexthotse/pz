@@ -204,6 +204,9 @@ pub fn retryLoop(
         stream.req = try http.request(.POST, uri, .{
             .extra_headers = hdrs.items,
             .keep_alive = false,
+            // SSE streams must not be compressed: we read lines incrementally
+            // and gzip content-encoding destroys the SSE framing.
+            .headers = .{ .accept_encoding = .omit },
         });
 
         stream.req.transfer_encoding = .{ .content_length = body.len };
@@ -467,7 +470,7 @@ pub fn SseClient(comptime Cfg: type) type {
 
             const ar = stream.arena.allocator();
 
-            const body = try Cfg.buildBody(ar, req);
+            const body = try Cfg.buildBody(ar, req, self.auth.auth == .oauth);
             var hdrs = try Cfg.buildAuthHeaders(&self.auth, ar);
 
             const uri = std.Uri{
