@@ -870,10 +870,26 @@ test "real pz PTY walkthrough edits prompt and covers session bg and compaction"
 
     const provider_cmd =
         "req=$(cat); " ++
-        "prompt=$(printf '%s' \"$req\" | rg -o '\"text\":\"[^\"]*\"' | head -n1 | cut -d'\"' -f4); " ++
+        "prompt=$(printf '%s' \"$req\" | rg -o '\"text\":\"[^\"]*\"' | tail -n1 | cut -d'\"' -f4); " ++
         "printf 'text:ack:%s\\nstop:done\\n' \"$prompt\"";
 
-    var out = try runPzPtySteps(
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "pingg\x7f\n" },
+        .{ .wait_for = .{ .text = "ack:ping", .timeout_ms = 15000 } },
+        .{ .inject = "/session\n\n" },
+        .{ .wait_for = .{ .text = "Session", .timeout_ms = 5000 } },
+        .{ .inject = "/bg run printf done\x1b\x00\n" },
+        .{ .wait_for = .{ .text = "bg", .timeout_ms = 5000 } },
+        .{ .inject = "/bg list\x1b\x00\n" },
+        .{ .wait_for = .{ .text = "id", .timeout_ms = 5000 } },
+        .{ .inject = "/compact\n\n" },
+        .{ .wait_for = .{ .text = "compact", .timeout_ms = 5000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(
         std.testing.allocator,
         cwd_abs,
         &env,
@@ -883,15 +899,7 @@ test "real pz PTY walkthrough edits prompt and covers session bg and compaction"
             "--provider-cmd",
             provider_cmd,
         },
-        &.{
-            .{ .wait_ms = 800, .input = "pingg\x7f\n" },
-            .{ .wait_ms = 1200, .input = "/session\n\n" },
-            .{ .wait_ms = 800, .input = "/bg run printf done\x1b\x00\n" },
-            .{ .wait_ms = 1000, .input = "/bg list\x1b\x00\n" },
-            .{ .wait_ms = 800, .input = "/compact\n\n" },
-            .{ .wait_ms = 800, .input = "\x03\x03" },
-        },
-        800,
+        &steps,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -918,12 +926,12 @@ test "real pz PTY walkthrough edits prompt and covers session bg and compaction"
         \\  .has_bg_list: bool = true
         \\  .has_compacted: bool = true
     ).expectEqual(Snap{
-        .has_edited_prompt = try streamHasText(std.testing.allocator, out.stdout, "ack:ping"),
-        .has_no_unedited_prompt = !try streamHasText(std.testing.allocator, out.stdout, "ack:pingg"),
-        .has_session_info = try streamHasText(std.testing.allocator, out.stdout, "Session Info"),
-        .has_bg_started = try streamHasText(std.testing.allocator, out.stdout, "bg started id=1"),
-        .has_bg_list = try streamHasText(std.testing.allocator, out.stdout, "id pid state code log cmd"),
-        .has_compacted = try streamHasText(std.testing.allocator, out.stdout, "compacted in="),
+        .has_edited_prompt = std.mem.indexOf(u8, out.output, "ack:ping") != null,
+        .has_no_unedited_prompt = std.mem.indexOf(u8, out.output, "ack:pingg") == null,
+        .has_session_info = std.mem.indexOf(u8, out.output, "Session Info") != null,
+        .has_bg_started = std.mem.indexOf(u8, out.output, "bg started id=1") != null,
+        .has_bg_list = std.mem.indexOf(u8, out.output, "id pid state code log cmd") != null,
+        .has_compacted = std.mem.indexOf(u8, out.output, "compacted in=") != null,
     });
 }
 
@@ -949,23 +957,32 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
     var env = try baseEnv(std.testing.allocator, home_abs);
     defer env.deinit();
 
-    var out = try runPzPtySteps(
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/wat\n\n" },
+        .{ .wait_for = .{ .text = "unknown command", .timeout_ms = 5000 } },
+        .{ .inject = "/tools nope\x1b\x00\n" },
+        .{ .wait_for = .{ .text = "invalid tools", .timeout_ms = 5000 } },
+        .{ .inject = "/login bogus\x1b\x00\n" },
+        .{ .wait_for = .{ .text = "unknown provider", .timeout_ms = 5000 } },
+        .{ .inject = "/bg stop 42\x1b\x00\n" },
+        .{ .wait_for = .{ .text = "bg not found", .timeout_ms = 5000 } },
+        .{ .inject = "/share\n\n" },
+        .{ .wait_for = .{ .text = "blocked by policy", .timeout_ms = 5000 } },
+        .{ .inject = "/compact\n\n" },
+        .{ .wait_for = .{ .text = "session persistence is disabled", .timeout_ms = 5000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(
         std.testing.allocator,
         cwd_abs,
         &env,
         &.{
             "--no-session",
         },
-        &.{
-            .{ .wait_ms = 800, .input = "/wat\n\n" },
-            .{ .wait_ms = 600, .input = "/tools nope\x1b\x00\n" },
-            .{ .wait_ms = 600, .input = "/login bogus\x1b\x00\n" },
-            .{ .wait_ms = 600, .input = "/bg stop 42\x1b\x00\n" },
-            .{ .wait_ms = 600, .input = "/share\n\n" },
-            .{ .wait_ms = 600, .input = "/compact\n\n" },
-            .{ .wait_ms = 600, .input = "\x03\x03" },
-        },
-        800,
+        &steps,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -992,12 +1009,12 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
         \\  .has_policy_deny: bool = true
         \\  .has_session_disabled: bool = true
     ).expectEqual(Snap{
-        .has_unknown_command = try streamHasText(std.testing.allocator, out.stdout, "unknown command: /wat"),
-        .has_invalid_tools = try streamHasText(std.testing.allocator, out.stdout, "error: invalid tools value; use all, none, or comma list of read,write,bash,edit,grep,find,ls,ask,skill"),
-        .has_unknown_provider = try streamHasText(std.testing.allocator, out.stdout, "unknown provider: bogus"),
-        .has_bg_not_found = try streamHasText(std.testing.allocator, out.stdout, "bg not found id=42"),
-        .has_policy_deny = try streamHasText(std.testing.allocator, out.stdout, "blocked by policy: /share"),
-        .has_session_disabled = try streamHasText(std.testing.allocator, out.stdout, "reason: session persistence is disabled"),
+        .has_unknown_command = std.mem.indexOf(u8, out.output, "unknown command: /wat") != null,
+        .has_invalid_tools = std.mem.indexOf(u8, out.output, "error: invalid tools value; use all, none, or comma list of read,write,bash,edit,grep,find,ls,ask,skill") != null,
+        .has_unknown_provider = std.mem.indexOf(u8, out.output, "unknown provider: bogus") != null,
+        .has_bg_not_found = std.mem.indexOf(u8, out.output, "bg not found id=42") != null,
+        .has_policy_deny = std.mem.indexOf(u8, out.output, "blocked by policy: /share") != null,
+        .has_session_disabled = std.mem.indexOf(u8, out.output, "reason: session persistence is disabled") != null,
     });
 }
 
@@ -1442,7 +1459,17 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
     defer env.deinit();
     try env.put("LINES", "50");
 
-    var out = try runPzPtySteps(
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/new\n\n" },
+        .{ .wait_for = .{ .text = "new session", .timeout_ms = 5000 } },
+        .{ .inject = "/name test-session\n\n" },
+        .{ .wait_for = .{ .text = "session named", .timeout_ms = 5000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(
         std.testing.allocator,
         cwd_abs,
         &env,
@@ -1450,12 +1477,7 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
             "--session-dir",
             sess_abs,
         },
-        &.{
-            .{ .wait_ms = 800, .input = "/new\n\n" },
-            .{ .wait_ms = 800, .input = "/name test-session\n\n" },
-            .{ .wait_ms = 600, .input = "\x03\x03" },
-        },
-        800,
+        &steps,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1474,8 +1496,8 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
         \\  .has_new_session: bool = true
         \\  .has_name_set: bool = true
     ).expectEqual(Snap{
-        .has_new_session = try streamHasText(std.testing.allocator, out.stdout, "new session"),
-        .has_name_set = try streamHasText(std.testing.allocator, out.stdout, "session named: test-session"),
+        .has_new_session = std.mem.indexOf(u8, out.output, "new session") != null,
+        .has_name_set = std.mem.indexOf(u8, out.output, "session named: test-session") != null,
     });
 }
 
@@ -1552,16 +1574,20 @@ test "UX8 PTY bg list shows status" {
     var env = try baseEnv(std.testing.allocator, home_abs);
     defer env.deinit();
 
-    var out = try runPzPtySteps(
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/bg list\x1b\x00\n" },
+        .{ .wait_for = .{ .text = "no background jobs", .timeout_ms = 5000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(
         std.testing.allocator,
         cwd_abs,
         &env,
         &.{"--no-session"},
-        &.{
-            .{ .wait_ms = 800, .input = "/bg list\x1b\x00\n" },
-            .{ .wait_ms = 600, .input = "\x03\x03" },
-        },
-        800,
+        &steps,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1570,8 +1596,8 @@ test "UX8 PTY bg list shows status" {
         .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
         else => return error.TestUnexpectedResult,
     }
-    // Empty bg list should show "no background jobs"
-    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "no background jobs"));
+    // If wait_for succeeded, the text was found. Verify in raw output too.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "no background jobs") != null);
 }
 
 // ── UX9: Security policy denial ──
@@ -1600,7 +1626,15 @@ test "UX9 PTY policy denies bash tool" {
         "cat >/dev/null; " ++
         "printf 'tool_call:c1|bash|{\"command\":\"echo hi\"}\\nstop:done\\n'";
 
-    var out = try runPzPtySteps(
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "run echo hi\n" },
+        .{ .wait_for = .{ .text = "denied", .timeout_ms = 10000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(
         std.testing.allocator,
         cwd_abs,
         &env,
@@ -1611,11 +1645,7 @@ test "UX9 PTY policy denies bash tool" {
             "--provider-cmd",
             provider_cmd,
         },
-        &.{
-            .{ .wait_ms = 800, .input = "run echo hi\n" },
-            .{ .wait_ms = 2000, .input = "\x03\x03" },
-        },
-        1000,
+        &steps,
     );
     defer out.deinit(std.testing.allocator);
 
@@ -1624,9 +1654,9 @@ test "UX9 PTY policy denies bash tool" {
         .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
         else => return error.TestUnexpectedResult,
     }
-    // Denial text should appear in the transcript
-    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "blocked by policy") or
-        try streamHasText(std.testing.allocator, out.stdout, "denied"));
+    // Denial text should appear in the raw output
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "blocked by policy") != null or
+        std.mem.indexOf(u8, out.output, "denied") != null);
 }
 
 // ── UX10: Changelog ──
@@ -1862,16 +1892,23 @@ pub const InteractiveStep = union(enum) {
 pub const PtyScreen = struct {
     vs: vscreen.VScreen,
     raw: std.ArrayList(u8),
+    plain: std.ArrayList(u8),
+    esc_state: EscState,
+
+    const EscState = enum { ground, escape, esc_inter, csi_param, osc_string, dcs_string, sos_string, apc_string, st_esc };
 
     pub fn init(alloc: std.mem.Allocator, w: usize, h: usize) !PtyScreen {
         return .{
             .vs = try vscreen.VScreen.init(alloc, w, h),
             .raw = .empty,
+            .plain = .empty,
+            .esc_state = .ground,
         };
     }
 
     pub fn deinit(self: *PtyScreen) void {
         const alloc = self.vs.alloc;
+        self.plain.deinit(alloc);
         self.raw.deinit(alloc);
         self.vs.deinit();
         self.* = undefined;
@@ -1879,6 +1916,45 @@ pub const PtyScreen = struct {
 
     pub fn feed(self: *PtyScreen, data: []const u8) !void {
         try self.raw.appendSlice(self.vs.alloc, data);
+        // ANSI-stripped plain text for reliable needle search.
+        // Labeled state machine strips CSI, OSC, DCS, PM, APC, SS2/SS3.
+        var st = self.esc_state;
+        for (data) |byte| {
+            st = switch (st) {
+                .ground => switch (byte) {
+                    0x1b => .escape,
+                    0x00...0x1a, 0x1c...0x1f => .ground, // C0 control
+                    0x80...0x9f => .ground, // C1 control (8-bit)
+                    else => blk: {
+                        try self.plain.append(self.vs.alloc, byte);
+                        break :blk .ground;
+                    },
+                },
+                .escape => switch (byte) {
+                    '[' => .csi_param, // CSI
+                    ']' => .osc_string, // OSC
+                    'P' => .dcs_string, // DCS
+                    '^' => .sos_string, // PM
+                    '_' => .apc_string, // APC
+                    'N', 'O' => .ground, // SS2/SS3 — skip next char
+                    0x20...0x2f => .esc_inter, // intermediate bytes
+                    else => .ground, // final byte or unknown
+                },
+                .esc_inter => if (byte >= 0x30 and byte <= 0x7e) .ground else .esc_inter,
+                .csi_param => if (byte >= 0x40 and byte <= 0x7e) .ground else .csi_param,
+                .osc_string => switch (byte) {
+                    0x07 => .ground, // BEL terminates
+                    0x1b => .st_esc, // possible ST (ESC \)
+                    else => .osc_string,
+                },
+                .dcs_string, .sos_string, .apc_string => switch (byte) {
+                    0x1b => .st_esc,
+                    else => st, // stay in string
+                },
+                .st_esc => .ground, // ESC \ (ST) or any other byte terminates
+            };
+        }
+        self.esc_state = st;
         self.vs.feed(data);
     }
 
@@ -2018,19 +2094,26 @@ fn runPtyInteractive(
                 const tty = try ttyInputAlloc(alloc, data);
                 defer alloc.free(tty);
                 writeAllFd(master_fd, tty) catch |err| switch (err) {
-                    error.BrokenPipe => break,
+                    error.BrokenPipe, error.InputOutput => break,
                     else => return err,
                 };
             },
             .wait_for => |wf| {
                 const deadline = std.time.milliTimestamp() + @as(i64, @intCast(wf.timeout_ms));
+                // Check accumulated buffer FIRST — previous steps may have
+                // already read the data we're looking for.
+                const already_found = (try screen.hasText(wf.text)) or
+                    std.mem.indexOf(u8, screen.plain.items, wf.text) != null;
+                if (!already_found) {
                 while (true) {
                     var buf: [4096]u8 = undefined;
                     const n = std.posix.read(master_fd, &buf) catch |err| switch (err) {
                         error.WouldBlock => {
                             if (std.time.milliTimestamp() >= deadline) {
                                 const grid = screen.textGrid() catch "";
-                                std.debug.print("wait_for timeout: needle=\"{s}\"\ngrid:\n{s}\n", .{ wf.text, grid });
+                                const plain_tail = if (screen.plain.items.len > 500) screen.plain.items[screen.plain.items.len - 500 ..] else screen.plain.items;
+                                const has_partial = std.mem.indexOf(u8, screen.plain.items, wf.text[0..@min(3, wf.text.len)]);
+                                std.debug.print("wait_for timeout: needle=\"{s}\" plain_len={d} partial_at={?d}\nplain_tail:\n{s}\ngrid:\n{s}\n", .{ wf.text, screen.plain.items.len, has_partial, plain_tail, grid });
                                 if (grid.len > 0) alloc.free(grid);
                                 return error.WaitForTimeout;
                             }
@@ -2046,7 +2129,8 @@ fn runPtyInteractive(
                     // output. Text that scrolled off the top of the viewport is only
                     // findable in the raw buffer.
                     if (try screen.hasText(wf.text)) break;
-                    if (std.mem.indexOf(u8, screen.raw.items, wf.text) != null) break;
+                    if (std.mem.indexOf(u8, screen.plain.items, wf.text) != null) break;
+                }
                 }
             },
             .snapshot => |label| {
@@ -2102,7 +2186,7 @@ fn runPtyInteractive(
 
     _ = c.close(master);
 
-    const output = try alloc.dupe(u8, screen.raw.items);
+    const output = try alloc.dupe(u8, screen.plain.items);
     errdefer alloc.free(output);
     const snap_slice = try snaps.toOwnedSlice(alloc);
     succeeded = true;
