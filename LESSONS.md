@@ -4,6 +4,16 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 
 ---
 
+## Session Notes (2026-03-20)
+
+### Worked Well
+- For SSE debugging, curl with `-D /dev/stderr` to dump response headers exposes content-encoding mismatches that are invisible in the application.
+- Adding a temporary `std.debug.print` for response `content_encoding` and `transfer_encoding` in `http_client.zig` immediately confirmed the gzip root cause vs hours of guessing.
+
+### Do Not Do
+- Don't use `std.http.Client.Response.reader()` for SSE streams — Zig's HTTP client sends `accept-encoding: gzip, deflate` by default, and `reader()` doesn't decompress. Either omit `accept-encoding` (correct for SSE) or use `readerDecompressing()`.
+- Don't assume API key and OAuth paths behave the same at the HTTP level — Cloudflare/CDN may compress differently based on request headers like `anthropic-dangerous-direct-browser-access`.
+
 ## Session Notes (2026-03-13)
 
 ### Worked Well
