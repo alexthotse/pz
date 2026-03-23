@@ -83,7 +83,7 @@ pub const Listener = struct {
         if (!isLoopback(conn.address)) return error.NonLoopbackPeer;
 
         // Set per-connection read deadline to abort trickle/stalled clients.
-        setRecvTimeout(conn.stream.handle, self.read_deadline_ms);
+        try setRecvTimeout(conn.stream.handle, self.read_deadline_ms);
 
         var req_buf: [8192]u8 = undefined;
         var req_len: usize = 0;
@@ -178,12 +178,12 @@ fn isLoopback(addr: std.net.Address) bool {
 
 /// Set SO_RCVTIMEO on fd. Best-effort; failure is non-fatal since poll
 /// already bounds the overall wait.
-fn setRecvTimeout(fd: std.posix.fd_t, ms: u32) void {
+fn setRecvTimeout(fd: std.posix.fd_t, ms: u32) !void {
     const tv = std.posix.timeval{
         .sec = @intCast(ms / 1000),
         .usec = @intCast(@as(u32, ms % 1000) * 1000),
     };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {}; // cleanup: propagation impossible
+    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
 }
 
 fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) void {

@@ -228,7 +228,7 @@ fn openConn(hooks: Hooks, alloc: std.mem.Allocator, host: []const u8, port: u16,
 
     if (transport == .tcp or transport == .tls) {
         try hooks.connect(fd, addr);
-        hooks.set_deadlines(fd, deadline_s);
+        try hooks.set_deadlines(fd, deadline_s);
     }
 
     var tls_state: ?*anyopaque = null;
@@ -252,7 +252,7 @@ const Hooks = struct {
     resolve: *const fn (alloc: std.mem.Allocator, host: []const u8, port: u16) anyerror!std.net.Address = resolve,
     open_socket: *const fn (addr: std.net.Address, transport: Transport) anyerror!std.posix.socket_t = openSocket,
     connect: *const fn (fd: std.posix.socket_t, addr: std.net.Address) anyerror!void = connectSocket,
-    set_deadlines: *const fn (fd: std.posix.socket_t, secs: i64) void = setDeadlines,
+    set_deadlines: *const fn (fd: std.posix.socket_t, secs: i64) anyerror!void = setDeadlines,
     send_udp: *const fn (fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) anyerror!void = sendUdpRaw,
     send_tcp: *const fn (fd: std.posix.socket_t, raw: []const u8) anyerror!void = sendAll,
     close_socket: *const fn (fd: std.posix.socket_t) void = closeSocket,
@@ -465,12 +465,12 @@ fn closeSocket(fd: std.posix.socket_t) void {
 }
 
 /// Apply SO_SNDTIMEO and SO_RCVTIMEO so TCP/TLS syslog connections
-/// cannot hang indefinitely. Best-effort: failure is non-fatal.
-fn setDeadlines(fd: std.posix.socket_t, secs: i64) void {
+/// cannot hang indefinitely.
+fn setDeadlines(fd: std.posix.socket_t, secs: i64) !void {
     const tv = std.posix.timeval{ .sec = secs, .usec = 0 };
     const tv_bytes: []const u8 = std.mem.asBytes(&tv);
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, tv_bytes) catch {}; // cleanup: propagation impossible
+    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, tv_bytes);
+    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, tv_bytes);
 }
 
 fn sendUdpRaw(fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) !void {
@@ -497,7 +497,7 @@ fn tlsSendStub(_: *anyopaque, _: []const u8) !void {
 
 fn tlsCloseStub(_: *anyopaque) void {}
 
-fn noopDeadlines(_: std.posix.socket_t, _: i64) void {}
+fn noopDeadlines(_: std.posix.socket_t, _: i64) anyerror!void {}
 
 fn writeTimestamp(writer: anytype, timestamp_ms: i64) !void {
     if (timestamp_ms < 0) return error.InvalidTimestamp;

@@ -488,7 +488,7 @@ pub fn SseClient(comptime Cfg: type) type {
                 stream.body_rdr = stream.response.reader(&stream.transfer_buf);
                 stream.conn_fd = connFd(stream);
                 if (stream.el) |el| {
-                    if (stream.conn_fd) |fd| el.register(fd, .read) catch {}; // cleanup: propagation impossible
+                    if (stream.conn_fd) |fd| try el.register(fd, .read);
                 }
             }
 

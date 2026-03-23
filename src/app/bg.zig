@@ -674,7 +674,7 @@ pub const Manager = struct {
             // Send TERM, then poll with WNOHANG up to ~150ms.
             std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
                 error.ProcessNotFound => {
-                    self.journal.appendCleanup(job.id, "startup_reap") catch {}; // cleanup: propagation impossible
+                    try self.journal.appendCleanup(job.id, "startup_reap");
                     continue;
                 },
                 else => {
@@ -703,7 +703,7 @@ pub const Manager = struct {
                 // Final blocking reap after KILL.
                 _ = std.posix.waitpid(pid, 0);
             }
-            self.journal.appendCleanup(job.id, "startup_reap") catch {}; // cleanup: propagation impossible
+            try self.journal.appendCleanup(job.id, "startup_reap");
         }
     }
 

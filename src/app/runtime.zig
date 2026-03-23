@@ -6411,7 +6411,7 @@ fn showStartup(alloc: std.mem.Allocator, ui: *tui_harness.Ui, is_resumed: bool, 
 
         // Update state with current git hash
         const new_state = config.PzState{ .last_hash = cli.build_id };
-        new_state.save(alloc, home) catch {}; // best-effort at shutdown
+        try new_state.save(alloc, home);
     }
 
     // Trailing blank lines before prompt (matching pi's spacing)

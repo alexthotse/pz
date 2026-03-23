@@ -1069,9 +1069,9 @@ fn installBinary(alloc: std.mem.Allocator, exe_path: []const u8, binary: []const
     moved = true;
 
     // fsync containing directory to persist the rename.
-    var dir = std.fs.openDirAbsolute(exe_dir, .{}) catch return;
+    var dir = try std.fs.openDirAbsolute(exe_dir, .{});
     defer dir.close();
-    std.posix.fsync(dir.fd) catch {}; // cleanup: propagation impossible
+    try std.posix.fsync(dir.fd);
 }
 
 fn makeTarGzAlloc(alloc: std.mem.Allocator, name: []const u8, data: []const u8) ![]u8 {
