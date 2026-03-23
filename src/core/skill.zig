@@ -216,7 +216,7 @@ fn scanDir(
     base_path: []const u8,
     source: Source,
 ) !void {
-    var dir = std.fs.openDirAbsolute(base_path, .{ .iterate = true }) catch return;
+    var dir = std.fs.openDirAbsolute(base_path, .{ .iterate = true }) catch return; // dir not found or inaccessible
     defer dir.close();
 
     var iter = dir.iterate();
@@ -224,12 +224,15 @@ fn scanDir(
         if (entry.kind != .directory) continue;
         if (!isValidDirName(entry.name)) continue;
 
-        var sub = dir.openDir(entry.name, .{}) catch continue;
+        var sub = dir.openDir(entry.name, .{}) catch continue; // subdir inaccessible
         defer sub.close();
-        const skill_file = sub.openFile("SKILL.md", .{}) catch continue;
+        const skill_file = sub.openFile("SKILL.md", .{}) catch continue; // no SKILL.md in this dir
         defer skill_file.close();
 
-        const content = skill_file.readToEndAlloc(alloc, max_file) catch continue;
+        const content = skill_file.readToEndAlloc(alloc, max_file) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue, // I/O read failed
+        };
         defer alloc.free(content);
 
         if (!std.unicode.utf8ValidateSlice(content)) continue;

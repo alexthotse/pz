@@ -367,7 +367,7 @@ const Ring = struct {
         };
 
         // Restore from spool if available
-        if (spool_dir != null) ring.restoreSpool();
+        if (spool_dir != null) try ring.restoreSpool();
 
         return ring;
     }
@@ -454,21 +454,21 @@ const Ring = struct {
         const base_seq = if (self.spool_seq >= self.len) self.spool_seq - self.len else 0;
         const seq = base_seq + age;
         var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{seq}) catch return;
+        const name = std.fmt.bufPrint(&name_buf, "{d:0>16}.spool", .{seq}) catch unreachable; // 20 digits + 6 = 26 < 32
         dir.deleteFile(name) catch {}; // cleanup: propagation impossible
     }
 
-    fn restoreSpool(self: *Ring) void {
+    fn restoreSpool(self: *Ring) error{OutOfMemory}!void {
         const dir = self.spool_dir orelse return;
         // Scan for .spool files and load them in order
         var it = dir.iterate();
         var names: [256]struct { seq: u64, name: [32]u8, len: usize } = undefined;
         var count: usize = 0;
-        while (it.next() catch null) |ent| {
+        while (it.next() catch null) |ent| { // I/O errors during iteration → stop
             if (!std.mem.endsWith(u8, ent.name, ".spool")) continue;
             if (count >= names.len) break;
             const stem = ent.name[0 .. ent.name.len - 6];
-            const seq = std.fmt.parseInt(u64, stem, 10) catch continue;
+            const seq = std.fmt.parseInt(u64, stem, 10) catch continue; // malformed filename, skip
             var entry = &names[count];
             entry.seq = seq;
             entry.len = ent.name.len;
@@ -487,7 +487,10 @@ const Ring = struct {
         for (items) |item| {
             if (self.len >= self.slots.len) break;
             const name = item.name[0..item.len];
-            const data = dir.readFileAlloc(self.alloc, name, 64 * 1024) catch continue;
+            const data = dir.readFileAlloc(self.alloc, name, 64 * 1024) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => continue, // I/O error on individual spool file, skip
+            };
             const idx = (self.head + self.len) % self.slots.len;
             self.slots[idx] = data;
             self.len += 1;

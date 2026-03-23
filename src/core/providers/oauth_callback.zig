@@ -97,26 +97,26 @@ pub const Listener = struct {
             if (std.mem.indexOf(u8, req_buf[0..req_len], "\r\n\r\n") != null) break;
         }
         if (req_len == 0) {
-            writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
+            try writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
             return error.InvalidOAuthCallbackRequest;
         }
 
         const query = parseQueryFromHttpRequest(req_buf[0..req_len], self.path) catch {
-            writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
+            try writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
             return error.InvalidOAuthCallbackRequest;
         };
         var out = parseCodeStateQuery(alloc, query) catch {
-            writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
+            try writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
             return error.InvalidOAuthCallbackRequest;
         };
         errdefer out.deinit(alloc);
 
         if (out.code.len == 0 or out.state.len == 0) {
-            writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
+            try writeHtml(conn.stream.handle, "400 Bad Request", callback_error_body);
             return error.InvalidOAuthCallbackRequest;
         }
 
-        writeHtml(conn.stream.handle, "200 OK", callback_ok_body);
+        try writeHtml(conn.stream.handle, "200 OK", callback_ok_body);
         return out;
     }
 };
@@ -186,13 +186,13 @@ fn setRecvTimeout(fd: std.posix.fd_t, ms: u32) !void {
     try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
 }
 
-fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) void {
+fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) !void {
     var header: [256]u8 = undefined;
-    const hdr = std.fmt.bufPrint(
+    const hdr = try std.fmt.bufPrint(
         &header,
         "HTTP/1.1 {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, body.len },
-    ) catch return;
+    );
     _ = std.posix.write(fd, hdr) catch {}; // cleanup: propagation impossible
     _ = std.posix.write(fd, body) catch {}; // cleanup: propagation impossible
 }

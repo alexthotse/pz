@@ -281,7 +281,10 @@ fn extractPath(alloc: std.mem.Allocator, args: []const u8) !?[]const u8 {
         alloc,
         args,
         .{ .allocate = .alloc_always },
-    ) catch return null;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null, // JSON parse failure
+    };
     defer parsed.deinit();
     const p = parsed.value.path orelse parsed.value.file_path orelse return null;
     if (p.len == 0) return null;

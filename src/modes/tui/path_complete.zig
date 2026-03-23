@@ -6,7 +6,7 @@ const max_results: usize = 32;
 
 /// List files matching a path prefix. Returns full paths relative to cwd.
 /// Caller must free with `freeList`.
-pub fn list(alloc: std.mem.Allocator, prefix: []const u8) ?[][]u8 {
+pub fn list(alloc: std.mem.Allocator, prefix: []const u8) std.mem.Allocator.Error!?[][]u8 {
     const last_sep = std.mem.lastIndexOfScalar(u8, prefix, '/');
     const dir_path = if (last_sep) |s| (if (s == 0) "/" else prefix[0..s]) else ".";
     const partial = if (last_sep) |s| prefix[s + 1 ..] else prefix;
@@ -25,13 +25,13 @@ pub fn list(alloc: std.mem.Allocator, prefix: []const u8) ?[][]u8 {
 
         const is_dir = entry.kind == .directory;
         const name = if (is_dir)
-            std.fmt.allocPrint(alloc, "{s}{s}/", .{ dir_prefix, entry.name }) catch continue
+            try std.fmt.allocPrint(alloc, "{s}{s}/", .{ dir_prefix, entry.name })
         else
-            std.fmt.allocPrint(alloc, "{s}{s}", .{ dir_prefix, entry.name }) catch continue;
+            try std.fmt.allocPrint(alloc, "{s}{s}", .{ dir_prefix, entry.name });
 
-        names.append(alloc, name) catch {
+        names.append(alloc, name) catch |err| {
             alloc.free(name);
-            continue;
+            return err;
         };
     }
 
@@ -46,11 +46,7 @@ pub fn list(alloc: std.mem.Allocator, prefix: []const u8) ?[][]u8 {
         }
     }.lt);
 
-    return names.toOwnedSlice(alloc) catch {
-        for (names.items) |n| alloc.free(n);
-        names.deinit(alloc);
-        return null;
-    };
+    return try names.toOwnedSlice(alloc);
 }
 
 pub fn freeList(alloc: std.mem.Allocator, items: [][]u8) void {
@@ -81,7 +77,7 @@ pub fn asConst(items: [][]u8) []const []const u8 {
 
 test "list finds files in src dir" {
     const alloc = std.testing.allocator;
-    if (list(alloc, "src/")) |items| {
+    if (try list(alloc, "src/")) |items| {
         defer freeList(alloc, items);
         try std.testing.expect(items.len > 0);
         // All items should start with "src/"
@@ -92,13 +88,13 @@ test "list finds files in src dir" {
 }
 
 test "list returns null for nonexistent dir" {
-    try std.testing.expect(list(std.testing.allocator, "nonexistent_dir_xyz_42/") == null);
+    try std.testing.expect(try list(std.testing.allocator, "nonexistent_dir_xyz_42/") == null);
 }
 
 test "list with partial name" {
     const alloc = std.testing.allocator;
     // "src/m" should match "src/modes/" at minimum
-    if (list(alloc, "src/m")) |items| {
+    if (try list(alloc, "src/m")) |items| {
         defer freeList(alloc, items);
         try std.testing.expect(items.len > 0);
         for (items) |item| {
@@ -109,7 +105,7 @@ test "list with partial name" {
 
 test "list skips hidden files" {
     const alloc = std.testing.allocator;
-    if (list(alloc, "")) |items| {
+    if (try list(alloc, "")) |items| {
         defer freeList(alloc, items);
         for (items) |item| {
             try std.testing.expect(item[0] != '.');
@@ -119,7 +115,7 @@ test "list skips hidden files" {
 
 test "list shows hidden files when prefix starts with dot" {
     const alloc = std.testing.allocator;
-    if (list(alloc, ".")) |items| {
+    if (try list(alloc, ".")) |items| {
         defer freeList(alloc, items);
         try std.testing.expect(items.len > 0);
         for (items) |item| {

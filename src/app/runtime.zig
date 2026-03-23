@@ -5421,7 +5421,7 @@ fn completeFilePath(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     const has_at = word[0] == '@';
     const prefix = if (has_at) word[1..] else word;
 
-    const items = tui_path_complete.list(alloc, prefix) orelse return;
+    const items = (try tui_path_complete.list(alloc, prefix)) orelse return;
     defer tui_path_complete.freeList(alloc, items);
 
     const repl: []const u8 = if (items.len == 1)

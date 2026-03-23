@@ -368,7 +368,10 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
         const ar = self.arena.allocator();
         const data_copy = try ar.dupe(u8, data);
 
-        const ev = self.parseSseData(data_copy) catch continue;
+        const ev = self.parseSseData(data_copy) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
         if (ev) |e| return e;
     }
 }

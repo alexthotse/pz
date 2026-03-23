@@ -90,7 +90,7 @@ pub const SeqTracker = struct {
     fn persist(self: *const SeqTracker) PersistError!void {
         const p = self.path orelse return;
         var buf: [20]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{self.high}) catch return;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{self.high}) catch unreachable; // max u64 = 20 digits = 20 <= 20
         const file = try std.fs.cwd().createFile(p, .{ .truncate = true });
         defer file.close();
         try file.writeAll(s);

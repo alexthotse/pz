@@ -227,8 +227,8 @@ pub const Transcript = struct {
     }
 
     /// Update the most recent agent block matching `agent_id` to a new phase.
-    pub fn updateAgent(self: *Transcript, agent_id: []const u8, phase: AgentPhase) void {
-        const needle = std.fmt.allocPrint(self.alloc, "agent:{s}", .{agent_id}) catch return;
+    pub fn updateAgent(self: *Transcript, agent_id: []const u8, phase: AgentPhase) std.mem.Allocator.Error!void {
+        const needle = try std.fmt.allocPrint(self.alloc, "agent:{s}", .{agent_id});
         defer self.alloc.free(needle);
         var i = self.blocks.items.len;
         while (i > 0) {
@@ -345,7 +345,7 @@ pub const Transcript = struct {
                 prev_rendered = b;
 
                 if (b.kind == .image) {
-                    self.renderImageBlock(&ctx, b);
+                    try self.renderImageBlock(&ctx, b);
                 } else if (b.kind == .text or b.kind == .user) {
                     try self.renderMdBlock(&ctx, &md, b);
                 } else if (b.line_mode == .ellipsis) {
@@ -368,11 +368,11 @@ pub const Transcript = struct {
 
         // Scroll indicator
         if (has_bar and total_rows > rect.h) {
-            renderScrollbar(frm, rect, total_rows, skip);
+            try renderScrollbar(frm, rect, total_rows, skip);
         }
     }
 
-    fn renderImageBlock(self: *Transcript, ctx: *RenderCtx, b: *const Block) void {
+    fn renderImageBlock(self: *Transcript, ctx: *RenderCtx, b: *const Block) RenderError!void {
         const blk_h = image.img_rows;
         var img_skipped: usize = 0;
         var ir: usize = 0;
@@ -385,7 +385,7 @@ pub const Transcript = struct {
             if (ctx.row >= ctx.rect.h) break;
             const y = ctx.rect.y + ctx.row;
             if (ir == 0) {
-                _ = ctx.frm.write(ctx.content_x, y, b.text(), b.st) catch return;
+                _ = try ctx.frm.write(ctx.content_x, y, b.text(), b.st);
             }
             if (ir == img_skipped and self.img_ref_n < self.img_refs.len) {
                 self.img_refs[self.img_ref_n] = .{
@@ -549,7 +549,7 @@ pub const Transcript = struct {
         }
     }
 
-    fn renderScrollbar(frm: *frame.Frame, rect: Rect, total_rows: usize, skip: usize) void {
+    fn renderScrollbar(frm: *frame.Frame, rect: Rect, total_rows: usize, skip: usize) RenderError!void {
         const bar_x = rect.x + rect.w - 1;
         const bar_st = frame.Style{ .fg = theme.get().border_muted };
         const track_st = frame.Style{ .fg = theme.get().dim };
@@ -564,7 +564,7 @@ pub const Transcript = struct {
             const is_thumb = sy >= thumb_y and sy < thumb_y + thumb_h;
             const cp: u21 = if (is_thumb) 0x2588 else 0x2591;
             const st = if (is_thumb) bar_st else track_st;
-            frm.set(bar_x, rect.y + sy, cp, st) catch return;
+            try frm.set(bar_x, rect.y + sy, cp, st);
         }
     }
 
@@ -2423,7 +2423,7 @@ test "updateAgent changes phase and style" {
     try std.testing.expectEqual(AgentPhase.running, tr.blocks.items[0].agent_phase);
 
     // Transition to done.
-    tr.updateAgent("scout", .done);
+    try tr.updateAgent("scout", .done);
     try std.testing.expectEqual(AgentPhase.done, tr.blocks.items[0].agent_phase);
 
     // Prefix should now be "* ".
@@ -2440,7 +2440,7 @@ test "updateAgent error phase gets error style" {
     defer tr.deinit();
 
     try tr.agentBlock("critic", .running);
-    tr.updateAgent("critic", .err);
+    try tr.updateAgent("critic", .err);
 
     try std.testing.expectEqual(AgentPhase.err, tr.blocks.items[0].agent_phase);
     const t = theme.get();

@@ -341,7 +341,7 @@ pub const Ui = struct {
 
         // Cache miss — full directory scan
         self.clearPathItems();
-        if (path_complete_mod.list(self.alloc, pattern)) |items| {
+        if (try path_complete_mod.list(self.alloc, pattern)) |items| {
             self.path_items = items;
             try self.updatePathPrefix(pattern);
             self.picker = cmdpicker_mod.Picker.updateArgs(
