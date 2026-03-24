@@ -256,9 +256,9 @@ const Hooks = struct {
     send_udp: *const fn (fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) anyerror!void = sendUdpRaw,
     send_tcp: *const fn (fd: std.posix.socket_t, raw: []const u8) anyerror!void = sendAll,
     close_socket: *const fn (fd: std.posix.socket_t) void = closeSocket,
-    tls_handshake: *const fn (fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) anyerror!*anyopaque = tlsHandshakeStub,
-    tls_send: *const fn (state: *anyopaque, data: []const u8) anyerror!void = tlsSendStub,
-    tls_close: *const fn (state: *anyopaque) void = tlsCloseStub,
+    tls_handshake: *const fn (fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) anyerror!*anyopaque = tlsHandshake,
+    tls_send: *const fn (state: *anyopaque, data: []const u8) anyerror!void = tlsSend,
+    tls_close: *const fn (state: *anyopaque) void = tlsClose,
 };
 
 const udp_max_len: usize = 1024;
@@ -487,23 +487,59 @@ fn sendAll(fd: std.posix.socket_t, raw: []const u8) !void {
     }
 }
 
-// B1: TLS syslog — requires Zig 0.15 std.crypto.tls.Client which takes
-// *std.Io.Reader / *std.Io.Writer (vtable-based buffered I/O), not raw fds.
-// The net.Stream.reader() returns a concrete type, not std.Io.Reader.
-// Proper implementation needs: (1) heap-allocate stream + buffers,
-// (2) create concrete reader/writer from stream, (3) obtain std.Io.Reader/Writer
-// from the concrete types via .any(), (4) pass to TLS Client.init.
-// Deferred to dedicated session — interface redesign is L effort.
+/// TLS state heap-allocated so it can be returned as *anyopaque through Hooks.
+const TlsState = struct {
+    client: std.crypto.tls.Client,
+    stream: std.net.Stream,
+    reader: std.net.Stream.Reader,
+    writer: std.net.Stream.Writer,
+    read_buf: [16384]u8,
+    write_buf: [4096]u8,
+};
 
-fn tlsHandshakeStub(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
-    return error.TlsNotConfigured;
+fn tlsHandshake(fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) !*anyopaque {
+    const alloc = std.heap.page_allocator;
+    const stream = std.net.Stream{ .handle = fd };
+
+    var ca_bundle: std.crypto.Certificate.Bundle = .{};
+    if (opts.ca_file) |path| {
+        ca_bundle.addCertsFromFilePathAbsolute(alloc, path) catch return error.TlsHandshakeFailed;
+    } else {
+        ca_bundle.rescan(alloc) catch return error.TlsHandshakeFailed;
+    }
+
+    const state = alloc.create(TlsState) catch return error.OutOfMemory;
+    errdefer alloc.destroy(state);
+    state.stream = stream;
+    state.read_buf = undefined;
+    state.write_buf = undefined;
+    state.reader = stream.reader(&state.read_buf);
+    state.writer = stream.writer(&state.write_buf);
+
+    state.client = std.crypto.tls.Client.init(
+        state.reader.interface(),
+        &state.writer.interface,
+        .{
+            .host = .{ .explicit = host },
+            .ca = .{ .bundle = ca_bundle },
+            .write_buffer = &state.write_buf,
+            .read_buffer = &state.read_buf,
+        },
+    ) catch return error.TlsHandshakeFailed;
+    return @ptrCast(state);
 }
 
-fn tlsSendStub(_: *anyopaque, _: []const u8) !void {
-    return error.TlsNotConfigured;
+fn tlsSend(raw_state: *anyopaque, data: []const u8) !void {
+    const state: *TlsState = @ptrCast(@alignCast(raw_state));
+    // Write through TLS client's plaintext writer (encrypts transparently)
+    state.client.writer.writeAll(data) catch return error.TlsSendFailed;
 }
 
-fn tlsCloseStub(_: *anyopaque) void {}
+fn tlsClose(raw_state: *anyopaque) void {
+    const state: *TlsState = @ptrCast(@alignCast(raw_state));
+    state.client.end() catch {}; // cleanup: close_notify best-effort
+    std.heap.page_allocator.destroy(state);
+}
 
 fn noopDeadlines(_: std.posix.socket_t, _: i64) anyerror!void {}
 
