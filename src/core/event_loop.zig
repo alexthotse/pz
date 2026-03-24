@@ -26,6 +26,57 @@ pub const TimerId = u32;
 const max_timers = 32;
 const timer_id_base: usize = 0x7fff_0000; // distinguish timer idents from fds in kqueue
 
+/// Callback for fd readiness events.
+pub const Handler = struct {
+    ctx: *anyopaque,
+    on_ready: *const fn (ctx: *anyopaque, fd: posix.fd_t, readable: bool, writable: bool) void,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime on_ready_fn: fn (ctx: *T, fd: posix.fd_t, readable: bool, writable: bool) void,
+    ) Handler {
+        const Wrap = struct {
+            fn onReady(raw: *anyopaque, fd: posix.fd_t, readable: bool, writable: bool) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                on_ready_fn(typed, fd, readable, writable);
+            }
+        };
+        return .{ .ctx = ctx, .on_ready = Wrap.onReady };
+    }
+
+    fn call(self: Handler, fd: posix.fd_t, readable: bool, writable: bool) void {
+        self.on_ready(self.ctx, fd, readable, writable);
+    }
+};
+
+/// Callback for timer events.
+pub const TimerHandler = struct {
+    ctx: *anyopaque,
+    on_timer: *const fn (ctx: *anyopaque, id: TimerId) void,
+
+    pub fn from(
+        comptime T: type,
+        ctx: *T,
+        comptime on_timer_fn: fn (ctx: *T, id: TimerId) void,
+    ) TimerHandler {
+        const Wrap = struct {
+            fn onTimer(raw: *anyopaque, id: TimerId) void {
+                const typed: *T = @ptrCast(@alignCast(raw));
+                on_timer_fn(typed, id);
+            }
+        };
+        return .{ .ctx = ctx, .on_timer = Wrap.onTimer };
+    }
+};
+
+const max_handlers = 64;
+
+const FdEntry = struct {
+    fd: posix.fd_t,
+    handler: Handler,
+};
+
 pub const EventLoop = struct {
     backend: posix.fd_t,
     wake_r: posix.fd_t,
@@ -33,6 +84,14 @@ pub const EventLoop = struct {
     timer_count: u32 = 0,
     timer_fds: if (is_epoll) [max_timers]posix.fd_t else void =
         if (is_epoll) [_]posix.fd_t{-1} ** max_timers else {},
+    // Fd → handler dispatch table
+    fd_handlers: [max_handlers]FdEntry = [_]FdEntry{.{ .fd = -1, .handler = undefined }} ** max_handlers,
+    fd_handler_count: u32 = 0,
+    // Timer handlers
+    timer_handlers: [max_timers]?TimerHandler = [_]?TimerHandler{null} ** max_timers,
+    // SIGCHLD signalfd (Linux) or kqueue EVFILT_SIGNAL
+    sigchld_fd: posix.fd_t = -1,
+    sigchld_handler: ?Handler = null,
 
     pub fn init() !EventLoop {
         const pipe = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
@@ -107,11 +166,90 @@ pub const EventLoop = struct {
         }
     }
 
+    /// Add a timer with a handler that's called when it fires.
+    pub fn addTimerWithHandler(self: *EventLoop, ms: u32, handler: TimerHandler) !TimerId {
+        const id = try self.addTimer(ms);
+        self.timer_handlers[id] = handler;
+        return id;
+    }
+
+    /// Wait for events and dispatch to registered handlers.
+    /// Returns the number of events dispatched. Unhandled fd events
+    /// (registered without a handler) are returned in `unhandled`.
+    pub fn dispatch(self: *EventLoop, timeout_ms: i32, unhandled: *[max_events]Event) !usize {
+        var buf: [max_events]Event = undefined;
+        const events = try self.wait(timeout_ms, &buf);
+        var uh_count: usize = 0;
+        for (events) |ev| {
+            if (ev.timer_id) |tid| {
+                if (tid < max_timers) {
+                    if (self.timer_handlers[tid]) |th| {
+                        th.on_timer(th.ctx, tid);
+                        self.timer_handlers[tid] = null;
+                        continue;
+                    }
+                }
+                // Unhandled timer
+                unhandled[uh_count] = ev;
+                uh_count += 1;
+                continue;
+            }
+            // Look up fd handler
+            var handled = false;
+            for (self.fd_handlers[0..self.fd_handler_count]) |entry| {
+                if (entry.fd == ev.fd) {
+                    entry.handler.call(ev.fd, ev.readable, ev.writable);
+                    handled = true;
+                    break;
+                }
+            }
+            if (!handled) {
+                unhandled[uh_count] = ev;
+                uh_count += 1;
+            }
+        }
+        return uh_count;
+    }
+
+    /// Register a handler for SIGCHLD (child process exit).
+    /// Only one SIGCHLD handler is supported.
+    pub fn watchSigchld(self: *EventLoop, handler: Handler) !void {
+        if (self.sigchld_handler != null) return error.AlreadyRegistered;
+
+        if (is_kqueue) {
+            // kqueue: use EVFILT_SIGNAL for SIGCHLD
+            const changelist = [1]std.posix.Kevent{.{
+                .ident = std.posix.SIG.CHLD,
+                .filter = std.posix.system.EVFILT.SIGNAL,
+                .flags = std.posix.system.EV.ADD,
+                .fflags = 0,
+                .data = 0,
+                .udata = 0,
+            }};
+            _ = try kqueueWaitChanges(self.backend, &changelist, &.{}, null);
+            // Block SIGCHLD so kqueue gets the event instead of the default handler
+            var mask = posix.empty_sigset;
+            sigaddset(&mask, posix.SIG.CHLD);
+            _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
+        } else {
+            // Linux: use signalfd
+            var mask = posix.empty_sigset;
+            sigaddset(&mask, posix.SIG.CHLD);
+            _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
+            const sfd = std.os.linux.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
+            if (std.posix.errno(sfd) != .SUCCESS) return error.SignalFdFailed;
+            self.sigchld_fd = @intCast(sfd);
+            try self.registerFd(self.sigchld_fd, .read);
+        }
+        self.sigchld_handler = handler;
+    }
+
     pub fn deinit(self: *EventLoop) void {
         if (is_epoll) {
             for (self.timer_fds) |tfd| {
                 if (tfd >= 0) posix.close(tfd);
             }
+            if (self.sigchld_fd >= 0) posix.close(self.sigchld_fd);
         }
         posix.close(self.backend);
         posix.close(self.wake_r);
@@ -123,8 +261,26 @@ pub const EventLoop = struct {
         try self.registerFd(fd, interest);
     }
 
+    /// Register fd with a handler that's called on readiness.
+    pub fn registerHandler(self: *EventLoop, fd: posix.fd_t, interest: Interest, handler: Handler) !void {
+        try self.registerFd(fd, interest);
+        if (self.fd_handler_count >= max_handlers) return error.TooManyHandlers;
+        self.fd_handlers[self.fd_handler_count] = .{ .fd = fd, .handler = handler };
+        self.fd_handler_count += 1;
+    }
+
     pub fn unregister(self: *EventLoop, fd: posix.fd_t) !void {
         try self.unregisterFd(fd);
+        // Remove handler entry if present
+        var i: u32 = 0;
+        while (i < self.fd_handler_count) {
+            if (self.fd_handlers[i].fd == fd) {
+                self.fd_handlers[i] = self.fd_handlers[self.fd_handler_count - 1];
+                self.fd_handler_count -= 1;
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Block until fds are ready or timeout expires. Returns ready events.
@@ -146,6 +302,13 @@ pub const EventLoop = struct {
                     n += 1;
                     continue;
                 }
+                if (ev.filter == std.posix.system.EVFILT.SIGNAL) {
+                    // SIGCHLD — dispatch to handler if set
+                    if (self.sigchld_handler) |h| {
+                        h.call(-1, true, false);
+                    }
+                    continue;
+                }
                 const fd: posix.fd_t = @intCast(ev.ident);
                 if (fd == self.wake_r) {
                     drain(self.wake_r);
@@ -165,6 +328,12 @@ pub const EventLoop = struct {
                 const fd = ev.data.fd;
                 if (fd == self.wake_r) {
                     drain(self.wake_r);
+                    continue;
+                }
+                // Check if this fd is a signalfd
+                if (fd == self.sigchld_fd and self.sigchld_fd >= 0) {
+                    drain(fd);
+                    if (self.sigchld_handler) |h| h.call(-1, true, false);
                     continue;
                 }
                 // Check if this fd is a timerfd
@@ -336,6 +505,15 @@ fn timerfdSet(fd: posix.fd_t, ms: u32) !void {
 fn drainTimerfd(fd: posix.fd_t) void {
     var buf: [8]u8 = undefined;
     _ = posix.read(fd, &buf) catch {}; // cleanup: drain expiration count
+}
+
+fn sigaddset(set: *posix.sigset_t, sig: u6) void {
+    if (is_epoll) {
+        std.os.linux.sigaddset(set, sig);
+    } else {
+        // macOS/BSD: sigset_t is u32, signal bit = 1 << (sig - 1)
+        set.* |= @as(u32, 1) << @intCast(sig - 1);
+    }
 }
 
 fn drain(fd: posix.fd_t) void {
