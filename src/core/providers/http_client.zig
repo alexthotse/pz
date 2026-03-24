@@ -311,20 +311,17 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
     _ = self.arena.reset(.retain_capacity);
 
     while (true) {
-        const rdr = self.body_rdr orelse {
-            self.done = true;
-            return null;
-        };
+        // Try to extract a complete line from the nonblocking buffer first.
+        if (extractNbLine(self)) |raw| {
+            if (try processSseLine(self, raw)) |ev| return ev;
+            continue;
+        }
 
-        // If we have an event loop and connection fd, wait for read
-        // readiness. The event loop multiplexes the connection fd with
-        // the wake pipe, giving cancel responsiveness during long SSE
-        // waits between server-sent chunks.
+        // If event loop is active, use nonblocking fd reads into nb_buf.
         if (self.el) |el| {
             if (self.conn_fd) |fd| {
-                var buf: [el_mod.max_events]ElEvent = undefined;
-                // Block until fd is readable or wake pipe fires.
-                const evs = el.wait(-1, &buf) catch {
+                var wait_buf: [el_mod.max_events]ElEvent = undefined;
+                const evs = el.wait(-1, &wait_buf) catch {
                     self.done = true;
                     return null;
                 };
@@ -332,13 +329,37 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
                 for (evs) |ev| {
                     if (ev.fd == fd and ev.readable) fd_ready = true;
                 }
-                // Wake with no fd readiness means cancel/interrupt.
                 if (!fd_ready) {
                     self.done = true;
                     return null;
                 }
+                // Nonblocking read into nb_buf
+                var read_buf: [8192]u8 = undefined;
+                const n = std.posix.read(fd, &read_buf) catch |err| switch (err) {
+                    error.WouldBlock => continue,
+                    else => {
+                        self.done = true;
+                        return null;
+                    },
+                };
+                if (n == 0) {
+                    self.done = true;
+                    return null;
+                }
+                self.nb_buf.appendSlice(self.alloc, read_buf[0..n]) catch return error.OutOfMemory;
+                // Extract and process lines from the buffer
+                while (extractNbLine(self)) |raw| {
+                    if (try processSseLine(self, raw)) |ev| return ev;
+                }
+                continue;
             }
         }
+
+        // Fallback: blocking read via body_rdr (no event loop)
+        const rdr = self.body_rdr orelse {
+            self.done = true;
+            return null;
+        };
 
         const line = rdr.takeDelimiter('\n') catch |err| switch (err) {
             error.ReadFailed => {
@@ -354,26 +375,42 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
         };
 
         const raw = std.mem.trimRight(u8, raw_line, "\r");
-
-        // Extract SSE data payload, handling both "data: " and "data:" prefixes
-        const data = if (std.mem.startsWith(u8, raw, "data: "))
-            raw["data: ".len..]
-        else if (std.mem.startsWith(u8, raw, "data:"))
-            std.mem.trimLeft(u8, raw["data:".len..], " ")
-        else
-            continue;
-
-        if (std.mem.eql(u8, data, "[DONE]")) continue;
-
-        const ar = self.arena.allocator();
-        const data_copy = try ar.dupe(u8, data);
-
-        const ev = self.parseSseData(data_copy) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => continue,
-        };
-        if (ev) |e| return e;
+        if (try processSseLine(self, raw)) |ev| return ev;
     }
+}
+
+/// Extract one complete line from the nonblocking buffer.
+/// Returns the line (without trailing \n/\r\n) or null if no complete line.
+fn extractNbLine(self: anytype) ?[]const u8 {
+    const buf = self.nb_buf.items;
+    const nl = std.mem.indexOfScalar(u8, buf, '\n') orelse return null;
+    const line = std.mem.trimRight(u8, buf[0..nl], "\r");
+    // Shift remaining bytes to front
+    const rest = buf[nl + 1 ..];
+    std.mem.copyForwards(u8, self.nb_buf.items[0..rest.len], rest);
+    self.nb_buf.items.len = rest.len;
+    return line;
+}
+
+/// Process a single SSE line. Returns an event if one was parsed, null to continue.
+fn processSseLine(self: anytype, raw: []const u8) anyerror!?providers.Event {
+    const data = if (std.mem.startsWith(u8, raw, "data: "))
+        raw["data: ".len..]
+    else if (std.mem.startsWith(u8, raw, "data:"))
+        std.mem.trimLeft(u8, raw["data:".len..], " ")
+    else
+        return null;
+
+    if (std.mem.eql(u8, data, "[DONE]")) return null;
+
+    const ar = self.arena.allocator();
+    const data_copy = try ar.dupe(u8, data);
+
+    const ev = self.parseSseData(data_copy) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    return ev;
 }
 
 /// Extract the connection fd from an SseStream's HTTP request.
@@ -519,6 +556,10 @@ pub fn SseStream(comptime Cfg: type) type {
         el: ?*EventLoop,
         conn_fd: ?std.posix.fd_t,
 
+        // Nonblocking SSE line buffer — accumulates partial reads between
+        // event-loop-driven readable events. Used only when el != null.
+        nb_buf: std.ArrayListUnmanaged(u8) = .{},
+
         // Common SSE state
         in_tok: u64,
         out_tok: u64,
@@ -573,6 +614,7 @@ pub fn SseStream(comptime Cfg: type) type {
                 if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
             }
             const alloc = self.alloc;
+            self.nb_buf.deinit(alloc);
             Cfg.ext_deinit(self, alloc);
             self.tool_name.deinit(alloc);
             self.tool_args.deinit(alloc);
