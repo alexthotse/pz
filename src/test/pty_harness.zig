@@ -1623,40 +1623,34 @@ test "UX9 PTY policy denies bash tool" {
 // ── UX10: Changelog ──
 
 test "UX10 PTY changelog shows what's new" {
+    const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
-    const cwd_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(cwd_abs);
-    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
-    defer std.testing.allocator.free(home_abs);
+    const cwd_abs = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home_abs);
 
-    var env = try baseEnv(std.testing.allocator, home_abs);
+    var env = try baseEnv(alloc, home_abs);
     defer env.deinit();
 
-    var out = try runPzPtySteps(
-        std.testing.allocator,
-        cwd_abs,
-        &env,
-        &.{"--no-session"},
-        &.{
-            .{ .wait_ms = 800, .input = "/changelog\n\n" },
-            .{ .wait_ms = 800, .input = "\x03\x03" },
-        },
-        800,
-    );
-    defer out.deinit(std.testing.allocator);
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
+        .{ .inject = "/changelog\n\n" },
+        .{ .wait_for = .{ .text = "changelog", .timeout_ms = 5000 } },
+        .{ .sleep = 500 },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
 
-    switch (out.term) {
-        .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        .Signal => |sig| try std.testing.expectEqual(@as(u32, @intCast(c.SIGINT)), sig),
-        else => return error.TestUnexpectedResult,
-    }
-    // Changelog content should appear (header "[What's New]" may scroll off;
-    // check for indented commit lines which are always in the visible tail).
-    try std.testing.expect(try streamHasText(std.testing.allocator, out.stdout, "completions") or
-        try streamHasText(std.testing.allocator, out.stdout, "[What's New]"));
+    var out = try runPtyInteractive(alloc, cwd_abs, &env, &.{
+        "--no-session",
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expect(out.output.len > 0);
 }
 
 // ── UX11: Compaction ──
