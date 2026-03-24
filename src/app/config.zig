@@ -55,6 +55,19 @@ pub const Env = struct {
     }
 };
 
+/// Syslog forwarding configuration from settings.
+pub const SyslogFwd = struct {
+    host: []u8,
+    port: u16,
+    transport: []u8, // "udp", "tcp", or "tls"
+    buf_cap: u16 = 64,
+
+    pub fn deinit(self: *SyslogFwd, alloc: std.mem.Allocator) void {
+        alloc.free(self.host);
+        alloc.free(self.transport);
+    }
+};
+
 pub const Config = struct {
     mode: args.Mode,
     model: []u8,
@@ -65,8 +78,11 @@ pub const Config = struct {
     ca_file: ?[]u8 = null,
     enabled_models: ?[][]u8 = null, // model cycle list
     policy_lock: core.policy.Lock = .{},
+    audit_overflow: core.policy.AuditOverflow = .drop_oldest,
+    syslog_fwd: ?SyslogFwd = null,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
+        if (self.syslog_fwd) |*fwd| fwd.deinit(alloc);
         inline for (@typeInfo(Config).@"struct".fields) |f| {
             if (f.type == []u8) {
                 alloc.free(@field(self, f.name));
@@ -188,6 +204,10 @@ const SettingsCfg = struct {
     ca_file: ?[]const u8 = null,
     enabledModels: ?[]const []const u8 = null,
     models: ?[]const u8 = null,
+    syslog_host: ?[]const u8 = null,
+    syslog_port: ?u16 = null,
+    syslog_transport: ?[]const u8 = null,
+    syslog_buf_cap: ?u16 = null,
 };
 
 test "pz state save and load are home-overrideable" {
@@ -256,6 +276,7 @@ pub fn discover(
     const resolved = try core.policy.loadResolved(alloc, cwd, env.home);
     defer core.policy.deinitResolved(alloc, resolved);
     out.policy_lock = resolved.doc.lock;
+    out.audit_overflow = resolved.doc.audit_overflow;
 
     if (out.policy_lock.cfg) {
         switch (parsed.cfg) {
@@ -453,6 +474,15 @@ fn applySettingsCfg(alloc: std.mem.Allocator, cfg: *Config, pi: SettingsCfg, com
         try setModelsFromArray(alloc, cfg, arr);
     } else if (pi.models) |csv| {
         try setModels(alloc, cfg, csv);
+    }
+    if (pi.syslog_host) |host| {
+        if (cfg.syslog_fwd) |*old| old.deinit(alloc);
+        cfg.syslog_fwd = .{
+            .host = try alloc.dupe(u8, host),
+            .port = pi.syslog_port orelse 514,
+            .transport = try alloc.dupe(u8, pi.syslog_transport orelse "udp"),
+            .buf_cap = pi.syslog_buf_cap orelse 64,
+        };
     }
 }
 

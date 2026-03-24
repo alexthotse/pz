@@ -332,6 +332,15 @@ pub fn evalEnv(rules: []const Rule, key: []const u8, val: []const u8) Effect {
 }
 
 /// Versioned policy document for JSON serialization.
+/// Enterprise audit overflow behavior.
+/// Controls what happens when the audit spool is full and the collector is down.
+pub const AuditOverflow = enum {
+    /// Drop oldest buffered events to make room (fail-open). Default.
+    drop_oldest,
+    /// Reject new audit events, blocking the operation (fail-closed).
+    fail_closed,
+};
+
 pub const Doc = struct {
     version: u16 = ver_current,
     rules: []const Rule,
@@ -342,6 +351,8 @@ pub const Doc = struct {
     /// Unix timestamp after which the policy is expired. null = no expiry.
     not_after: ?i64 = null,
     release_url: ?[]const u8 = null,
+    /// Enterprise-controlled audit overflow behavior.
+    audit_overflow: AuditOverflow = .drop_oldest,
 };
 
 pub const SignedDoc = struct {
@@ -507,6 +518,7 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         .{ "release_url", {} },
         .{ "generation", {} },
         .{ "not_after", {} },
+        .{ "audit_overflow", {} },
     });
     for (root.object.keys()) |k| {
         if (!known_top.has(k)) return error.UnknownPolicyKey;
@@ -664,7 +676,17 @@ pub fn parseDoc(alloc: std.mem.Allocator, json: []const u8) !Doc {
         release_url = try alloc.dupe(u8, ru_val.string);
     }
 
-    return .{ .version = ver, .rules = rules, .ca_file = ca_file, .lock = lock, .generation = generation, .not_after = not_after, .release_url = release_url };
+    var audit_overflow: AuditOverflow = .drop_oldest;
+    if (root.object.get("audit_overflow")) |ao_val| {
+        if (ao_val != .string) return error.UnexpectedToken;
+        if (std.mem.eql(u8, ao_val.string, "drop_oldest")) {
+            audit_overflow = .drop_oldest;
+        } else if (std.mem.eql(u8, ao_val.string, "fail_closed")) {
+            audit_overflow = .fail_closed;
+        } else return error.UnexpectedToken;
+    }
+
+    return .{ .version = ver, .rules = rules, .ca_file = ca_file, .lock = lock, .generation = generation, .not_after = not_after, .release_url = release_url, .audit_overflow = audit_overflow };
 }
 
 pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
@@ -772,6 +794,10 @@ pub fn encodeDoc(alloc: std.mem.Allocator, doc: Doc) ![]u8 {
         try w.writeAll(",\"not_after\":");
         try w.print("{d}", .{na});
     }
+    if (doc.audit_overflow != .drop_oldest) {
+        try w.writeAll(",\"audit_overflow\":");
+        try writeJsonStr(w, @tagName(doc.audit_overflow));
+    }
     try w.writeAll(",\"rules\":[");
     for (doc.rules, 0..) |rule, i| {
         if (i > 0) try w.writeByte(',');
@@ -862,6 +888,7 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
     errdefer if (release_url) |v| alloc.free(v);
     var max_gen: u64 = 0;
     var merged_na: ?i64 = null;
+    var audit_overflow: AuditOverflow = .drop_oldest;
     for (docs[0..doc_n]) |maybe_doc| {
         const doc = maybe_doc.?;
         total_rules += doc.doc.rules.len;
@@ -878,6 +905,8 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
             if (release_url) |curr| alloc.free(curr);
             release_url = try alloc.dupe(u8, v);
         }
+        // Strictest wins: any fail_closed escalates the merged result.
+        if (doc.doc.audit_overflow == .fail_closed) audit_overflow = .fail_closed;
     }
 
     const rules = try alloc.alloc(Rule, total_rules);
@@ -906,6 +935,7 @@ pub fn loadResolved(alloc: std.mem.Allocator, cwd: ?[]const u8, home: ?[]const u
         .generation = max_gen,
         .not_after = merged_na,
         .release_url = release_url,
+        .audit_overflow = audit_overflow,
     };
     errdefer deinitDoc(alloc, merged);
 
@@ -1390,6 +1420,48 @@ test "parseDoc with tool filter" {
         .eff0 = doc.rules[0].effect,
         .tool0 = doc.rules[0].tool.?,
     });
+}
+
+test "parseDoc audit_overflow defaults to drop_oldest" {
+    const json = "{\"version\":1,\"rules\":[{\"pattern\":\"*\",\"effect\":\"allow\"}]}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(AuditOverflow.drop_oldest, doc.audit_overflow);
+}
+
+test "parseDoc audit_overflow fail_closed" {
+    const json = "{\"version\":1,\"audit_overflow\":\"fail_closed\",\"rules\":[{\"pattern\":\"*\",\"effect\":\"allow\"}]}";
+    const doc = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc);
+    try testing.expectEqual(AuditOverflow.fail_closed, doc.audit_overflow);
+}
+
+test "encodeDoc roundtrip preserves audit_overflow" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{
+        .rules = &rules,
+        .audit_overflow = .fail_closed,
+    };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+
+    const doc2 = try parseDoc(testing.allocator, json);
+    defer deinitDoc(testing.allocator, doc2);
+    try testing.expectEqual(AuditOverflow.fail_closed, doc2.audit_overflow);
+}
+
+test "encodeDoc omits audit_overflow when default" {
+    const rules = [_]Rule{.{ .pattern = "*", .effect = .allow }};
+    const doc = Doc{ .rules = &rules };
+    const json = try encodeDoc(testing.allocator, doc);
+    defer testing.allocator.free(json);
+    // Default drop_oldest is omitted from serialization
+    try testing.expect(std.mem.indexOf(u8, json, "audit_overflow") == null);
+}
+
+test "parseDoc rejects unknown audit_overflow value" {
+    const json = "{\"version\":1,\"audit_overflow\":\"bogus\",\"rules\":[{\"pattern\":\"*\",\"effect\":\"allow\"}]}";
+    try testing.expectError(error.UnexpectedToken, parseDoc(testing.allocator, json));
 }
 
 test "signed policy bundle verifies" {

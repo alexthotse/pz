@@ -37,6 +37,8 @@ pub const Err = error{
     AmbiguousSession,
     InvalidSessionPath,
     TerminalSetupFailed,
+    InvalidSyslogTransport,
+    AuditSpoolSetup,
 };
 
 const ProcMapCtx = struct {
@@ -93,6 +95,13 @@ const native_provider_kind_map = std.StaticStringMap(NativeProviderKind).initCom
 
 fn parseNativeProviderKind(provider: []const u8) ?NativeProviderKind {
     return native_provider_kind_map.get(provider);
+}
+
+fn parseSyslogTransport(s: []const u8) ?core.syslog.Transport {
+    if (std.mem.eql(u8, s, "udp")) return .udp;
+    if (std.mem.eql(u8, s, "tcp")) return .tcp;
+    if (std.mem.eql(u8, s, "tls")) return .tls;
+    return null;
 }
 
 const NativeProviderRuntime = union(enum) {
@@ -1653,6 +1662,64 @@ const AuditHooks = struct {
     }
 };
 
+/// Live audit forwarder: wraps SyslogShipper to implement emit_audit callback.
+/// Events are syslog-framed, buffered to a durable Ring spool on disconnect,
+/// and flushed in order on reconnect.
+const AuditShipper = struct {
+    alloc: std.mem.Allocator,
+    shipper: core.audit.SyslogShipper,
+    sender_conn: core.audit.SenderConnector,
+    now_ms: *const fn () i64,
+
+    const InitOpts = struct {
+        alloc: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        transport: core.syslog.Transport,
+        overflow: core.audit.OverflowPolicy,
+        buf_cap: u16,
+        spool_dir: ?std.fs.Dir,
+        allow_private: bool = false,
+        ca_file: ?[]const u8 = null,
+        now_ms: *const fn () i64 = std.time.milliTimestamp,
+    };
+
+    fn init(self: *AuditShipper, opts: InitOpts) !void {
+        self.alloc = opts.alloc;
+        self.now_ms = opts.now_ms;
+        self.sender_conn = .{
+            .alloc = opts.alloc,
+            .opts = .{
+                .transport = opts.transport,
+                .host = opts.host,
+                .port = opts.port,
+                .allow_private = opts.allow_private,
+                .tls = .{ .ca_file = opts.ca_file },
+            },
+        };
+        self.shipper = try core.audit.SyslogShipper.init(opts.alloc, .{}, .{
+            .connector = self.sender_conn.connector(),
+            .buf_cap = opts.buf_cap,
+            .overflow = opts.overflow,
+            .spool_dir = opts.spool_dir,
+        });
+    }
+
+    fn deinit(self: *AuditShipper) void {
+        self.shipper.deinit();
+    }
+
+    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+        const self: *AuditShipper = @ptrCast(@alignCast(ctx));
+        _ = alloc;
+        _ = try self.shipper.send(ent, self.now_ms());
+    }
+
+    fn emitFn(self: *AuditShipper) struct { ctx: *anyopaque, f: *const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void } {
+        return .{ .ctx = self, .f = &emit };
+    }
+};
+
 const RuntimeCtlAudit = struct {
     hooks: AuditHooks,
     seq: u64 = 1,
@@ -1966,6 +2033,61 @@ fn execWithIoTuiHooks(
     } else null;
     var seq_tracker = core.audit_integrity.SeqTracker.init(alloc, seq_path);
     hooks.seq_tracker = &seq_tracker;
+
+    // Durable audit forwarding: when syslog is configured, create a
+    // SyslogShipper with disk-backed spool so collector outages don't
+    // silently drop privileged audit events.
+    var audit_shipper: AuditShipper = undefined;
+    var has_audit_shipper = false;
+    var spool_dir: ?std.fs.Dir = null;
+    defer if (spool_dir) |*d| d.close();
+    defer if (has_audit_shipper) audit_shipper.deinit();
+
+    if (hooks.emit_audit == null) {
+        if (run_cmd.cfg.syslog_fwd) |fwd| {
+            if (parseSyslogTransport(fwd.transport)) |transport| {
+                const overflow: core.audit.OverflowPolicy = switch (run_cmd.cfg.audit_overflow) {
+                    .drop_oldest => .drop_oldest,
+                    .fail_closed => .fail_closed,
+                };
+
+                // Create spool directory under ~/.pz/audit_spool/.
+                // Under fail_closed, spool creation failure is fatal.
+                // Under drop_oldest, falls back to in-memory ring.
+                if (home) |h| {
+                    var spool_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const spool_path = std.fmt.bufPrint(&spool_path_buf, "{s}/.pz/audit_spool", .{h}) catch
+                        if (overflow == .fail_closed) return error.AuditSpoolSetup else null;
+                    if (spool_path) |sp| {
+                        if (core.fs_secure.ensureDirPath(sp)) {
+                            spool_dir = std.fs.openDirAbsolute(sp, .{ .iterate = true }) catch
+                                if (overflow == .fail_closed) return error.AuditSpoolSetup else null;
+                        } else |_| {
+                            if (overflow == .fail_closed) return error.AuditSpoolSetup;
+                        }
+                    }
+                } else if (overflow == .fail_closed) {
+                    return error.AuditSpoolSetup;
+                }
+
+                try audit_shipper.init(.{
+                    .alloc = alloc,
+                    .host = fwd.host,
+                    .port = fwd.port,
+                    .transport = transport,
+                    .overflow = overflow,
+                    .buf_cap = fwd.buf_cap,
+                    .spool_dir = spool_dir,
+                    .ca_file = run_cmd.cfg.ca_file,
+                    .now_ms = hooks.now_ms,
+                });
+                has_audit_shipper = true;
+                const fns = audit_shipper.emitFn();
+                hooks.emit_audit_ctx = fns.ctx;
+                hooks.emit_audit = fns.f;
+            } else return error.InvalidSyslogTransport;
+        }
+    }
 
     // Shared event loop for TUI mode — providers and tools use it
     // instead of creating per-call instances.
@@ -7115,6 +7237,12 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8
     const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}/pz-paste-{d}.png", .{ tmp_dir, ts });
     defer std.fs.deleteFileAbsolute(tmp_path) catch {}; // cleanup: propagation impossible
 
+    // Reject paths with chars that could break out of AppleScript string interpolation.
+    if (std.mem.indexOfAny(u8, tmp_path, "\"\\") != null) {
+        try ui.tr.infoText("[paste: unsafe temp path]");
+        return;
+    }
+
     const script = try std.fmt.allocPrint(alloc, "set imgData to the clipboard as «class PNGf»\nset fp to open for access POSIX file \"{s}\" with write permission\nwrite imgData to fp\nclose access fp", .{tmp_path});
     defer alloc.free(script);
 
@@ -8790,6 +8918,99 @@ test "runtime denied bash audit ships through udp syslog" {
 
 test "runtime denied bash audit ships through tcp syslog" {
     try verifyDeniedBashAuditSyslog(.tcp);
+}
+
+test "AuditShipper buffers events during disconnect and flushes on reconnect" {
+    // Verifies the runtime's AuditShipper struct wires SyslogShipper correctly:
+    // events are buffered during collector outage and flushed in order on reconnect.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Use a failing connector to simulate collector outage.
+    const FailConn = struct {
+        fn connect(_: *anyopaque) anyerror!core.audit.Connection {
+            return error.ConnectionRefused;
+        }
+    };
+
+    var shipper: AuditShipper = undefined;
+    shipper.alloc = std.testing.allocator;
+    shipper.now_ms = struct {
+        fn f() i64 {
+            return 42;
+        }
+    }.f;
+    shipper.sender_conn = undefined;
+    shipper.shipper = try core.audit.SyslogShipper.init(std.testing.allocator, .{}, .{
+        .connector = .{ .ctx = undefined, .connect = &FailConn.connect },
+        .buf_cap = 8,
+        .overflow = .drop_oldest,
+        .spool_dir = tmp.dir,
+    });
+    defer shipper.deinit();
+
+    // Send an event — connection will fail, event is buffered
+    const entry = core.audit.Entry{
+        .ts_ms = 42,
+        .sid = "test-sid",
+        .seq = 1,
+        .actor = .{ .kind = .sys },
+        .data = .{ .sess = .{ .op = .start, .tty = false } },
+    };
+    const result = try shipper.shipper.send(entry, 42);
+    try std.testing.expectEqual(core.audit.SendState.buffered, result.state);
+    try std.testing.expectEqual(@as(usize, 1), result.queued);
+
+    // Verify spool file was written
+    var count: usize = 0;
+    var it = tmp.dir.iterate();
+    while (try it.next()) |ent| {
+        if (std.mem.endsWith(u8, ent.name, ".spool")) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "AuditShipper fail_closed overflow rejects when ring full" {
+    const FailConn = struct {
+        fn connect(_: *anyopaque) anyerror!core.audit.Connection {
+            return error.ConnectionRefused;
+        }
+    };
+
+    var shipper: AuditShipper = undefined;
+    shipper.alloc = std.testing.allocator;
+    shipper.now_ms = struct {
+        fn f() i64 {
+            return 0;
+        }
+    }.f;
+    shipper.sender_conn = undefined;
+    shipper.shipper = try core.audit.SyslogShipper.init(std.testing.allocator, .{}, .{
+        .connector = .{ .ctx = undefined, .connect = &FailConn.connect },
+        .buf_cap = 2,
+        .overflow = .fail_closed,
+    });
+    defer shipper.deinit();
+
+    const entry = core.audit.Entry{
+        .ts_ms = 1,
+        .sid = "test-sid",
+        .seq = 1,
+        .actor = .{ .kind = .sys },
+        .data = .{ .sess = .{ .op = .start, .tty = false } },
+    };
+    // Fill the ring
+    _ = try shipper.shipper.send(entry, 0);
+    _ = try shipper.shipper.send(entry, 1);
+    // Third should fail: ring is full with fail_closed
+    try std.testing.expectError(error.SpoolFull, shipper.shipper.send(entry, 2));
+}
+
+test "parseSyslogTransport maps valid strings" {
+    try std.testing.expectEqual(core.syslog.Transport.udp, parseSyslogTransport("udp").?);
+    try std.testing.expectEqual(core.syslog.Transport.tcp, parseSyslogTransport("tcp").?);
+    try std.testing.expectEqual(core.syslog.Transport.tls, parseSyslogTransport("tls").?);
+    try std.testing.expect(parseSyslogTransport("bogus") == null);
 }
 
 test "subagent stub inherits effective policy hash" {

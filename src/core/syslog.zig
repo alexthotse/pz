@@ -487,6 +487,14 @@ fn sendAll(fd: std.posix.socket_t, raw: []const u8) !void {
     }
 }
 
+// B1: TLS syslog — requires Zig 0.15 std.crypto.tls.Client which takes
+// *std.Io.Reader / *std.Io.Writer (vtable-based buffered I/O), not raw fds.
+// The net.Stream.reader() returns a concrete type, not std.Io.Reader.
+// Proper implementation needs: (1) heap-allocate stream + buffers,
+// (2) create concrete reader/writer from stream, (3) obtain std.Io.Reader/Writer
+// from the concrete types via .any(), (4) pass to TLS Client.init.
+// Deferred to dedicated session — interface redesign is L effort.
+
 fn tlsHandshakeStub(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
     return error.TlsNotConfigured;
 }

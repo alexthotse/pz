@@ -68,14 +68,51 @@ pub const Listener = struct {
         alloc: std.mem.Allocator,
         timeout_ms: i32,
     ) !CodeState {
-        var fds = [_]std.posix.pollfd{.{
-            .fd = self.server.stream.handle,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        const ready = try std.posix.poll(&fds, timeout_ms);
-        if (ready == 0) return error.OAuthCallbackTimeout;
+        var timer = std.time.Timer.start() catch return error.OAuthCallbackTimeout;
+        const deadline_ns: u64 = if (timeout_ms > 0)
+            @as(u64, @intCast(timeout_ms)) * std.time.ns_per_ms
+        else
+            0;
 
+        while (true) {
+            // Compute remaining poll timeout from overall deadline.
+            const remaining_ms: i32 = if (timeout_ms <= 0)
+                timeout_ms // 0 = immediate, negative = infinite
+            else blk: {
+                const elapsed_ns = timer.read();
+                if (elapsed_ns >= deadline_ns) return error.OAuthCallbackTimeout;
+                const left_ns = deadline_ns - elapsed_ns;
+                const left_ms = left_ns / std.time.ns_per_ms;
+                break :blk if (left_ms > std.math.maxInt(i32))
+                    std.math.maxInt(i32)
+                else
+                    @intCast(left_ms);
+            };
+
+            var fds = [_]std.posix.pollfd{.{
+                .fd = self.server.stream.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            const ready = try std.posix.poll(&fds, remaining_ms);
+            if (ready == 0) return error.OAuthCallbackTimeout;
+
+            if (self.tryAcceptOne(alloc)) |out| {
+                return out;
+            } else |err| switch (err) {
+                // Retryable: bad request, wrong path, missing params, non-loopback,
+                // stalled client. Loop back and wait for next connection.
+                error.InvalidOAuthCallbackRequest,
+                error.NonLoopbackPeer,
+                error.OAuthReadTimeout,
+                => continue,
+                else => return err,
+            }
+        }
+    }
+
+    /// Accept a single connection and try to extract code+state from it.
+    fn tryAcceptOne(self: *Listener, alloc: std.mem.Allocator) !CodeState {
         var conn = try self.server.accept();
         defer conn.stream.close();
 
@@ -246,7 +283,7 @@ test "listener times out when callback is not received" {
     try std.testing.expectError(error.OAuthCallbackTimeout, listener.waitForCodeState(std.testing.allocator, 25));
 }
 
-test "listener rejects callback on wrong path" {
+test "listener retries on wrong path then times out" {
     var listener = try Listener.init(std.testing.allocator, .{});
     defer listener.deinit();
 
@@ -254,10 +291,11 @@ test "listener rejects callback on wrong path" {
     const t = try std.Thread.spawn(.{}, sendTestCallback, .{ listener.port(), req });
     defer t.join();
 
-    try std.testing.expectError(error.InvalidOAuthCallbackRequest, listener.waitForCodeState(std.testing.allocator, 3000));
+    // Invalid path is retried; with no valid follow-up, overall timeout fires.
+    try std.testing.expectError(error.OAuthCallbackTimeout, listener.waitForCodeState(std.testing.allocator, 200));
 }
 
-test "listener rejects callback missing state param" {
+test "listener retries on missing state then times out" {
     var listener = try Listener.init(std.testing.allocator, .{});
     defer listener.deinit();
 
@@ -265,7 +303,33 @@ test "listener rejects callback missing state param" {
     const t = try std.Thread.spawn(.{}, sendTestCallback, .{ listener.port(), req });
     defer t.join();
 
-    try std.testing.expectError(error.InvalidOAuthCallbackRequest, listener.waitForCodeState(std.testing.allocator, 3000));
+    // Missing state is retried; with no valid follow-up, overall timeout fires.
+    try std.testing.expectError(error.OAuthCallbackTimeout, listener.waitForCodeState(std.testing.allocator, 200));
+}
+
+test "listener retries invalid then accepts valid callback" {
+    var listener = try Listener.init(std.testing.allocator, .{});
+    defer listener.deinit();
+
+    const bad_req = "GET /wrong?code=abc&state=def HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    const good_req = "GET /callback?code=real&state=csrf HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+
+    // Send bad then good with a small delay between.
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(p: u16) void {
+            // First: invalid path
+            sendTestCallback(p, bad_req);
+            // Second: valid callback
+            sendTestCallback(p, good_req);
+        }
+    }.run, .{listener.port()});
+    defer t.join();
+
+    var got = try listener.waitForCodeState(std.testing.allocator, 5000);
+    defer got.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("real", got.code);
+    try std.testing.expectEqualStrings("csrf", got.state);
 }
 
 test "isLoopback accepts 127.x.x.x" {
@@ -290,23 +354,23 @@ test "isLoopback rejects non-loopback IPv6" {
     try std.testing.expect(!isLoopback(ext6));
 }
 
-test "listener stalled client triggers read timeout" {
-    var listener = try Listener.init(std.testing.allocator, .{ .read_deadline_ms = 100 });
+test "listener stalled client retried then times out" {
+    var listener = try Listener.init(std.testing.allocator, .{ .read_deadline_ms = 50 });
     defer listener.deinit();
 
-    // Connect but send nothing; read deadline should abort.
+    // Connect but send nothing; read deadline fires, retry loop exhausts overall timeout.
     const t = try std.Thread.spawn(.{}, struct {
         fn run(p: u16) void {
             std.Thread.sleep(20 * std.time.ns_per_ms);
             const addr = std.net.Address.parseIp("127.0.0.1", p) catch return;
             var stream = std.net.tcpConnectToAddress(addr) catch return;
             // Hold connection open without sending.
-            std.Thread.sleep(2 * std.time.ns_per_s);
+            std.Thread.sleep(1 * std.time.ns_per_s);
             stream.close();
         }
     }.run, .{listener.port()});
     defer t.join();
 
-    const err = listener.waitForCodeState(std.testing.allocator, 10_000);
-    try std.testing.expectError(error.OAuthReadTimeout, err);
+    const err = listener.waitForCodeState(std.testing.allocator, 300);
+    try std.testing.expectError(error.OAuthCallbackTimeout, err);
 }
