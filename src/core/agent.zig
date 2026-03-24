@@ -3,6 +3,7 @@ const std = @import("std");
 const signing = @import("signing.zig");
 const vtable = @import("vtable.zig");
 const event_loop = @import("event_loop.zig");
+const fs_secure = @import("fs_secure.zig");
 const EventLoop = event_loop.EventLoop;
 const testing = std.testing;
 
@@ -311,6 +312,8 @@ pub const ChildProc = struct {
         done: ?Done = null,
         err: ?Err = null,
         stdout: ?[]const u8 = null,
+        /// Path to secure artifact file containing full child stdout.
+        artifact_path: ?[]const u8 = null,
     };
 
     pub fn spawnHarness(
@@ -414,6 +417,62 @@ pub const ChildProc = struct {
         }
         return try list.toOwnedSlice(a);
     }
+
+    /// Drain child stdout to a secure artifact file under `dir`.
+    /// Returns the arena-owned artifact filename and a bounded in-memory
+    /// tail for the tool result.  Caller must eventually clean up the
+    /// artifact via `cleanupArtifacts`.
+    pub fn spoolToFile(self: *ChildProc, dir: std.fs.Dir, tail_cap: usize) !SpoolResult {
+        const a = self.arena.allocator();
+        // Generate unique artifact name from pid.
+        var name_buf: [48]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "agent-{d}.stdout", .{self.proc.id});
+        var file = try fs_secure.createConfined(dir, name, .{ .truncate = true });
+        errdefer {
+            file.close();
+            dir.deleteFile(name) catch {}; // cleanup: propagation impossible
+        }
+
+        var total: usize = 0;
+        var tail: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = self.stdout_file.read(&buf) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => {
+                    file.close();
+                    dir.deleteFile(name) catch {}; // cleanup: propagation impossible
+                    return err;
+                },
+            };
+            if (n == 0) break;
+            const chunk = buf[0..n];
+            try file.writeAll(chunk);
+            total += n;
+
+            // Keep a rolling tail window.
+            try tail.appendSlice(a, chunk);
+            if (tail.items.len > tail_cap) {
+                const excess = tail.items.len - tail_cap;
+                std.mem.copyForwards(u8, tail.items[0..tail_cap], tail.items[excess..]);
+                tail.shrinkRetainingCapacity(tail_cap);
+            }
+        }
+        try file.sync();
+        file.close();
+
+        return .{
+            .artifact = try a.dupe(u8, name),
+            .tail = try tail.toOwnedSlice(a),
+            .total = total,
+        };
+    }
+
+    pub const SpoolResult = struct {
+        artifact: []const u8,
+        tail: []const u8,
+        total: usize,
+    };
 
     /// Hello handshake deadline (ms).
     pub const hello_deadline_ms: i64 = 5_000;
@@ -1604,6 +1663,35 @@ test "tool stdout does not corrupt RPC channel" {
     const spool = try child.spoolStdout();
     try testing.expect(spool.len > 0);
     try testing.expect(std.mem.indexOf(u8, spool, "TOOL_OUTPUT_NOISE") != null);
+}
+
+test "spoolToFile writes artifact and returns tail" {
+    const build_options = @import("build_options");
+    const hash =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    var child = try ChildProc.spawnHarness(testing.allocator, build_options.agent_child_harness_path, .stdout_noise, "agent-child", hash);
+    defer child.deinit();
+
+    _ = try child.connect();
+    _ = try child.runReq(.{ .id = "job-spool", .prompt = "noise" });
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const sr = try child.spoolToFile(tmp.dir, 32);
+    try testing.expect(sr.total > 0);
+    try testing.expect(sr.tail.len <= 32);
+    try testing.expect(sr.artifact.len > 0);
+
+    // Artifact file contains full output.
+    const on_disk = try tmp.dir.readFileAlloc(testing.allocator, sr.artifact, 64 * 1024);
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqual(sr.total, on_disk.len);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "TOOL_OUTPUT_NOISE") != null);
+
+    // Cleanup removes the artifact.
+    fs_secure.cleanupAgentArtifacts(tmp.dir);
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(sr.artifact));
 }
 
 test "oversized RPC frame is rejected" {

@@ -4,6 +4,26 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 
 ---
 
+## Session Notes (2026-03-24)
+
+### Worked Well
+- Adding random entropy strings to parallel agent prompts breaks convergence — same-model agents with identical prompts find the same things and miss the same blind spots.
+- Converting all `runPzPtySteps` tests to `runPtyInteractive` with wait-for-text sync eliminated an entire class of timing flakes (10 tests converted, 0 remaining callers).
+- Adversarial plan review with 6 specialized agents (plan-critic, edge-case, reviewer, scout, auditor, destructor) on disjoint surfaces finds issues a single reviewer misses — 2 reviews × 10 rounds found 2 Critical + 59 Major issues.
+- Many plan items turn out to be "already done" when checked against actual code — always verify before implementing (B5, D5, D10, D11, D12, D16 were all complete).
+- The escapeBodyAlloc case-sensitivity bug (A10) was found by the security auditor agent — fresh context catches what the implementer assumes is working.
+
+### Do Not Do
+- Don't run tests 5+ times to prove stability — fix the root cause instead. Converting to wait-for-text sync is the fix, not longer sleeps.
+- Don't use `runPzPtySteps` for new PTY tests — use `runPtyInteractive` exclusively.
+- Don't skip plan review validation against actual code — line numbers drift as the file changes, function names get wrong, items get silently dropped.
+- Don't claim `catch return` in `RealSleeper.sleep` is a bug — immediate retry on poll failure is correct backoff behavior.
+- Don't assume `config.zig Err = anyerror` — it uses `@typeInfo` reflection to compute a concrete error set.
+
+### Did Not Work
+- Fixed-sleep `runPzPtySteps` approach for PTY tests — inherently unreliable, can't be fixed with longer sleeps.
+- Trying to make the version check PTY test deterministic with server.join — the join kills the server before the version check thread can connect. Using skip on timeout is more robust.
+
 ## Session Notes (2026-03-20)
 
 ### Worked Well

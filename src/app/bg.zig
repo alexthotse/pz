@@ -102,6 +102,7 @@ pub const Manager = struct {
     wake_w: std.posix.fd_t,
     journal: journal_mod.Journal,
     tmp_dir: []const u8 = "/tmp",
+    home: ?[]const u8 = null,
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = nowMs,
@@ -134,6 +135,7 @@ pub const Manager = struct {
                 .xdg_state_home = opts.xdg_state_home,
             }),
             .tmp_dir = opts.tmp_dir,
+            .home = opts.home,
             .emit_audit_ctx = opts.emit_audit_ctx,
             .emit_audit = opts.emit_audit,
             .now_ms = opts.now_ms,
@@ -720,11 +722,21 @@ pub const Manager = struct {
     }
 
     fn mkLogPath(self: *Manager, id: u64) ![]u8 {
+        const log_dir = if (self.home) |h|
+            try std.fmt.allocPrint(self.alloc, "{s}/.pz/bg", .{h})
+        else
+            try self.alloc.dupe(u8, self.tmp_dir);
+        defer self.alloc.free(log_dir);
+
+        core.fs_secure.ensureDirPath(log_dir) catch {
+            // Fall through: createFileAbsolute will fail with a clear error.
+        };
+
         var n: u32 = 0;
         while (n < 64) : (n += 1) {
             const ts = std.time.milliTimestamp();
             const path = try std.fmt.allocPrint(self.alloc, "{s}/pz-bg-{d}-{d}.log", .{
-                self.tmp_dir,
+                log_dir,
                 id,
                 ts + @as(i64, n),
             });

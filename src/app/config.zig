@@ -123,7 +123,7 @@ pub const PzState = struct {
         defer alloc.free(raw);
         const parsed = try std.json.parseFromSlice(PzState, alloc, raw, .{
             .allocate = .alloc_always,
-            .ignore_unknown_fields = true,
+            .ignore_unknown_fields = false,
         });
         defer parsed.deinit();
         // Dupe fields so they outlive the parsed arena
@@ -265,9 +265,11 @@ pub fn discover(
             },
             .off, .path => return error.PolicyLockedConfig,
         }
-    } else if (try loadGlobalSettings(alloc, env.home)) |global_cfg| {
-        defer global_cfg.deinit();
-        try applySettingsCfg(alloc, &out, global_cfg.value, error.InvalidFileMode);
+    } else if (parsed.cfg != .off) {
+        if (try loadGlobalSettings(alloc, env.home)) |global_cfg| {
+            defer global_cfg.deinit();
+            try applySettingsCfg(alloc, &out, global_cfg.value, error.InvalidFileMode);
+        }
     }
 
     if (!out.policy_lock.cfg) {
@@ -620,6 +622,27 @@ test "config no-config bypasses file source" {
     try std.testing.expectEqualStrings(provider_default, cfg.provider);
     try std.testing.expect(cfg.theme == null);
     try std.testing.expect(cfg.provider_cmd == null);
+}
+
+test "config no-config suppresses global settings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.pz/settings.json",
+        .data = "{\"defaultModel\":\"home-model\",\"theme\":\"dark\"}",
+    });
+
+    const home_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "home");
+    defer std.testing.allocator.free(home_abs);
+
+    const parsed = try args.parse(&.{"--no-config"});
+    var cfg = try discover(std.testing.allocator, tmp.dir, parsed, .{ .home = home_abs });
+    defer cfg.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(model_default, cfg.model);
+    try std.testing.expect(cfg.theme == null);
 }
 
 test "config explicit path loads file" {

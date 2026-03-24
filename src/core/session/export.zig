@@ -152,7 +152,7 @@ const StreamCtx = struct {
     }
 };
 
-/// Atomic streaming write: temp file + write callback + fsync + rename.
+/// Atomic streaming write via fs_secure (O_EXCL + O_NOFOLLOW temp).
 fn atomicExportStream(
     dest: []const u8,
     ctx: *StreamCtx,
@@ -167,28 +167,7 @@ fn atomicExportStream(
         try std.fs.cwd().openDir(dir_path, .{});
     defer out_dir.close();
 
-    var tmp_buf: [512]u8 = undefined;
-    const needed = 1 + basename.len + 4;
-    if (needed > tmp_buf.len) return error.NameTooLong;
-    tmp_buf[0] = '.';
-    @memcpy(tmp_buf[1 .. 1 + basename.len], basename);
-    @memcpy(tmp_buf[1 + basename.len .. needed], ".tmp");
-    const tmp_name = tmp_buf[0..needed];
-
-    out_dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
-    var file = try out_dir.createFile(tmp_name, .{ .truncate = true, .mode = fs_secure.file_mode });
-    errdefer {
-        file.close();
-        out_dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
-    }
-    try writeFn(ctx, file);
-    try file.sync();
-    file.close();
-
-    out_dir.rename(tmp_name, basename) catch |err| {
-        out_dir.deleteFile(tmp_name) catch {}; // cleanup: propagation impossible
-        return err;
-    };
+    try fs_secure.atomicWriteAtFn(out_dir, basename, ctx, writeFn);
 }
 
 fn writeSection(alloc: std.mem.Allocator, f: std.fs.File, title: []const u8, txt: []const u8) !void {

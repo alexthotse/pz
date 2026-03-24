@@ -511,8 +511,10 @@ pub fn verifyManifestRing(
 }
 
 /// Anti-downgrade: manifest version must be strictly newer.
+/// Fails closed: unparseable current version (e.g. dev builds) rejects
+/// all updates rather than silently allowing arbitrary versions.
 pub fn checkNotDowngrade(manifest_ver: []const u8, current_ver: []const u8) error{Downgrade}!void {
-    const cur = parseSemver(current_ver) orelse return;
+    const cur = parseSemver(current_ver) orelse return error.Downgrade;
     const mfst = parseSemver(manifest_ver) orelse return error.Downgrade;
     if (!mfst.isNewer(cur)) return error.Downgrade;
 }
@@ -1012,8 +1014,8 @@ test "checkNotDowngrade rejects same or older" {
     try testing.expectError(error.Downgrade, checkNotDowngrade("v1.0.0", "v2.0.0"));
 }
 
-test "checkNotDowngrade allows unparseable current" {
-    try checkNotDowngrade("v1.0.0", "dev");
+test "checkNotDowngrade rejects unparseable current (fail closed)" {
+    try testing.expectError(error.Downgrade, checkNotDowngrade("v1.0.0", "dev"));
 }
 
 test "checkNotDowngrade rejects unparseable manifest" {

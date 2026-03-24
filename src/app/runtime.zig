@@ -4063,7 +4063,15 @@ fn runRpc(
                         .{ .text = @errorName(err), .vis = .mask },
                         &.{},
                     );
-                    return err;
+                    const err_msg = try report.rpc(alloc, "compact session", err);
+                    defer alloc.free(err_msg);
+                    try writeJsonLine(alloc, out, .{
+                        .type = "rpc_error",
+                        .id = req.id,
+                        .cmd = raw_cmd,
+                        .msg = err_msg,
+                    });
+                    continue;
                 };
                 const attrs = [_]core.audit.Attribute{
                     .{
@@ -4726,7 +4734,10 @@ fn handleSlashCommand(
                     .{ .text = @errorName(err), .vis = .mask },
                     &.{},
                 );
-                return err;
+                const em = try report.cli(alloc, "compact session", err);
+                defer alloc.free(em);
+                try out.writeAll(em);
+                return .handled;
             };
             const attrs = [_]core.audit.Attribute{
                 .{

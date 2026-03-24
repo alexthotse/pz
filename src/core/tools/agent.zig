@@ -250,6 +250,7 @@ fn renderAlloc(alloc: std.mem.Allocator, agent_id: []const u8, run_res: rpc.Chil
     try wr.print("stop: {s}\n", .{stop});
     try wr.print("truncated: {}\n", .{child_trunc});
     if (dropped > 0) try wr.print("dropped_output: {d}\n", .{dropped});
+    if (run_res.artifact_path) |ap| try wr.print("artifact: {s}\n", .{ap});
     if (run_res.err) |rpc_err| {
         try wr.print("error: {s}\n", .{rpc_err.code});
         try wr.print("fatal: {}\n\n", .{rpc_err.fatal});

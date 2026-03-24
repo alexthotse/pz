@@ -182,9 +182,48 @@ fn tmpName(name: []const u8, buf: *[256]u8) ![]const u8 {
     return buf[0..needed];
 }
 
+// ---------------------------------------------------------------------------
+// Agent artifact orphan cleanup
+// ---------------------------------------------------------------------------
+
+/// Remove orphan agent artifact files (matching `agent-*.stdout`) from `dir`.
+/// Best-effort: individual delete failures are ignored since we cannot
+/// propagate per-file errors during cleanup.
+pub fn cleanupAgentArtifacts(dir: std.fs.Dir) void {
+    var it = dir.iterate();
+    while (it.next() catch null) |ent| { // cleanup: iteration failure ends scan
+        if (ent.kind != .file) continue;
+        if (!std.mem.startsWith(u8, ent.name, "agent-")) continue;
+        if (!std.mem.endsWith(u8, ent.name, ".stdout")) continue;
+        dir.deleteFile(ent.name) catch {}; // cleanup: propagation impossible
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "cleanupAgentArtifacts removes orphans" {
+    if (builtin.os.tag == .windows) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create some artifact files and a non-artifact.
+    var f1 = try tmp.dir.createFile("agent-123.stdout", .{});
+    f1.close();
+    var f2 = try tmp.dir.createFile("agent-456.stdout", .{});
+    f2.close();
+    var f3 = try tmp.dir.createFile("other.txt", .{});
+    f3.close();
+
+    cleanupAgentArtifacts(tmp.dir);
+
+    // Artifacts deleted, other file preserved.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("agent-123.stdout"));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile("agent-456.stdout"));
+    _ = try tmp.dir.statFile("other.txt");
+}
 
 test "ensureDirAt locks directory mode to 0700" {
     if (builtin.os.tag == .windows) return;

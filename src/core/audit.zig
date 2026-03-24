@@ -458,33 +458,36 @@ const Ring = struct {
         dir.deleteFile(name) catch {}; // cleanup: propagation impossible
     }
 
-    fn restoreSpool(self: *Ring) error{OutOfMemory}!void {
+    const SpoolEntry = struct { seq: u64, name: [32]u8, len: usize };
+
+    fn restoreSpool(self: *Ring) !void {
         const dir = self.spool_dir orelse return;
-        // Scan for .spool files and load them in order
+        if (self.slots.len == 0) return;
+
+        // Scan all spool files, sort by seq, load oldest up to ring capacity.
+        var list: std.ArrayListUnmanaged(SpoolEntry) = .empty;
+        defer list.deinit(self.alloc);
+
         var it = dir.iterate();
-        var names: [256]struct { seq: u64, name: [32]u8, len: usize } = undefined;
-        var count: usize = 0;
-        while (it.next() catch null) |ent| { // I/O errors during iteration → stop
+        while (try it.next()) |ent| {
             if (!std.mem.endsWith(u8, ent.name, ".spool")) continue;
-            if (count >= names.len) break;
             const stem = ent.name[0 .. ent.name.len - 6];
             const seq = std.fmt.parseInt(u64, stem, 10) catch continue; // malformed filename, skip
-            var entry = &names[count];
+            var entry: SpoolEntry = undefined;
             entry.seq = seq;
             entry.len = ent.name.len;
             @memcpy(entry.name[0..ent.name.len], ent.name);
-            count += 1;
+            try list.append(self.alloc, entry);
         }
 
         // Sort by seq
-        const items = names[0..count];
-        std.mem.sort(@TypeOf(items[0]), items, {}, struct {
-            fn cmp(_: void, a: @TypeOf(items[0]), b: @TypeOf(items[0])) bool {
+        std.mem.sort(SpoolEntry, list.items, {}, struct {
+            fn cmp(_: void, a: SpoolEntry, b: SpoolEntry) bool {
                 return a.seq < b.seq;
             }
         }.cmp);
 
-        for (items) |item| {
+        for (list.items) |item| {
             if (self.len >= self.slots.len) break;
             const name = item.name[0..item.len];
             const data = dir.readFileAlloc(self.alloc, name, 64 * 1024) catch |err| switch (err) {
@@ -2099,6 +2102,32 @@ test "durable spool persists and restores events" {
         try testing.expectEqualStrings("event-2", ring.peek().?);
         ring.pop();
         try testing.expectEqual(@as(usize, 0), ring.len);
+    }
+}
+
+test "durable spool restores only up to ring capacity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Write 5 events into a ring with cap 8
+    {
+        var ring = try Ring.init(testing.allocator, 8, .drop_oldest, tmp.dir);
+        defer ring.deinit();
+        var i: u8 = 0;
+        while (i < 5) : (i += 1) {
+            var buf: [16]u8 = undefined;
+            const name = std.fmt.bufPrint(&buf, "msg-{d}", .{i}) catch unreachable;
+            _ = try ring.push(name);
+        }
+        try testing.expectEqual(@as(usize, 5), ring.len);
+    }
+
+    // Restore into a ring with cap 3 -- should load only 3
+    {
+        var ring = try Ring.init(testing.allocator, 3, .drop_oldest, tmp.dir);
+        defer ring.deinit();
+        try testing.expectEqual(@as(usize, 3), ring.len);
+        try testing.expectEqualStrings("msg-0", ring.peek().?);
     }
 }
 

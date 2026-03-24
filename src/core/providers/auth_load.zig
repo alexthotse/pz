@@ -84,12 +84,34 @@ fn findAuthFile(ar: std.mem.Allocator, home: []const u8) ![]const u8 {
     // Primary: ~/.pz/auth.json
     const path = try authFilePath(ar, home);
     if (std.fs.cwd().access(path, .{})) |_| return path else |_| {}
-    ar.free(path);
-    // Fallback: ~/.pi/agent/auth.json (legacy migration)
+
+    // Legacy: ~/.pi/agent/auth.json -- migrate once, then use primary
     const legacy = try std.fs.path.join(ar, &.{ home, ".pi", "agent", "auth.json" });
-    if (std.fs.cwd().access(legacy, .{})) |_| return legacy else |_| {}
-    ar.free(legacy);
+    defer ar.free(legacy);
+    if (std.fs.cwd().access(legacy, .{})) |_| {
+        migrateAuth(ar, home, legacy, path) catch {
+            ar.free(path);
+            return error.AuthNotFound;
+        };
+        return path;
+    } else |_| {}
+    ar.free(path);
     return error.AuthNotFound;
+}
+
+/// Copy legacy ~/.pi/agent/auth.json to ~/.pz/auth.json.
+fn migrateAuth(ar: std.mem.Allocator, home: []const u8, legacy: []const u8, dest: []const u8) !void {
+    _ = dest;
+    const dir_path = try primaryAuthDir(ar, home);
+    defer ar.free(dir_path);
+    try fs_secure.ensureDirPath(dir_path);
+    const data = try std.fs.cwd().readFileAlloc(ar, legacy, 1024 * 1024);
+    defer ar.free(data);
+    if (!std.fs.path.isAbsolute(dir_path)) return error.AuthNotFound;
+    var dir = try std.fs.openDirAbsolute(dir_path, .{});
+    defer dir.close();
+    try fs_secure.atomicWriteAt(dir, "auth.json", data);
+    std.log.warn("migrated auth from ~/.pi/agent/auth.json to ~/.pz/auth.json", .{});
 }
 
 /// Check if a resolved auth file path is a legacy ~/.pi/ path.
@@ -663,6 +685,43 @@ test "loadFileAuth returns AuthNotFound when file is missing" {
     defer arena.deinit();
     const res = loadFileAuth(arena.allocator(), home);
     try std.testing.expectError(error.AuthNotFound, res);
+}
+
+test "findAuthFile migrates legacy .pi auth to .pz" {
+    const OhSnap = @import("ohsnap");
+    const oh = OhSnap{};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create legacy auth only (no .pz/auth.json)
+    try tmp.dir.makePath(".pi/agent");
+    try tmp.dir.writeFile(.{
+        .sub_path = ".pi/agent/auth.json",
+        .data =
+        \\{
+        \\  "anthropic": {
+        \\    "type": "api_key",
+        \\    "key": "sk-legacy"
+        \\  }
+        \\}
+        ,
+    });
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    // Load should migrate and return from primary path
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = try loadFileAuth(arena.allocator(), home);
+    try oh.snap(@src(),
+        \\core.providers.auth.Auth
+        \\  .api_key: []const u8
+        \\    "sk-legacy"
+    ).expectEqual(a);
+
+    // Verify migrated file exists at primary path
+    try tmp.dir.access(".pz/auth.json", .{});
 }
 
 test "loadFileAuthForProvider parses openai oauth entry" {
