@@ -461,7 +461,10 @@ fn auditOutcome(
     user_msg: []u8,
 ) !Outcome {
     try emitUpdateAudit(alloc, hooks, 2, out, sev, msg, argv);
-    return .{ .ok = ok, .msg = user_msg };
+    // Redact secrets (tokens in URLs, auth fragments) before user display.
+    const redacted = try core.audit.redactTextAlloc(alloc, user_msg, .@"pub");
+    alloc.free(user_msg);
+    return .{ .ok = ok, .msg = redacted };
 }
 
 fn emitUpdateAudit(

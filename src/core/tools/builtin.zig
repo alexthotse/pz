@@ -1,5 +1,6 @@
 //! Built-in tool specs: parameter schemas and metadata.
 const std = @import("std");
+const audit = @import("../audit.zig");
 const tools = @import("../tools.zig");
 const vtable = @import("../vtable.zig");
 const read = @import("read.zig");
@@ -587,10 +588,13 @@ pub const Runtime = struct {
         const summary = try web.approvalSummaryAlloc(self.alloc, req);
         defer self.alloc.free(summary);
 
-        const msg = if (needs_approval)
+        const raw_msg = if (needs_approval)
             try std.fmt.allocPrint(self.alloc, "approval_required: {s}", .{summary})
         else
             try std.fmt.allocPrint(self.alloc, "ready: {s}", .{summary});
+        // Redact secrets (tokens in URLs) before returning to model.
+        const msg = audit.redactTextAlloc(self.alloc, raw_msg, .@"pub") catch return error.OutOfMemory;
+        self.alloc.free(raw_msg);
         errdefer self.alloc.free(msg);
 
         const out = try self.alloc.alloc(tools.Output, 1);

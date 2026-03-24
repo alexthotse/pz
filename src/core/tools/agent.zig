@@ -1,5 +1,6 @@
 //! Agent tool: spawn child agent via RPC.
 const std = @import("std");
+const audit = @import("../audit.zig");
 const rpc = @import("../agent.zig");
 const tools = @import("../tools.zig");
 const vtable = @import("../vtable.zig");
@@ -157,7 +158,10 @@ const SinkBridge = struct {
 };
 
 fn finish(self: Handler, call: tools.Call, agent_id: []const u8, run_res: rpc.ChildProc.RunResult, dropped: u32) Err!tools.Result {
-    const full = try renderAlloc(self.alloc, agent_id, run_res, dropped);
+    const raw = try renderAlloc(self.alloc, agent_id, run_res, dropped);
+    defer self.alloc.free(raw);
+    // Redact secrets from child agent output before returning to model.
+    const full = audit.redactTextAlloc(self.alloc, raw, .@"pub") catch return error.OutOfMemory;
     defer self.alloc.free(full);
 
     const slice = tools.truncate.apply(full, self.max_bytes);
