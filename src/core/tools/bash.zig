@@ -303,7 +303,7 @@ fn runChild(
     while (stdout_open or stderr_open or final == null) {
         if (cancel) |src| {
             if (final == null and src.isCanceled()) {
-                _ = terminateAndReap(&child) catch |kill_err| return shared.mapFsErr(kill_err);
+                _ = terminateAndReap(&child, &el) catch |kill_err| return shared.mapFsErr(kill_err);
                 final = .{ .cancelled = .{ .reason = .user } };
             }
         }
@@ -384,9 +384,6 @@ fn runChild(
     };
 }
 
-fn killAndWait(child: *std.process.Child) Err!void {
-    _ = terminateAndReap(child) catch |kill_err| return shared.mapFsErr(kill_err);
-}
 
 fn setNonblock(fd: std.posix.fd_t) !void {
     const cur = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
@@ -434,7 +431,9 @@ fn readFd(
     }
 }
 
-fn terminateAndReap(child: *std.process.Child) anyerror!u32 {
+/// Terminate child: SIGTERM, poll grace period, escalate to SIGKILL.
+/// When `el` is non-null, uses event-loop wait instead of Thread.sleep.
+fn terminateAndReap(child: *std.process.Child, el: ?*EventLoop) anyerror!u32 {
     switch (pollChild(child)) {
         .status => |status| return status,
         .pending => {},
@@ -446,8 +445,13 @@ fn terminateAndReap(child: *std.process.Child) anyerror!u32 {
     };
 
     var polls: u64 = 0;
+    var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
     while (polls < (term_grace_ms / wait_poll_ms)) : (polls += 1) {
-        std.Thread.sleep(wait_poll_ms * std.time.ns_per_ms);
+        if (el) |loop| {
+            _ = loop.wait(@intCast(wait_poll_ms), &ev_buf) catch {}; // cleanup: propagation impossible in teardown
+        } else {
+            std.Thread.sleep(wait_poll_ms * std.time.ns_per_ms);
+        }
         switch (pollChild(child)) {
             .status => |status| return status,
             .pending => {},

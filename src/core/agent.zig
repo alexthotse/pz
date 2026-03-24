@@ -465,11 +465,11 @@ pub const ChildProc = struct {
     }
 
     pub fn deinit(self: *ChildProc) void {
-        self.el.deinit();
         self.stdin_file.close();
         self.stdout_file.close();
         self.rpc_file.close();
-        killAndWait(&self.proc);
+        killAndWait(&self.proc, &self.el);
+        self.el.deinit();
         self.arena.deinit();
     }
 
@@ -683,7 +683,8 @@ pub const ChildProc = struct {
 };
 
 /// SIGTERM the process group, poll for exit, escalate to SIGKILL.
-fn killAndWait(child: *std.process.Child) void {
+/// When `el` is non-null, uses event-loop wait instead of Thread.sleep.
+fn killAndWait(child: *std.process.Child, el: ?*EventLoop) void {
     const builtin = @import("builtin");
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {
         _ = child.wait() catch {}; // cleanup: propagation impossible
@@ -704,13 +705,18 @@ fn killAndWait(child: *std.process.Child) void {
 
     // Poll with WNOHANG during grace period.
     var polls: u32 = 0;
+    var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
     while (polls < ChildProc.kill_polls) : (polls += 1) {
         const res = std.posix.waitpid(pid, std.c.W.NOHANG);
         if (res.pid != 0) {
             child.id = undefined;
             return;
         }
-        std.Thread.sleep(ChildProc.poll_sleep_ms * std.time.ns_per_ms);
+        if (el) |loop| {
+            _ = loop.wait(@intCast(ChildProc.poll_sleep_ms), &ev_buf) catch {}; // cleanup: propagation impossible in deinit
+        } else {
+            std.Thread.sleep(ChildProc.poll_sleep_ms * std.time.ns_per_ms);
+        }
     }
 
     // Escalate to SIGKILL on the process group.
@@ -1190,11 +1196,11 @@ pub const BgAgent = struct {
         // Detach the arena from child so result slices stay valid.
         // Manually clean up child resources without freeing the arena.
         ctx.bg.result_arena = child.arena;
-        child.el.deinit();
         child.stdin_file.close();
         child.stdout_file.close();
         child.rpc_file.close();
-        killAndWait(&child.proc);
+        killAndWait(&child.proc, &child.el);
+        child.el.deinit();
 
         ctx.bg.result = res;
         ctx.bg.status.store(@intFromEnum(AgentStatus.fromRunResult(res)), .release);
@@ -2142,4 +2148,42 @@ test "lastLine extracts final line" {
     try testing.expect(lastLine("") == null);
     try testing.expect(lastLine("\n") == null);
     try testing.expectEqualStrings("b", lastLine("a\nb").?);
+}
+
+test "BgPool lifecycle: init, inject agents, poll to done" {
+    const alloc = testing.allocator;
+    var pool = BgPool.init(alloc);
+    defer pool.deinit();
+
+    // Empty pool is not "all done" (len == 0).
+    try testing.expect(!pool.allDone());
+
+    // Create two BgAgents with wake pipes, inject into pool manually.
+    var agents: [2]*BgAgent = undefined;
+    for (&agents) |*slot| {
+        const bg = try alloc.create(BgAgent);
+        bg.* = try BgAgent.init(alloc, "test-agent", "0" ** 64);
+        const idx = try pool.tracker.add("test-agent", 0);
+        pool.agents[idx] = bg;
+        pool.len += 1;
+        slot.* = bg;
+    }
+
+    // Both agents are running — pollAll should return false.
+    try testing.expect(!pool.pollAll());
+    try testing.expect(!pool.allDone());
+
+    // Transition first agent to done.
+    agents[0].status.store(@intFromEnum(AgentStatus.done), .release);
+    try testing.expect(!pool.pollAll());
+
+    // Transition second agent to err.
+    agents[1].status.store(@intFromEnum(AgentStatus.err), .release);
+    try testing.expect(pool.pollAll());
+    try testing.expect(pool.allDone());
+
+    // Verify per-agent status via get.
+    try testing.expectEqual(AgentStatus.done, pool.get(0).?.getStatus());
+    try testing.expectEqual(AgentStatus.err, pool.get(1).?.getStatus());
+    try testing.expect(pool.get(2) == null);
 }

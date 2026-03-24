@@ -242,6 +242,13 @@ const RuntimePolicy = struct {
         const path = toolPolicyPath(&buf, name, call) catch return false;
         return core.policy.evaluateKind(self.resolved.doc.rules, path, name, kind_str) == .allow;
     }
+
+    fn allowsCmdKind(self: *const RuntimePolicy, name: []const u8, tool: ?[]const u8, kind: ?[]const u8) bool {
+        if (!self.enforced()) return true;
+        var buf: [128]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "cmd/{s}", .{name}) catch return false;
+        return core.policy.evaluateKind(self.resolved.doc.rules, path, tool, kind) == .allow;
+    }
 };
 
 fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]const u8 {
@@ -1321,7 +1328,7 @@ const AuditHooks = struct {
     auth_home: ?[]const u8 = null,
     auth_lock: core.policy.Lock = .{},
     ca_file: ?[]const u8 = null,
-    share_gist: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = shareGist,
+    share_gist: *const fn (std.mem.Allocator, []const u8, *const RuntimePolicy) anyerror![]u8 = shareGist,
     run_upgrade: *const fn (std.mem.Allocator, update_mod.AuditHooks) anyerror!update_mod.Outcome = update_mod.runOutcomeAudited,
     seq_tracker: ?*core.audit_integrity.SeqTracker = null,
 
@@ -2370,7 +2377,7 @@ fn runTui(
         }
         if (cmd == .copy) {
             try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .start, null, &.{});
-            try copyLastResponse(alloc, &ui);
+            try copyLastResponse(alloc, &ui, pol);
             try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
         }
         if (cmd == .cost) {
@@ -2750,7 +2757,7 @@ fn runTui(
                             }
                             if (cmd == .copy) {
                                 try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .start, null, &.{});
-                                try copyLastResponse(alloc, &ui);
+                                try copyLastResponse(alloc, &ui, pol);
                                 try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
                                 try ui.draw(out);
                                 continue;
@@ -2842,7 +2849,7 @@ fn runTui(
 
                             // Bash mode: !cmd or !!cmd
                             if (parseBashCmd(prompt)) |bcmd| {
-                                try runBashMode(alloc, &ui, bcmd, sid.*, store);
+                                try runBashMode(alloc, &ui, bcmd, sid.*, store, pol);
                                 try ui.draw(out);
                                 continue;
                             }
@@ -2984,7 +2991,7 @@ fn runTui(
                         },
                         .paste_image => {
                             if (pre) |p| alloc.free(p);
-                            try pasteImage(alloc, &ui, run_cmd.tmp_dir);
+                            try pasteImage(alloc, &ui, run_cmd.tmp_dir, pol);
                             try ui.draw(out);
                         },
                         .reverse_cycle_model => {
@@ -3227,7 +3234,7 @@ fn runTui(
             }
             if (cmd == .copy) {
                 try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .start, null, &.{});
-                try copyLastResponse(alloc, &ui);
+                try copyLastResponse(alloc, &ui, pol);
                 try runtimeCtlAudit(&ctl_audit, alloc, "copy", .cmd, runtimeCfgResName(), null, .ok, null, &.{});
                 try ui.draw(out);
                 cmd_ct += 1;
@@ -3260,7 +3267,7 @@ fn runTui(
 
             // Bash mode: !cmd or !!cmd
             if (parseBashCmd(trimmed)) |bcmd| {
-                try runBashMode(alloc, &ui, bcmd, sid.*, store);
+                try runBashMode(alloc, &ui, bcmd, sid.*, store, pol);
                 try ui.draw(out);
                 turn_ct += 1;
                 continue;
@@ -4767,7 +4774,7 @@ fn handleSlashCommand(
                 return .handled;
             };
             defer alloc.free(md_path);
-            const gist_url = audit_hooks.share_gist(alloc, md_path) catch |err| {
+            const gist_url = audit_hooks.share_gist(alloc, md_path, pol) catch |err| {
                 try runtimeCtlAudit(
                     ctl_audit,
                     alloc,
@@ -4962,7 +4969,8 @@ const gh_paths = if (builtin.target.os.tag == .macos)
 else
     &[_][]const u8{ "/usr/bin/gh", "/usr/local/bin/gh" };
 
-fn shareGist(alloc: std.mem.Allocator, md_path: []const u8) ![]u8 {
+fn shareGist(alloc: std.mem.Allocator, md_path: []const u8, pol: *const RuntimePolicy) ![]u8 {
+    if (!pol.allowsCmdKind("gh", null, "egress")) return error.PolicyDenied;
     const gh = try resolveAbsCmd(alloc, gh_paths);
     defer alloc.free(gh);
     const result = try std.process.Child.run(.{
@@ -5871,6 +5879,7 @@ fn looksLikeHexCommit(text: []const u8) bool {
     return true;
 }
 
+// hardcoded argv, no user input -- policy gate not needed
 fn runCmdTrimAlloc(alloc: std.mem.Allocator, argv: []const []const u8, max_bytes: usize) ?[]u8 {
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -6322,13 +6331,13 @@ const clip_paths = if (builtin.target.os.tag == .macos)
 else
     &[_][]const u8{ "/usr/bin/xclip", "/usr/bin/xsel", "/usr/bin/wl-copy" };
 
-fn copyLastResponse(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
+fn copyLastResponse(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimePolicy) !void {
     const text = ui.lastResponseText() orelse {
         try ui.tr.infoText("[nothing to copy]");
         return;
     };
     for (clip_paths) |cmd| {
-        if (try pipeToCmd(alloc, cmd, text)) {
+        if (try pipeToCmd(alloc, cmd, text, pol)) {
             try ui.tr.infoText("[copied to clipboard]");
             return;
         }
@@ -6336,7 +6345,9 @@ fn copyLastResponse(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
     try ui.tr.infoText("[copy failed: no clipboard tool found]");
 }
 
-fn pipeToCmd(alloc: std.mem.Allocator, cmd: []const u8, text: []const u8) !bool {
+fn pipeToCmd(alloc: std.mem.Allocator, cmd: []const u8, text: []const u8, pol: *const RuntimePolicy) !bool {
+    const base = std.fs.path.basename(cmd);
+    if (!pol.allowsCmdKind(base, null, "clipboard")) return false;
     const argv = [_][]const u8{cmd};
     var child = std.process.Child.init(argv[0..], alloc);
     child.stdin_behavior = .Pipe;
@@ -6754,7 +6765,21 @@ fn runBashMode(
     bcmd: BashCmd,
     sid: []const u8,
     store: core.session.SessionStore,
+    pol: *const RuntimePolicy,
 ) !void {
+    if (!pol.allowsCmdKind("bash", "bash", null)) {
+        try ui.tr.append(.{ .tool_call = .{
+            .id = "bash",
+            .name = "bash",
+            .args = bcmd.cmd,
+        } });
+        try ui.tr.append(.{ .tool_result = .{
+            .id = "bash",
+            .output = "bash denied: policy",
+            .is_err = true,
+        } });
+        return;
+    }
     if (try core.tools.bash.deniesProtectedCmd(alloc, bcmd.cmd)) {
         try ui.tr.append(.{ .tool_call = .{
             .id = "bash",
@@ -6897,7 +6922,11 @@ fn openExtEditor(alloc: std.mem.Allocator, current: []const u8) !?[]u8 {
     return content;
 }
 
-fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8) !void {
+fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8, pol: *const RuntimePolicy) !void {
+    if (!pol.allowsCmdKind("osascript", null, "clipboard")) {
+        try ui.tr.infoText("[paste denied: policy]");
+        return;
+    }
     // macOS: check clipboard for image via osascript
     const argv = [_][]const u8{
         "/usr/bin/osascript",                                                                                            "-e",
@@ -6916,7 +6945,7 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8
 
     const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
     if (!std.mem.eql(u8, trimmed, "image")) {
-        try pasteText(alloc, ui);
+        try pasteText(alloc, ui, pol);
         return;
     }
 
@@ -6954,7 +6983,11 @@ fn pasteImage(alloc: std.mem.Allocator, ui: *tui_harness.Ui, tmp_dir: []const u8
     };
 }
 
-fn pasteText(alloc: std.mem.Allocator, ui: *tui_harness.Ui) !void {
+fn pasteText(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimePolicy) !void {
+    if (!pol.allowsCmdKind("pbpaste", null, "clipboard")) {
+        try ui.tr.infoText("[paste denied: policy]");
+        return;
+    }
     const argv = [_][]const u8{"/usr/bin/pbpaste"};
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -8221,6 +8254,18 @@ fn eofReader() std.Io.AnyReader {
 fn runtimeTestPolicyKeyPair() !core.signing.KeyPair {
     const seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     return core.signing.KeyPair.fromSeed(seed);
+}
+
+fn noopPolicy() RuntimePolicy {
+    return .{
+        .alloc = std.testing.allocator,
+        .resolved = .{
+            .doc = .{ .rules = &.{} },
+            .hash_hex = [_]u8{'0'} ** 64,
+            .has_files = false,
+            .locked = false,
+        },
+    };
 }
 
 fn writeRuntimePolicy(dir: std.fs.Dir, doc: core.policy.Doc) !void {
@@ -9668,10 +9713,11 @@ test "runBashMode include write failure is non-fatal for denied bash" {
     var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
 
+    const noop_pol = noopPolicy();
     try runBashMode(std.testing.allocator, &ui, .{
         .cmd = "cat ~/.pz/settings.json",
         .include = true,
-    }, "sid-1", store);
+    }, "sid-1", store, &noop_pol);
 
     var saw_deny = false;
     var saw_write_err = false;
@@ -9700,10 +9746,11 @@ test "runBashMode include write failure is non-fatal for bash output" {
     var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
 
+    const noop_pol = noopPolicy();
     try runBashMode(std.testing.allocator, &ui, .{
         .cmd = "printf ok",
         .include = true,
-    }, "sid-1", store);
+    }, "sid-1", store, &noop_pol);
 
     var saw_ok = false;
     var saw_write_err = false;
@@ -10227,7 +10274,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
             }
         }.f,
         .share_gist = struct {
-            fn ok(alloc: std.mem.Allocator, _: []const u8) ![]u8 {
+            fn ok(alloc: std.mem.Allocator, _: []const u8, _: *const RuntimePolicy) ![]u8 {
                 return try alloc.dupe(u8, "https://gist.github.test/private/secret-url");
             }
         }.ok,
@@ -10264,7 +10311,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
     );
 
     ctl_audit.hooks.share_gist = struct {
-        fn fail(_: std.mem.Allocator, _: []const u8) ![]u8 {
+        fn fail(_: std.mem.Allocator, _: []const u8, _: *const RuntimePolicy) ![]u8 {
             return error.GistFailed;
         }
     }.fail;
@@ -14359,7 +14406,7 @@ test "UX6: /share calls share_gist and prints url" {
     defer bg_mgr.deinit();
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{
         .share_gist = struct {
-            fn ok(a: std.mem.Allocator, _: []const u8) ![]u8 {
+            fn ok(a: std.mem.Allocator, _: []const u8, _: *const RuntimePolicy) ![]u8 {
                 return try a.dupe(u8, "https://gist.example.com/123");
             }
         }.ok,

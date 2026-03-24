@@ -225,7 +225,7 @@ pub fn retryLoop(
         if (status_int == 401 and auth.auth == .oauth and !did_refresh) {
             did_refresh = true;
             if (refreshAuth(alloc, auth, tag, ca_file, ar)) {
-                drainResponse(stream, ar);
+                try drainResponse(stream, ar);
                 stream.req.deinit();
                 hdrs.* = try rebuildHdrs(auth, ar);
                 continue;
@@ -237,7 +237,7 @@ pub fn retryLoop(
         const retryable = status_int == 429 or (status_int >= 500 and status_int < 600);
         if (!retryable or attempt >= max_retries) break;
 
-        drainResponse(stream, ar);
+        try drainResponse(stream, ar);
         stream.req.deinit();
 
         // Backoff: min(base * 2^attempt, max)
@@ -248,11 +248,11 @@ pub fn retryLoop(
     }
 }
 
-pub fn drainResponse(stream: anytype, ar: std.mem.Allocator) void {
+pub fn drainResponse(stream: anytype, ar: std.mem.Allocator) error{OutOfMemory}!void {
     const rdr = stream.response.reader(&stream.transfer_buf);
     _ = rdr.allocRemaining(ar, .limited(16384)) catch |err| switch (err) {
-        error.OutOfMemory => std.log.warn("drain response OOM", .{}),
-        else => {},
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {}, // I/O errors acceptable: response body being discarded before retry
     };
 }
 
