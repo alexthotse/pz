@@ -113,6 +113,20 @@ const NativeProviderRuntime = union(enum) {
         }
     }
 
+    fn setCancel(self: *NativeProviderRuntime, cancel: core.providers.CancelPoll) void {
+        switch (self.*) {
+            .anthropic => |*client| client.cancel = cancel,
+            .openai => |*client| client.cancel = cancel,
+        }
+    }
+
+    fn clearCancel(self: *NativeProviderRuntime) void {
+        switch (self.*) {
+            .anthropic => |*client| client.cancel = null,
+            .openai => |*client| client.cancel = null,
+        }
+    }
+
     fn asProvider(self: *NativeProviderRuntime) core.providers.Provider {
         return switch (self.*) {
             .anthropic => |*client| client.asProvider(),
@@ -1265,7 +1279,7 @@ const LiveTurn = struct {
             .stop => |s| self.last_stop = s.reason,
             .err => |txt| {
                 if (self.last_err) |old| self.alloc.free(old);
-                self.last_err = self.alloc.dupe(u8, txt) catch null;
+                self.last_err = self.alloc.dupe(u8, txt) catch null; // OOM: error still queued in evs, only convenience field lost
             },
             else => {},
         }
@@ -1346,7 +1360,7 @@ const LiveTurn = struct {
         self.evs.items.len = 0;
         self.ev_head = 0;
         self.next_seq = 1;
-        self.last_model = self.alloc.dupe(u8, opts.model) catch null;
+        self.last_model = self.alloc.dupe(u8, opts.model) catch null; // OOM: overflow retry skips model match (conservative)
         self.mu.unlock();
 
         self.cancel_flag.clear();
@@ -1956,7 +1970,7 @@ fn execWithIoTuiHooks(
     // Shared event loop for TUI mode — providers and tools use it
     // instead of creating per-call instances.
     var el: ?event_loop.EventLoop = if (run_cmd.mode == .tui)
-        event_loop.EventLoop.init() catch null
+        try event_loop.EventLoop.init()
     else
         null;
     defer if (el) |*e| e.deinit();
@@ -2083,6 +2097,7 @@ fn execWithIoTuiHooks(
                 has_native_rt and native_rt.isSub(),
                 hooks,
                 tui_hooks,
+                if (has_native_rt) &native_rt else null,
             ),
             .rpc => try runRpc(
                 alloc,
@@ -2373,6 +2388,7 @@ fn runTui(
     is_sub: bool,
     audit_hooks: AuditHooks,
     tui_hooks: TuiHooks,
+    native_rt: ?*NativeProviderRuntime,
 ) !void {
     const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
@@ -2643,6 +2659,15 @@ fn runTui(
         // Raw mode already enabled above (before -p prompt path)
         var live_turn = try LiveTurn.init(alloc);
         defer live_turn.deinit();
+
+        // Wire cancel signal to native provider so ESC during SSE streaming
+        // triggers CancelPoll check in retryLoop/sseNext. Clear before
+        // live_turn.deinit() to prevent dangling ctx pointer.
+        if (native_rt) |nrt| {
+            nrt.setCancel(core.providers.CancelPoll.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled));
+        }
+        defer if (native_rt) |nrt| nrt.clearCancel();
+
         var live_sink_impl = LiveTurnSink{
             .live = &live_turn,
         };
@@ -5957,7 +5982,7 @@ fn shortenHomePath(alloc: std.mem.Allocator, full: []const u8, home: ?[]const u8
 }
 
 fn getGitBranch(alloc: std.mem.Allocator) ![]u8 {
-    if (getJjBranch(alloc)) |b| return b;
+    if (try getJjBranch(alloc)) |b| return b;
 
     if (runCmdTrimAlloc(alloc, &.{ "git", "branch", "--show-current" }, 512)) |branch| {
         return branch;
@@ -5978,12 +6003,12 @@ fn getGitBranch(alloc: std.mem.Allocator) ![]u8 {
     return try alloc.dupe(u8, "detached");
 }
 
-fn getJjBranch(alloc: std.mem.Allocator) ?[]u8 {
+fn getJjBranch(alloc: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
     const current = runCmdTrimAlloc(alloc, &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "bookmarks" }, 4096);
     if (current) |raw| {
         defer alloc.free(raw);
         if (parseJjBookmark(raw)) |name| {
-            return alloc.dupe(u8, name) catch null;
+            return try alloc.dupe(u8, name);
         }
     }
 
@@ -5991,7 +6016,7 @@ fn getJjBranch(alloc: std.mem.Allocator) ?[]u8 {
     if (parent) |raw| {
         defer alloc.free(raw);
         if (parseJjBookmark(raw)) |name| {
-            return alloc.dupe(u8, name) catch null;
+            return try alloc.dupe(u8, name);
         }
     }
 
@@ -9054,6 +9079,7 @@ test "runtime tui overflow retries once with injected live stdin" {
             .stop_after_completions = 1,
             .submit_text = "ping",
         },
+        null,
     );
 
     var session_dir = try std.fs.openDirAbsolute(sess_abs, .{});
