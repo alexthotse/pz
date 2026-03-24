@@ -316,8 +316,32 @@ pub const ChildProc = struct {
         artifact_path: ?[]const u8 = null,
     };
 
+    /// Spawn a child agent process (real pz binary).
+    pub fn spawnAgent(
+        alloc: std.mem.Allocator,
+        agent_id: []const u8,
+        policy_hash: []const u8,
+    ) !ChildProc {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        return spawnWithArgv(alloc, &arena, agent_id, policy_hash);
+    }
+
     pub fn spawnHarness(
         alloc: std.mem.Allocator,
+        harness_path: []const u8,
+        mode: ChildMode,
+        agent_id: []const u8,
+        policy_hash: []const u8,
+    ) !ChildProc {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        return spawnWithHarnessArgv(alloc, &arena, harness_path, mode, agent_id, policy_hash);
+    }
+
+    fn spawnWithHarnessArgv(
+        alloc: std.mem.Allocator,
+        arena: *std.heap.ArenaAllocator,
         harness_path: []const u8,
         mode: ChildMode,
         agent_id: []const u8,
@@ -329,21 +353,16 @@ pub const ChildProc = struct {
             try markOpenFdsCloexec();
         }
 
-        // Create dedicated RPC pipe: child writes to rpc_w, parent reads from rpc_r.
-        // rpc_r: CLOEXEC (parent-only), rpc_w: no CLOEXEC (inherited by child).
         const rpc_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
         const rpc_r: std.posix.fd_t = rpc_pipe[0];
         const rpc_w: std.posix.fd_t = rpc_pipe[1];
         errdefer std.posix.close(rpc_r);
         errdefer std.posix.close(rpc_w);
 
-        // Clear CLOEXEC on write end so child inherits it.
         if (is_posix) {
             try clearCloexec(rpc_w);
         }
 
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        errdefer arena.deinit();
         const rpc_fd_str = try std.fmt.allocPrint(arena.allocator(), "{d}", .{rpc_w});
         const argv = [_][]const u8{
             harness_path,
@@ -352,7 +371,59 @@ pub const ChildProc = struct {
             policy_hash,
             rpc_fd_str,
         };
-        var proc = std.process.Child.init(argv[0..], alloc);
+        return finishSpawn(alloc, arena, &argv, rpc_r, rpc_w, agent_id, policy_hash);
+    }
+
+    fn spawnWithArgv(
+        alloc: std.mem.Allocator,
+        arena: *std.heap.ArenaAllocator,
+        agent_id: []const u8,
+        policy_hash: []const u8,
+    ) !ChildProc {
+        const builtin = @import("builtin");
+        const is_posix = builtin.os.tag != .windows and builtin.os.tag != .wasi;
+        if (is_posix) {
+            try markOpenFdsCloexec();
+        }
+
+        const rpc_pipe = try std.posix.pipe2(.{ .CLOEXEC = true });
+        const rpc_r: std.posix.fd_t = rpc_pipe[0];
+        const rpc_w: std.posix.fd_t = rpc_pipe[1];
+        errdefer std.posix.close(rpc_r);
+        errdefer std.posix.close(rpc_w);
+
+        if (is_posix) {
+            try clearCloexec(rpc_w);
+        }
+
+        const driver = try driverPathAlloc(alloc);
+        defer alloc.free(driver);
+        const a = arena.allocator();
+        const rpc_fd_str = try std.fmt.allocPrint(a, "{d}", .{rpc_w});
+        const drv = try a.dupe(u8, driver);
+        const argv = [_][]const u8{
+            drv,
+            "--child",
+            agent_id,
+            policy_hash,
+            rpc_fd_str,
+        };
+        return finishSpawn(alloc, arena, &argv, rpc_r, rpc_w, agent_id, policy_hash);
+    }
+
+    fn finishSpawn(
+        alloc: std.mem.Allocator,
+        arena: *std.heap.ArenaAllocator,
+        argv: []const []const u8,
+        rpc_r: std.posix.fd_t,
+        rpc_w: std.posix.fd_t,
+        agent_id: []const u8,
+        policy_hash: []const u8,
+    ) !ChildProc {
+        const builtin = @import("builtin");
+        const is_posix = builtin.os.tag != .windows and builtin.os.tag != .wasi;
+
+        var proc = std.process.Child.init(argv, alloc);
         proc.stdin_behavior = .Pipe;
         proc.stdout_behavior = .Pipe;
         proc.stderr_behavior = .Ignore;
@@ -381,7 +452,7 @@ pub const ChildProc = struct {
 
         var out: ChildProc = undefined;
         out.alloc = alloc;
-        out.arena = arena;
+        out.arena = arena.*;
         out.proc = proc;
         out.stdin_file = stdin_file;
         out.stdout_file = stdout_file;
@@ -501,6 +572,30 @@ pub const ChildProc = struct {
         var res: RunResult = .{};
         while (true) {
             const ev = try self.stub.recv(try self.recvDeadline(deadline));
+            switch (ev) {
+                .out => |out| res.out = out,
+                .done => |done| {
+                    res.done = done;
+                    return res;
+                },
+                .err => |rpc_err| {
+                    res.err = rpc_err;
+                    return res;
+                },
+                else => return error.UnexpectedMsg,
+            }
+        }
+    }
+
+    /// Like `runReqTimeout` but feeds each RPC event to a `ProgressStream`,
+    /// enabling incremental progress reporting while the child runs.
+    pub fn runReqStreaming(self: *ChildProc, req: Request, timeout_ms: i64, ps: *ProgressStream) !RunResult {
+        try self.send(try self.stub.run(req));
+        const deadline = std.time.milliTimestamp() + timeout_ms;
+        var res: RunResult = .{};
+        while (true) {
+            const ev = try self.stub.recv(try self.recvDeadline(deadline));
+            _ = ps.feed(ev);
             switch (ev) {
                 .out => |out| res.out = out,
                 .done => |done| {
@@ -803,6 +898,16 @@ pub const AgentStatus = enum {
     pub fn terminal(self: AgentStatus) bool {
         return self != .running;
     }
+
+    pub fn fromRunResult(res: ChildProc.RunResult) AgentStatus {
+        if (res.err != null) return .err;
+        if (res.done) |d| return switch (d.stop) {
+            .done => .done,
+            .canceled => .canceled,
+            .err => .err,
+        };
+        return .err;
+    }
 };
 
 /// Per-agent tracking entry for parallel execution.
@@ -974,6 +1079,194 @@ fn lastLine(text: []const u8) ?[]const u8 {
     }
     return trimmed;
 }
+
+/// Background agent: spawns a child on a monitor thread, posts progress
+/// to a thread-safe callback, and collects the final result.
+pub const BgAgent = struct {
+    alloc: std.mem.Allocator,
+    agent_id: []const u8,
+    policy_hash: []const u8,
+    status: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(AgentStatus.running)),
+    result: ?ChildProc.RunResult = null,
+    err_msg: ?[]u8 = null,
+    thr: ?std.Thread = null,
+    wake_w: std.posix.fd_t,
+    wake_r: std.posix.fd_t,
+
+    pub fn init(alloc: std.mem.Allocator, agent_id: []const u8, policy_hash: []const u8) !BgAgent {
+        const pipe = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer {
+            std.posix.close(pipe[0]);
+            std.posix.close(pipe[1]);
+        }
+        return .{
+            .alloc = alloc,
+            .agent_id = agent_id,
+            .policy_hash = policy_hash,
+            .wake_r = pipe[0],
+            .wake_w = pipe[1],
+        };
+    }
+
+    pub fn deinit(self: *BgAgent) void {
+        if (self.thr) |thr| thr.join();
+        std.posix.close(self.wake_r);
+        std.posix.close(self.wake_w);
+        if (self.err_msg) |m| self.alloc.free(m);
+    }
+
+    /// Spawn the child and start the monitor thread.
+    pub fn start(self: *BgAgent, prompt: []const u8, cb: ProgressCb) !void {
+        const ctx = try self.alloc.create(ThreadCtx);
+        errdefer self.alloc.destroy(ctx);
+        const prompt_copy = try self.alloc.dupe(u8, prompt);
+        errdefer self.alloc.free(prompt_copy);
+
+        ctx.* = .{
+            .bg = self,
+            .prompt = prompt_copy,
+            .cb = cb,
+        };
+        self.thr = try std.Thread.spawn(.{}, monitorThread, .{ctx});
+    }
+
+    pub fn getStatus(self: *const BgAgent) AgentStatus {
+        return @enumFromInt(self.status.load(.acquire));
+    }
+
+    pub fn isDone(self: *const BgAgent) bool {
+        return self.getStatus().terminal();
+    }
+
+    /// Join the monitor thread and return the result. Call only after `isDone()`.
+    pub fn join(self: *BgAgent) ?ChildProc.RunResult {
+        if (self.thr) |thr| {
+            thr.join();
+            self.thr = null;
+        }
+        return self.result;
+    }
+
+    const ThreadCtx = struct {
+        bg: *BgAgent,
+        prompt: []u8,
+        cb: ProgressCb,
+    };
+
+    fn monitorThread(ctx: *ThreadCtx) void {
+        defer ctx.bg.alloc.destroy(ctx);
+        defer ctx.bg.alloc.free(ctx.prompt);
+        defer ctx.bg.nudge();
+
+        var child = ChildProc.spawnAgent(
+            ctx.bg.alloc,
+            ctx.bg.agent_id,
+            ctx.bg.policy_hash,
+        ) catch |err| {
+            ctx.bg.setErr(err);
+            return;
+        };
+        defer child.deinit();
+
+        _ = child.connect() catch |err| {
+            ctx.bg.setErr(err);
+            return;
+        };
+
+        var ps = ProgressStream.init(&child.stub, ctx.bg.agent_id, ctx.cb);
+        const res = child.runReqStreaming(
+            .{ .id = "bg-0", .prompt = ctx.prompt },
+            ChildProc.default_run_deadline_ms,
+            &ps,
+        ) catch |err| {
+            ctx.bg.setErr(err);
+            return;
+        };
+
+        ctx.bg.result = res;
+        ctx.bg.status.store(@intFromEnum(AgentStatus.fromRunResult(res)), .release);
+    }
+
+    fn setErr(self: *BgAgent, err: anyerror) void {
+        self.err_msg = std.fmt.allocPrint(self.alloc, "{s}", .{@errorName(err)}) catch null;
+        self.status.store(@intFromEnum(AgentStatus.err), .release);
+    }
+
+    fn nudge(self: *BgAgent) void {
+        const b = [_]u8{1};
+        _ = std.posix.write(self.wake_w, &b) catch {}; // cleanup: propagation impossible
+    }
+};
+
+/// Pool of concurrent background agents with bounded capacity.
+pub const BgPool = struct {
+    alloc: std.mem.Allocator,
+    agents: [MultiTracker.max_agents]?*BgAgent = [_]?*BgAgent{null} ** MultiTracker.max_agents,
+    len: u8 = 0,
+    tracker: MultiTracker = .{},
+
+    pub fn init(alloc: std.mem.Allocator) BgPool {
+        return .{ .alloc = alloc };
+    }
+
+    pub fn deinit(self: *BgPool) void {
+        var i: u8 = 0;
+        while (i < self.len) : (i += 1) {
+            if (self.agents[i]) |a| {
+                a.deinit();
+                self.alloc.destroy(a);
+            }
+        }
+    }
+
+    /// Spawn a new background agent. Returns its index.
+    pub fn spawn(
+        self: *BgPool,
+        agent_id: []const u8,
+        policy_hash: []const u8,
+        prompt: []const u8,
+        cb: ProgressCb,
+    ) !u8 {
+        if (self.len >= MultiTracker.max_agents) return error.Overflow;
+        const now = std.time.milliTimestamp();
+        const idx = try self.tracker.add(agent_id, now);
+
+        const bg = try self.alloc.create(BgAgent);
+        errdefer self.alloc.destroy(bg);
+        bg.* = try BgAgent.init(self.alloc, agent_id, policy_hash);
+        errdefer bg.deinit();
+        try bg.start(prompt, cb);
+
+        self.agents[idx] = bg;
+        self.len += 1;
+        return idx;
+    }
+
+    /// Poll all agents, update tracker, return true if all done.
+    pub fn pollAll(self: *BgPool) bool {
+        const now = std.time.milliTimestamp();
+        var i: u8 = 0;
+        while (i < self.len) : (i += 1) {
+            if (self.agents[i]) |a| {
+                const s = a.getStatus();
+                if (s.terminal() and !self.tracker.entries[i].status.terminal()) {
+                    self.tracker.entries[i].status = s;
+                    self.tracker.entries[i].ended_ms = now;
+                }
+            }
+        }
+        return self.tracker.allDone();
+    }
+
+    pub fn allDone(self: *const BgPool) bool {
+        return self.tracker.allDone();
+    }
+
+    pub fn get(self: *const BgPool, idx: u8) ?*BgAgent {
+        if (idx >= self.len) return null;
+        return self.agents[idx];
+    }
+};
 
 test "frame hello roundtrip enforces protocol version" {
     const OhSnap = @import("ohsnap");

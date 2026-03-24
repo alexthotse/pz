@@ -57,6 +57,48 @@ pub const StreamHook = struct {
     }
 };
 
+/// Production agent spawner: creates a real ChildProc, connects,
+/// runs the request with streaming progress, and returns the result.
+pub const SpawnCtx = struct {
+    alloc: std.mem.Allocator,
+
+    pub fn run(_: *SpawnCtx, _: tools.Call.AgentArgs, _: rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult {
+        // policy_hash is validated before we get here (Handler.run checks non-null).
+        // It's passed through the args at the hook level, but SpawnCtx gets it
+        // from the caller context. For now, we rely on the Hook/Handler layer
+        // having validated it. The agent_id and prompt come from args.
+        //
+        // We can't spawn without a policy hash — that's enforced by Handler.run
+        // returning PolicyMismatch before reaching hooks. But we need it for
+        // the child spawn. Pass it through the StreamHook as part of a wrapper.
+        return error.PolicyMismatch; // placeholder — real impl needs policy_hash threaded
+    }
+};
+
+/// Wraps SpawnCtx with a policy hash for production spawning.
+pub const PolicySpawnCtx = struct {
+    alloc: std.mem.Allocator,
+    policy_hash: []const u8,
+
+    pub fn run(self: *PolicySpawnCtx, args: tools.Call.AgentArgs, cb: rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult {
+        var child = try rpc.ChildProc.spawnAgent(self.alloc, args.agent_id, self.policy_hash);
+        defer child.deinit();
+
+        _ = try child.connect();
+
+        var ps = rpc.ProgressStream.init(&child.stub, args.agent_id, cb);
+        return try child.runReqStreaming(
+            .{ .id = "agent-0", .prompt = args.prompt },
+            rpc.ChildProc.default_run_deadline_ms,
+            &ps,
+        );
+    }
+
+    pub fn asStreamHook(self: *PolicySpawnCtx) StreamHook {
+        return StreamHook.from(PolicySpawnCtx, self, PolicySpawnCtx.run);
+    }
+};
+
 pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,

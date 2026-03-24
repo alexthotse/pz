@@ -504,6 +504,18 @@ const TuiSink = struct {
                 defer self.ui.alloc.free(note);
                 try self.ui.tr.infoText(note);
             },
+            .agent_status => |as| {
+                const phase: tui_transcript.AgentPhase = switch (as.phase) {
+                    .running => .running,
+                    .done => .done,
+                    .err => .err,
+                    .canceled => .canceled,
+                };
+                self.ui.tr.updateAgent(as.agent_id, phase) catch {
+                    // Agent block not yet created — create it.
+                    try self.ui.tr.agentBlock(as.agent_id, phase);
+                };
+            },
             else => {},
         }
         try self.ui.draw(self.out);
@@ -750,6 +762,8 @@ const LiveTurn = struct {
     cancel_flag: TurnCancelFlag = .{},
     abort_slot: core.providers.AbortSlot = .{},
     last_req: ?Req = null,
+    agent_statuses: std.ArrayListUnmanaged(AgentStatusEntry) = .empty,
+    agent_head: usize = 0,
     last_stop: ?core.providers.StopReason = null,
     last_err: ?[]u8 = null,
     last_model: ?[]u8 = null,
@@ -778,6 +792,11 @@ const LiveTurn = struct {
         ev: core.providers.Event,
     };
 
+    const AgentStatusEntry = struct {
+        agent_id: []u8,
+        phase: core.loop.AgentPhase,
+    };
+
     fn init(alloc: std.mem.Allocator) !LiveTurn {
         const pipe = try std.posix.pipe2(.{
             .NONBLOCK = true,
@@ -804,6 +823,8 @@ const LiveTurn = struct {
         self.mu.lock();
         for (self.evs.items[self.ev_head..]) |sev| freeProviderEv(self.alloc, sev.ev);
         self.evs.deinit(self.alloc);
+        for (self.agent_statuses.items[self.agent_head..]) |as| self.alloc.free(as.agent_id);
+        self.agent_statuses.deinit(self.alloc);
         if (self.err_name) |name| self.alloc.free(name);
         if (self.last_err) |e| self.alloc.free(e);
         if (self.last_model) |m| self.alloc.free(m);
@@ -929,6 +950,36 @@ const LiveTurn = struct {
         return ev;
     }
 
+    fn enqueueAgent(self: *LiveTurn, agent_id: []const u8, phase: core.loop.AgentPhase) !void {
+        const id_dup = try self.alloc.dupe(u8, agent_id);
+        errdefer self.alloc.free(id_dup);
+
+        self.mu.lock();
+        self.agent_statuses.append(self.alloc, .{
+            .agent_id = id_dup,
+            .phase = phase,
+        }) catch |err| {
+            self.mu.unlock();
+            return err;
+        };
+        self.mu.unlock();
+        self.nudge();
+    }
+
+    fn popAgent(self: *LiveTurn) ?AgentStatusEntry {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (self.agent_head >= self.agent_statuses.items.len) return null;
+        const entry = self.agent_statuses.items[self.agent_head];
+        self.agent_head += 1;
+        if (self.agent_head == self.agent_statuses.items.len) {
+            self.agent_statuses.items.len = 0;
+            self.agent_head = 0;
+        }
+        return entry;
+    }
+
     const Completion = struct {
         err_name: ?[]u8 = null,
     };
@@ -987,6 +1038,9 @@ const LiveTurn = struct {
         for (self.evs.items[self.ev_head..]) |sev| freeProviderEv(self.alloc, sev.ev);
         self.evs.items.len = 0;
         self.ev_head = 0;
+        for (self.agent_statuses.items[self.agent_head..]) |as| self.alloc.free(as.agent_id);
+        self.agent_statuses.items.len = 0;
+        self.agent_head = 0;
         self.next_seq = 1;
         self.last_model = self.alloc.dupe(u8, opts.model) catch null; // OOM: overflow retry skips model match (conservative)
         self.mu.unlock();
@@ -1059,6 +1113,7 @@ const LiveTurnSink = struct {
     fn push(self: *LiveTurnSink, ev: core.loop.ModeEv) !void {
         switch (ev) {
             .provider => |pev| try self.live.enqueueProvider(pev),
+            .agent_status => |as| try self.live.enqueueAgent(as.agent_id, as.phase),
             else => {},
         }
     }
@@ -1229,6 +1284,7 @@ const JsonSink = struct {
             .provider => |payload| try self.emit("provider", payload),
             .tool => |payload| try self.emit("tool", payload),
             .session_write_err => |msg| try self.emit("session_write_err", msg),
+            .agent_status => |as| try self.emit("agent_status", as),
         }
     }
 
@@ -2980,6 +3036,20 @@ fn runTui(
                     while (live_turn.popProvider()) |sev| {
                         defer freeProviderEv(alloc, sev.ev);
                         try ui.onProviderSeq(sev.seq, sev.ev);
+                    }
+
+                    // Drain agent status updates from loop thread.
+                    while (live_turn.popAgent()) |as| {
+                        defer alloc.free(as.agent_id);
+                        const phase: tui_transcript.AgentPhase = switch (as.phase) {
+                            .running => .running,
+                            .done => .done,
+                            .err => .err,
+                            .canceled => .canceled,
+                        };
+                        ui.tr.updateAgent(as.agent_id, phase) catch {
+                            try ui.tr.agentBlock(as.agent_id, phase);
+                        };
                     }
 
                     if (live_turn.takeCompletion()) |done| {

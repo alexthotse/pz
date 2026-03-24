@@ -497,11 +497,23 @@ pub const Runtime = struct {
     }
 
     fn runAgent(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+        // If no explicit hook is provided but we have a policy hash,
+        // use the production spawner with streaming progress.
+        var spawn_ctx: ?agent_tool.PolicySpawnCtx = null;
+        var stream_hook: ?agent_tool.StreamHook = null;
+        if (self.agent_hook == null and self.policy_hash != null) {
+            spawn_ctx = .{
+                .alloc = self.alloc,
+                .policy_hash = self.policy_hash.?,
+            };
+            stream_hook = spawn_ctx.?.asStreamHook();
+        }
         const h = agent_tool.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
             .now_ms = call.at_ms,
             .hook = self.agent_hook,
+            .stream_hook = stream_hook,
             .policy_hash = self.policy_hash,
         });
         return h.run(call, sink);

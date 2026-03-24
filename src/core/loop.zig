@@ -21,12 +21,25 @@ pub const Err = error{
     OutOfMemory,
 };
 
+pub const AgentStatusEv = struct {
+    agent_id: []const u8,
+    phase: AgentPhase,
+};
+
+pub const AgentPhase = enum {
+    running,
+    done,
+    err,
+    canceled,
+};
+
 pub const ModeEv = union(enum) {
     replay: session.Event,
     session: session.Event,
     provider: providers.Event,
     tool: tools.Event,
     session_write_err: []const u8,
+    agent_status: AgentStatusEv,
 };
 
 pub const ModeSink = struct {
@@ -524,224 +537,262 @@ const Hist = struct {
     }
 };
 
-pub fn run(opts: Opts) (Err || anyerror)!RunOut {
-    if (opts.sid.len == 0) return error.EmptySessionId;
-    if (opts.prompt.len == 0) return error.EmptyPrompt;
-    if (opts.model.len == 0) return error.EmptyModel;
-    if (opts.compactor != null and opts.compact_every == 0) return error.InvalidCompactEvery;
+pub const TurnState = enum {
+    idle,
+    streaming,
+    tool_dispatch,
+    compacting,
+    done,
+};
 
-    var hist = Hist{
-        .alloc = opts.alloc,
-    };
-    defer hist.deinit();
-    var append_ct: u64 = 0;
+/// Externalized loop state for re-entrant (step-by-step) execution.
+/// Use `init` to create, `spin` to run the FSM to completion, `deinit` to clean up.
+/// The existing `run` function wraps all three for backward compatibility.
+pub const LoopCtx = struct {
+    opts: Opts,
+    hist: Hist,
+    append_ct: u64,
+    req_tools: []providers.Tool,
+    turns: u16,
+    tool_calls: u32,
+    turn_arena: std.heap.ArenaAllocator,
+    stream: ?providers.Stream,
+    saw_tool_call: bool,
+    pending_tc: ?providers.ToolCall,
+    turn_state: TurnState,
 
-    {
-        var replay = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
-            error.FileNotFound, error.NotFound => null,
-            else => return failWithReport(opts, .replay_open, replay_err),
+    pub fn init(opts: Opts) (Err || anyerror)!LoopCtx {
+        if (opts.sid.len == 0) return error.EmptySessionId;
+        if (opts.prompt.len == 0) return error.EmptyPrompt;
+        if (opts.model.len == 0) return error.EmptyModel;
+        if (opts.compactor != null and opts.compact_every == 0) return error.InvalidCompactEvery;
+
+        var hist = Hist{
+            .alloc = opts.alloc,
         };
-        if (replay) |*rdr| {
-            defer rdr.deinit();
-            while (rdr.next() catch |next_err| return failWithReport(opts, .replay_next, next_err)) |ev| {
-                opts.mode.push(.{ .replay = ev }) catch |mode_err| {
-                    return failWithReport(opts, .mode_push, mode_err);
-                };
-                hist.appendFromSession(ev) catch |hist_err| {
-                    return failWithReport(opts, .replay_next, hist_err);
-                };
+        errdefer hist.deinit();
+        var append_ct: u64 = 0;
+
+        {
+            var replay = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
+                error.FileNotFound, error.NotFound => null,
+                else => return failWithReport(opts, .replay_open, replay_err),
+            };
+            if (replay) |*rdr| {
+                defer rdr.deinit();
+                while (rdr.next() catch |next_err| return failWithReport(opts, .replay_next, next_err)) |ev| {
+                    opts.mode.push(.{ .replay = ev }) catch |mode_err| {
+                        return failWithReport(opts, .mode_push, mode_err);
+                    };
+                    hist.appendFromSession(ev) catch |hist_err| {
+                        return failWithReport(opts, .replay_next, hist_err);
+                    };
+                }
             }
         }
-    }
 
-    const prompt_ev = session.Event{
-        .at_ms = nowMs(opts),
-        .data = .{
-            .prompt = .{ .text = opts.prompt },
-        },
-    };
-    hist.pushTextDup(.user, opts.prompt) catch |hist_err| {
-        return failWithReport(opts, .store_append, hist_err);
-    };
-    const prompt_stored = blk: {
-        opts.store.append(opts.sid, prompt_ev) catch |append_err| {
-            try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
-            break :blk false;
+        const prompt_ev = session.Event{
+            .at_ms = nowMs(opts),
+            .data = .{
+                .prompt = .{ .text = opts.prompt },
+            },
         };
-        break :blk true;
-    };
-    onSessionAppend(opts, &append_ct, &hist, prompt_stored) catch |compact_err| {
-        return failWithReport(opts, .compact, compact_err);
-    };
-    opts.mode.push(.{ .session = prompt_ev }) catch |mode_err| {
-        return failWithReport(opts, .mode_push, mode_err);
-    };
+        hist.pushTextDup(.user, opts.prompt) catch |hist_err| {
+            return failWithReport(opts, .store_append, hist_err);
+        };
+        const prompt_stored = blk: {
+            opts.store.append(opts.sid, prompt_ev) catch |append_err| {
+                try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                break :blk false;
+            };
+            break :blk true;
+        };
+        onSessionAppend(opts, &append_ct, &hist, prompt_stored) catch |compact_err| {
+            return failWithReport(opts, .compact, compact_err);
+        };
+        opts.mode.push(.{ .session = prompt_ev }) catch |mode_err| {
+            return failWithReport(opts, .mode_push, mode_err);
+        };
 
-    // Cache tool schemas — registry is static across turns
-    const req_tools = buildReqTools(opts.alloc, opts.reg) catch |tools_err| {
-        return failWithReport(opts, .provider_start, tools_err);
-    };
-    defer {
-        for (req_tools) |t| opts.alloc.free(t.schema);
-        opts.alloc.free(req_tools);
+        // Cache tool schemas — registry is static across turns
+        const req_tools = buildReqTools(opts.alloc, opts.reg) catch |tools_err| {
+            return failWithReport(opts, .provider_start, tools_err);
+        };
+        errdefer {
+            for (req_tools) |t| opts.alloc.free(t.schema);
+            opts.alloc.free(req_tools);
+        }
+
+        return .{
+            .opts = opts,
+            .hist = hist,
+            .append_ct = append_ct,
+            .req_tools = req_tools,
+            .turns = 0,
+            .tool_calls = 0,
+            .turn_arena = std.heap.ArenaAllocator.init(opts.alloc),
+            .stream = null,
+            .saw_tool_call = false,
+            .pending_tc = null,
+            .turn_state = .idle,
+        };
     }
 
-    const TurnState = enum {
-        idle,
-        streaming,
-        tool_dispatch,
-        compacting,
-        done,
-    };
+    pub fn deinit(self: *LoopCtx) void {
+        if (self.stream) |*s| s.deinit();
+        self.turn_arena.deinit();
+        for (self.req_tools) |t| self.opts.alloc.free(t.schema);
+        self.opts.alloc.free(self.req_tools);
+        self.hist.deinit();
+    }
 
-    var turns: u16 = 0;
-    var tool_calls: u32 = 0;
-    var turn_arena = std.heap.ArenaAllocator.init(opts.alloc);
-    defer turn_arena.deinit();
-    var stream: ?providers.Stream = null;
-    defer if (stream != null) stream.?.deinit();
-    var saw_tool_call = false;
-    var pending_tc: ?providers.ToolCall = null;
-
-    var turn_state: TurnState = .idle;
-    turn_state = state: switch (turn_state) {
-        .idle => {
-            if (opts.max_turns != 0 and turns >= opts.max_turns) {
-                continue :state .done;
-            }
-            if (isCanceled(opts)) {
-                emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
-                    return failWithReport(opts, .mode_push, cancel_err);
-                };
-                continue :state .done;
-            }
-
-            _ = turn_arena.reset(.retain_capacity);
-            const turn_alloc = turn_arena.allocator();
-
-            const req_msgs = buildReqMsgs(turn_alloc, hist.items.items, opts.system_prompt, opts.skip_prompt_guard) catch |msg_err| {
-                return failWithReport(opts, .provider_start, msg_err);
-            };
-
-            if (stream) |*s| s.deinit();
-            stream = opts.provider.start(.{
-                .model = opts.model,
-                .provider = opts.provider_label,
-                .msgs = req_msgs,
-                .tools = req_tools,
-                .opts = opts.provider_opts,
-            }) catch |start_err| {
-                return failWithReport(opts, .provider_start, start_err);
-            };
-            if (opts.abort_slot) |slot| slot.set(stream.?.aborter());
-            saw_tool_call = false;
-            continue :state .streaming;
-        },
-        .streaming => {
-            if (isCanceled(opts)) {
-                if (opts.abort_slot) |slot| slot.set(null);
-                emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
-                    return failWithReport(opts, .mode_push, cancel_err);
-                };
-                continue :state .done;
-            }
-
-            const ev = (stream.?.next() catch |next_err| return failWithReport(opts, .stream_next, next_err)) orelse {
-                // Stream exhausted — end of turn
-                if (opts.abort_slot) |slot| slot.set(null);
-                if (isCanceled(opts)) {
-                    emitCanceled(opts, &append_ct, &hist) catch |cancel_err| {
-                        return failWithReport(opts, .mode_push, cancel_err);
+    /// Run the FSM to completion, returning the final result.
+    pub fn spin(self: *LoopCtx) (Err || anyerror)!RunOut {
+        self.turn_state = state: switch (self.turn_state) {
+            .idle => {
+                if (self.opts.max_turns != 0 and self.turns >= self.opts.max_turns) {
+                    continue :state .done;
+                }
+                if (isCanceled(self.opts)) {
+                    emitCanceled(self.opts, &self.append_ct, &self.hist) catch |cancel_err| {
+                        return failWithReport(self.opts, .mode_push, cancel_err);
                     };
                     continue :state .done;
                 }
-                if (!saw_tool_call) {
-                    turns +|= 1;
+
+                _ = self.turn_arena.reset(.retain_capacity);
+                const turn_alloc = self.turn_arena.allocator();
+
+                const req_msgs = buildReqMsgs(turn_alloc, self.hist.items.items, self.opts.system_prompt, self.opts.skip_prompt_guard) catch |msg_err| {
+                    return failWithReport(self.opts, .provider_start, msg_err);
+                };
+
+                if (self.stream) |*s| s.deinit();
+                self.stream = self.opts.provider.start(.{
+                    .model = self.opts.model,
+                    .provider = self.opts.provider_label,
+                    .msgs = req_msgs,
+                    .tools = self.req_tools,
+                    .opts = self.opts.provider_opts,
+                }) catch |start_err| {
+                    return failWithReport(self.opts, .provider_start, start_err);
+                };
+                if (self.opts.abort_slot) |slot| slot.set(self.stream.?.aborter());
+                self.saw_tool_call = false;
+                continue :state .streaming;
+            },
+            .streaming => {
+                if (isCanceled(self.opts)) {
+                    if (self.opts.abort_slot) |slot| slot.set(null);
+                    emitCanceled(self.opts, &self.append_ct, &self.hist) catch |cancel_err| {
+                        return failWithReport(self.opts, .mode_push, cancel_err);
+                    };
                     continue :state .done;
                 }
-                turns +|= 1;
-                continue :state .idle;
-            };
 
-            opts.mode.push(.{ .provider = ev }) catch |mode_err| {
-                return failWithReport(opts, .mode_push, mode_err);
-            };
-
-            const sess_ev = mapProviderEv(ev, nowMs(opts));
-            hist.appendFromProvider(ev) catch |hist_err| {
-                return failWithReport(opts, .stream_next, hist_err);
-            };
-            const sess_stored = blk: {
-                opts.store.append(opts.sid, sess_ev) catch |append_err| {
-                    try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
-                    break :blk false;
+                const ev = (self.stream.?.next() catch |next_err| return failWithReport(self.opts, .stream_next, next_err)) orelse {
+                    // Stream exhausted — end of turn
+                    if (self.opts.abort_slot) |slot| slot.set(null);
+                    if (isCanceled(self.opts)) {
+                        emitCanceled(self.opts, &self.append_ct, &self.hist) catch |cancel_err| {
+                            return failWithReport(self.opts, .mode_push, cancel_err);
+                        };
+                        continue :state .done;
+                    }
+                    if (!self.saw_tool_call) {
+                        self.turns +|= 1;
+                        continue :state .done;
+                    }
+                    self.turns +|= 1;
+                    continue :state .idle;
                 };
-                break :blk true;
-            };
-            onSessionAppend(opts, &append_ct, &hist, sess_stored) catch |compact_err| {
-                return failWithReport(opts, .compact, compact_err);
-            };
-            opts.mode.push(.{ .session = sess_ev }) catch |mode_err| {
-                return failWithReport(opts, .mode_push, mode_err);
-            };
 
-            switch (ev) {
-                .tool_call => |tc| {
-                    pending_tc = tc;
-                    continue :state .tool_dispatch;
-                },
-                else => continue :state .streaming,
-            }
-        },
-        .tool_dispatch => {
-            const tc = pending_tc.?;
-            pending_tc = null;
-            saw_tool_call = true;
-            tool_calls += 1;
-
-            const tr = runTool(opts, tc) catch |tool_err| {
-                return failWithReport(opts, .tool_run, tool_err);
-            };
-            hist.pushToolResultOwned(tr) catch |hist_err| {
-                return failWithReport(opts, .tool_run, hist_err);
-            };
-
-            const tr_ev: providers.Event = .{
-                .tool_result = tr,
-            };
-            opts.mode.push(.{ .provider = tr_ev }) catch |mode_err| {
-                return failWithReport(opts, .mode_push, mode_err);
-            };
-
-            const tr_sess_ev = mapProviderEv(tr_ev, nowMs(opts));
-            const tr_stored = blk: {
-                opts.store.append(opts.sid, tr_sess_ev) catch |append_err| {
-                    try opts.mode.push(.{ .session_write_err = @errorName(append_err) });
-                    break :blk false;
+                self.opts.mode.push(.{ .provider = ev }) catch |mode_err| {
+                    return failWithReport(self.opts, .mode_push, mode_err);
                 };
-                break :blk true;
-            };
-            onSessionAppend(opts, &append_ct, &hist, tr_stored) catch |compact_err| {
-                return failWithReport(opts, .compact, compact_err);
-            };
-            opts.mode.push(.{ .session = tr_sess_ev }) catch |mode_err| {
-                return failWithReport(opts, .mode_push, mode_err);
-            };
 
-            continue :state .streaming;
-        },
-        .compacting => {
-            // Reserved for async compaction; currently handled inline via onSessionAppend.
-            continue :state .streaming;
-        },
-        .done => {
-            if (opts.abort_slot) |slot| slot.set(null);
-            return .{
-                .turns = turns,
-                .tool_calls = tool_calls,
-            };
-        },
-    };
+                const sess_ev = mapProviderEv(ev, nowMs(self.opts));
+                self.hist.appendFromProvider(ev) catch |hist_err| {
+                    return failWithReport(self.opts, .stream_next, hist_err);
+                };
+                const sess_stored = blk: {
+                    self.opts.store.append(self.opts.sid, sess_ev) catch |append_err| {
+                        try self.opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                        break :blk false;
+                    };
+                    break :blk true;
+                };
+                onSessionAppend(self.opts, &self.append_ct, &self.hist, sess_stored) catch |compact_err| {
+                    return failWithReport(self.opts, .compact, compact_err);
+                };
+                self.opts.mode.push(.{ .session = sess_ev }) catch |mode_err| {
+                    return failWithReport(self.opts, .mode_push, mode_err);
+                };
+
+                switch (ev) {
+                    .tool_call => |tc| {
+                        self.pending_tc = tc;
+                        continue :state .tool_dispatch;
+                    },
+                    else => continue :state .streaming,
+                }
+            },
+            .tool_dispatch => {
+                const tc = self.pending_tc.?;
+                self.pending_tc = null;
+                self.saw_tool_call = true;
+                self.tool_calls += 1;
+
+                const tr = runTool(self.opts, tc) catch |tool_err| {
+                    return failWithReport(self.opts, .tool_run, tool_err);
+                };
+                self.hist.pushToolResultOwned(tr) catch |hist_err| {
+                    return failWithReport(self.opts, .tool_run, hist_err);
+                };
+
+                const tr_ev: providers.Event = .{
+                    .tool_result = tr,
+                };
+                self.opts.mode.push(.{ .provider = tr_ev }) catch |mode_err| {
+                    return failWithReport(self.opts, .mode_push, mode_err);
+                };
+
+                const tr_sess_ev = mapProviderEv(tr_ev, nowMs(self.opts));
+                const tr_stored = blk: {
+                    self.opts.store.append(self.opts.sid, tr_sess_ev) catch |append_err| {
+                        try self.opts.mode.push(.{ .session_write_err = @errorName(append_err) });
+                        break :blk false;
+                    };
+                    break :blk true;
+                };
+                onSessionAppend(self.opts, &self.append_ct, &self.hist, tr_stored) catch |compact_err| {
+                    return failWithReport(self.opts, .compact, compact_err);
+                };
+                self.opts.mode.push(.{ .session = tr_sess_ev }) catch |mode_err| {
+                    return failWithReport(self.opts, .mode_push, mode_err);
+                };
+
+                continue :state .streaming;
+            },
+            .compacting => {
+                // Reserved for async compaction; currently handled inline via onSessionAppend.
+                continue :state .streaming;
+            },
+            .done => {
+                if (self.opts.abort_slot) |slot| slot.set(null);
+                return .{
+                    .turns = self.turns,
+                    .tool_calls = self.tool_calls,
+                };
+            },
+        };
+    }
+};
+
+pub fn run(opts: Opts) (Err || anyerror)!RunOut {
+    var ctx = try LoopCtx.init(opts);
+    defer ctx.deinit();
+    return ctx.spin();
 }
 
 fn isCanceled(opts: Opts) bool {
@@ -1185,9 +1236,39 @@ const ToolModeSink = struct {
     mode: ModeSink,
 
     fn push(self: *ToolModeSink, ev: tools.Event) !void {
-        return self.mode.push(.{
-            .tool = ev,
-        });
+        // Emit agent status events for agent tool lifecycle.
+        switch (ev) {
+            .start => |s| {
+                if (s.call.kind == .agent) {
+                    try self.mode.push(.{ .agent_status = .{
+                        .agent_id = s.call.args.agent.agent_id,
+                        .phase = .running,
+                    } });
+                }
+            },
+            .finish => |f| {
+                // Extract agent_id from the tool call outputs (look for agent: prefix).
+                const phase: AgentPhase = switch (f.final) {
+                    .ok => .done,
+                    .cancelled => .canceled,
+                    else => .err,
+                };
+                // Try to extract agent_id from output text.
+                if (f.out.len > 0) {
+                    const chunk = f.out[0].chunk;
+                    if (std.mem.startsWith(u8, chunk, "agent: ")) {
+                        if (std.mem.indexOfScalar(u8, chunk[7..], '\n')) |nl| {
+                            try self.mode.push(.{ .agent_status = .{
+                                .agent_id = chunk[7 .. 7 + nl],
+                                .phase = phase,
+                            } });
+                        }
+                    }
+                }
+            },
+            .output => {},
+        }
+        try self.mode.push(.{ .tool = ev });
     }
 };
 
@@ -1598,6 +1679,7 @@ test "loop smoke composes replay provider tool and mode" {
                     .finish => self.tool_finish_ct += 1,
                 },
                 .session_write_err => {},
+                .agent_status => {},
             }
         }
     };
@@ -1845,6 +1927,7 @@ test "loop smoke finishes single turn with no tools" {
                 .provider => self.provider_ct += 1,
                 .tool => self.tool_ct += 1,
                 .session_write_err => {},
+                .agent_status => {},
             }
         }
     };

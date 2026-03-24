@@ -16,7 +16,7 @@ const Kind = enum { text, user, thinking, tool, err, meta, image, agent };
 
 const ToolPhase = enum { none, call, result };
 
-const AgentPhase = enum { none, running, done, err, canceled };
+pub const AgentPhase = enum { none, running, done, err, canceled };
 
 const LineMode = enum { wrap, ellipsis };
 
