@@ -1088,6 +1088,8 @@ pub const BgAgent = struct {
     policy_hash: []const u8,
     status: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(AgentStatus.running)),
     result: ?ChildProc.RunResult = null,
+    /// Arena detached from child proc, keeps result slices alive.
+    result_arena: ?std.heap.ArenaAllocator = null,
     err_msg: ?[]u8 = null,
     thr: ?std.Thread = null,
     wake_w: std.posix.fd_t,
@@ -1110,6 +1112,7 @@ pub const BgAgent = struct {
 
     pub fn deinit(self: *BgAgent) void {
         if (self.thr) |thr| thr.join();
+        if (self.result_arena) |*a| a.deinit();
         std.posix.close(self.wake_r);
         std.posix.close(self.wake_w);
         if (self.err_msg) |m| self.alloc.free(m);
@@ -1166,9 +1169,9 @@ pub const BgAgent = struct {
             ctx.bg.setErr(err);
             return;
         };
-        defer child.deinit();
 
         _ = child.connect() catch |err| {
+            child.deinit();
             ctx.bg.setErr(err);
             return;
         };
@@ -1179,9 +1182,19 @@ pub const BgAgent = struct {
             ChildProc.default_run_deadline_ms,
             &ps,
         ) catch |err| {
+            child.deinit();
             ctx.bg.setErr(err);
             return;
         };
+
+        // Detach the arena from child so result slices stay valid.
+        // Manually clean up child resources without freeing the arena.
+        ctx.bg.result_arena = child.arena;
+        child.el.deinit();
+        child.stdin_file.close();
+        child.stdout_file.close();
+        child.rpc_file.close();
+        killAndWait(&child.proc);
 
         ctx.bg.result = res;
         ctx.bg.status.store(@intFromEnum(AgentStatus.fromRunResult(res)), .release);

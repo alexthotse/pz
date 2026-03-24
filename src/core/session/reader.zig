@@ -613,6 +613,39 @@ test "jsonl replay property survives crap-and-mutate of valid rows" {
     });
 }
 
+test "fuzz session reader survives arbitrary JSONL lines" {
+    try std.testing.fuzz({}, struct {
+        fn f(_: void, input: []const u8) anyerror!void {
+            const alloc = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+
+            {
+                const file = try tmp.dir.createFile("fz.jsonl", .{});
+                defer file.close();
+                try file.writeAll(input);
+                // Ensure trailing newline so reader doesn't see a torn line
+                if (input.len == 0 or input[input.len - 1] != '\n')
+                    try file.writeAll("\n");
+            }
+
+            var rdr = ReplayReader.init(alloc, tmp.dir, "fz", .{}) catch return;
+            defer rdr.deinit();
+
+            while (true) {
+                _ = rdr.next() catch return;
+                if (rdr.eof) break;
+            }
+        }
+    }.f, .{ .corpus = &.{
+        "{\"version\":1,\"at_ms\":0,\"data\":{\"noop\":{}}}\n",
+        "{\"version\":1,\"at_ms\":1,\"data\":{\"text\":{\"text\":\"hi\"}}}\n",
+        "\n",
+        "{}\n",
+        "\xff\xfe\x00\x01\n",
+    } });
+}
+
 test "P0-1 regression: no UAF across multi-event compaction replay" {
     // Exercises the arena-reset path in next(): each call deinits the previous
     // arena before allocating a new one. A UAF would surface as a use of freed

@@ -2153,3 +2153,90 @@ test "fail_closed propagates through ReconnSender" {
     try testing.expectError(error.SpoolFull, rs.sendRaw("c", 2));
     try testing.expectEqual(@as(usize, 2), rs.ring.len);
 }
+
+test "e2e: denied cmd → seal → syslog frame → udp mock → verify HMAC + redaction" {
+    const syslog_mock = @import("../test/syslog_mock.zig");
+    const talloc = testing.allocator;
+
+    // 1. Build a denied-command audit entry (e.g. "cat .pz/auth.json")
+    const denied_cmd = "cat .pz/auth.json";
+    const ent = Entry{
+        .ts_ms = 1_700_000_000_000,
+        .sid = "sess-e2e",
+        .seq = 1,
+        .severity = .warn,
+        .outcome = .deny,
+        .site = .{ .host = "e2e-host", .app = "pz", .pid = 9999 },
+        .actor = .{ .kind = .tool, .id = .{ .text = "bash", .vis = .@"pub" } },
+        .res = .{
+            .kind = .cmd,
+            .name = .{ .text = denied_cmd, .vis = .secret },
+            .op = "exec",
+        },
+        .msg = .{ .text = "command denied by policy", .vis = .@"pub" },
+        .data = .{
+            .policy = .{
+                .effect = .deny,
+                .rule = "self-protect",
+                .scope = "bash",
+            },
+        },
+    };
+
+    // 2. Seal with HMAC chain (first entry, no prev)
+    const hmac_key = integrity.Key{ .id = 42, .bytes = [_]u8{0xAB} ** integrity.mac_len };
+    const sealed = try sealAlloc(talloc, ent, hmac_key, null, null);
+    defer talloc.free(sealed);
+
+    // 3. Frame as RFC 5424 syslog
+    const body = try encodeAlloc(talloc, ent);
+    defer talloc.free(body);
+    const frame = try encodeFrameBodyAlloc(talloc, .{
+        .facility = .auth,
+        .hostname = "e2e-host",
+        .app_name = "pz",
+        .procid = "9999",
+        .msgid = "audit",
+    }, .{
+        .ts_ms = ent.ts_ms,
+        .sid = ent.sid,
+        .seq = ent.seq,
+        .severity = ent.severity,
+        .site = ent.site,
+    }, body);
+    defer talloc.free(frame);
+
+    // 4. Send to UDP mock collector
+    var collector = try syslog_mock.UdpCollector.init();
+    defer collector.deinit();
+    const recv_thread = try collector.spawn();
+
+    const send_fd = try std.posix.socket(
+        std.posix.AF.INET,
+        std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC,
+        std.posix.IPPROTO.UDP,
+    );
+    defer (std.net.Stream{ .handle = send_fd }).close();
+    var dest = try std.net.Address.parseIp("127.0.0.1", collector.port());
+    _ = try std.posix.sendto(send_fd, frame, 0, &dest.any, dest.getOsSockLen());
+
+    // 5. Receive from collector
+    recv_thread.join();
+    const received = collector.message();
+    try testing.expectEqualStrings(frame, received);
+
+    // 6. Verify HMAC chain integrity
+    const sealed_log = try std.fmt.allocPrint(talloc, "{s}\n", .{sealed});
+    defer talloc.free(sealed_log);
+    const verify = try integrity.verifyLogAlloc(talloc, sealed_log, &.{hmac_key});
+    try testing.expect(verify == .ok);
+    try testing.expectEqual(@as(u64, 1), verify.ok.lines);
+
+    // 7. Verify command text is redacted (not present in cleartext in frame or sealed)
+    try testing.expect(std.mem.indexOf(u8, frame, denied_cmd) == null);
+    try testing.expect(std.mem.indexOf(u8, sealed, denied_cmd) == null);
+
+    // Verify the redaction surrogate IS present (secret: tag)
+    try testing.expect(std.mem.indexOf(u8, frame, "[secret:") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "[secret:") != null);
+}

@@ -971,3 +971,29 @@ test "parseSseData fuzz random payloads do not crash parser state" {
         };
     }
 }
+
+test "fuzz parseSseData survives arbitrary bytes" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    defer stream.ext.tool_call_id.deinit(testing.allocator);
+    defer stream.tool_name.deinit(testing.allocator);
+    defer stream.tool_args.deinit(testing.allocator);
+
+    try std.testing.fuzz(&stream, struct {
+        fn f(s: *Stream, input: []const u8) anyerror!void {
+            resetParserState(s);
+            const ar = s.arena.allocator();
+            const copy = try ar.dupe(u8, input);
+            _ = s.parseSseData(copy) catch {};
+        }
+    }.f, .{ .corpus = &.{
+        "{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}",
+        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}",
+        "{\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"bash\"}}",
+        "{\"type\":\"response.failed\"}",
+        "{\"type\":\"error\",\"message\":\"boom\"}",
+        "",
+        "not json",
+        "\xff\xfe\x00\x01",
+    } });
+}

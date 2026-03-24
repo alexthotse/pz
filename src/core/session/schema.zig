@@ -632,6 +632,23 @@ test "schema property: event encode/decode roundtrip across tags" {
     });
 }
 
+test "fuzz decodeSlice survives arbitrary bytes" {
+    try std.testing.fuzz({}, struct {
+        fn f(_: void, input: []const u8) anyerror!void {
+            const alloc = std.testing.allocator;
+            var parsed = decodeSlice(alloc, input) catch return;
+            parsed.deinit();
+        }
+    }.f, .{ .corpus = &.{
+        "{\"version\":1,\"at_ms\":0,\"data\":{\"noop\":{}}}",
+        "{\"version\":1,\"at_ms\":1,\"data\":{\"text\":{\"text\":\"hi\"}}}",
+        "",
+        "{}",
+        "{\"version\":99}",
+        "\xff\xfe\x00\x01",
+    } });
+}
+
 test "schema property: Event.dupe preserves encode across tags" {
     const pbt = @import("../prop_test.zig");
     const Text = pbt.Utf8(24);

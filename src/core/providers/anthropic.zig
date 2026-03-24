@@ -1058,3 +1058,29 @@ test "SseStream done returns null" {
     stream.done = true;
     try testing.expect((try stream.next()) == null);
 }
+
+test "fuzz parseSseData survives arbitrary bytes" {
+    var stream = testStream();
+    defer stream.arena.deinit();
+    defer stream.ext.tool_id.deinit(testing.allocator);
+    defer stream.tool_name.deinit(testing.allocator);
+    defer stream.tool_args.deinit(testing.allocator);
+
+    try std.testing.fuzz(&stream, struct {
+        fn f(s: *Stream, input: []const u8) anyerror!void {
+            resetParserState(s);
+            const ar = s.arena.allocator();
+            const copy = try ar.dupe(u8, input);
+            _ = s.parseSseData(copy) catch {};
+        }
+    }.f, .{ .corpus = &.{
+        "{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}",
+        "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}",
+        "{\"type\":\"content_block_stop\"}",
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}",
+        "",
+        "not json",
+        "\xff\xfe\x00\x01",
+        "{\"type\":\"ping\"}",
+    } });
+}

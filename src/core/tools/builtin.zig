@@ -508,6 +508,7 @@ pub const Runtime = struct {
             };
             stream_hook = spawn_ctx.?.asStreamHook();
         }
+        defer if (spawn_ctx) |*ctx| ctx.cleanup();
         const h = agent_tool.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
