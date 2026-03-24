@@ -85,6 +85,59 @@ pub fn free(alloc: Allocator, tokens: []Token) void {
     alloc.free(tokens);
 }
 
+/// Check if any command in the input is denied by policy rules.
+/// Tokenizes the input, extracts executable names from each command
+/// (including through bash -c / env / exec / xargs wrappers), and
+/// evaluates each against the policy with path "cmd/<executable>".
+pub fn deniedByPolicy(alloc: Allocator, input: []const u8, pol: policy.Policy) Error!bool {
+    const toks = tokenize(alloc, input) catch |err| switch (err) {
+        error.UnterminatedQuote, error.EmptyInput => return false,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer free(alloc, toks);
+
+    for (toks) |tok| {
+        if (commandDeniedByPolicy(alloc, tok.cmd, pol, 0) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => true, // fail closed on parse error
+        }) return true;
+    }
+    return false;
+}
+
+fn commandDeniedByPolicy(alloc: Allocator, cmd: []const u8, pol: policy.Policy, depth: usize) Error!bool {
+    if (depth > 4) return false;
+    const words = splitWordsAlloc(alloc, cmd) catch return error.OutOfMemory;
+    defer words.deinit(alloc);
+    return wordsDeniedByPolicy(alloc, words.words, pol, depth);
+}
+
+fn wordsDeniedByPolicy(alloc: Allocator, words: []const []u8, pol: policy.Policy, depth: usize) Error!bool {
+    if (words.len == 0) return false;
+    const exe = std.fs.path.basename(words[0]);
+    // Check policy: "cmd/<executable>" pattern
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "cmd/{s}", .{exe}) catch return false;
+    if (pol.eval(path, "bash") == .deny) return true;
+    // Unwrap shell wrappers: bash -c, sh -c, env, exec, xargs
+    if ((std.mem.eql(u8, exe, "bash") or std.mem.eql(u8, exe, "sh")) and words.len > 1) {
+        for (words[1..], 0..) |w, i| {
+            if (std.mem.eql(u8, w, "-c") and i + 2 < words.len) {
+                return commandDeniedByPolicy(alloc, words[i + 2], pol, depth + 1);
+            }
+        }
+    }
+    if (std.mem.eql(u8, exe, "env") or std.mem.eql(u8, exe, "exec")) {
+        // Skip env vars (KEY=VAL) and find the actual command
+        for (words[1..]) |w| {
+            if (std.mem.indexOfScalar(u8, w, '=') == null) {
+                return commandDeniedByPolicy(alloc, w, pol, depth + 1);
+            }
+        }
+    }
+    return false;
+}
+
 pub fn touchesProtectedPath(alloc: Allocator, input: []const u8) Error!bool {
     const toks = try tokenize(alloc, input);
     defer free(alloc, toks);

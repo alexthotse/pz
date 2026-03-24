@@ -60,9 +60,20 @@ pub const VerifyError = error{
 /// `T` must have `raw: [len]u8` and be constructable via `.{ .raw = buf }`.
 fn ParseMixin(comptime T: type, comptime len: usize, comptime E: type, comptime bad_len: E) type {
     return struct {
+        /// Volatile-zero a stack buffer to prevent secret residue.
+        /// No-op for non-secret types (comptime-eliminated).
+        fn wipeStack(buf: *[len]u8) void {
+            if (T != Seed) return;
+            const p: *volatile [len]u8 = buf;
+            p.* = [_]u8{0} ** len;
+        }
+
         pub fn parse(raw_in: []const u8) E!T {
             if (raw_in.len != len) return bad_len;
             var buf: [len]u8 = undefined;
+            // Wipe stack copy of secret material after value is moved
+            // into the result location (defer runs after return copy).
+            defer wipeStack(&buf);
             @memcpy(buf[0..], raw_in);
             return .{ .raw = buf };
         }
@@ -70,6 +81,7 @@ fn ParseMixin(comptime T: type, comptime len: usize, comptime E: type, comptime 
         pub fn parseHex(hex: []const u8) E!T {
             if (hex.len != len * 2) return error.BadHexLen;
             var buf: [len]u8 = undefined;
+            defer wipeStack(&buf);
             _ = std.fmt.hexToBytes(buf[0..], hex) catch return error.BadHex;
             return .{ .raw = buf };
         }
@@ -220,7 +232,13 @@ pub const KeyPair = struct {
     pair: Ed25519.KeyPair,
 
     pub fn fromSeed(seed: Seed) KeyPairError!KeyPair {
-        const pair = Ed25519.KeyPair.generateDeterministic(seed.bytes().*) catch return error.BadSeed;
+        // seed.bytes().* dereferences into a stack copy; wipe it.
+        var seed_copy = seed.bytes().*;
+        defer {
+            const p: *volatile [seed_len]u8 = &seed_copy;
+            p.* = [_]u8{0} ** seed_len;
+        }
+        const pair = Ed25519.KeyPair.generateDeterministic(seed_copy) catch return error.BadSeed;
         return .{ .pair = pair };
     }
 
@@ -514,10 +532,8 @@ pub fn signManifestAlloc(
     asset: []const u8,
     archive: []const u8,
     url: []const u8,
-    kp_in: KeyPair,
+    kp: *const KeyPair,
 ) (std.mem.Allocator.Error || SignError || error{Overflow})![]u8 {
-    var kp = kp_in;
-    defer kp.wipe();
 
     const Sha256 = std.crypto.hash.sha2.Sha256;
     var digest: [Sha256.digest_length]u8 = undefined;
@@ -571,6 +587,10 @@ fn fixtureSignature() !Signature {
 
 fn seedFromParts(a: u64, b: u64, c: u64, d: u64) Seed {
     var raw: [seed_len]u8 = undefined;
+    defer {
+        const p: *volatile [seed_len]u8 = &raw;
+        p.* = [_]u8{0} ** seed_len;
+    }
     std.mem.writeInt(u64, raw[0..8], a, .little);
     std.mem.writeInt(u64, raw[8..16], b, .little);
     std.mem.writeInt(u64, raw[16..24], c, .little);
@@ -751,7 +771,7 @@ test "manifest roundtrip sign and verify" {
         "pz-aarch64-macos.tar.gz",
         archive,
         "https://dl.example/pz.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
 
@@ -771,7 +791,7 @@ test "manifest rejects tampered archive" {
         "pz-aarch64-macos.tar.gz",
         archive,
         "https://dl.example/pz.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
 
@@ -791,7 +811,7 @@ test "manifest rejects version mismatch" {
         "pz-aarch64-macos.tar.gz",
         archive,
         "https://dl.example/pz.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
 
@@ -811,7 +831,7 @@ test "manifest rejects asset mismatch" {
         "pz-aarch64-macos.tar.gz",
         archive,
         "https://dl.example/pz.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
 
@@ -830,7 +850,7 @@ test "manifest rejects wrong signing key" {
         "pz-aarch64-macos.tar.gz",
         archive,
         "https://dl.example/pz.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
 
@@ -933,7 +953,7 @@ test "manifest ring roundtrip with multi-key ring" {
         "pz-test.tar.gz",
         archive,
         "https://dl.example/pz2.tar.gz",
-        kp2,
+        &kp2,
     );
     defer testing.allocator.free(txt);
 
@@ -956,7 +976,7 @@ test "manifest ring rejects revoked signer" {
         "pz-test.tar.gz",
         archive,
         "https://dl.example/pz3.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
 
@@ -995,7 +1015,7 @@ test "manifest key_id in canonical form" {
         "test.tar.gz",
         archive,
         "https://dl.example/t.tar.gz",
-        kp,
+        &kp,
     );
     defer testing.allocator.free(txt);
     try testing.expect(std.mem.indexOf(u8, txt, "key_id=") != null);

@@ -89,6 +89,7 @@ pub const Manager = struct {
         emit_audit_ctx: ?*anyopaque = null,
         emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
         now_ms: *const fn () i64 = nowMs,
+        policy: ?core.policy.Policy = null,
     };
 
     alloc: std.mem.Allocator,
@@ -104,6 +105,7 @@ pub const Manager = struct {
     emit_audit_ctx: ?*anyopaque = null,
     emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
     now_ms: *const fn () i64 = nowMs,
+    policy: ?core.policy.Policy = null,
     audit_seq: u64 = 1,
 
     pub fn init(alloc: std.mem.Allocator) !Manager {
@@ -135,6 +137,7 @@ pub const Manager = struct {
             .emit_audit_ctx = opts.emit_audit_ctx,
             .emit_audit = opts.emit_audit,
             .now_ms = opts.now_ms,
+            .policy = opts.policy,
         };
         errdefer out.journal.deinit();
 
@@ -215,7 +218,9 @@ pub const Manager = struct {
             });
             return error.InvalidArgs;
         }
-        if (try shell.touchesProtectedPath(self.alloc, cmd)) {
+        if (try shell.touchesProtectedPath(self.alloc, cmd) or
+            (if (self.policy) |pol| try shell.deniedByPolicy(self.alloc, cmd, pol) else false))
+        {
             try self.emitControlAudit(.{
                 .op = "start",
                 .outcome = .fail,

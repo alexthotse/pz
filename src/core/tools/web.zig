@@ -29,18 +29,41 @@ pub const Request = struct {
     max_redirects: u8 = 5,
 };
 
-pub fn hasCredentialHeaders(req: Request) bool {
-    const cred_names = [_][]const u8{
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "x-api-key",
-    };
-    for (req.headers) |hdr| {
-        for (cred_names) |name| {
-            if (std.ascii.eqlIgnoreCase(hdr.name, name)) return true;
-        }
+const cred_names = [_][]const u8{
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "x-api-key",
+};
+
+fn isCredentialHeader(name: []const u8) bool {
+    for (cred_names) |cred| {
+        if (std.ascii.eqlIgnoreCase(name, cred)) return true;
     }
+    return false;
+}
+
+pub fn hasCredentialHeaders(req: Request) bool {
+    for (req.headers) |hdr| {
+        if (isCredentialHeader(hdr.name)) return true;
+    }
+    return false;
+}
+
+/// Strip credential-bearing headers, returning a new slice from `alloc`.
+fn stripCredentialHeaders(alloc: std.mem.Allocator, headers: []const Header) error{OutOfMemory}![]const Header {
+    var out: std.ArrayListUnmanaged(Header) = .{};
+    try out.ensureTotalCapacity(alloc, headers.len);
+    for (headers) |hdr| {
+        if (!isCredentialHeader(hdr.name)) out.appendAssumeCapacity(hdr);
+    }
+    return out.items;
+}
+
+/// True when redirect target differs in host or downgrades from HTTPS to HTTP.
+fn isCrossOrigin(orig: ParsedUrl, next: ParsedUrl) bool {
+    if (!std.ascii.eqlIgnoreCase(orig.host, next.host)) return true;
+    if (orig.scheme == .https and next.scheme == .http) return true;
     return false;
 }
 
@@ -417,7 +440,7 @@ fn fetchRedirectChainAlloc(
         const parsed = try parseUrl(cur.url);
         _ = try resolveConnectAddrWith(ar, parsed, policy, fns);
 
-        const raw = try sendLocalRequestAlloc(ar, cur.method, parsed);
+        const raw = try sendLocalRequestAlloc(ar, cur.method, cur.headers, parsed);
         const res = try parseHttpResponseAlloc(ar, raw);
         if (!cur.follow_redirects or !res.isRedirect()) {
             return .{
@@ -432,6 +455,10 @@ fn fetchRedirectChainAlloc(
         const next = (try nextRedirectTargetAlloc(ar, cur, res, policy)) orelse {
             return error.MissingRedirectTarget;
         };
+        const next_parsed = try parseUrl(next.text);
+        if (isCrossOrigin(parsed, next_parsed)) {
+            cur.headers = try stripCredentialHeaders(ar, cur.headers);
+        }
         cur.url = next.text;
         hops += 1;
     }
@@ -440,6 +467,7 @@ fn fetchRedirectChainAlloc(
 fn sendLocalRequestAlloc(
     alloc: std.mem.Allocator,
     method: Method,
+    headers: []const Header,
     parsed: ParsedUrl,
 ) ![]u8 {
     var addr = try std.net.Address.parseIp("127.0.0.1", parsed.port);
@@ -460,15 +488,23 @@ fn sendLocalRequestAlloc(
     else
         try alloc.dupe(u8, parsed.path);
     const host = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ parsed.host, parsed.port });
-    const raw_req = try std.fmt.allocPrint(
+
+    // Build request with extra headers.
+    var req_buf = std.ArrayList(u8).empty;
+    try req_buf.appendSlice(alloc, try std.fmt.allocPrint(
         alloc,
-        "{s} {s} HTTP/1.1\r\n" ++
-            "Host: {s}\r\n" ++
-            "Connection: close\r\n" ++
-            "\r\n",
+        "{s} {s} HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n",
         .{ @tagName(method), target, host },
-    );
-    _ = try std.posix.write(fd, raw_req);
+    ));
+    for (headers) |hdr| {
+        try req_buf.appendSlice(alloc, try std.fmt.allocPrint(
+            alloc,
+            "{s}: {s}\r\n",
+            .{ hdr.name, hdr.value },
+        ));
+    }
+    try req_buf.appendSlice(alloc, "\r\n");
+    _ = try std.posix.write(fd, req_buf.items);
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -1265,4 +1301,140 @@ test "Deadline connectRemaining returns remaining connect" {
     const rem = try dl.connectRemaining();
     try std.testing.expect(rem > 9_000);
     try std.testing.expect(rem <= 10_000);
+}
+
+test "D15: cross-origin redirect strips credential headers" {
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{ .status = "302 Found" },
+        },
+        .{
+            .resp = .{
+                .status = "200 OK",
+                .headers = &.{"Content-Type: text/plain"},
+                .body = "ok",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const p = server.port();
+    const host_a = try std.fmt.allocPrint(ar, "host-a.test:{d}", .{p});
+    const host_b = try std.fmt.allocPrint(ar, "host-b.test:{d}", .{p});
+    const start = try std.fmt.allocPrint(ar, "http://{s}/start", .{host_a});
+    const dest = try std.fmt.allocPrint(ar, "http://{s}/dest", .{host_b});
+
+    steps[0].expect = .{ .target = "/start", .host = host_a };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{dest})};
+    steps[1].expect = .{ .target = "/dest", .host = host_b };
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/host-a.test", .effect = .allow, .tool = "web" },
+        .{ .pattern = "runtime/web/host-b.test", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "host-a.test", .ip = .{ 34, 117, 59, 81 } },
+        .{ .host = "host-b.test", .ip = .{ 34, 117, 59, 82 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, h: []const u8, port: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, h, port, &addrs);
+        }
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    const got = try fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start,
+        .headers = &.{
+            .{ .name = "Authorization", .value = "Bearer secret" },
+            .{ .name = "Accept", .value = "text/html" },
+        },
+    }, .{
+        .egress = .{ .rules = &rules },
+        .allow_cross_host = true,
+    }, .{ .resolve = Mock.resolve, .free = Mock.free });
+    defer got.deinit(std.testing.allocator);
+    try server.join(thr);
+
+    try std.testing.expectEqual(@as(u8, 1), got.hops);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    try std.testing.expectEqualStrings("ok", got.body);
+
+    // First request (to host-a) must contain Authorization.
+    const req1 = server.request(0);
+    try std.testing.expect(std.mem.indexOf(u8, req1, "Authorization: Bearer secret") != null);
+
+    // Second request (to host-b, cross-origin) must NOT contain Authorization.
+    const req2 = server.request(1);
+    try std.testing.expect(std.mem.indexOf(u8, req2, "Authorization") == null);
+    // Non-credential header must survive.
+    try std.testing.expect(std.mem.indexOf(u8, req2, "Accept: text/html") != null);
+}
+
+test "same-origin redirect preserves credential headers" {
+    var steps = [_]http_mock.Step{
+        .{
+            .resp = .{ .status = "302 Found" },
+        },
+        .{
+            .resp = .{
+                .status = "200 OK",
+                .body = "ok",
+            },
+        },
+    };
+    var server = try http_mock.Server.init(std.testing.allocator, steps[0..]);
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const p = server.port();
+    const host = try std.fmt.allocPrint(ar, "same.test:{d}", .{p});
+    const start = try std.fmt.allocPrint(ar, "http://{s}/a", .{host});
+    const dest = try std.fmt.allocPrint(ar, "http://{s}/b", .{host});
+
+    steps[0].expect = .{ .target = "/a", .host = host };
+    steps[0].resp.headers = &.{try std.fmt.allocPrint(ar, "Location: {s}", .{dest})};
+    steps[1].expect = .{ .target = "/b", .host = host };
+
+    const rules = [_]policy_mod.Rule{
+        .{ .pattern = "runtime/web/same.test", .effect = .allow, .tool = "web" },
+    };
+    const addrs = [_]TestAddr{
+        .{ .host = "same.test", .ip = .{ 34, 117, 59, 81 } },
+    };
+    const Mock = struct {
+        fn resolve(alloc: std.mem.Allocator, h: []const u8, port: u16) ![]std.net.Address {
+            return resolveTestAddrsAlloc(alloc, h, port, &addrs);
+        }
+        fn free(alloc: std.mem.Allocator, items: []std.net.Address) void {
+            freeAddrsAlloc(alloc, items);
+        }
+    };
+
+    const thr = try server.spawn();
+    const got = try fetchRedirectChainAlloc(std.testing.allocator, .{
+        .url = start,
+        .headers = &.{
+            .{ .name = "Authorization", .value = "Bearer keep" },
+        },
+    }, .{
+        .egress = .{ .rules = &rules },
+    }, .{ .resolve = Mock.resolve, .free = Mock.free });
+    defer got.deinit(std.testing.allocator);
+    try server.join(thr);
+
+    // Same-origin: Authorization must survive to second request.
+    const req2 = server.request(1);
+    try std.testing.expect(std.mem.indexOf(u8, req2, "Authorization: Bearer keep") != null);
 }

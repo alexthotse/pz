@@ -2104,7 +2104,7 @@ fn updateTestManifestAlloc(
 ) ![]u8 {
     const test_seed = try core.signing.Seed.parseHex("8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     const kp = try core.signing.KeyPair.fromSeed(test_seed);
-    const txt = try core.signing.signManifestAlloc(alloc, ver, asset, archive, url, kp);
+    const txt = try core.signing.signManifestAlloc(alloc, ver, asset, archive, url, &kp);
     if (!valid) txt[0] = if (txt[0] == 'p') 'q' else 'p';
     return txt;
 }
@@ -2340,7 +2340,7 @@ test "verifyArchiveManifest rejects downgrade" {
         "pz-test.tar.gz",
         archive,
         "https://dl.example/pz.tar.gz",
-        kp,
+        &kp,
     );
     defer std.testing.allocator.free(txt);
 
