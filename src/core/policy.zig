@@ -348,6 +348,7 @@ pub const SignedDoc = struct {
     doc: Doc,
     pk: signing.PublicKey,
     sig: signing.Signature,
+    key_id: [signing.key_id_len]u8 = [_]u8{0} ** signing.key_id_len,
 };
 
 /// Tracks last-seen policy generation for rollback detection.
@@ -696,10 +697,21 @@ pub fn parseSignedDoc(alloc: std.mem.Allocator, json: []const u8) !SignedDoc {
     const sig_det = try signing.Signature.parseHex(sig.string);
     _ = try signing.verifyDetached(payload, sig_det, pk);
 
+    // Parse optional key_id (new format) or derive from pk (compat)
+    var kid: [signing.key_id_len]u8 = signing.keyIdFromPk(pk);
+    if (sig_obj.object.get("key_id")) |kid_val| {
+        if (kid_val == .string and kid_val.string.len == signing.key_id_hex_len) {
+            _ = std.fmt.hexToBytes(&kid, kid_val.string) catch {
+                kid = signing.keyIdFromPk(pk);
+            };
+        }
+    }
+
     return .{
         .doc = doc,
         .pk = pk,
         .sig = sig_det,
+        .key_id = kid,
     };
 }
 
@@ -789,13 +801,17 @@ pub fn encodeSignedDoc(alloc: std.mem.Allocator, doc: Doc, kp: signing.KeyPair) 
     const pk = kp.publicKey();
     const pk_hex = std.fmt.bytesToHex(pk.raw, .lower);
     const sig_hex = std.fmt.bytesToHex(sig.raw, .lower);
+    const kid = signing.keyIdFromPk(pk);
+    const kid_hex = std.fmt.bytesToHex(kid, .lower);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
     const w = buf.writer(alloc);
 
     try w.writeAll(payload[0 .. payload.len - 1]);
-    try w.writeAll(",\"signature\":{\"alg\":\"ed25519\",\"key\":\"");
+    try w.writeAll(",\"signature\":{\"alg\":\"ed25519\",\"key_id\":\"");
+    try w.print("{s}", .{&kid_hex});
+    try w.writeAll("\",\"key\":\"");
     try w.print("{s}", .{&pk_hex});
     try w.writeAll("\",\"sig\":\"");
     try w.print("{s}", .{&sig_hex});

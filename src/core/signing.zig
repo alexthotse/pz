@@ -283,10 +283,10 @@ pub fn verifyDetached(msg: []const u8, sig: Signature, pk: PublicKey) VerifyErro
 
 // ── Key identity and trust ──────────────────────────────────────────
 
-pub const key_id_len: usize = 8;
+pub const key_id_len: usize = 16; // 128 bits for collision resistance
 pub const key_id_hex_len: usize = key_id_len * 2;
 
-/// Derive key ID from public key: first 8 bytes of SHA-256(pk).
+/// Derive key ID from public key: first 16 bytes of SHA-256(pk).
 pub fn keyIdFromPk(pk: PublicKey) [key_id_len]u8 {
     const Sha256 = std.crypto.hash.sha2.Sha256;
     var digest: [Sha256.digest_length]u8 = undefined;
@@ -298,15 +298,28 @@ pub const TrustAnchor = struct {
     id: [key_id_len]u8,
     pk: PublicKey,
     revoked: bool = false,
+    /// Generation counter for rollback resistance. Newer > older.
+    generation: u64 = 0,
+    /// Expiry timestamp (ms since epoch). 0 = no expiry.
+    expires_ms: i64 = 0,
+
+    pub fn isExpired(self: TrustAnchor, now_ms: i64) bool {
+        return self.expires_ms > 0 and now_ms >= self.expires_ms;
+    }
 };
 
 pub const KeyRing = struct {
     anchors: []const TrustAnchor,
 
     pub fn resolve(self: KeyRing, kid: [key_id_len]u8) KeyRingError!PublicKey {
+        return self.resolveAt(kid, 0);
+    }
+
+    pub fn resolveAt(self: KeyRing, kid: [key_id_len]u8, now_ms: i64) KeyRingError!PublicKey {
         for (self.anchors) |a| {
             if (std.mem.eql(u8, a.id[0..], kid[0..])) {
                 if (a.revoked) return error.KeyRevoked;
+                if (a.isExpired(now_ms)) return error.KeyExpired;
                 return a.pk;
             }
         }
@@ -321,6 +334,7 @@ pub const KeyRing = struct {
 pub const KeyRingError = error{
     KeyNotFound,
     KeyRevoked,
+    KeyExpired,
 };
 
 // ── Keyed redaction surrogates ──────────────────────────────────────
@@ -893,7 +907,7 @@ test "keyIdFromPk is deterministic" {
     const id1 = keyIdFromPk(pk);
     const id2 = keyIdFromPk(pk);
     try testing.expectEqualSlices(u8, id1[0..], id2[0..]);
-    try testing.expectEqual(@as(usize, 8), id1.len);
+    try testing.expectEqual(@as(usize, key_id_len), id1.len);
 }
 
 test "keyIdFromPk differs for different keys" {
