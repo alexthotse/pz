@@ -16,15 +16,23 @@ pub const Event = struct {
     fd: posix.fd_t,
     readable: bool,
     writable: bool,
+    timer_id: ?TimerId = null, // set when this event is a timer firing
 };
 
 /// Max events returned per wait call.
 pub const max_events = 64;
 
+pub const TimerId = u32;
+const max_timers = 32;
+const timer_id_base: usize = 0x7fff_0000; // distinguish timer idents from fds in kqueue
+
 pub const EventLoop = struct {
     backend: posix.fd_t,
     wake_r: posix.fd_t,
     wake_w: posix.fd_t,
+    timer_count: u32 = 0,
+    timer_fds: if (is_epoll) [max_timers]posix.fd_t else void =
+        if (is_epoll) [_]posix.fd_t{-1} ** max_timers else {},
 
     pub fn init() !EventLoop {
         const pipe = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
@@ -43,7 +51,68 @@ pub const EventLoop = struct {
         return self;
     }
 
+    /// Add a one-shot timer that fires after `ms` milliseconds.
+    /// Returns a TimerId that appears in Event.timer_id when it fires.
+    pub fn addTimer(self: *EventLoop, ms: u32) !TimerId {
+        if (self.timer_count >= max_timers) return error.TooManyTimers;
+        const id: TimerId = self.timer_count;
+        self.timer_count += 1;
+
+        if (is_kqueue) {
+            const changelist = [1]std.posix.Kevent{.{
+                .ident = timer_id_base + id,
+                .filter = std.posix.system.EVFILT.TIMER,
+                .flags = std.posix.system.EV.ADD | std.posix.system.EV.ONESHOT,
+                .fflags = 0,
+                .data = ms,
+                .udata = 0,
+            }};
+            _ = try kqueueWaitChanges(self.backend, &changelist, &.{}, null);
+        } else {
+            const tfd = timerfdCreate() catch return error.TimerCreateFailed;
+            errdefer posix.close(tfd);
+            try timerfdSet(tfd, ms);
+            var ev = std.os.linux.epoll_event{
+                .events = std.os.linux.EPOLL.IN,
+                .data = .{ .fd = tfd },
+            };
+            const rc = std.os.linux.epoll_ctl(@intCast(self.backend), std.os.linux.EPOLL.CTL_ADD, @intCast(tfd), &ev);
+            if (std.posix.errno(rc) != .SUCCESS) {
+                posix.close(tfd);
+                return error.TimerCreateFailed;
+            }
+            self.timer_fds[id] = tfd;
+        }
+        return id;
+    }
+
+    /// Cancel a pending timer. No-op if already fired.
+    pub fn cancelTimer(self: *EventLoop, id: TimerId) void {
+        if (is_kqueue) {
+            const changelist = [1]std.posix.Kevent{.{
+                .ident = timer_id_base + id,
+                .filter = std.posix.system.EVFILT.TIMER,
+                .flags = std.posix.system.EV.DELETE,
+                .fflags = 0,
+                .data = 0,
+                .udata = 0,
+            }};
+            _ = kqueueWaitChanges(self.backend, &changelist, &.{}, null) catch {}; // cleanup: timer may already have fired
+        } else {
+            if (id < max_timers and self.timer_fds[id] >= 0) {
+                _ = std.os.linux.epoll_ctl(@intCast(self.backend), std.os.linux.EPOLL.CTL_DEL, @intCast(self.timer_fds[id]), null);
+                posix.close(self.timer_fds[id]);
+                self.timer_fds[id] = -1;
+            }
+        }
+    }
+
     pub fn deinit(self: *EventLoop) void {
+        if (is_epoll) {
+            for (self.timer_fds) |tfd| {
+                if (tfd >= 0) posix.close(tfd);
+            }
+        }
         posix.close(self.backend);
         posix.close(self.wake_r);
         posix.close(self.wake_w);
@@ -71,6 +140,12 @@ pub const EventLoop = struct {
             } else null;
             const count = try kqueueWait(self.backend, &kev, ts);
             for (kev[0..count]) |ev| {
+                if (ev.filter == std.posix.system.EVFILT.TIMER) {
+                    const tid: TimerId = @intCast(ev.ident - timer_id_base);
+                    buf[n] = .{ .fd = -1, .readable = false, .writable = false, .timer_id = tid };
+                    n += 1;
+                    continue;
+                }
                 const fd: posix.fd_t = @intCast(ev.ident);
                 if (fd == self.wake_r) {
                     drain(self.wake_r);
@@ -92,6 +167,14 @@ pub const EventLoop = struct {
                     drain(self.wake_r);
                     continue;
                 }
+                // Check if this fd is a timerfd
+                const tid = self.findTimerId(fd);
+                if (tid != null) {
+                    drainTimerfd(fd);
+                    buf[n] = .{ .fd = -1, .readable = false, .writable = false, .timer_id = tid };
+                    n += 1;
+                    continue;
+                }
                 buf[n] = .{
                     .fd = fd,
                     .readable = (ev.events & std.os.linux.EPOLL.IN) != 0,
@@ -106,6 +189,14 @@ pub const EventLoop = struct {
     /// Interrupt a blocking wait() from another thread or signal handler.
     pub fn wake(self: *EventLoop) void {
         _ = posix.write(self.wake_w, "\x01") catch return; // cleanup: propagation impossible
+    }
+
+    fn findTimerId(self: *const EventLoop, fd: posix.fd_t) ?TimerId {
+        if (!is_epoll) return null;
+        for (self.timer_fds, 0..) |tfd, i| {
+            if (tfd == fd) return @intCast(i);
+        }
+        return null;
     }
 
     // -- platform impl --
@@ -225,6 +316,28 @@ fn epollWait(epfd: posix.fd_t, events: []std.os.linux.epoll_event, timeout_ms: i
     }
 }
 
+fn timerfdCreate() !posix.fd_t {
+    const rc = std.os.linux.timerfd_create(std.os.linux.CLOCK.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+    if (std.posix.errno(rc) != .SUCCESS) return error.TimerCreateFailed;
+    return @intCast(rc);
+}
+
+fn timerfdSet(fd: posix.fd_t, ms: u32) !void {
+    const secs: i64 = @divTrunc(ms, 1000);
+    const nsecs: i64 = @rem(ms, 1000) * 1_000_000;
+    const spec = std.os.linux.itimerspec{
+        .interval = .{ .sec = 0, .nsec = 0 }, // one-shot
+        .value = .{ .sec = secs, .nsec = nsecs },
+    };
+    const rc = std.os.linux.timerfd_settime(@intCast(fd), 0, &spec, null);
+    if (std.posix.errno(rc) != .SUCCESS) return error.TimerSetFailed;
+}
+
+fn drainTimerfd(fd: posix.fd_t) void {
+    var buf: [8]u8 = undefined;
+    _ = posix.read(fd, &buf) catch {}; // cleanup: drain expiration count
+}
+
 fn drain(fd: posix.fd_t) void {
     var buf: [64]u8 = undefined;
     while (true) {
@@ -332,4 +445,31 @@ test "multiple fds" {
     }
     try std.testing.expect(saw_p1);
     try std.testing.expect(saw_p2);
+}
+
+test "timer fires after delay" {
+    var el = try EventLoop.init();
+    defer el.deinit();
+
+    const tid = try el.addTimer(50); // 50ms
+
+    var buf: [max_events]Event = undefined;
+    const events = try el.wait(2000, &buf); // wait up to 2s
+    try std.testing.expect(events.len >= 1);
+    try std.testing.expectEqual(tid, events[0].timer_id.?);
+    try std.testing.expectEqual(@as(posix.fd_t, -1), events[0].fd);
+}
+
+test "cancelled timer does not fire" {
+    var el = try EventLoop.init();
+    defer el.deinit();
+
+    const tid = try el.addTimer(5000); // 5s — won't fire in time
+    _ = tid;
+    el.cancelTimer(0);
+
+    var buf: [max_events]Event = undefined;
+    const events = try el.wait(100, &buf); // 100ms — timer was cancelled
+    // Should get 0 events (timer cancelled, nothing else registered)
+    try std.testing.expectEqual(@as(usize, 0), events.len);
 }
