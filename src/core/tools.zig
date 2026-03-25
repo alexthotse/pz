@@ -15,7 +15,6 @@ pub const agent = @import("tools/agent.zig");
 pub const skill = @import("tools/skill.zig");
 pub const web = @import("tools/web.zig");
 pub const contract_test = @import("tools/test.zig");
-const vtable = @import("vtable.zig");
 
 pub const Kind = enum {
     read,
@@ -62,19 +61,30 @@ pub const Tool = struct {
 pub const Spec = Tool;
 
 pub const CancelSrc = struct {
-    ctx: *anyopaque,
-    is_canceled_fn: *const fn (ctx: *anyopaque) bool,
+    vt: *const Vt,
 
-    pub fn from(comptime T: type, ctx: *T, comptime method: fn (*T) bool) CancelSrc {
-        return .{ .ctx = ctx, .is_canceled_fn = vtable.wrap(T, method) };
-    }
+    pub const Vt = struct {
+        is_canceled: *const fn (self: *CancelSrc) bool,
+    };
 
-    pub fn isCanceled(self: CancelSrc) bool {
-        return self.is_canceled_fn(self.ctx);
+    pub fn isCanceled(self: *CancelSrc) bool {
+        return self.vt.is_canceled(self);
     }
 
     pub fn jsonStringify(_: CancelSrc, jw: anytype) !void {
         try jw.write(null);
+    }
+
+    pub fn Bind(comptime T: type, comptime method: fn (*T) bool) type {
+        return struct {
+            pub const vt = Vt{
+                .is_canceled = isCanceledFn,
+            };
+            fn isCanceledFn(cs: *CancelSrc) bool {
+                const self: *T = @fieldParentPtr("cancel_src", cs);
+                return method(self);
+            }
+        };
     }
 };
 
@@ -84,7 +94,7 @@ pub const Call = struct {
     args: Args,
     src: Source,
     at_ms: i64,
-    cancel: ?CancelSrc = null,
+    cancel: ?*CancelSrc = null,
 
     pub const Source = enum {
         model,
@@ -278,6 +288,7 @@ pub const RegistryErr = rt.Err;
 
 test "CancelSrc forwards isCanceled" {
     const Impl = struct {
+        cancel_src: CancelSrc = .{ .vt = &CancelSrc.Bind(@This(), @This().isCanceled).vt },
         canceled: bool = false,
 
         fn isCanceled(self: *@This()) bool {
@@ -288,21 +299,20 @@ test "CancelSrc forwards isCanceled" {
     var impl = Impl{
         .canceled = true,
     };
-    const cancel = CancelSrc.from(Impl, &impl, Impl.isCanceled);
 
-    try std.testing.expect(cancel.isCanceled());
+    try std.testing.expect(impl.cancel_src.isCanceled());
 }
 
 test "CancelSrc stringifies as null" {
     const Impl = struct {
+        cancel_src: CancelSrc = .{ .vt = &CancelSrc.Bind(@This(), @This().isCanceled).vt },
         fn isCanceled(_: *@This()) bool {
             return false;
         }
     };
 
-    var impl = Impl{};
-    const cancel = CancelSrc.from(Impl, &impl, Impl.isCanceled);
-    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, cancel, .{});
+    const impl = Impl{};
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, impl.cancel_src, .{});
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings("null", json);

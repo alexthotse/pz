@@ -3,23 +3,19 @@ const std = @import("std");
 const session = @import("../session.zig");
 
 pub const Store = struct {
+    session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinitStore).vt },
+
     pub fn init() Store {
         return .{};
     }
 
-    pub fn asSessionStore(self: *Store) session.SessionStore {
-        return session.SessionStore.from(
-            Store,
-            self,
-            Store.append,
-            Store.replay,
-            Store.deinitStore,
-        );
+    pub fn sessionStore(self: *Store) *session.SessionStore {
+        return &self.session_store;
     }
 
     fn append(_: *Store, _: []const u8, _: session.Event) !void {}
 
-    fn replay(_: *Store, _: []const u8) !session.Reader {
+    fn replay(_: *Store, _: []const u8) !*session.Reader {
         return error.FileNotFound;
     }
 
@@ -32,7 +28,7 @@ pub const Store = struct {
 
 test "null store append is no-op and replay behaves as missing session" {
     var store_impl = Store.init();
-    var store = store_impl.asSessionStore();
+    const store = store_impl.sessionStore();
 
     try store.append("sid", .{
         .at_ms = 1,

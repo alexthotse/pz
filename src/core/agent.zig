@@ -1,7 +1,6 @@
 //! Child agent RPC protocol: spawn, message framing, version negotiation.
 const std = @import("std");
 const signing = @import("signing.zig");
-const vtable = @import("vtable.zig");
 const event_loop = @import("event_loop.zig");
 const fs_secure = @import("fs_secure.zig");
 const EventLoop = event_loop.EventLoop;
@@ -957,19 +956,26 @@ pub const ProgressTag = enum {
 
 /// Callback type for progress events.
 pub const ProgressCb = struct {
-    ctx: *anyopaque,
-    push_fn: *const fn (ctx: *anyopaque, ev: ProgressEvent) void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime push_fn: fn (ctx: *T, ev: ProgressEvent) void,
-    ) ProgressCb {
-        return .{ .ctx = ctx, .push_fn = vtable.wrap(T, push_fn) };
+    pub const Vt = struct {
+        push: *const fn (self: *ProgressCb, ev: ProgressEvent) void,
+    };
+
+    pub fn push(self: *ProgressCb, ev: ProgressEvent) void {
+        self.vt.push(self, ev);
     }
 
-    pub fn push(self: ProgressCb, ev: ProgressEvent) void {
-        self.push_fn(self.ctx, ev);
+    pub fn Bind(comptime T: type, comptime push_fn: fn (*T, ProgressEvent) void) type {
+        return struct {
+            pub const vt = Vt{
+                .push = pushFn,
+            };
+            fn pushFn(cb: *ProgressCb, ev: ProgressEvent) void {
+                const self: *T = @fieldParentPtr("cb", cb);
+                push_fn(self, ev);
+            }
+        };
     }
 };
 
@@ -979,10 +985,10 @@ pub const ProgressCb = struct {
 pub const ProgressStream = struct {
     stub: *Stub,
     agent_id: []const u8,
-    cb: ProgressCb,
+    cb: *ProgressCb,
     status: AgentStatus = .running,
 
-    pub fn init(stub: *Stub, agent_id: []const u8, cb: ProgressCb) ProgressStream {
+    pub fn init(stub: *Stub, agent_id: []const u8, cb: *ProgressCb) ProgressStream {
         return .{
             .stub = stub,
             .agent_id = agent_id,
@@ -1125,7 +1131,7 @@ pub const BgAgent = struct {
     }
 
     /// Spawn the child and start the monitor thread.
-    pub fn start(self: *BgAgent, prompt: []const u8, cb: ProgressCb) !void {
+    pub fn start(self: *BgAgent, prompt: []const u8, cb: *ProgressCb) !void {
         const ctx = try self.alloc.create(ThreadCtx);
         errdefer self.alloc.destroy(ctx);
         const prompt_copy = try self.alloc.dupe(u8, prompt);
@@ -1159,7 +1165,7 @@ pub const BgAgent = struct {
     const ThreadCtx = struct {
         bg: *BgAgent,
         prompt: []u8,
-        cb: ProgressCb,
+        cb: *ProgressCb,
     };
 
     fn monitorThread(ctx: *ThreadCtx) void {
@@ -1244,7 +1250,7 @@ pub const BgPool = struct {
         agent_id: []const u8,
         policy_hash: []const u8,
         prompt: []const u8,
-        cb: ProgressCb,
+        cb: *ProgressCb,
     ) !u8 {
         if (self.len >= MultiTracker.max_agents) return error.Overflow;
         const now = std.time.milliTimestamp();
@@ -2035,6 +2041,7 @@ test "progress stream fires callback on child output" {
     _ = try stub.run(.{ .id = "j1", .prompt = "go" });
 
     const Collector = struct {
+        cb: ProgressCb = .{ .vt = &Bind.vt },
         events: [8]ProgressTag = undefined,
         n: u8 = 0,
 
@@ -2044,10 +2051,11 @@ test "progress stream fires callback on child output" {
                 self.n += 1;
             }
         }
+        const Bind = ProgressCb.Bind(@This(), push);
     };
 
     var col = Collector{};
-    var ps = ProgressStream.init(&stub, "child", ProgressCb.from(Collector, &col, Collector.push));
+    var ps = ProgressStream.init(&stub, "child", &col.cb);
 
     const ev_out = try stub.recv(Frame.init(2, .{
         .out = .{ .id = "j1", .kind = .text, .text = "hello" },

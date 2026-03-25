@@ -28,7 +28,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, _: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, _: *tools.Sink) Err!tools.Result {
         if (call.kind != .write) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .write) return error.KindMismatch;
 
@@ -236,11 +236,13 @@ test "write handler returns kind mismatch for wrong call kind" {
 test "write handler denies replaced target before truncation" {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
 
-    const Hook = struct {
-        fn run(_: *anyopaque, dir: std.fs.Dir, path: []const u8) !void {
+    const HookCtx = struct {
+        race_hook: path_guard.RaceHook = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), dir: std.fs.Dir, path: []const u8) !void {
             try dir.rename(path, "gone.txt");
             try dir.rename("swap.txt", path);
         }
+        const Bind = path_guard.RaceHook.Bind(@This(), run);
     };
 
     var tmp = std.testing.tmpDir(.{});
@@ -253,8 +255,8 @@ test "write handler denies replaced target before truncation" {
 
     const sink = noop.sink();
 
-    var ctx: u8 = 0;
-    var hook = path_guard.installRaceHook(&ctx, Hook.run);
+    var hook_ctx = HookCtx{};
+    var hook = path_guard.installRaceHook(&hook_ctx.race_hook);
     defer hook.deinit();
 
     const handler = Handler.init(.{});

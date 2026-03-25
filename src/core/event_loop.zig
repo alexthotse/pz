@@ -28,45 +28,51 @@ const timer_id_base: usize = 0x7fff_0000; // distinguish timer idents from fds i
 
 /// Callback for fd readiness events.
 pub const Handler = struct {
-    ctx: *anyopaque,
-    on_ready: *const fn (ctx: *anyopaque, fd: posix.fd_t, readable: bool, writable: bool) void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime on_ready_fn: fn (ctx: *T, fd: posix.fd_t, readable: bool, writable: bool) void,
-    ) Handler {
-        const Wrap = struct {
-            fn onReady(raw: *anyopaque, fd: posix.fd_t, readable: bool, writable: bool) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                on_ready_fn(typed, fd, readable, writable);
-            }
-        };
-        return .{ .ctx = ctx, .on_ready = Wrap.onReady };
+    pub const Vt = struct {
+        on_ready: *const fn (self: *Handler, fd: posix.fd_t, readable: bool, writable: bool) void,
+    };
+
+    fn call(self: *Handler, fd: posix.fd_t, readable: bool, writable: bool) void {
+        self.vt.on_ready(self, fd, readable, writable);
     }
 
-    fn call(self: Handler, fd: posix.fd_t, readable: bool, writable: bool) void {
-        self.on_ready(self.ctx, fd, readable, writable);
+    pub fn Bind(comptime T: type, comptime on_ready_fn: fn (*T, posix.fd_t, bool, bool) void) type {
+        return struct {
+            pub const vt = Vt{
+                .on_ready = onReadyFn,
+            };
+            fn onReadyFn(h: *Handler, fd: posix.fd_t, readable: bool, writable: bool) void {
+                const self: *T = @fieldParentPtr("handler", h);
+                on_ready_fn(self, fd, readable, writable);
+            }
+        };
     }
 };
 
 /// Callback for timer events.
 pub const TimerHandler = struct {
-    ctx: *anyopaque,
-    on_timer: *const fn (ctx: *anyopaque, id: TimerId) void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime on_timer_fn: fn (ctx: *T, id: TimerId) void,
-    ) TimerHandler {
-        const Wrap = struct {
-            fn onTimer(raw: *anyopaque, id: TimerId) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                on_timer_fn(typed, id);
+    pub const Vt = struct {
+        on_timer: *const fn (self: *TimerHandler, id: TimerId) void,
+    };
+
+    fn call(self: *TimerHandler, id: TimerId) void {
+        self.vt.on_timer(self, id);
+    }
+
+    pub fn Bind(comptime T: type, comptime on_timer_fn: fn (*T, TimerId) void) type {
+        return struct {
+            pub const vt = Vt{
+                .on_timer = onTimerFn,
+            };
+            fn onTimerFn(th: *TimerHandler, id: TimerId) void {
+                const self: *T = @fieldParentPtr("timer_handler", th);
+                on_timer_fn(self, id);
             }
         };
-        return .{ .ctx = ctx, .on_timer = Wrap.onTimer };
     }
 };
 
@@ -74,7 +80,7 @@ const max_handlers = 64;
 
 const FdEntry = struct {
     fd: posix.fd_t,
-    handler: Handler,
+    handler: *Handler,
 };
 
 pub const EventLoop = struct {
@@ -88,10 +94,10 @@ pub const EventLoop = struct {
     fd_handlers: [max_handlers]FdEntry = [_]FdEntry{.{ .fd = -1, .handler = undefined }} ** max_handlers,
     fd_handler_count: u32 = 0,
     // Timer handlers
-    timer_handlers: [max_timers]?TimerHandler = [_]?TimerHandler{null} ** max_timers,
+    timer_handlers: [max_timers]?*TimerHandler = [_]?*TimerHandler{null} ** max_timers,
     // SIGCHLD signalfd (Linux) or kqueue EVFILT_SIGNAL
     sigchld_fd: posix.fd_t = -1,
-    sigchld_handler: ?Handler = null,
+    sigchld_handler: ?*Handler = null,
 
     pub fn init() !EventLoop {
         const pipe = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
@@ -167,7 +173,7 @@ pub const EventLoop = struct {
     }
 
     /// Add a timer with a handler that's called when it fires.
-    pub fn addTimerWithHandler(self: *EventLoop, ms: u32, handler: TimerHandler) !TimerId {
+    pub fn addTimerWithHandler(self: *EventLoop, ms: u32, handler: *TimerHandler) !TimerId {
         const id = try self.addTimer(ms);
         self.timer_handlers[id] = handler;
         return id;
@@ -184,7 +190,7 @@ pub const EventLoop = struct {
             if (ev.timer_id) |tid| {
                 if (tid < max_timers) {
                     if (self.timer_handlers[tid]) |th| {
-                        th.on_timer(th.ctx, tid);
+                        th.call(tid);
                         self.timer_handlers[tid] = null;
                         continue;
                     }
@@ -213,7 +219,7 @@ pub const EventLoop = struct {
 
     /// Register a handler for SIGCHLD (child process exit).
     /// Only one SIGCHLD handler is supported.
-    pub fn watchSigchld(self: *EventLoop, handler: Handler) !void {
+    pub fn watchSigchld(self: *EventLoop, handler: *Handler) !void {
         if (self.sigchld_handler != null) return error.AlreadyRegistered;
 
         if (is_kqueue) {
@@ -268,7 +274,7 @@ pub const EventLoop = struct {
     }
 
     /// Register fd with a handler that's called on readiness.
-    pub fn registerHandler(self: *EventLoop, fd: posix.fd_t, interest: Interest, handler: Handler) !void {
+    pub fn registerHandler(self: *EventLoop, fd: posix.fd_t, interest: Interest, handler: *Handler) !void {
         try self.registerFd(fd, interest);
         if (self.fd_handler_count >= max_handlers) return error.TooManyHandlers;
         self.fd_handlers[self.fd_handler_count] = .{ .fd = fd, .handler = handler };

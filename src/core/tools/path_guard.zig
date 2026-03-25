@@ -5,13 +5,32 @@ const posix = std.posix;
 
 const native_os = builtin.os.tag;
 
-const RaceHook = struct {
-    ctx: *anyopaque,
-    after_open: *const fn (*anyopaque, std.fs.Dir, []const u8) anyerror!void,
+pub const RaceHook = struct {
+    vt: *const Vt,
+
+    pub const Vt = struct {
+        after_open: *const fn (self: *RaceHook, dir: std.fs.Dir, path: []const u8) anyerror!void,
+    };
+
+    pub fn call(self: *RaceHook, dir: std.fs.Dir, path: []const u8) !void {
+        return self.vt.after_open(self, dir, path);
+    }
+
+    pub fn Bind(comptime T: type, comptime after_open_fn: fn (*T, std.fs.Dir, []const u8) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .after_open = afterOpenFn,
+            };
+            fn afterOpenFn(rh: *RaceHook, dir: std.fs.Dir, path: []const u8) anyerror!void {
+                const self_ptr: *T = @fieldParentPtr("race_hook", rh);
+                return after_open_fn(self_ptr, dir, path);
+            }
+        };
+    }
 };
 
 var race_mu: std.Thread.Mutex = .{};
-var race_hook: ?RaceHook = null;
+var race_hook: ?*RaceHook = null;
 
 pub const CwdGuard = struct {
     prev: std.fs.Dir,
@@ -47,15 +66,9 @@ pub const RaceGuard = struct {
     }
 };
 
-pub fn installRaceHook(
-    ctx: *anyopaque,
-    after_open: *const fn (*anyopaque, std.fs.Dir, []const u8) anyerror!void,
-) RaceGuard {
+pub fn installRaceHook(hook: *RaceHook) RaceGuard {
     race_mu.lock();
-    race_hook = .{
-        .ctx = ctx,
-        .after_open = after_open,
-    };
+    race_hook = hook;
     return .{};
 }
 
@@ -323,7 +336,7 @@ fn createFileAt(dir_fd: posix.fd_t, path: []const u8, flags: std.fs.File.CreateF
 
 fn maybeRace(dir_fd: posix.fd_t, path: []const u8) !void {
     if (race_hook) |hook| {
-        try hook.after_open(hook.ctx, .{ .fd = dir_fd }, path);
+        try hook.call(.{ .fd = dir_fd }, path);
     }
 }
 
@@ -563,10 +576,12 @@ test "openFile denies replaced leaf after open" {
     if (native_os == .windows or native_os == .wasi) return;
 
     const Ctx = struct {
-        fn run(_: *anyopaque, dir: std.fs.Dir, path: []const u8) !void {
+        race_hook: RaceHook = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), dir: std.fs.Dir, path: []const u8) !void {
             try dir.rename(path, "gone.txt");
             try dir.rename("swap.txt", path);
         }
+        const Bind = RaceHook.Bind(@This(), run);
     };
 
     var tmp = std.testing.tmpDir(.{});
@@ -577,8 +592,8 @@ test "openFile denies replaced leaf after open" {
     try tmp.dir.writeFile(.{ .sub_path = "victim.txt", .data = "keep\n" });
     try tmp.dir.writeFile(.{ .sub_path = "swap.txt", .data = "swap\n" });
 
-    var ctx: u8 = 0;
-    var guard = installRaceHook(&ctx, Ctx.run);
+    var ctx = Ctx{};
+    var guard = installRaceHook(&ctx.race_hook);
     defer guard.deinit();
 
     try std.testing.expectError(error.AccessDenied, openFile("victim.txt", .{ .mode = .read_only }));
@@ -591,10 +606,12 @@ test "createFile denies replaced leaf before truncation" {
     if (native_os == .windows or native_os == .wasi) return;
 
     const Ctx = struct {
-        fn run(_: *anyopaque, dir: std.fs.Dir, path: []const u8) !void {
+        race_hook: RaceHook = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), dir: std.fs.Dir, path: []const u8) !void {
             try dir.rename(path, "gone.txt");
             try dir.rename("swap.txt", path);
         }
+        const Bind = RaceHook.Bind(@This(), run);
     };
 
     var tmp = std.testing.tmpDir(.{});
@@ -605,8 +622,8 @@ test "createFile denies replaced leaf before truncation" {
     try tmp.dir.writeFile(.{ .sub_path = "victim.txt", .data = "keep\n" });
     try tmp.dir.writeFile(.{ .sub_path = "swap.txt", .data = "swap\n" });
 
-    var ctx: u8 = 0;
-    var guard = installRaceHook(&ctx, Ctx.run);
+    var ctx = Ctx{};
+    var guard = installRaceHook(&ctx.race_hook);
     defer guard.deinit();
 
     try std.testing.expectError(error.AccessDenied, createFile("victim.txt", .{ .truncate = true }));

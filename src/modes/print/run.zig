@@ -241,6 +241,7 @@ test "exec runs prompt path and persists mapped provider events" {
     };
 
     const ReaderImpl = struct {
+        reader: core.session.Reader = .{ .vt = &core.session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?core.session.Event {
             return null;
         }
@@ -249,6 +250,7 @@ test "exec runs prompt path and persists mapped provider events" {
     };
 
     const StoreImpl = struct {
+        session_store: core.session.SessionStore = .{ .vt = &core.session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         replay_ct: usize = 0,
         deinit_ct: usize = 0,
@@ -265,14 +267,9 @@ test "exec runs prompt path and persists mapped provider events" {
             self.len += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !core.session.Reader {
+        fn replay(self: *@This(), _: []const u8) !*core.session.Reader {
             self.replay_ct += 1;
-            return core.session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -320,13 +317,7 @@ test "exec runs prompt path and persists mapped provider events" {
     
 
     var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var out_buf: [512]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
@@ -334,7 +325,7 @@ test "exec runs prompt path and persists mapped provider events" {
     const result = try execVerbose(.{
         .alloc = std.testing.allocator,
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .sid = "sid-1",
         .prompt = "ship-it",
     }, out_fbs.writer().any(), true);
@@ -483,6 +474,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     };
 
     const ReaderImpl = struct {
+        reader: core.session.Reader = .{ .vt = &core.session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?core.session.Event {
             return null;
         }
@@ -491,6 +483,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     };
 
     const StoreImpl = struct {
+        session_store: core.session.SessionStore = .{ .vt = &core.session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         evs: [2]core.session.Event = undefined,
         rdr: ReaderImpl = .{},
@@ -501,13 +494,8 @@ test "exec deinit stream and maps stream next error to typed print error" {
             self.append_ct += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !core.session.Reader {
-            return core.session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*core.session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -517,13 +505,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     
 
     var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var out_buf: [32]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
@@ -531,7 +513,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     try std.testing.expectError(error.StreamRead, execVerbose(.{
         .alloc = std.testing.allocator,
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .sid = "sid-2",
         .prompt = "prompt-2",
     }, out_fbs.writer().any(), true));
@@ -588,6 +570,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     };
 
     const ReaderImpl = struct {
+        reader: core.session.Reader = .{ .vt = &core.session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?core.session.Event {
             return null;
         }
@@ -596,6 +579,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     };
 
     const StoreImpl = struct {
+        session_store: core.session.SessionStore = .{ .vt = &core.session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         evs: [4]core.session.Event = undefined,
         rdr: ReaderImpl = .{},
@@ -606,13 +590,8 @@ test "exec maps max_out stop reason to deterministic typed error" {
             self.append_ct += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !core.session.Reader {
-            return core.session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*core.session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -633,13 +612,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     
 
     var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var out_buf: [128]u8 = undefined;
     var out_fbs = std.io.fixedBufferStream(&out_buf);
@@ -647,7 +620,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     const result = try execVerbose(.{
         .alloc = std.testing.allocator,
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .sid = "sid-3",
         .prompt = "prompt-3",
     }, out_fbs.writer().any(), true);

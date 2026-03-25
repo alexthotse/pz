@@ -5,7 +5,7 @@ const policy = @import("../policy.zig");
 const sandbox = @import("../sandbox.zig");
 const shell = @import("../shell.zig");
 const tools = @import("../tools.zig");
-const vtable = @import("../vtable.zig");
+
 const shared = @import("shared.zig");
 const tool_snap = @import("../../test/tool_snap.zig");
 const noop = @import("../../test/noop_sink.zig");
@@ -26,30 +26,37 @@ pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64 = 0,
-    runner: ?Runner = null,
+    runner: ?*Runner = null,
 };
 
 const Launch = struct {
     argv: []const []const u8,
     cwd: ?[]const u8,
     env: *const std.process.EnvMap,
-    cancel: ?tools.CancelSrc,
+    cancel: ?*tools.CancelSrc,
 };
 
 pub const Runner = struct {
-    ctx: *anyopaque,
-    run_fn: *const fn (*anyopaque, Handler, Launch) Err!RunOut,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime run_fn: fn (*T, Handler, Launch) Err!RunOut,
-    ) Runner {
-        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
+    pub const Vt = struct {
+        run: *const fn (self: *Runner, handler: Handler, launch: Launch) Err!RunOut,
+    };
+
+    fn exec(self: *Runner, handler: Handler, launch: Launch) Err!RunOut {
+        return self.vt.run(self, handler, launch);
     }
 
-    fn exec(self: Runner, handler: Handler, launch: Launch) Err!RunOut {
-        return self.run_fn(self.ctx, handler, launch);
+    pub fn Bind(comptime T: type, comptime run_fn: fn (*T, Handler, Launch) Err!RunOut) type {
+        return struct {
+            pub const vt = Vt{
+                .run = runFn,
+            };
+            fn runFn(r: *Runner, handler: Handler, launch: Launch) Err!RunOut {
+                const self_ptr: *T = @fieldParentPtr("runner", r);
+                return run_fn(self_ptr, handler, launch);
+            }
+        };
     }
 };
 
@@ -57,7 +64,7 @@ pub const Handler = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64,
-    runner: ?Runner,
+    runner: ?*Runner,
 
     pub fn init(opts: Opts) Handler {
         return .{
@@ -68,7 +75,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, sink: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, sink: *tools.Sink) Err!tools.Result {
         if (call.kind != .bash) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .bash) return error.KindMismatch;
 
@@ -259,10 +266,10 @@ fn runChild(
     argv: []const []const u8,
     cwd: ?[]const u8,
     env: *const std.process.EnvMap,
-    cancel: ?tools.CancelSrc,
+    cancel: ?*tools.CancelSrc,
     call_id: []const u8,
     at_ms: i64,
-    sink: tools.Sink,
+    sink: *tools.Sink,
 ) Err!RunOut {
     var child = std.process.Child.init(argv, self.alloc);
     child.stdin_behavior = .Ignore;
@@ -401,7 +408,7 @@ fn readFd(
     max_bytes: usize,
     buf: *std.ArrayList(u8),
     full_bytes: *usize,
-    sink: tools.Sink,
+    sink: *tools.Sink,
     seq: *u32,
 ) !bool {
     var scratch: [4096]u8 = undefined;
@@ -661,9 +668,12 @@ test "bash handler installs sandbox before bash exec" {
         cwd_matches_sub: bool,
     };
     const RunnerCtx = struct {
+        runner: Runner = .{ .vt = &RunBind.vt },
         alloc: std.mem.Allocator,
         argv: ?[][]const u8 = null,
         cwd: ?[]const u8 = null,
+
+        const RunBind = Runner.Bind(@This(), run);
 
         fn run(self: *@This(), handler: Handler, launch: Launch) Err!RunOut {
             self.argv = try self.alloc.alloc([]const u8, launch.argv.len);
@@ -713,7 +723,7 @@ test "bash handler installs sandbox before bash exec" {
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 128,
-        .runner = Runner.from(RunnerCtx, &runner_ctx, RunnerCtx.run),
+        .runner = &runner_ctx.runner,
     });
     const call: tools.Call = .{
         .id = "b2-sandbox",
@@ -1293,10 +1303,12 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
         }
     };
     const SinkImpl = struct {
+        sink: tools.Sink = .{ .vt = &SinkBind.vt },
         mu: std.Thread.Mutex = .{},
         saw_out: bool = false,
         out_before_done: bool = false,
         done: bool = false,
+        const SinkBind = tools.Sink.Bind(@This(), push);
 
         fn push(self: *@This(), ev: tools.Event) !void {
             self.mu.lock();
@@ -1312,6 +1324,7 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
         }
     };
     const CancelImpl = struct {
+        cancel_src: tools.CancelSrc = .{ .vt = &tools.CancelSrc.Bind(@This(), @This().isCanceled).vt },
         canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         fn isCanceled(self: *@This()) bool {
@@ -1321,7 +1334,7 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
     const RunCtx = struct {
         handler: Handler,
         call: tools.Call,
-        sink: tools.Sink,
+        sink: *tools.Sink,
         res: ?tools.Result = null,
         err: ?Err = null,
 
@@ -1334,9 +1347,7 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
     };
 
     var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
     var cancel_impl = CancelImpl{};
-    const cancel = tools.CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
@@ -1352,13 +1363,13 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
         },
         .src = .model,
         .at_ms = 0,
-        .cancel = cancel,
+        .cancel = &cancel_impl.cancel_src,
     };
 
     var ctx = RunCtx{
         .handler = handler,
         .call = call,
-        .sink = sink,
+        .sink = &sink_impl.sink,
     };
 
     const thr = try std.Thread.spawn(.{}, RunCtx.run, .{&ctx});

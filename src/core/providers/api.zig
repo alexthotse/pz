@@ -58,36 +58,34 @@ pub const Opts = struct {
 };
 
 pub const Aborter = struct {
-    ctx: *anyopaque,
-    abort_fn: *const fn (ctx: *anyopaque) void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime abort_fn: fn (ctx: *T) void,
-    ) Aborter {
-        const Wrap = struct {
-            fn abort(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                abort_fn(typed);
-            }
-        };
-        return .{
-            .ctx = ctx,
-            .abort_fn = Wrap.abort,
-        };
+    pub const Vt = struct {
+        abort: *const fn (self: *Aborter) void,
+    };
+
+    pub fn abort(self: *Aborter) void {
+        self.vt.abort(self);
     }
 
-    pub fn abort(self: Aborter) void {
-        self.abort_fn(self.ctx);
+    pub fn Bind(comptime T: type, comptime abort_fn: fn (*T) void) type {
+        return struct {
+            pub const vt = Vt{
+                .abort = abortFn,
+            };
+            fn abortFn(a: *Aborter) void {
+                const self: *T = @fieldParentPtr("aborter", a);
+                abort_fn(self);
+            }
+        };
     }
 };
 
 pub const AbortSlot = struct {
     mu: @import("std").Thread.Mutex = .{},
-    cur: ?Aborter = null,
+    cur: ?*Aborter = null,
 
-    pub fn set(self: *AbortSlot, aborter: ?Aborter) void {
+    pub fn set(self: *AbortSlot, aborter: ?*Aborter) void {
         self.mu.lock();
         self.cur = aborter;
         self.mu.unlock();
@@ -103,28 +101,26 @@ pub const AbortSlot = struct {
 /// Lightweight cancel-poll vtable. Lives in api.zig to avoid
 /// circular imports from providers → loop.
 pub const CancelPoll = struct {
-    ctx: *anyopaque,
-    is_canceled_fn: *const fn (ctx: *anyopaque) bool,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime is_canceled_fn: fn (ctx: *T) bool,
-    ) CancelPoll {
-        const Wrap = struct {
-            fn isCanceled(raw: *anyopaque) bool {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return is_canceled_fn(typed);
-            }
-        };
-        return .{
-            .ctx = ctx,
-            .is_canceled_fn = Wrap.isCanceled,
-        };
+    pub const Vt = struct {
+        is_canceled: *const fn (self: *CancelPoll) bool,
+    };
+
+    pub fn isCanceled(self: *CancelPoll) bool {
+        return self.vt.is_canceled(self);
     }
 
-    pub fn isCanceled(self: CancelPoll) bool {
-        return self.is_canceled_fn(self.ctx);
+    pub fn Bind(comptime T: type, comptime is_canceled_fn: fn (*T) bool) type {
+        return struct {
+            pub const vt = Vt{
+                .is_canceled = isCanceledFn,
+            };
+            fn isCanceledFn(cp: *CancelPoll) bool {
+                const self: *T = @fieldParentPtr("cancel_poll", cp);
+                return is_canceled_fn(self);
+            }
+        };
     }
 };
 
@@ -326,7 +322,7 @@ pub const Stream = struct {
     pub const Vt = struct {
         next: *const fn (self: *Stream) anyerror!?Event,
         deinit: *const fn (self: *Stream) void,
-        abort: ?*const fn (self: *Stream) void = null,
+        aborter: ?*const fn (self: *Stream) *Aborter = null,
     };
 
     pub fn next(self: *Stream) !?Event {
@@ -337,12 +333,9 @@ pub const Stream = struct {
         self.vt.deinit(self);
     }
 
-    pub fn aborter(self: *Stream) ?Aborter {
-        const abort_fn = self.vt.abort orelse return null;
-        return .{
-            .ctx = self,
-            .abort_fn = @ptrCast(abort_fn),
-        };
+    pub fn aborter(self: *Stream) ?*Aborter {
+        const f = self.vt.aborter orelse return null;
+        return f(self);
     }
 
     /// Generate a Stream.Vt that trampolines through @fieldParentPtr.
@@ -368,19 +361,21 @@ pub const Stream = struct {
         };
     }
 
-    /// Like Bind but also includes an abort trampoline.
+    /// Like Bind but also embeds an Aborter in T (T must have `aborter: Aborter` field).
     pub fn BindAbortable(
         comptime T: type,
         comptime next_fn: fn (*T) anyerror!?Event,
         comptime deinit_fn: fn (*T) void,
         comptime abort_fn: fn (*T) void,
     ) type {
+        const AbortBind = Aborter.Bind(T, abort_fn);
         return struct {
             pub const vt = Vt{
                 .next = nextFn,
                 .deinit = deinitFn,
-                .abort = abortFn,
+                .aborter = aborterFn,
             };
+            pub const aborter_vt = AbortBind.vt;
             fn nextFn(s: *Stream) anyerror!?Event {
                 const self: *T = @fieldParentPtr("stream", s);
                 return next_fn(self);
@@ -389,9 +384,9 @@ pub const Stream = struct {
                 const self: *T = @fieldParentPtr("stream", s);
                 deinit_fn(self);
             }
-            fn abortFn(s: *Stream) void {
+            fn aborterFn(s: *Stream) *Aborter {
                 const self: *T = @fieldParentPtr("stream", s);
-                abort_fn(self);
+                return &self.aborter;
             }
         };
     }

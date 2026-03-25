@@ -1,6 +1,5 @@
 //! Session layer: JSONL persistence, replay, compaction, export.
 const std = @import("std");
-const vtable = @import("vtable.zig");
 const schema = @import("session/schema.zig");
 pub const writer = @import("session/writer.zig");
 pub const reader = @import("session/reader.zig");
@@ -41,75 +40,89 @@ pub const saveRetryState = retry_state.save;
 pub const loadRetryState = retry_state.load;
 
 pub const Reader = struct {
-    ctx: *anyopaque,
     vt: *const Vt,
 
     pub const Vt = struct {
-        next: *const fn (ctx: *anyopaque) anyerror!?Event,
-        deinit: *const fn (ctx: *anyopaque) void,
+        next: *const fn (self: *Reader) anyerror!?Event,
+        deinit: *const fn (self: *Reader) void,
     };
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime next_fn: fn (ctx: *T) anyerror!?Event,
-        comptime deinit_fn: fn (ctx: *T) void,
-    ) Reader {
-        const Gen = struct {
-            const vt = Vt{
-                .next = vtable.wrap(T, next_fn),
-                .deinit = vtable.wrap(T, deinit_fn),
-            };
-        };
-        return .{ .ctx = ctx, .vt = &Gen.vt };
-    }
-
     pub fn next(self: *Reader) !?Event {
-        return self.vt.next(self.ctx);
+        return self.vt.next(self);
     }
 
     pub fn deinit(self: *Reader) void {
-        self.vt.deinit(self.ctx);
+        self.vt.deinit(self);
+    }
+
+    pub fn Bind(
+        comptime T: type,
+        comptime next_fn: fn (*T) anyerror!?Event,
+        comptime deinit_fn: fn (*T) void,
+    ) type {
+        return struct {
+            pub const vt = Vt{
+                .next = nextFn,
+                .deinit = deinitFn,
+            };
+            fn nextFn(r: *Reader) anyerror!?Event {
+                const self: *T = @fieldParentPtr("reader", r);
+                return next_fn(self);
+            }
+            fn deinitFn(r: *Reader) void {
+                const self: *T = @fieldParentPtr("reader", r);
+                deinit_fn(self);
+            }
+        };
     }
 };
 
 pub const SessionStore = struct {
-    ctx: *anyopaque,
     vt: *const Vt,
 
     pub const Vt = struct {
-        append: *const fn (ctx: *anyopaque, sid: []const u8, ev: Event) anyerror!void,
-        replay: *const fn (ctx: *anyopaque, sid: []const u8) anyerror!Reader,
-        deinit: *const fn (ctx: *anyopaque) void,
+        append: *const fn (self: *SessionStore, sid: []const u8, ev: Event) anyerror!void,
+        replay: *const fn (self: *SessionStore, sid: []const u8) anyerror!*Reader,
+        deinit: *const fn (self: *SessionStore) void,
     };
 
-    pub fn from(
+    pub fn append(self: *SessionStore, sid: []const u8, ev: Event) !void {
+        return self.vt.append(self, sid, ev);
+    }
+
+    pub fn replay(self: *SessionStore, sid: []const u8) !*Reader {
+        return self.vt.replay(self, sid);
+    }
+
+    pub fn deinit(self: *SessionStore) void {
+        self.vt.deinit(self);
+    }
+
+    pub fn Bind(
         comptime T: type,
-        ctx: *T,
-        comptime append_fn: fn (ctx: *T, sid: []const u8, ev: Event) anyerror!void,
-        comptime replay_fn: fn (ctx: *T, sid: []const u8) anyerror!Reader,
-        comptime deinit_fn: fn (ctx: *T) void,
-    ) SessionStore {
-        const Gen = struct {
-            const vt = Vt{
-                .append = vtable.wrap(T, append_fn),
-                .replay = vtable.wrap(T, replay_fn),
-                .deinit = vtable.wrap(T, deinit_fn),
+        comptime append_fn: fn (*T, []const u8, Event) anyerror!void,
+        comptime replay_fn: fn (*T, []const u8) anyerror!*Reader,
+        comptime deinit_fn: fn (*T) void,
+    ) type {
+        return struct {
+            pub const vt = Vt{
+                .append = appendFn,
+                .replay = replayFn,
+                .deinit = deinitFn,
             };
+            fn appendFn(ss: *SessionStore, sid: []const u8, ev: Event) anyerror!void {
+                const self: *T = @fieldParentPtr("session_store", ss);
+                return append_fn(self, sid, ev);
+            }
+            fn replayFn(ss: *SessionStore, sid: []const u8) anyerror!*Reader {
+                const self: *T = @fieldParentPtr("session_store", ss);
+                return replay_fn(self, sid);
+            }
+            fn deinitFn(ss: *SessionStore) void {
+                const self: *T = @fieldParentPtr("session_store", ss);
+                deinit_fn(self);
+            }
         };
-        return .{ .ctx = ctx, .vt = &Gen.vt };
-    }
-
-    pub fn append(self: SessionStore, sid: []const u8, ev: Event) !void {
-        return self.vt.append(self.ctx, sid, ev);
-    }
-
-    pub fn replay(self: SessionStore, sid: []const u8) !Reader {
-        return self.vt.replay(self.ctx, sid);
-    }
-
-    pub fn deinit(self: SessionStore) void {
-        self.vt.deinit(self.ctx);
     }
 };
 
@@ -127,6 +140,7 @@ test "session store contract dispatches through vtable" {
         deinit_ct: usize,
     };
     const ReaderImpl = struct {
+        reader: Reader = .{ .vt = &Reader.Bind(@This(), @This().next, @This().deinit).vt },
         left: u8 = 0,
 
         fn next(self: *@This()) !?Event {
@@ -139,6 +153,7 @@ test "session store contract dispatches through vtable" {
     };
 
     const StoreImpl = struct {
+        session_store: SessionStore = .{ .vt = &SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         replay_ct: usize = 0,
         deinit_ct: usize = 0,
@@ -150,11 +165,11 @@ test "session store contract dispatches through vtable" {
             self.sid_len = sid.len;
         }
 
-        fn replay(self: *@This(), sid: []const u8) !Reader {
+        fn replay(self: *@This(), sid: []const u8) !*Reader {
             self.replay_ct += 1;
             self.sid_len = sid.len;
             self.rdr.left = 1;
-            return Reader.from(ReaderImpl, &self.rdr, ReaderImpl.next, ReaderImpl.deinit);
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -163,16 +178,10 @@ test "session store contract dispatches through vtable" {
     };
 
     var impl = StoreImpl{};
-    var store = SessionStore.from(
-        StoreImpl,
-        &impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    var store = &impl.session_store;
 
     try store.append("abc", .{});
-    var rdr = try store.replay("abc");
+    const rdr = try store.replay("abc");
     defer rdr.deinit();
 
     const first = (try rdr.next()) != null;

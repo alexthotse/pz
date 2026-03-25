@@ -33,7 +33,7 @@ comptime {
     _ = @import("core/syslog.zig");
     _ = @import("core/signing.zig");
     _ = @import("core/agent.zig");
-    _ = @import("core/vtable.zig");
+    // vtable.zig deleted — @fieldParentPtr pattern replaced anyopaque vtables
     _ = @import("core/watcher.zig");
     _ = @import("core/event_loop.zig");
     _ = @import("core/tools/web.zig");

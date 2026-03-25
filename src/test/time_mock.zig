@@ -1,15 +1,18 @@
 //! Test mock: fixed-time clock.
 const std = @import("std");
+const loop = @import("../core/loop.zig");
 
 pub const FixedMs = struct {
+    time_src: loop.TimeSrc = .{ .vt = &loop.TimeSrc.Bind(@This(), nowMs).vt },
     now_ms: i64,
 
-    pub fn nowMs(self: *const @This()) i64 {
+    pub fn nowMs(self: *@This()) i64 {
         return self.now_ms;
     }
 };
 
 pub const SeqMs = struct {
+    time_src: loop.TimeSrc = .{ .vt = &loop.TimeSrc.Bind(@This(), nowMs).vt },
     vals: []const i64,
     idx: usize = 0,
 

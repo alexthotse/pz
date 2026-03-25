@@ -176,6 +176,7 @@ test "tool contract handlers emit deterministic envelopes" {
     defer ls_h.deinitResult(ls_res);
 
     const AgentImpl = struct {
+        hook: @import("agent.zig").Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunResult {
             return .{
                 .out = .{
@@ -190,13 +191,14 @@ test "tool contract handlers emit deterministic envelopes" {
                 },
             };
         }
+        const Bind = @import("agent.zig").Hook.Bind(@This(), run);
     };
     var agent_impl = AgentImpl{};
     const agent_h = @import("agent.zig").Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 4096,
         .now_ms = 70,
-        .hook = @import("agent.zig").Hook.from(AgentImpl, &agent_impl, AgentImpl.run),
+        .hook = &agent_impl.hook,
         .policy_hash = "test",
     });
     const agent_call: tools.Call = .{
@@ -507,6 +509,7 @@ test "tool contract handlers deny nested symlink escapes" {
 test "tool contract registry emits start output finish ordering" {
     const oh = OhSnap{};
     const SinkImpl = struct {
+        sink: tools.Sink = undefined,
         tags: [8]std.meta.Tag(tools.Event) = undefined,
         ct: usize = 0,
 
@@ -516,15 +519,17 @@ test "tool contract registry emits start output finish ordering" {
             self.ct += 1;
         }
     };
-    var sink_impl = SinkImpl{};
-    const sink = tools.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
+    const SinkBind = tools.Sink.Bind(SinkImpl, SinkImpl.push);
+    var sink_impl = SinkImpl{ .sink = .{ .vt = &SinkBind.vt } };
 
     const Wrap = struct {
+        dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         h: @import("bash.zig").Handler,
 
-        fn run(self: *@This(), call: tools.Call, s: tools.Sink) !tools.Result {
+        fn run(self: *@This(), call: tools.Call, s: *tools.Sink) !tools.Result {
             return self.h.run(call, s);
         }
+        const Bind = tools.Dispatch.Bind(@This(), run);
     };
     var wrap = Wrap{
         .h = @import("bash.zig").Handler.init(.{
@@ -549,7 +554,7 @@ test "tool contract registry emits start output finish ordering" {
                 .timeout_ms = 1000,
                 .destructive = true,
             },
-            .dispatch = tools.Dispatch.from(Wrap, &wrap, Wrap.run),
+            .dispatch = &wrap.dispatch,
         },
     };
     const reg = tools.Registry.init(entries[0..]);
@@ -565,7 +570,7 @@ test "tool contract registry emits start output finish ordering" {
         .src = .model,
         .at_ms = 1,
     };
-    const res = try reg.run("bash", call, sink);
+    const res = try reg.run("bash", call, &sink_impl.sink);
     defer wrap.h.deinitResult(res);
 
     try oh.snap(@src(),

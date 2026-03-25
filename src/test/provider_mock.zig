@@ -9,7 +9,8 @@ pub const Step = union(enum) {
 
 pub const ScriptedProvider = struct {
     provider: providers.Provider = .{ .vt = &provider_vt },
-    stream: providers.Stream = .{ .vt = &stream_vt },
+    stream: providers.Stream = .{ .vt = &StreamBind.vt },
+    aborter: providers.Aborter = .{ .vt = &StreamBind.aborter_vt },
     steps: []const Step,
     idx: usize = 0,
     wake_r: std.posix.fd_t,
@@ -19,11 +20,7 @@ pub const ScriptedProvider = struct {
         .start = providerStart,
     };
 
-    const stream_vt = providers.Stream.Vt{
-        .next = streamNext,
-        .deinit = streamDeinit,
-        .abort = streamAbort,
-    };
+    const StreamBind = providers.Stream.BindAbortable(ScriptedProvider, streamNextImpl, streamDeinitImpl, streamAbortImpl);
 
     pub fn init(steps: []const Step) !ScriptedProvider {
         const pipe = try std.posix.pipe2(.{
@@ -49,8 +46,7 @@ pub const ScriptedProvider = struct {
         return &self.stream;
     }
 
-    fn streamNext(s: *providers.Stream) anyerror!?providers.Event {
-        const self: *ScriptedProvider = @fieldParentPtr("stream", s);
+    fn streamNextImpl(self: *ScriptedProvider) anyerror!?providers.Event {
         if (self.idx >= self.steps.len) return null;
         const step = self.steps[self.idx];
         self.idx += 1;
@@ -70,16 +66,11 @@ pub const ScriptedProvider = struct {
         };
     }
 
-    pub fn abort(self: *ScriptedProvider) void {
+    pub fn streamAbortImpl(self: *ScriptedProvider) void {
         _ = std.posix.write(self.wake_w, "\x01") catch {}; // test: error irrelevant
     }
 
-    fn streamAbort(s: *providers.Stream) void {
-        const self: *ScriptedProvider = @fieldParentPtr("stream", s);
-        self.abort();
-    }
-
-    fn streamDeinit(_: *providers.Stream) void {}
+    fn streamDeinitImpl(_: *ScriptedProvider) void {}
 
     fn reset(self: *ScriptedProvider) void {
         self.idx = 0;
@@ -110,7 +101,7 @@ test "scripted provider emits events then aborts blocked stream" {
     const one = (try stream.next()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("hello", one.text);
 
-    const thr = try std.Thread.spawn(.{}, ScriptedProvider.abort, .{&provider});
+    const thr = try std.Thread.spawn(.{}, ScriptedProvider.streamAbortImpl, .{&provider});
     defer thr.join();
     try std.testing.expect((try stream.next()) == null);
 }

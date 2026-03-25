@@ -123,7 +123,7 @@ const NativeProviderRuntime = union(enum) {
         }
     }
 
-    fn setCancel(self: *NativeProviderRuntime, cancel: core.providers.CancelPoll) void {
+    fn setCancel(self: *NativeProviderRuntime, cancel: *core.providers.CancelPoll) void {
         switch (self.*) {
             .anthropic => |*client| client.cancel = cancel,
             .openai => |*client| client.cancel = cancel,
@@ -268,12 +268,15 @@ fn toolPolicyPath(buf: *[256]u8, name: []const u8, call: core.tools.Call) ![]con
 }
 
 const PolicyToolDispatch = struct {
+    dispatch: core.tools.Dispatch = .{ .vt = &Bind.vt },
     pol: *const RuntimePolicy,
     name: []const u8,
     audit: ?PolicyToolAudit = null,
-    inner: core.tools.Dispatch,
+    inner: *core.tools.Dispatch,
 
-    fn run(self: *@This(), call: core.tools.Call, sink: core.tools.Sink) !core.tools.Result {
+    const Bind = core.tools.Dispatch.Bind(@This(), run);
+
+    fn run(self: *@This(), call: core.tools.Call, sink: *core.tools.Sink) !core.tools.Result {
         if (!self.pol.allowsTool(self.name, call)) {
             if (self.audit) |audit| try audit.emit(call, self.name);
             return .{
@@ -308,11 +311,7 @@ const PolicyToolRegistry = struct {
                 .inner = entry.dispatch,
             };
             self.entries[i] = entry;
-            self.entries[i].dispatch = core.tools.Dispatch.from(
-                PolicyToolDispatch,
-                &self.ctxs[i],
-                PolicyToolDispatch.run,
-            );
+            self.entries[i].dispatch = &self.ctxs[i].dispatch;
         }
         self.reg = core.tools.Registry.init(self.entries[0..base.entries.len]);
     }
@@ -323,6 +322,7 @@ const PolicyToolRegistry = struct {
 };
 
 const PolicyToolAuth = struct {
+    tool_auth: core.loop.ToolAuth = .{ .vt = &core.loop.ToolAuth.Bind(@This(), @This().check).vt },
     alloc: std.mem.Allocator,
     pol: *const RuntimePolicy,
     sid: []const u8,
@@ -445,6 +445,7 @@ const MissingProviderStream = struct {
 };
 
 const PrintSink = struct {
+    mode_sink: core.loop.ModeSink = .{ .vt = &core.loop.ModeSink.Bind(@This(), @This().push).vt },
     fmt: print_fmt.Formatter,
     stop_reason: ?core.providers.StopReason = null,
 
@@ -486,6 +487,7 @@ const PrintSink = struct {
 };
 
 const TuiSink = struct {
+    mode_sink: core.loop.ModeSink = .{ .vt = &core.loop.ModeSink.Bind(@This(), @This().push).vt },
     ui: *tui_harness.Ui,
     out: std.Io.AnyWriter,
 
@@ -580,6 +582,8 @@ const buildAskResult = tui_ask.buildAskResult;
 /// detect cancellation without platform-specific non-blocking hacks.
 /// Mirrors pi's CancellableLoader + AbortController pattern.
 const InputWatcher = struct {
+    cancel_src: core.loop.CancelSrc = .{ .vt = &core.loop.CancelSrc.Bind(@This(), @This().isCanceled).vt },
+    pause_ctl: tui_ask.PauseCtl = .{ .vt = &tui_ask.PauseCtl.Bind(@This(), @This().setPaused).vt },
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     paused: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -708,6 +712,8 @@ fn drainWake(fd: std.posix.fd_t) void {
 }
 
 const TurnCancelFlag = struct {
+    cancel_src: core.loop.CancelSrc = .{ .vt = &core.loop.CancelSrc.Bind(@This(), @This().isCanceled).vt },
+    cancel_poll: core.providers.CancelPoll = .{ .vt = &core.providers.CancelPoll.Bind(@This(), @This().isCanceled).vt },
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn clear(self: *TurnCancelFlag) void {
@@ -1108,6 +1114,7 @@ const LiveTurn = struct {
 };
 
 const LiveTurnSink = struct {
+    mode_sink: core.loop.ModeSink = .{ .vt = &core.loop.ModeSink.Bind(@This(), @This().push).vt },
     live: *LiveTurn,
 
     fn push(self: *LiveTurnSink, ev: core.loop.ModeEv) !void {
@@ -1120,7 +1127,10 @@ const LiveTurnSink = struct {
 };
 
 const LiveAskCtx = struct {
+    ask_hook: core.tools.builtin.AskHook = .{ .vt = &AskBind.vt },
     live: *LiveTurn,
+
+    const AskBind = core.tools.builtin.AskHook.Bind(@This(), run);
 
     fn run(self: *LiveAskCtx, args: core.tools.Call.AskArgs) ![]u8 {
         return self.live.ask(args);
@@ -1274,6 +1284,7 @@ fn freeProviderEv(alloc: std.mem.Allocator, ev: core.providers.Event) void {
 }
 
 const JsonSink = struct {
+    mode_sink: core.loop.ModeSink = .{ .vt = &core.loop.ModeSink.Bind(@This(), @This().push).vt },
     alloc: std.mem.Allocator,
     out: std.Io.AnyWriter,
 
@@ -1373,7 +1384,7 @@ const AuditShipper = struct {
             },
         };
         self.shipper = try core.audit.SyslogShipper.init(opts.alloc, .{}, .{
-            .connector = self.sender_conn.connector(),
+            .connector = &self.sender_conn.connector,
             .buf_cap = opts.buf_cap,
             .overflow = opts.overflow,
             .spool_dir = opts.spool_dir,
@@ -1783,11 +1794,11 @@ fn execWithIoTuiHooks(
     defer if (session_dir_path) |path| alloc.free(path);
     errdefer if (sid.len > 0) alloc.free(sid);
 
-    var store: ?core.session.SessionStore = null;
+    var store: ?*core.session.SessionStore = null;
     var fs_store_impl: core.session.fs_store.Store = undefined;
     var null_store_impl = core.session.NullStore.init();
 
-    defer if (store) |*s| s.deinit();
+    defer if (store) |s| s.deinit();
 
     const writer = if (out) |w| w else std.fs.File.stdout().deprecatedWriter().any();
     const reader = if (in) |r| r else std.fs.File.stdin().deprecatedReader().any();
@@ -1823,7 +1834,7 @@ fn execWithIoTuiHooks(
         core.policy.SessionPersist.forMode(run_cmd.mode) == .off;
     if (run_cmd.no_session or headless_default) {
         sid = try newSid(alloc);
-        store = null_store_impl.asSessionStore();
+        store = &null_store_impl.session_store;
     } else {
         const plan = try resolveSessionPlan(alloc, run_cmd);
         sid = plan.sid;
@@ -1841,7 +1852,7 @@ fn execWithIoTuiHooks(
             },
             .replay = .{},
         });
-        store = fs_store_impl.asSessionStore();
+        store = &fs_store_impl.session_store;
     }
 
     // Dispatch
@@ -1923,7 +1934,7 @@ fn runPrint(
     run_cmd: cli.Run,
     sid: []const u8,
     provider: *core.providers.Provider,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     out: std.Io.AnyWriter,
@@ -1938,7 +1949,7 @@ fn runPrint(
     defer sink_impl.deinit();
     sink_impl.fmt.verbose = run_cmd.verbose;
 
-    const mode = core.loop.ModeSink.from(PrintSink, &sink_impl, PrintSink.push);
+    
     var reg: PolicyToolRegistry = undefined;
     var tool_audit_seq: u64 = 1;
     const tool_audit = PolicyToolAudit{
@@ -1973,8 +1984,8 @@ fn runPrint(
         .provider = provider,
         .store = store,
         .reg = reg.registry(),
-        .tool_auth = core.loop.ToolAuth.from(PolicyToolAuth, &tool_auth_impl, PolicyToolAuth.check),
-        .mode = mode,
+        .tool_auth = &tool_auth_impl.tool_auth,
+        .mode = &sink_impl.mode_sink,
         .system_prompt = sys_prompt,
         .provider_opts = run_cmd.thinking.toProviderOpts(),
         .max_turns = run_cmd.max_turns,
@@ -1993,8 +2004,11 @@ fn runPrint(
 }
 
 const PromptAskCtx = struct {
+    ask_hook: core.tools.builtin.AskHook = .{ .vt = &AskBind.vt },
     ask_ui: *AskUiCtx,
     reader: *tui_input.Reader,
+
+    const AskBind = core.tools.builtin.AskHook.Bind(@This(), run);
 
     fn run(self: *PromptAskCtx, args: core.tools.Call.AskArgs) ![]u8 {
         return self.ask_ui.runOnMain(self.reader, args);
@@ -2009,8 +2023,9 @@ const ApprovalAnswer = struct {
 };
 
 const HookApprover = struct {
+    approver: core.loop.Approver = .{ .vt = &core.loop.Approver.Bind(@This(), @This().check).vt },
     alloc: std.mem.Allocator,
-    hook: core.tools.builtin.AskHook,
+    hook: *core.tools.builtin.AskHook,
     cache: *core.loop.CmdCache,
 
     fn check(self: *@This(), key: core.loop.CmdCache.Key, cached: bool) !void {
@@ -2098,7 +2113,7 @@ fn runJson(
     run_cmd: cli.Run,
     sid: []const u8,
     provider: *core.providers.Provider,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     in: std.Io.AnyReader,
@@ -2112,7 +2127,7 @@ fn runJson(
         .alloc = alloc,
         .out = out,
     };
-    const mode = core.loop.ModeSink.from(JsonSink, &sink_impl, JsonSink.push);
+    
     const popts = run_cmd.thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
@@ -2126,7 +2141,7 @@ fn runJson(
         .store = store,
         .pol = pol,
         .tools_rt = tools_rt,
-        .mode = mode,
+        .mode = &sink_impl.mode_sink,
         .max_turns = run_cmd.max_turns,
         .cmd_cache = &cmd_cache,
         .approval_bind = approval_bind,
@@ -2174,7 +2189,7 @@ fn runTui(
     run_cmd: cli.Run,
     sid: *([]u8),
     provider: *core.providers.Provider,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     in: std.Io.AnyReader,
@@ -2242,7 +2257,7 @@ fn runTui(
         .ui = &ui,
         .out = out,
     };
-    const mode = core.loop.ModeSink.from(TuiSink, &sink_impl, TuiSink.push);
+    
 
     const stdin_fd = tui_hooks.stdin_fd;
     const is_tty = tui_hooks.live orelse std.posix.isatty(stdin_fd);
@@ -2255,7 +2270,7 @@ fn runTui(
 
     var watcher = try InputWatcher.init(stdin_fd);
     defer watcher.deinit();
-    const cancel = core.loop.CancelSrc.from(InputWatcher, &watcher, InputWatcher.isCanceled);
+    
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
     const approval_bind = try loadApprovalBindAlloc(alloc, home);
@@ -2278,33 +2293,32 @@ fn runTui(
         .alloc = alloc,
         .ui = &ui,
         .out = out,
-        .pause = tui_ask.PauseCtl.from(InputWatcher, &watcher, InputWatcher.setPaused),
+        .pause = &watcher.pause_ctl,
     };
     var prompt_reader = tui_input.Reader.init(stdin_fd);
     var prompt_ask_ctx = PromptAskCtx{
         .ask_ui = &ask_ui_ctx,
         .reader = &prompt_reader,
     };
-    const prompt_ask_hook = core.tools.builtin.AskHook.from(PromptAskCtx, &prompt_ask_ctx, PromptAskCtx.run);
     var prompt_approver_impl = HookApprover{
         .alloc = alloc,
-        .hook = prompt_ask_hook,
+        .hook = &prompt_ask_ctx.ask_hook,
         .cache = &cmd_cache,
     };
-    const prompt_approver = core.loop.Approver.from(HookApprover, &prompt_approver_impl, HookApprover.check);
+    
     const tctx = TurnCtx{
         .alloc = alloc,
         .provider = provider,
         .store = store,
         .pol = pol,
         .tools_rt = tools_rt,
-        .mode = mode,
+        .mode = &sink_impl.mode_sink,
         .max_turns = run_cmd.max_turns,
-        .cancel = cancel,
+        .cancel = &watcher.cancel_src,
         .cmd_cache = &cmd_cache,
         .approval_bind = approval_bind,
         .approval_loc = approval_loc,
-        .approver = prompt_approver,
+        .approver = &prompt_approver_impl.approver,
         .skip_prompt_guard = is_sub,
     };
     defer tools_rt.ask_hook = null;
@@ -2461,15 +2475,15 @@ fn runTui(
         // triggers CancelPoll check in retryLoop/sseNext. Clear before
         // live_turn.deinit() to prevent dangling ctx pointer.
         if (native_rt) |nrt| {
-            nrt.setCancel(core.providers.CancelPoll.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled));
+            nrt.setCancel(&live_turn.cancel_flag.cancel_poll);
         }
         defer if (native_rt) |nrt| nrt.clearCancel();
 
         var live_sink_impl = LiveTurnSink{
             .live = &live_turn,
         };
-        const live_mode = core.loop.ModeSink.from(LiveTurnSink, &live_sink_impl, LiveTurnSink.push);
-        const live_cancel = core.loop.CancelSrc.from(TurnCancelFlag, &live_turn.cancel_flag, TurnCancelFlag.isCanceled);
+        
+        
         var live_cmd_cache = core.loop.CmdCache.init(alloc);
         defer live_cmd_cache.deinit();
         const live_approval_bind = try loadApprovalBindAlloc(alloc, home);
@@ -2482,9 +2496,9 @@ fn runTui(
             .store = store,
             .pol = pol,
             .tools_rt = tools_rt,
-            .mode = live_mode,
+            .mode = &live_sink_impl.mode_sink,
             .max_turns = run_cmd.max_turns,
-            .cancel = live_cancel,
+            .cancel = &live_turn.cancel_flag.cancel_src,
             .abort_slot = &live_turn.abort_slot,
             .cmd_cache = &live_cmd_cache,
             .approval_bind = live_approval_bind,
@@ -2495,14 +2509,14 @@ fn runTui(
         var live_ask_ctx = LiveAskCtx{
             .live = &live_turn,
         };
-        tools_rt.ask_hook = core.tools.builtin.AskHook.from(LiveAskCtx, &live_ask_ctx, LiveAskCtx.run);
+        tools_rt.ask_hook = &live_ask_ctx.ask_hook;
         var live_approver_impl = HookApprover{
             .alloc = alloc,
             .hook = tools_rt.ask_hook.?,
             .cache = &live_cmd_cache,
         };
-        const live_approver = core.loop.Approver.from(HookApprover, &live_approver_impl, HookApprover.check);
-        live_tctx.approver = live_approver;
+        
+        live_tctx.approver = &live_approver_impl.approver;
         var pending = PendingQueue{};
         defer pending.deinit(alloc);
         const input_mode: tui_panels.InputMode = .steering;
@@ -3286,7 +3300,7 @@ fn runRpc(
     run_cmd: cli.Run,
     sid: *([]u8),
     provider: *core.providers.Provider,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
     in: std.Io.AnyReader,
@@ -3310,7 +3324,7 @@ fn runRpc(
         .alloc = alloc,
         .out = out,
     };
-    const mode = core.loop.ModeSink.from(JsonSink, &sink_impl, JsonSink.push);
+    
     const popts = run_cmd.thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
@@ -3324,7 +3338,7 @@ fn runRpc(
         .store = store,
         .pol = pol,
         .tools_rt = tools_rt,
-        .mode = mode,
+        .mode = &sink_impl.mode_sink,
         .max_turns = run_cmd.max_turns,
         .cmd_cache = &cmd_cache,
         .approval_bind = approval_bind,
@@ -6733,7 +6747,7 @@ fn noteSessionWriteErr(ui: *tui_harness.Ui, msg: []const u8) !void {
 fn appendSessionOrNote(
     ui: *tui_harness.Ui,
     sid: []const u8,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     ev: core.session.Event,
 ) !bool {
     store.append(sid, ev) catch |append_err| {
@@ -6760,7 +6774,7 @@ fn runBashMode(
     ui: *tui_harness.Ui,
     bcmd: BashCmd,
     sid: []const u8,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     pol: *const RuntimePolicy,
 ) !void {
     if (!pol.allowsCmdKind("bash", "bash", null)) {
@@ -7006,17 +7020,17 @@ fn pasteText(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimeP
 const TurnCtx = struct {
     alloc: std.mem.Allocator,
     provider: *core.providers.Provider,
-    store: core.session.SessionStore,
+    store: *core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
-    mode: core.loop.ModeSink,
+    mode: *core.loop.ModeSink,
     max_turns: u16 = 0,
-    cancel: ?core.loop.CancelSrc = null,
+    cancel: ?*core.loop.CancelSrc = null,
     abort_slot: ?*core.providers.AbortSlot = null,
     cmd_cache: ?*core.loop.CmdCache = null,
     approval_bind: core.policy.ApprovalBind = .{ .version = core.policy.ver_current },
     approval_loc: ?core.loop.CmdCache.Loc = null,
-    approver: ?core.loop.Approver = null,
+    approver: ?*core.loop.Approver = null,
     audit_hooks: AuditHooks = .{},
     skip_prompt_guard: bool = false,
 
@@ -7068,7 +7082,7 @@ const TurnCtx = struct {
             .provider = self.provider,
             .store = self.store,
             .reg = reg.registry(),
-            .tool_auth = core.loop.ToolAuth.from(PolicyToolAuth, &tool_auth_impl, PolicyToolAuth.check),
+            .tool_auth = &tool_auth_impl.tool_auth,
             .mode = self.mode,
             .system_prompt = opts.system_prompt,
             .provider_opts = opts.provider_opts,
@@ -7362,7 +7376,7 @@ test "live turn ask handoff keeps editor input isolated and cannot deadlock" {
         .alloc = std.testing.allocator,
         .ui = &ui,
         .out = out_fbs.writer().any(),
-        .pause = tui_ask.PauseCtl.from(InputWatcher, &watcher, InputWatcher.setPaused),
+        .pause = &watcher.pause_ctl,
     };
     _ = try std.posix.write(pipe[1], "\r\x1b[B\r");
     var reader = tui_input.Reader.init(watcher.fd);
@@ -7429,7 +7443,7 @@ test "live turn ask handoff frees custom other answers cleanly" {
         .alloc = std.testing.allocator,
         .ui = &ui,
         .out = out_fbs.writer().any(),
-        .pause = tui_ask.PauseCtl.from(InputWatcher, &watcher, InputWatcher.setPaused),
+        .pause = &watcher.pause_ctl,
     };
     _ = try std.posix.write(pipe[1], "\x1b[B\rZ\r\x1b[B\r");
     var reader = tui_input.Reader.init(watcher.fd);
@@ -7499,7 +7513,7 @@ test "ask ui cancel frees temporary state and overlay" {
         .alloc = std.testing.allocator,
         .ui = &ui,
         .out = out_fbs.writer().any(),
-        .pause = tui_ask.PauseCtl.from(InputWatcher, &watcher, InputWatcher.setPaused),
+        .pause = &watcher.pause_ctl,
     };
     _ = try std.posix.write(pipe[1], "\x03");
     var reader = tui_input.Reader.init(watcher.fd);
@@ -8657,11 +8671,13 @@ test "AuditShipper buffers events during disconnect and flushes on reconnect" {
     defer tmp.cleanup();
 
     // Use a failing connector to simulate collector outage.
-    const FailConn = struct {
-        fn connect(_: *anyopaque) anyerror!core.audit.Connection {
+    const FailConnCtx = struct {
+        connector: core.audit.Connector = .{ .vt = &core.audit.Connector.Bind(@This(), doConnect).vt },
+        fn doConnect(_: *@This()) anyerror!*core.audit.Connection {
             return error.ConnectionRefused;
         }
     };
+    var fail_conn = FailConnCtx{};
 
     var shipper: AuditShipper = undefined;
     shipper.alloc = std.testing.allocator;
@@ -8672,7 +8688,7 @@ test "AuditShipper buffers events during disconnect and flushes on reconnect" {
     }.f;
     shipper.sender_conn = undefined;
     shipper.shipper = try core.audit.SyslogShipper.init(std.testing.allocator, .{}, .{
-        .connector = .{ .ctx = undefined, .connect = &FailConn.connect },
+        .connector = &fail_conn.connector,
         .buf_cap = 8,
         .overflow = .drop_oldest,
         .spool_dir = tmp.dir,
@@ -8701,11 +8717,13 @@ test "AuditShipper buffers events during disconnect and flushes on reconnect" {
 }
 
 test "AuditShipper fail_closed overflow rejects when ring full" {
-    const FailConn = struct {
-        fn connect(_: *anyopaque) anyerror!core.audit.Connection {
+    const FailConnCtx2 = struct {
+        connector: core.audit.Connector = .{ .vt = &core.audit.Connector.Bind(@This(), doConnect).vt },
+        fn doConnect(_: *@This()) anyerror!*core.audit.Connection {
             return error.ConnectionRefused;
         }
     };
+    var fail_conn2 = FailConnCtx2{};
 
     var shipper: AuditShipper = undefined;
     shipper.alloc = std.testing.allocator;
@@ -8716,7 +8734,7 @@ test "AuditShipper fail_closed overflow rejects when ring full" {
     }.f;
     shipper.sender_conn = undefined;
     shipper.shipper = try core.audit.SyslogShipper.init(std.testing.allocator, .{}, .{
-        .connector = .{ .ctx = undefined, .connect = &FailConn.connect },
+        .connector = &fail_conn2.connector,
         .buf_cap = 2,
         .overflow = .fail_closed,
     });
@@ -9015,7 +9033,7 @@ test "runtime tui overflow retries once with injected live stdin" {
         cfg,
         &sid,
         &provider_impl.provider,
-        fs_store.asSessionStore(),
+        &fs_store.session_store,
         &pol,
         &tools_rt,
         eofReader(),
@@ -9685,17 +9703,17 @@ test "TuiSink surfaces session write errors in transcript" {
 
 test "runBashMode include write failure is non-fatal for denied bash" {
     const StoreImpl = struct {
+        session_store: core.session.SessionStore = .{ .vt = &core.session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         fn append(_: *@This(), _: []const u8, _: core.session.Event) !void {
             return error.DiskFull;
         }
-        fn replay(_: *@This(), _: []const u8) !core.session.Reader {
+        fn replay(_: *@This(), _: []const u8) !*core.session.Reader {
             return error.Unexpected;
         }
         fn deinit(_: *@This()) void {}
     };
 
     var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
 
     var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
@@ -9704,7 +9722,7 @@ test "runBashMode include write failure is non-fatal for denied bash" {
     try runBashMode(std.testing.allocator, &ui, .{
         .cmd = "cat ~/.pz/settings.json",
         .include = true,
-    }, "sid-1", store, &noop_pol);
+    }, "sid-1", &store_impl.session_store, &noop_pol);
 
     var saw_deny = false;
     var saw_write_err = false;
@@ -9718,17 +9736,17 @@ test "runBashMode include write failure is non-fatal for denied bash" {
 
 test "runBashMode include write failure is non-fatal for bash output" {
     const StoreImpl = struct {
+        session_store: core.session.SessionStore = .{ .vt = &core.session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         fn append(_: *@This(), _: []const u8, _: core.session.Event) !void {
             return error.DiskFull;
         }
-        fn replay(_: *@This(), _: []const u8) !core.session.Reader {
+        fn replay(_: *@This(), _: []const u8) !*core.session.Reader {
             return error.Unexpected;
         }
         fn deinit(_: *@This()) void {}
     };
 
     var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
 
     var ui = try tui_harness.Ui.init(std.testing.allocator, 80, 12, "m", "p");
     defer ui.deinit();
@@ -9737,7 +9755,7 @@ test "runBashMode include write failure is non-fatal for bash output" {
     try runBashMode(std.testing.allocator, &ui, .{
         .cmd = "printf ok",
         .include = true,
-    }, "sid-1", store, &noop_pol);
+    }, "sid-1", &store_impl.session_store, &noop_pol);
 
     var saw_ok = false;
     var saw_write_err = false;
@@ -10040,6 +10058,7 @@ test "TurnCtx.run binds approval context for destructive tools" {
     defer scripted.deinit();
 
     const ReaderImpl = struct {
+        reader: core.session.Reader = .{ .vt = &core.session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?core.session.Event {
             return null;
         }
@@ -10048,22 +10067,25 @@ test "TurnCtx.run binds approval context for destructive tools" {
     };
 
     const StoreImpl = struct {
+        session_store: core.session.SessionStore = .{ .vt = &core.session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
 
         fn append(_: *@This(), _: []const u8, _: core.session.Event) !void {}
 
-        fn replay(self: *@This(), _: []const u8) !core.session.Reader {
-            return core.session.Reader.from(ReaderImpl, &self.rdr, ReaderImpl.next, ReaderImpl.deinit);
+        fn replay(self: *@This(), _: []const u8) !*core.session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
     };
 
     const ModeImpl = struct {
+        mode_sink: core.loop.ModeSink = .{ .vt = &core.loop.ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: core.loop.ModeEv) !void {}
     };
 
     const ApproverImpl = struct {
+        approver: core.loop.Approver = .{ .vt = &core.loop.Approver.Bind(@This(), @This().check).vt },
         cached: bool = true,
         sid: []const u8 = "",
         cwd: []const u8 = "",
@@ -10087,9 +10109,7 @@ test "TurnCtx.run binds approval context for destructive tools" {
     };
 
     var store_impl = StoreImpl{};
-    const store = core.session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
     var mode_impl = ModeImpl{};
-    const mode = core.loop.ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
     var tools_rt = core.tools.builtin.Runtime.init(.{ .alloc = std.testing.allocator });
     defer tools_rt.deinit();
     var cmd_cache = core.loop.CmdCache.init(std.testing.allocator);
@@ -10102,20 +10122,19 @@ test "TurnCtx.run binds approval context for destructive tools" {
         .life = .{ .session = "sid-rt" },
     });
     var approver_impl = ApproverImpl{};
-    const approver = core.loop.Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
 
     const tctx = TurnCtx{
         .alloc = std.testing.allocator,
         .provider = &scripted.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .pol = &pol,
         .tools_rt = &tools_rt,
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 1,
         .cmd_cache = &cmd_cache,
         .approval_bind = .{ .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
         .approval_loc = .{ .cwd = cwd },
-        .approver = approver,
+        .approver = &approver_impl.approver,
     };
 
     try tctx.run(.{

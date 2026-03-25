@@ -221,16 +221,16 @@ pub fn fail(call: tools.Call, kind: tools.Result.ErrKind, msg: []const u8) tools
 }
 
 /// No-op event sink for tests.
-pub fn noopSink() tools.Sink {
+pub fn noopSink() *tools.Sink {
     const Impl = struct {
+        sink: tools.Sink = .{ .vt = &Bind.vt },
         fn push(_: *@This(), _: tools.Event) !void {}
+        const Bind = tools.Sink.Bind(@This(), push);
     };
-    // The Sink captures the pointer, so this static works for the
-    // duration of any single test invocation.
     const S = struct {
         var impl: Impl = .{};
     };
-    return tools.Sink.from(Impl, &S.impl, Impl.push);
+    return &S.impl.sink;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

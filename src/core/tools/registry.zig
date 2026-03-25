@@ -1,6 +1,6 @@
 //! Comptime tool registry: kind-keyed dispatch table generation.
 const std = @import("std");
-const vtable = @import("../vtable.zig");
+
 
 pub fn bind(
     comptime Kind: type,
@@ -27,54 +27,50 @@ pub fn bind(
         };
 
         pub const Sink = struct {
-            ctx: *anyopaque,
             vt: *const Vt,
 
             pub const Vt = struct {
-                push: *const fn (ctx: *anyopaque, ev: Event) anyerror!void,
+                push: *const fn (self: *Sink, ev: Event) anyerror!void,
             };
 
-            pub fn from(
-                comptime T: type,
-                ctx: *T,
-                comptime push_fn: fn (ctx: *T, ev: Event) anyerror!void,
-            ) Sink {
-                const Gen = struct {
-                    const vt = Vt{
-                        .push = vtable.wrap(T, push_fn),
-                    };
-                };
-                return .{ .ctx = ctx, .vt = &Gen.vt };
+            pub fn push(self: *Sink, ev: Event) !void {
+                return self.vt.push(self, ev);
             }
 
-            pub fn push(self: Sink, ev: Event) !void {
-                return self.vt.push(self.ctx, ev);
+            pub fn Bind(comptime T: type, comptime push_fn: fn (*T, Event) anyerror!void) type {
+                return struct {
+                    pub const vt = Vt{
+                        .push = pushFn,
+                    };
+                    fn pushFn(s: *Sink, ev: Event) anyerror!void {
+                        const self: *T = @fieldParentPtr("sink", s);
+                        return push_fn(self, ev);
+                    }
+                };
             }
         };
 
         pub const Dispatch = struct {
-            ctx: *anyopaque,
             vt: *const Vt,
 
             pub const Vt = struct {
-                run: *const fn (ctx: *anyopaque, call: Call, sink: Sink) anyerror!Result,
+                run: *const fn (self: *Dispatch, call: Call, sink: *Sink) anyerror!Result,
             };
 
-            pub fn from(
-                comptime T: type,
-                ctx: *T,
-                comptime run_fn: fn (ctx: *T, call: Call, sink: Sink) anyerror!Result,
-            ) Dispatch {
-                const Gen = struct {
-                    const vt = Vt{
-                        .run = vtable.wrap(T, run_fn),
-                    };
-                };
-                return .{ .ctx = ctx, .vt = &Gen.vt };
+            pub fn run(self: *Dispatch, call: Call, sink: *Sink) !Result {
+                return self.vt.run(self, call, sink);
             }
 
-            pub fn run(self: Dispatch, call: Call, sink: Sink) !Result {
-                return self.vt.run(self.ctx, call, sink);
+            pub fn Bind(comptime T: type, comptime run_fn: fn (*T, Call, *Sink) anyerror!Result) type {
+                return struct {
+                    pub const vt = Vt{
+                        .run = runFn,
+                    };
+                    fn runFn(d: *Dispatch, call: Call, sink: *Sink) anyerror!Result {
+                        const self: *T = @fieldParentPtr("dispatch", d);
+                        return run_fn(self, call, sink);
+                    }
+                };
             }
         };
 
@@ -82,7 +78,7 @@ pub fn bind(
             name: []const u8,
             kind: Kind,
             spec: Spec,
-            dispatch: Dispatch,
+            dispatch: *Dispatch,
         };
 
         pub const Registry = struct {
@@ -112,7 +108,7 @@ pub fn bind(
                 self: Registry,
                 name: []const u8,
                 call: Call,
-                sink: Sink,
+                sink: *Sink,
             ) (Err || anyerror)!Result {
                 const entry = self.byName(name) orelse return Err.NotFound;
                 if (call.kind != entry.kind) return Err.KindMismatch;
@@ -156,9 +152,11 @@ test "registry lookup resolves by name and kind" {
         missing: bool,
     };
     const DispatchImpl = struct {
-        fn run(_: *@This(), call: TCall, _: TReg.Sink) !TResult {
+        dispatch: TReg.Dispatch = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), call: TCall, _: *TReg.Sink) !TResult {
             return .{ .code = call.value };
         }
+        const Bind = TReg.Dispatch.Bind(@This(), run);
     };
 
     var read_impl = DispatchImpl{};
@@ -168,13 +166,13 @@ test "registry lookup resolves by name and kind" {
             .name = "read",
             .kind = .read,
             .spec = .{ .timeout_ms = 10 },
-            .dispatch = TReg.Dispatch.from(DispatchImpl, &read_impl, DispatchImpl.run),
+            .dispatch = &read_impl.dispatch,
         },
         .{
             .name = "write",
             .kind = .write,
             .spec = .{ .timeout_ms = 20 },
-            .dispatch = TReg.Dispatch.from(DispatchImpl, &write_impl, DispatchImpl.run),
+            .dispatch = &write_impl.dispatch,
         },
     };
     const reg = TReg.Registry.init(entries[0..]);
@@ -213,6 +211,7 @@ test "registry run dispatches to named handler" {
         sink: SinkSnap,
     };
     const SinkImpl = struct {
+        sink: TReg.Sink = .{ .vt = &Bind.vt },
         ct: usize = 0,
         last: u8 = 0,
 
@@ -220,22 +219,24 @@ test "registry run dispatches to named handler" {
             self.ct += 1;
             self.last = ev.id;
         }
+        const Bind = TReg.Sink.Bind(@This(), push);
     };
 
     const DispatchImpl = struct {
+        dispatch: TReg.Dispatch = .{ .vt = &Bind.vt },
         ct: usize = 0,
         add: i32,
         ev_id: u8,
 
-        fn run(self: *@This(), call: TCall, sink: TReg.Sink) !TResult {
+        fn run(self: *@This(), call: TCall, sink: *TReg.Sink) !TResult {
             self.ct += 1;
             try sink.push(.{ .id = self.ev_id });
             return .{ .code = call.value + self.add };
         }
+        const Bind = TReg.Dispatch.Bind(@This(), run);
     };
 
     var sink_impl = SinkImpl{};
-    const sink = TReg.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
 
     var read_impl = DispatchImpl{ .add = 10, .ev_id = 1 };
     var write_impl = DispatchImpl{ .add = 20, .ev_id = 2 };
@@ -244,27 +245,27 @@ test "registry run dispatches to named handler" {
             .name = "read",
             .kind = .read,
             .spec = .{},
-            .dispatch = TReg.Dispatch.from(DispatchImpl, &read_impl, DispatchImpl.run),
+            .dispatch = &read_impl.dispatch,
         },
         .{
             .name = "write",
             .kind = .write,
             .spec = .{},
-            .dispatch = TReg.Dispatch.from(DispatchImpl, &write_impl, DispatchImpl.run),
+            .dispatch = &write_impl.dispatch,
         },
     };
     const reg = TReg.Registry.init(entries[0..]);
 
-    const res = try reg.run("write", .{ .kind = .write, .value = 7 }, sink);
+    const res = try reg.run("write", .{ .kind = .write, .value = 7 }, &sink_impl.sink);
     const missing = blk: {
-        _ = reg.run("missing", .{ .kind = .read, .value = 1 }, sink) catch |err| {
+        _ = reg.run("missing", .{ .kind = .read, .value = 1 }, &sink_impl.sink) catch |err| {
             if (err != TReg.Err.NotFound) return err;
             break :blk @errorName(err);
         };
         return error.TestUnexpectedResult;
     };
     const mismatch = blk: {
-        _ = reg.run("read", .{ .kind = .write, .value = 1 }, sink) catch |err| {
+        _ = reg.run("read", .{ .kind = .write, .value = 1 }, &sink_impl.sink) catch |err| {
             if (err != TReg.Err.KindMismatch) return err;
             break :blk @errorName(err);
         };

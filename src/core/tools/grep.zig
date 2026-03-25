@@ -20,19 +20,38 @@ pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64 = 0,
-    pre_open: ?PreOpen = null,
+    pre_open: ?*PreOpen = null,
 };
 
-const PreOpen = struct {
-    ctx: *anyopaque,
-    run: *const fn (*anyopaque, std.fs.Dir, []const u8) anyerror!void,
+pub const PreOpen = struct {
+    vt: *const Vt,
+
+    pub const Vt = struct {
+        run: *const fn (self: *PreOpen, dir: std.fs.Dir, rel_path: []const u8) anyerror!void,
+    };
+
+    pub fn call(self: *PreOpen, dir: std.fs.Dir, rel_path: []const u8) !void {
+        return self.vt.run(self, dir, rel_path);
+    }
+
+    pub fn Bind(comptime T: type, comptime run_fn: fn (*T, std.fs.Dir, []const u8) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .run = runFn,
+            };
+            fn runFn(po: *PreOpen, dir: std.fs.Dir, rel_path: []const u8) anyerror!void {
+                const self_ptr: *T = @fieldParentPtr("pre_open", po);
+                return run_fn(self_ptr, dir, rel_path);
+            }
+        };
+    }
 };
 
 pub const Handler = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64,
-    pre_open: ?PreOpen,
+    pre_open: ?*PreOpen,
 
     pub fn init(opts: Opts) Handler {
         return .{
@@ -43,7 +62,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, _: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, _: *tools.Sink) Err!tools.Result {
         if (call.kind != .grep) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .grep) return error.KindMismatch;
 
@@ -119,7 +138,7 @@ fn grepFile(
     acc: *Acc,
 ) Err!void {
     if (self.pre_open) |hook| {
-        hook.run(hook.ctx, dir, rel_path) catch |hook_err| return shared.mapFsErr(hook_err);
+        hook.call(dir, rel_path) catch |hook_err| return shared.mapFsErr(hook_err);
     }
 
     var file = path_guard.openFileInDir(dir, name, .{ .mode = .read_only }) catch |open_err| {
@@ -315,20 +334,19 @@ test "grep handler denies hardlinked leaf" {
 test "grep handler keeps trusted dir after ancestor swap" {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
 
-    const Hook = struct {
-        const Ctx = struct {
-            root: std.fs.Dir,
-            done: bool = false,
-        };
+    const HookCtx = struct {
+        pre_open: PreOpen = .{ .vt = &Bind.vt },
+        root: std.fs.Dir,
+        done: bool = false,
 
-        fn run(raw: *anyopaque, _: std.fs.Dir, rel_path: []const u8) !void {
-            const ctx: *Ctx = @ptrCast(@alignCast(raw));
-            if (ctx.done) return;
+        fn run(self: *@This(), _: std.fs.Dir, rel_path: []const u8) !void {
+            if (self.done) return;
             if (!std.mem.eql(u8, rel_path, "sub/victim.txt")) return;
-            ctx.done = true;
-            try ctx.root.rename("sub", "gone");
-            try ctx.root.rename("swap", "sub");
+            self.done = true;
+            try self.root.rename("sub", "gone");
+            try self.root.rename("swap", "sub");
         }
+        const Bind = PreOpen.Bind(@This(), run);
     };
 
     var tmp = std.testing.tmpDir(.{});
@@ -346,13 +364,13 @@ test "grep handler keeps trusted dir after ancestor swap" {
 
     const sink = noop.sink();
 
-    var ctx = Hook.Ctx{ .root = try tmp.dir.openDir("src", .{ .access_sub_paths = true }) };
+    var ctx = HookCtx{ .root = try tmp.dir.openDir("src", .{ .access_sub_paths = true }) };
     defer ctx.root.close();
 
     const handler = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 256,
-        .pre_open = .{ .ctx = &ctx, .run = Hook.run },
+        .pre_open = &ctx.pre_open,
     });
     const res = try handler.run(.{
         .id = "g-race",

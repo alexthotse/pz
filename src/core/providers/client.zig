@@ -28,7 +28,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
         map: *Map,
         pol: Policy,
         slp: ?*Slp = null,
-        cancel: ?providers.CancelPoll = null,
+        cancel: ?*providers.CancelPoll = null,
         provider: providers.Provider = .{ .vt = &provider_vt },
 
         const Self = @This();
@@ -181,7 +181,7 @@ fn streamRun(
     req: providers.Request,
     pol: Policy,
     slp: ?*Slp,
-    cancel: ?providers.CancelPoll,
+    cancel: ?*providers.CancelPoll,
 ) (retry.StepErr || Err)!RunResult {
     var tries: u16 = 0;
     while (true) {
@@ -213,7 +213,7 @@ fn streamRun(
     }
 }
 
-fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: providers.Request, cancel: ?providers.CancelPoll) Err![]providers.Event {
+fn streamOnce(comptime Tr: type, alloc: std.mem.Allocator, tr: *Tr, req: providers.Request, cancel: ?*providers.CancelPoll) Err![]providers.Event {
     var stream = try tr.start(req);
     defer stream.deinit();
 
@@ -811,6 +811,7 @@ test "first provider retries on transient chunk read failures" {
 
 const CancelFlag = struct {
     canceled: bool = false,
+    cancel_poll: providers.CancelPoll = .{ .vt = &providers.CancelPoll.Bind(@This(), isCanceled).vt },
 
     fn isCanceled(self: *CancelFlag) bool {
         return self.canceled;
@@ -827,7 +828,7 @@ test "stream run aborts immediately when cancel is set before start" {
     const pol = try mkPol(3);
 
     var flag = CancelFlag{ .canceled = true };
-    const cancel = providers.CancelPoll.from(CancelFlag, &flag, CancelFlag.isCanceled);
+    const cancel = &flag.cancel_poll;
 
     try std.testing.expectError(
         error.TransportFatal,
@@ -857,7 +858,7 @@ test "stream run aborts between retry sleep when cancel fires" {
 
     // Cancel flag set after first attempt fails, before sleep
     var flag = CancelFlag{};
-    const cancel = providers.CancelPoll.from(CancelFlag, &flag, CancelFlag.isCanceled);
+    const cancel = &flag.cancel_poll;
 
     // Custom sleeper that sets cancel during wait
     const CancelSleeper = struct {
@@ -891,7 +892,7 @@ test "stream run aborts between retry sleep when cancel fires" {
 
 test "CancelPoll vtable roundtrips" {
     var flag = CancelFlag{};
-    const cp = providers.CancelPoll.from(CancelFlag, &flag, CancelFlag.isCanceled);
+    const cp = &flag.cancel_poll;
     try std.testing.expect(!cp.isCanceled());
     flag.canceled = true;
     try std.testing.expect(cp.isCanceled());
@@ -906,13 +907,14 @@ test "AbortSlot.abort holds mutex for entire call" {
     var called = false;
     const TestCtx = struct {
         flag: *bool,
+        aborter: providers.Aborter = .{ .vt = &providers.Aborter.Bind(@This(), doAbort).vt },
 
         fn doAbort(self: *@This()) void {
             self.flag.* = true;
         }
     };
     var ctx = TestCtx{ .flag = &called };
-    slot.set(providers.Aborter.from(TestCtx, &ctx, TestCtx.doAbort));
+    slot.set(&ctx.aborter);
     slot.abort();
     try std.testing.expect(called);
 }

@@ -5,6 +5,7 @@ const writer = @import("writer.zig");
 const reader = @import("reader.zig");
 
 pub const Store = struct {
+    session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinitStore).vt },
     alloc: std.mem.Allocator,
     dir: std.fs.Dir,
     wr: writer.Writer,
@@ -29,21 +30,15 @@ pub const Store = struct {
         };
     }
 
-    pub fn asSessionStore(self: *Store) session.SessionStore {
-        return session.SessionStore.from(
-            Store,
-            self,
-            Store.append,
-            Store.replay,
-            Store.deinitStore,
-        );
+    pub fn sessionStore(self: *Store) *session.SessionStore {
+        return &self.session_store;
     }
 
     fn append(self: *Store, sid: []const u8, ev: session.Event) !void {
         try self.wr.append(sid, ev);
     }
 
-    fn replay(self: *Store, sid: []const u8) !session.Reader {
+    fn replay(self: *Store, sid: []const u8) !*session.Reader {
         const owned = try self.alloc.create(OwnedReplay);
         errdefer self.alloc.destroy(owned);
 
@@ -52,12 +47,7 @@ pub const Store = struct {
             .rdr = try reader.ReplayReader.init(self.alloc, self.dir, sid, self.replay_opts),
         };
 
-        return session.Reader.from(
-            OwnedReplay,
-            owned,
-            OwnedReplay.next,
-            OwnedReplay.deinit,
-        );
+        return &owned.reader;
     }
 
     fn deinitStore(self: *Store) void {
@@ -71,6 +61,7 @@ pub const Store = struct {
 };
 
 const OwnedReplay = struct {
+    reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
     alloc: std.mem.Allocator,
     rdr: reader.ReplayReader,
 
@@ -96,7 +87,7 @@ test "fs store append and replay roundtrip" {
     });
     defer fs_store.deinit();
 
-    var store = fs_store.asSessionStore();
+    const store = fs_store.sessionStore();
     try store.append("s1", .{
         .at_ms = 10,
         .data = .{ .prompt = .{ .text = "hi" } },
@@ -106,7 +97,7 @@ test "fs store append and replay roundtrip" {
         .data = .{ .text = .{ .text = "hello" } },
     });
 
-    var rdr = try store.replay("s1");
+    const rdr = try store.replay("s1");
     defer rdr.deinit();
 
     const ev0 = (try rdr.next()) orelse return error.TestUnexpectedResult;
@@ -135,6 +126,6 @@ test "fs store replay missing sid returns file-not-found error" {
     });
     defer fs_store.deinit();
 
-    var store = fs_store.asSessionStore();
+    const store = fs_store.sessionStore();
     try std.testing.expectError(error.FileNotFound, store.replay("missing"));
 }

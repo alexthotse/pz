@@ -36,7 +36,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, _: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, _: *tools.Sink) Err!tools.Result {
         if (call.kind != .find) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .find) return error.KindMismatch;
 

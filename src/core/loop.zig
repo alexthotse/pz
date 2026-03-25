@@ -5,7 +5,6 @@ const providers = @import("providers.zig");
 const prov_api = @import("providers/api.zig");
 const session = @import("session.zig");
 const tools = @import("tools.zig");
-const vtable = @import("vtable.zig");
 const cancel_mock = @import("../test/cancel_mock.zig");
 const provider_mock = @import("../test/provider_mock.zig");
 const time_mock = @import("../test/time_mock.zig");
@@ -43,71 +42,98 @@ pub const ModeEv = union(enum) {
 };
 
 pub const ModeSink = struct {
-    ctx: *anyopaque,
     vt: *const Vt,
 
     pub const Vt = struct {
-        push: *const fn (ctx: *anyopaque, ev: ModeEv) anyerror!void,
+        push: *const fn (self: *ModeSink, ev: ModeEv) anyerror!void,
     };
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime push_fn: fn (ctx: *T, ev: ModeEv) anyerror!void,
-    ) ModeSink {
-        const Gen = struct {
-            const vt = Vt{
-                .push = vtable.wrap(T, push_fn),
-            };
-        };
-        return .{ .ctx = ctx, .vt = &Gen.vt };
+    pub fn push(self: *ModeSink, ev: ModeEv) !void {
+        return self.vt.push(self, ev);
     }
 
-    pub fn push(self: ModeSink, ev: ModeEv) !void {
-        return self.vt.push(self.ctx, ev);
+    pub fn Bind(comptime T: type, comptime push_fn: fn (*T, ModeEv) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .push = pushFn,
+            };
+            fn pushFn(ms: *ModeSink, ev: ModeEv) anyerror!void {
+                const self: *T = @fieldParentPtr("mode_sink", ms);
+                return push_fn(self, ev);
+            }
+        };
     }
 };
 
 pub const TimeSrc = struct {
-    ctx: *anyopaque,
-    now_ms_fn: *const fn (ctx: *anyopaque) i64,
+    vt: *const Vt,
 
-    pub fn from(comptime T: type, ctx: *T, comptime method: fn (*T) i64) TimeSrc {
-        return .{ .ctx = ctx, .now_ms_fn = vtable.wrap(T, method) };
+    pub const Vt = struct {
+        now_ms: *const fn (self: *TimeSrc) i64,
+    };
+
+    pub fn nowMs(self: *TimeSrc) i64 {
+        return self.vt.now_ms(self);
     }
 
-    pub fn nowMs(self: TimeSrc) i64 {
-        return self.now_ms_fn(self.ctx);
+    pub fn Bind(comptime T: type, comptime method: fn (*T) i64) type {
+        return struct {
+            pub const vt = Vt{
+                .now_ms = nowMsFn,
+            };
+            fn nowMsFn(ts: *TimeSrc) i64 {
+                const self: *T = @fieldParentPtr("time_src", ts);
+                return method(self);
+            }
+        };
     }
 };
 
 pub const CancelSrc = struct {
-    ctx: *anyopaque,
-    is_canceled_fn: *const fn (ctx: *anyopaque) bool,
+    vt: *const Vt,
 
-    pub fn from(comptime T: type, ctx: *T, comptime method: fn (*T) bool) CancelSrc {
-        return .{ .ctx = ctx, .is_canceled_fn = vtable.wrap(T, method) };
+    pub const Vt = struct {
+        is_canceled: *const fn (self: *CancelSrc) bool,
+    };
+
+    pub fn isCanceled(self: *CancelSrc) bool {
+        return self.vt.is_canceled(self);
     }
 
-    pub fn isCanceled(self: CancelSrc) bool {
-        return self.is_canceled_fn(self.ctx);
+    pub fn Bind(comptime T: type, comptime method: fn (*T) bool) type {
+        return struct {
+            pub const vt = Vt{
+                .is_canceled = isCanceledFn,
+            };
+            fn isCanceledFn(cs: *CancelSrc) bool {
+                const self: *T = @fieldParentPtr("cancel_src", cs);
+                return method(self);
+            }
+        };
     }
 };
 
 pub const Compactor = struct {
-    ctx: *anyopaque,
-    run_fn: *const fn (ctx: *anyopaque, sid: []const u8, at_ms: i64) anyerror!void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime run_fn: fn (ctx: *T, sid: []const u8, at_ms: i64) anyerror!void,
-    ) Compactor {
-        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
+    pub const Vt = struct {
+        run: *const fn (self: *Compactor, sid: []const u8, at_ms: i64) anyerror!void,
+    };
+
+    pub fn run(self: *Compactor, sid: []const u8, at_ms: i64) !void {
+        return self.vt.run(self, sid, at_ms);
     }
 
-    pub fn run(self: Compactor, sid: []const u8, at_ms: i64) !void {
-        return self.run_fn(self.ctx, sid, at_ms);
+    pub fn Bind(comptime T: type, comptime run_fn: fn (*T, []const u8, i64) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .run = runFn,
+            };
+            fn runFn(c: *Compactor, sid: []const u8, at_ms: i64) anyerror!void {
+                const self: *T = @fieldParentPtr("compactor", c);
+                return run_fn(self, sid, at_ms);
+            }
+        };
     }
 };
 
@@ -349,21 +375,21 @@ pub const Opts = struct {
     model: []const u8,
     provider_label: ?[]const u8 = null,
     provider: *providers.Provider,
-    store: session.SessionStore,
+    store: *session.SessionStore,
     reg: tools.Registry,
-    mode: ModeSink,
+    mode: *ModeSink,
     system_prompt: ?[]const u8 = null,
     provider_opts: providers.Opts = .{},
     max_turns: u16 = 0, // 0 = unlimited
-    time: ?TimeSrc = null,
-    cancel: ?CancelSrc = null,
+    time: ?*TimeSrc = null,
+    cancel: ?*CancelSrc = null,
     abort_slot: ?*providers.AbortSlot = null,
-    compactor: ?Compactor = null,
+    compactor: ?*Compactor = null,
     compact_every: u32 = 0,
     cmd_cache: ?*CmdCache = null,
-    tool_auth: ?ToolAuth = null,
+    tool_auth: ?*ToolAuth = null,
     approval: ?ApprovalCtx = null,
-    approver: ?Approver = null,
+    approver: ?*Approver = null,
     /// Skip <untrusted-input> wrapping on user prompts and prompt_guard
     /// system injection. Required for OAuth API compatibility.
     skip_prompt_guard: bool = false,
@@ -375,36 +401,50 @@ pub const ApprovalCtx = struct {
 };
 
 pub const Approver = struct {
-    ctx: *anyopaque,
-    check_fn: *const fn (ctx: *anyopaque, key: CmdCache.Key, cached: bool) anyerror!void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime check_fn: fn (ctx: *T, key: CmdCache.Key, cached: bool) anyerror!void,
-    ) Approver {
-        return .{ .ctx = ctx, .check_fn = vtable.wrap(T, check_fn) };
+    pub const Vt = struct {
+        check: *const fn (self: *Approver, key: CmdCache.Key, cached: bool) anyerror!void,
+    };
+
+    pub fn check(self: *Approver, key: CmdCache.Key, cached: bool) !void {
+        return self.vt.check(self, key, cached);
     }
 
-    pub fn check(self: Approver, key: CmdCache.Key, cached: bool) !void {
-        return self.check_fn(self.ctx, key, cached);
+    pub fn Bind(comptime T: type, comptime check_fn: fn (*T, CmdCache.Key, bool) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .check = checkFn,
+            };
+            fn checkFn(a: *Approver, key: CmdCache.Key, cached: bool) anyerror!void {
+                const self: *T = @fieldParentPtr("approver", a);
+                return check_fn(self, key, cached);
+            }
+        };
     }
 };
 
 pub const ToolAuth = struct {
-    ctx: *anyopaque,
-    check_fn: *const fn (ctx: *anyopaque, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) anyerror!void,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime check_fn: fn (ctx: *T, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) anyerror!void,
-    ) ToolAuth {
-        return .{ .ctx = ctx, .check_fn = vtable.wrap(T, check_fn) };
+    pub const Vt = struct {
+        check: *const fn (self: *ToolAuth, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) anyerror!void,
+    };
+
+    pub fn check(self: *ToolAuth, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) !void {
+        return self.vt.check(self, call_id, name, kind, kind_str, parsed_args);
     }
 
-    pub fn check(self: ToolAuth, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) !void {
-        return self.check_fn(self.ctx, call_id, name, kind, kind_str, parsed_args);
+    pub fn Bind(comptime T: type, comptime check_fn: fn (*T, []const u8, []const u8, tools.Kind, []const u8, tools.Call.Args) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .check = checkFn,
+            };
+            fn checkFn(ta: *ToolAuth, call_id: []const u8, name: []const u8, kind: tools.Kind, kind_str: []const u8, parsed_args: tools.Call.Args) anyerror!void {
+                const self: *T = @fieldParentPtr("tool_auth", ta);
+                return check_fn(self, call_id, name, kind, kind_str, parsed_args);
+            }
+        };
     }
 };
 
@@ -574,13 +614,13 @@ pub const LoopCtx = struct {
         var append_ct: u64 = 0;
 
         {
-            var replay = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
+            const rdr = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
                 error.FileNotFound, error.NotFound => null,
                 else => return failWithReport(opts, .replay_open, replay_err),
             };
-            if (replay) |*rdr| {
-                defer rdr.deinit();
-                while (rdr.next() catch |next_err| return failWithReport(opts, .replay_next, next_err)) |ev| {
+            if (rdr) |r| {
+                defer r.deinit();
+                while (r.next() catch |next_err| return failWithReport(opts, .replay_next, next_err)) |ev| {
                     opts.mode.push(.{ .replay = ev }) catch |mode_err| {
                         return failWithReport(opts, .mode_push, mode_err);
                     };
@@ -796,7 +836,7 @@ pub fn run(opts: Opts) (Err || anyerror)!RunOut {
 }
 
 fn isCanceled(opts: Opts) bool {
-    if (opts.cancel) |cancel| return cancel.isCanceled();
+    if (opts.cancel) |c| return c.isCanceled();
     return false;
 }
 
@@ -857,7 +897,7 @@ fn reportRuntimeErr(opts: Opts, stage: Stage, cause: anyerror) !void {
 }
 
 fn nowMs(opts: Opts) i64 {
-    if (opts.time) |time| return time.nowMs();
+    if (opts.time) |t| return t.nowMs();
     return std.time.milliTimestamp();
 }
 
@@ -985,13 +1025,13 @@ fn freeReqMsgsOwned(alloc: std.mem.Allocator, msgs: []providers.Msg) void {
 
 fn reloadHist(opts: Opts, hist: *Hist) !void {
     try hist.clear();
-    var replay = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
+    const rdr = opts.store.replay(opts.sid) catch |replay_err| switch (replay_err) {
         error.FileNotFound, error.NotFound => null,
         else => return replay_err,
     };
-    if (replay) |*rdr| {
-        defer rdr.deinit();
-        while (try rdr.next()) |ev| {
+    if (rdr) |r| {
+        defer r.deinit();
+        while (try r.next()) |ev| {
             try hist.appendFromSession(ev);
         }
     }
@@ -1075,9 +1115,12 @@ fn buildSchema(alloc: std.mem.Allocator, params: []const tools.Spec.Param) ![]co
 }
 
 const ToolCancelBridge = struct {
-    src: CancelSrc,
+    cancel_src: tools.CancelSrc = .{ .vt = &CancelBind.vt },
+    src: *CancelSrc,
 
-    fn isCanceled(self: *@This()) bool {
+    const CancelBind = tools.CancelSrc.Bind(@This(), checkCanceled);
+
+    fn checkCanceled(self: *@This()) bool {
         return self.src.isCanceled();
     }
 };
@@ -1136,8 +1179,8 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
     var tool_cancel = if (opts.cancel) |cancel| ToolCancelBridge{
         .src = cancel,
     } else null;
-    const call_cancel = if (tool_cancel) |*cancel|
-        tools.CancelSrc.from(ToolCancelBridge, cancel, ToolCancelBridge.isCanceled)
+    const call_cancel: ?*tools.CancelSrc = if (tool_cancel) |*cancel|
+        &cancel.cancel_src
     else
         null;
 
@@ -1153,9 +1196,8 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
     var mode_sink = ToolModeSink{
         .mode = opts.mode,
     };
-    const sink = tools.Sink.from(ToolModeSink, &mode_sink, ToolModeSink.push);
 
-    const run_res = opts.reg.run(entry.name, call, sink) catch |run_err| {
+    const run_res = opts.reg.run(entry.name, call, &mode_sink.sink) catch |run_err| {
         const fail = tools.Result{
             .call_id = call.id,
             .started_at_ms = at_ms,
@@ -1168,7 +1210,7 @@ fn runTool(opts: Opts, tc: providers.ToolCall) (Err || anyerror)!providers.ToolR
                 },
             },
         };
-        try sink.push(.{
+        try mode_sink.sink.push(.{
             .finish = fail,
         });
 
@@ -1233,7 +1275,9 @@ pub fn approvalSummaryAlloc(
 }
 
 const ToolModeSink = struct {
-    mode: ModeSink,
+    sink: tools.Sink = .{ .vt = &SinkBind.vt },
+    mode: *ModeSink,
+    const SinkBind = tools.Sink.Bind(ToolModeSink, ToolModeSink.push);
 
     fn push(self: *ToolModeSink, ev: tools.Event) !void {
         // Emit agent status events for agent tool lifecycle.
@@ -1507,6 +1551,7 @@ test "mapProviderEv preserves usage cache counters" {
 
 test "loop smoke composes replay provider tool and mode" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const session.Event = &.{},
         idx: usize = 0,
 
@@ -1521,6 +1566,7 @@ test "loop smoke composes replay provider tool and mode" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         tool_result_ct: usize = 0,
         tool_result_out: [64]u8 = [_]u8{0} ** 64,
@@ -1545,18 +1591,13 @@ test "loop smoke composes replay provider tool and mode" {
             }
         }
 
-        fn replay(self: *@This(), sid: []const u8) !session.Reader {
+        fn replay(self: *@This(), sid: []const u8) !*session.Reader {
             self.replay_sid = sid;
             self.rdr = .{
                 .evs = self.replay_evs,
                 .idx = 0,
             };
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -1614,10 +1655,11 @@ test "loop smoke composes replay provider tool and mode" {
     };
 
     const DispatchImpl = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         run_ct: usize = 0,
         out: [1]tools.Output = undefined,
 
-        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), call: tools.Call, _: *tools.Sink) !tools.Result {
             self.run_ct += 1;
             try std.testing.expect(call.kind == .read);
             try std.testing.expect(std.meta.activeTag(call.args) == .read);
@@ -1642,9 +1684,11 @@ test "loop smoke composes replay provider tool and mode" {
                 },
             };
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         replay_ct: usize = 0,
         session_ct: usize = 0,
         provider_ct: usize = 0,
@@ -1718,18 +1762,10 @@ test "loop smoke composes replay provider tool and mode" {
         .turn1 = turn1[0..],
         .turn2 = turn2[0..],
     };
-    
 
     var store_impl = StoreImpl{
         .replay_evs = replay[0..],
     };
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
 
     var dispatch_impl = DispatchImpl{};
     const entries = [_]tools.Entry{
@@ -1747,21 +1783,12 @@ test "loop smoke composes replay provider tool and mode" {
                 .timeout_ms = 1000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(
-                DispatchImpl,
-                &dispatch_impl,
-                DispatchImpl.run,
-            ),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
     const reg = tools.Registry.init(entries[0..]);
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(
-        ModeImpl,
-        &mode_impl,
-        ModeImpl.push,
-    );
 
     var clock_impl = time_mock.FixedMs{ .now_ms = 900 };
     const out = try run(.{
@@ -1770,11 +1797,11 @@ test "loop smoke composes replay provider tool and mode" {
         .prompt = "ship-it",
         .model = "m1",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = reg,
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 4,
-        .time = TimeSrc.from(time_mock.FixedMs, &clock_impl, time_mock.FixedMs.nowMs),
+        .time = &clock_impl.time_src,
     });
 
     const OhSnap = @import("ohsnap");
@@ -1842,6 +1869,7 @@ test "loop smoke composes replay provider tool and mode" {
 
 test "loop smoke finishes single turn with no tools" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -1850,6 +1878,7 @@ test "loop smoke finishes single turn with no tools" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         rdr: ReaderImpl = .{},
 
@@ -1857,13 +1886,8 @@ test "loop smoke finishes single turn with no tools" {
             self.append_ct += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -1905,6 +1929,7 @@ test "loop smoke finishes single turn with no tools" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         replay_ct: usize = 0,
         session_ct: usize = 0,
         provider_ct: usize = 0,
@@ -1938,22 +1963,12 @@ test "loop smoke finishes single turn with no tools" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     const reg = tools.Registry.init(&.{});
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(
-        ModeImpl,
-        &mode_impl,
-        ModeImpl.push,
-    );
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -1961,9 +1976,9 @@ test "loop smoke finishes single turn with no tools" {
         .prompt = "hello",
         .model = "m2",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = reg,
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
     });
 
     const OhSnap = @import("ohsnap");
@@ -2004,6 +2019,7 @@ test "loop smoke finishes single turn with no tools" {
 
 test "loop cancellation emits canceled stop and exits early" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -2012,6 +2028,7 @@ test "loop cancellation emits canceled stop and exits early" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         canceled_ct: usize = 0,
         rdr: ReaderImpl = .{},
@@ -2021,13 +2038,8 @@ test "loop cancellation emits canceled stop and exits early" {
             if (ev.data == .stop and ev.data.stop.reason == .canceled) self.canceled_ct += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -2059,6 +2071,7 @@ test "loop cancellation emits canceled stop and exits early" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         provider_canceled_ct: usize = 0,
 
         fn push(self: *@This(), ev: ModeEv) !void {
@@ -2072,6 +2085,7 @@ test "loop cancellation emits canceled stop and exits early" {
     };
 
     const CancelImpl = struct {
+        cancel_src: CancelSrc = .{ .vt = &CancelSrc.Bind(@This(), @This().isCanceled).vt },
         fn isCanceled(_: *@This()) bool {
             return true;
         }
@@ -2091,19 +2105,13 @@ test "loop cancellation emits canceled stop and exits early" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var cancel_impl = CancelImpl{};
-    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -2111,10 +2119,10 @@ test "loop cancellation emits canceled stop and exits early" {
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
-        .cancel = cancel,
+        .mode = &mode_impl.mode_sink,
+        .cancel = &cancel_impl.cancel_src,
     });
 
     const OhSnap = @import("ohsnap");
@@ -2140,10 +2148,11 @@ test "loop cancellation emits canceled stop and exits early" {
 
 test "runTool forwards cancel source to dispatch" {
     const DispatchImpl = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         run_ct: usize = 0,
         out: [1]tools.Output = undefined,
 
-        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), call: tools.Call, _: *tools.Sink) !tools.Result {
             self.run_ct += 1;
             try std.testing.expect(call.cancel != null);
             try std.testing.expect(call.cancel.?.isCanceled());
@@ -2166,9 +2175,11 @@ test "runTool forwards cancel source to dispatch" {
                 },
             };
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
@@ -2180,11 +2191,12 @@ test "runTool forwards cancel source to dispatch" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         fn append(_: *@This(), _: []const u8, _: session.Event) !void {
             return error.Unused;
         }
 
-        fn replay(_: *@This(), _: []const u8) !session.Reader {
+        fn replay(_: *@This(), _: []const u8) !*session.Reader {
             return error.Unused;
         }
 
@@ -2192,6 +2204,7 @@ test "runTool forwards cancel source to dispatch" {
     };
 
     const CancelImpl = struct {
+        cancel_src: CancelSrc = .{ .vt = &CancelSrc.Bind(@This(), @This().isCanceled).vt },
         fn isCanceled(_: *@This()) bool {
             return true;
         }
@@ -2220,31 +2233,21 @@ test "runTool forwards cancel source to dispatch" {
                 .timeout_ms = 1000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(
-                DispatchImpl,
-                &dispatch_impl,
-                DispatchImpl.run,
-            ),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var provider_impl = ProviderImpl{};
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var cancel_impl = CancelImpl{};
-    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+    
 
     const tr = try runTool(.{
         .alloc = std.testing.allocator,
@@ -2252,10 +2255,10 @@ test "runTool forwards cancel source to dispatch" {
         .prompt = "prompt",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
-        .cancel = cancel,
+        .mode = &mode_impl.mode_sink,
+        .cancel = &cancel_impl.cancel_src,
     }, .{
         .id = "call-1",
         .name = "read",
@@ -2287,7 +2290,8 @@ test "runTool forwards cancel source to dispatch" {
 
 test "runTool approval hook binds repo policy session and cache state" {
     const DispatchImpl = struct {
-        fn run(_: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), call: tools.Call, _: *tools.Sink) !tools.Result {
             return .{
                 .call_id = call.id,
                 .started_at_ms = 1,
@@ -2298,9 +2302,11 @@ test "runTool approval hook binds repo policy session and cache state" {
                 },
             };
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
@@ -2312,11 +2318,12 @@ test "runTool approval hook binds repo policy session and cache state" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         fn append(_: *@This(), _: []const u8, _: session.Event) !void {
             return error.Unused;
         }
 
-        fn replay(_: *@This(), _: []const u8) !session.Reader {
+        fn replay(_: *@This(), _: []const u8) !*session.Reader {
             return error.Unused;
         }
 
@@ -2324,6 +2331,7 @@ test "runTool approval hook binds repo policy session and cache state" {
     };
 
     const ApproverImpl = struct {
+        approver: Approver = .{ .vt = &Approver.Bind(@This(), @This().check).vt },
         cached: bool = true,
         tool: tools.Kind = .read,
         cmd: []const u8 = "",
@@ -2366,16 +2374,16 @@ test "runTool approval hook binds repo policy session and cache state" {
                 .timeout_ms = 1000,
                 .destructive = true,
             },
-            .dispatch = tools.Dispatch.from(DispatchImpl, &dispatch_impl, DispatchImpl.run),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
     var provider_impl = ProviderImpl{};
     
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+    
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
     try cache.add(.{
@@ -2386,7 +2394,7 @@ test "runTool approval hook binds repo policy session and cache state" {
         .life = .{ .session = "sid-approve" },
     });
     var approver_impl = ApproverImpl{};
-    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+    
 
     const tr = try runTool(.{
         .alloc = std.testing.allocator,
@@ -2394,15 +2402,15 @@ test "runTool approval hook binds repo policy session and cache state" {
         .prompt = "prompt",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .cmd_cache = &cache,
         .approval = .{
             .loc = .{ .repo_root = "/work/pz" },
             .policy = .{ .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
         },
-        .approver = approver,
+        .approver = &approver_impl.approver,
     }, .{
         .id = "call-write",
         .name = "write",
@@ -2446,6 +2454,7 @@ test "runTool approval hook binds repo policy session and cache state" {
 
 test "loop requires approval before bash escalation from malicious comment replay" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const session.Event,
         idx: usize = 0,
 
@@ -2460,6 +2469,7 @@ test "loop requires approval before bash escalation from malicious comment repla
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl,
         events: std.ArrayListUnmanaged(session.Event) = .{},
 
@@ -2467,9 +2477,9 @@ test "loop requires approval before bash escalation from malicious comment repla
             try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
             self.rdr.idx = 0;
-            return session.Reader.from(ReaderImpl, &self.rdr, ReaderImpl.next, ReaderImpl.deinit);
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -2521,19 +2531,23 @@ test "loop requires approval before bash escalation from malicious comment repla
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
     const BashDispatch = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         run_ct: usize = 0,
 
-        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), _: tools.Call, _: *tools.Sink) !tools.Result {
             self.run_ct += 1;
             return error.TestUnexpectedResult;
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ApproverImpl = struct {
+        approver: Approver = .{ .vt = &Approver.Bind(@This(), @This().check).vt },
         seen: bool = false,
 
         fn check(self: *@This(), key: CmdCache.Key, cached: bool) !void {
@@ -2559,14 +2573,14 @@ test "loop requires approval before bash escalation from malicious comment repla
         .rdr = .{ .evs = replay[0..] },
     };
     defer store_impl.deinit();
-    const store = session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+    
 
     var provider_impl = ProviderImpl{};
     defer if (provider_impl.req_snap) |snap| std.testing.allocator.free(snap);
     
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var bash_dispatch = BashDispatch{};
     const entries = [_]tools.Entry{
@@ -2581,14 +2595,14 @@ test "loop requires approval before bash escalation from malicious comment repla
                 .timeout_ms = 1000,
                 .destructive = true,
             },
-            .dispatch = tools.Dispatch.from(BashDispatch, &bash_dispatch, BashDispatch.run),
+            .dispatch = &bash_dispatch.dispatch,
         },
     };
 
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
     var approver_impl = ApproverImpl{};
-    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+    
 
     _ = try run(.{
         .alloc = std.testing.allocator,
@@ -2596,16 +2610,16 @@ test "loop requires approval before bash escalation from malicious comment repla
         .prompt = "ship",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 1,
         .cmd_cache = &cache,
         .approval = .{
             .loc = .{ .cwd = "/tmp/pz" },
             .policy = .{ .version = policy.ver_current },
         },
-        .approver = approver,
+        .approver = &approver_impl.approver,
     });
 
     try std.testing.expect(approver_impl.seen);
@@ -2629,6 +2643,7 @@ test "loop requires approval before bash escalation from malicious comment repla
 
 test "loop requires approval before web post escalation from malicious page replay" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const session.Event,
         idx: usize = 0,
 
@@ -2643,6 +2658,7 @@ test "loop requires approval before web post escalation from malicious page repl
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl,
         events: std.ArrayListUnmanaged(session.Event) = .{},
 
@@ -2650,9 +2666,9 @@ test "loop requires approval before web post escalation from malicious page repl
             try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
             self.rdr.idx = 0;
-            return session.Reader.from(ReaderImpl, &self.rdr, ReaderImpl.next, ReaderImpl.deinit);
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -2704,19 +2720,23 @@ test "loop requires approval before web post escalation from malicious page repl
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
     const WebDispatch = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         run_ct: usize = 0,
 
-        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), _: tools.Call, _: *tools.Sink) !tools.Result {
             self.run_ct += 1;
             return error.TestUnexpectedResult;
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ApproverImpl = struct {
+        approver: Approver = .{ .vt = &Approver.Bind(@This(), @This().check).vt },
         seen: bool = false,
 
         fn check(self: *@This(), key: CmdCache.Key, cached: bool) !void {
@@ -2742,14 +2762,14 @@ test "loop requires approval before web post escalation from malicious page repl
         .rdr = .{ .evs = replay[0..] },
     };
     defer store_impl.deinit();
-    const store = session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
+    
 
     var provider_impl = ProviderImpl{};
     defer if (provider_impl.req_snap) |snap| std.testing.allocator.free(snap);
     
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var web_dispatch = WebDispatch{};
     const entries = [_]tools.Entry{
@@ -2764,14 +2784,14 @@ test "loop requires approval before web post escalation from malicious page repl
                 .timeout_ms = 1000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(WebDispatch, &web_dispatch, WebDispatch.run),
+            .dispatch = &web_dispatch.dispatch,
         },
     };
 
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
     var approver_impl = ApproverImpl{};
-    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+    
 
     _ = try run(.{
         .alloc = std.testing.allocator,
@@ -2779,16 +2799,16 @@ test "loop requires approval before web post escalation from malicious page repl
         .prompt = "continue",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 1,
         .cmd_cache = &cache,
         .approval = .{
             .loc = .{ .cwd = "/tmp/pz" },
             .policy = .{ .version = policy.ver_current },
         },
-        .approver = approver,
+        .approver = &approver_impl.approver,
     });
 
     try std.testing.expect(approver_impl.seen);
@@ -2812,6 +2832,7 @@ test "loop requires approval before web post escalation from malicious page repl
 
 test "loop compaction trigger runs at configured append cadence" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -2820,6 +2841,7 @@ test "loop compaction trigger runs at configured append cadence" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         rdr: ReaderImpl = .{},
 
@@ -2827,13 +2849,8 @@ test "loop compaction trigger runs at configured append cadence" {
             self.append_ct += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -2865,10 +2882,12 @@ test "loop compaction trigger runs at configured append cadence" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
     const CompactorImpl = struct {
+        compactor: Compactor = .{ .vt = &Compactor.Bind(@This(), @This().run).vt },
         run_ct: usize = 0,
         sid: []const u8 = "",
 
@@ -2892,19 +2911,13 @@ test "loop compaction trigger runs at configured append cadence" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var comp_impl = CompactorImpl{};
-    const comp = Compactor.from(CompactorImpl, &comp_impl, CompactorImpl.run);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -2912,10 +2925,10 @@ test "loop compaction trigger runs at configured append cadence" {
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
-        .compactor = comp,
+        .mode = &mode_impl.mode_sink,
+        .compactor = &comp_impl.compactor,
         .compact_every = 2,
     });
 
@@ -3014,6 +3027,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
     const oh = OhSnap{};
 
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const session.Event = &.{},
         idx: usize = 0,
 
@@ -3028,6 +3042,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         alloc: std.mem.Allocator,
         events: std.ArrayListUnmanaged(session.Event) = .{},
         append_ct: usize = 0,
@@ -3039,18 +3054,13 @@ test "loop reloads history from compacted replay across repeated compactions" {
             try self.events.append(self.alloc, try ev.dupe(self.alloc));
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
             self.replay_ct += 1;
             self.rdr = .{
                 .evs = self.events.items,
                 .idx = 0,
             };
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+            return &self.rdr.reader;
         }
 
         fn reset(self: *@This(), evs: []const session.Event) !void {
@@ -3108,9 +3118,10 @@ test "loop reloads history from compacted replay across repeated compactions" {
     };
 
     const DispatchImpl = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         out: [1]tools.Output = undefined,
 
-        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), call: tools.Call, _: *tools.Sink) !tools.Result {
             self.out[0] = .{
                 .call_id = call.id,
                 .seq = 0,
@@ -3129,6 +3140,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
                 },
             };
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const replay = [_]session.Event{
@@ -3191,10 +3203,12 @@ test "loop reloads history from compacted replay across repeated compactions" {
     const turn2 = [_]providers.Event{};
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
     const CompactorImpl = struct {
+        compactor: Compactor = .{ .vt = &Compactor.Bind(@This(), @This().run).vt },
         store: *StoreImpl,
         run_ct: usize = 0,
 
@@ -3215,13 +3229,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
     defer store_impl.deinit();
     try store_impl.reset(&replay);
 
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var provider_impl = ProviderImpl{
         .turn1 = turn1[0..],
@@ -3248,21 +3256,17 @@ test "loop reloads history from compacted replay across repeated compactions" {
                 .timeout_ms = 1000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(
-                DispatchImpl,
-                &dispatch_impl,
-                DispatchImpl.run,
-            ),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var comp_impl = CompactorImpl{
         .store = &store_impl,
     };
-    const comp = Compactor.from(CompactorImpl, &comp_impl, CompactorImpl.run);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -3270,10 +3274,10 @@ test "loop reloads history from compacted replay across repeated compactions" {
         .prompt = "live-user",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
-        .compactor = comp,
+        .mode = &mode_impl.mode_sink,
+        .compactor = &comp_impl.compactor,
         .compact_every = 1,
     });
 
@@ -3318,6 +3322,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
 
 test "loop unified runtime error reporting appends stage-tagged error event" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -3326,6 +3331,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         append_ct: usize = 0,
         err_ct: usize = 0,
         last_err: [128]u8 = [_]u8{0} ** 128,
@@ -3343,13 +3349,8 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -3363,6 +3364,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
@@ -3370,16 +3372,10 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     try std.testing.expectError(error.StartBoom, run(.{
         .alloc = std.testing.allocator,
@@ -3387,9 +3383,9 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
     }));
 
     try std.testing.expectEqual(@as(usize, 1), store_impl.err_ct);
@@ -3399,6 +3395,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
 
 test "loop runtime error append failure preserves original error and reports session write error" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -3407,19 +3404,15 @@ test "loop runtime error append failure preserves original error and reports ses
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
 
         fn append(_: *@This(), _: []const u8, ev: session.Event) !void {
             if (ev.data == .err) return error.OutOfMemory;
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -3433,6 +3426,7 @@ test "loop runtime error append failure preserves original error and reports ses
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         session_write_err_ct: usize = 0,
         last_write_err: ?[]const u8 = null,
 
@@ -3451,16 +3445,10 @@ test "loop runtime error append failure preserves original error and reports ses
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     try std.testing.expectError(error.StartBoom, run(.{
         .alloc = std.testing.allocator,
@@ -3468,9 +3456,9 @@ test "loop runtime error append failure preserves original error and reports ses
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
     }));
 
     const OhSnap = @import("ohsnap");
@@ -3492,6 +3480,7 @@ test "loop runtime error append failure preserves original error and reports ses
 
 test "mid-stream cancel delivers partial text then canceled stop" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -3500,6 +3489,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
         last_text: [128]u8 = [_]u8{0} ** 128,
@@ -3521,13 +3511,8 @@ test "mid-stream cancel delivers partial text then canceled stop" {
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -3559,6 +3544,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
 
@@ -3577,6 +3563,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     };
 
     const CancelImpl = struct {
+        cancel_src: CancelSrc = .{ .vt = &CancelSrc.Bind(@This(), @This().isCanceled).vt },
         poll_ct: usize = 0,
         // Cancel after the first stream event has been processed.
         // The cancel check runs once per stream.next() iteration,
@@ -3604,19 +3591,13 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var cancel_impl = CancelImpl{};
-    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -3624,10 +3605,10 @@ test "mid-stream cancel delivers partial text then canceled stop" {
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
-        .cancel = cancel,
+        .mode = &mode_impl.mode_sink,
+        .cancel = &cancel_impl.cancel_src,
     });
 
     const OhSnap = @import("ohsnap");
@@ -3663,6 +3644,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
 
 test "loop cancel append failure still returns canceled turn and reports session write error" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -3671,6 +3653,7 @@ test "loop cancel append failure still returns canceled turn and reports session
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         append_ct: usize = 0,
         rdr: ReaderImpl = .{},
@@ -3681,13 +3664,8 @@ test "loop cancel append failure still returns canceled turn and reports session
             if (ev.data == .text) self.text_ct += 1;
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -3719,6 +3697,7 @@ test "loop cancel append failure still returns canceled turn and reports session
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
         session_ct: usize = 0,
@@ -3745,6 +3724,7 @@ test "loop cancel append failure still returns canceled turn and reports session
     };
 
     const CancelImpl = struct {
+        cancel_src: CancelSrc = .{ .vt = &CancelSrc.Bind(@This(), @This().isCanceled).vt },
         poll_ct: usize = 0,
 
         fn isCanceled(self: *@This()) bool {
@@ -3766,19 +3746,13 @@ test "loop cancel append failure still returns canceled turn and reports session
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var cancel_impl = CancelImpl{};
-    const cancel = CancelSrc.from(CancelImpl, &cancel_impl, CancelImpl.isCanceled);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -3786,10 +3760,10 @@ test "loop cancel append failure still returns canceled turn and reports session
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
-        .cancel = cancel,
+        .mode = &mode_impl.mode_sink,
+        .cancel = &cancel_impl.cancel_src,
     });
 
     const OhSnap = @import("ohsnap");
@@ -3831,6 +3805,7 @@ test "loop cancel append failure still returns canceled turn and reports session
 
 test "abort slot cancels blocked provider stream quickly and preserves partial text" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -3839,6 +3814,7 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
         last_text: [128]u8 = [_]u8{0} ** 128,
@@ -3860,19 +3836,15 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         canceled_ct: usize = 0,
 
         fn push(self: *@This(), ev: ModeEv) !void {
@@ -3911,19 +3883,13 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
     defer provider_impl.deinit();
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var cancel_impl = cancel_mock.Flag{};
-    const cancel = CancelSrc.from(cancel_mock.Flag, &cancel_impl, cancel_mock.Flag.isCanceled);
+    
     var abort_slot = providers.AbortSlot{};
     var cancel_ctx = CancelCtx{
         .cancel = &cancel_impl,
@@ -3939,10 +3905,10 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
-        .cancel = cancel,
+        .mode = &mode_impl.mode_sink,
+        .cancel = &cancel_impl.cancel_src,
         .abort_slot = &abort_slot,
     });
     const elapsed_ms: i128 = @divTrunc(std.time.nanoTimestamp() - start_ns, std.time.ns_per_ms);
@@ -3980,6 +3946,7 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
     // Mock provider streams text every 50ms, cancel after 100ms.
     // Proves: cancel detected within 200ms, partial text persisted.
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -3988,6 +3955,7 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         text_ct: usize = 0,
         canceled_ct: usize = 0,
         last_text: [128]u8 = [_]u8{0} ** 128,
@@ -4009,19 +3977,15 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         canceled_ct: usize = 0,
 
         fn push(self: *@This(), ev: ModeEv) !void {
@@ -4058,19 +4022,13 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
     defer provider_impl.deinit();
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var cancel_impl = cancel_mock.Flag{};
-    const cancel = CancelSrc.from(cancel_mock.Flag, &cancel_impl, cancel_mock.Flag.isCanceled);
+    
     var abort_slot = providers.AbortSlot{};
     var cancel_ctx = CancelCtx{
         .cancel = &cancel_impl,
@@ -4086,10 +4044,10 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
-        .cancel = cancel,
+        .mode = &mode_impl.mode_sink,
+        .cancel = &cancel_impl.cancel_src,
         .abort_slot = &abort_slot,
     });
     const elapsed_ms: i128 = @divTrunc(std.time.nanoTimestamp() - start_ns, std.time.ns_per_ms);
@@ -4543,6 +4501,7 @@ test "parseCallArgs parses skill args" {
 
 test "loop text streaming append OOM reports session write error and continues" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -4551,6 +4510,7 @@ test "loop text streaming append OOM reports session write error and continues" 
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
         text_ct: usize = 0,
 
@@ -4561,13 +4521,8 @@ test "loop text streaming append OOM reports session write error and continues" 
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -4599,6 +4554,7 @@ test "loop text streaming append OOM reports session write error and continues" 
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         session_write_err_ct: usize = 0,
         last_write_err: ?[]const u8 = null,
         text_ct: usize = 0,
@@ -4628,16 +4584,10 @@ test "loop text streaming append OOM reports session write error and continues" 
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -4645,9 +4595,9 @@ test "loop text streaming append OOM reports session write error and continues" 
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
     });
 
     const OhSnap = @import("ohsnap");
@@ -4680,6 +4630,7 @@ test "loop text streaming append OOM reports session write error and continues" 
 
 test "loop prompt append OOM reports session write error and continues" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -4688,19 +4639,15 @@ test "loop prompt append OOM reports session write error and continues" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
 
         fn append(_: *@This(), _: []const u8, ev: session.Event) !void {
             if (ev.data == .prompt) return error.OutOfMemory;
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -4732,6 +4679,7 @@ test "loop prompt append OOM reports session write error and continues" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         session_write_err_ct: usize = 0,
         last_write_err: ?[]const u8 = null,
 
@@ -4756,16 +4704,10 @@ test "loop prompt append OOM reports session write error and continues" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     const out = try run(.{
         .alloc = std.testing.allocator,
@@ -4773,9 +4715,9 @@ test "loop prompt append OOM reports session write error and continues" {
         .prompt = "hello",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(&.{}),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
     });
 
     const OhSnap = @import("ohsnap");
@@ -4802,6 +4744,7 @@ test "loop prompt append OOM reports session write error and continues" {
 
 test "denied tool events appear in causal order: tool_call before denied tool_result" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -4810,6 +4753,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
         events: std.ArrayListUnmanaged(session.Event) = .{},
 
@@ -4817,13 +4761,8 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
             try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -4858,6 +4797,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         order: [8]u8 = [_]u8{0} ** 8,
         len: usize = 0,
 
@@ -4878,12 +4818,15 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
     };
 
     const BashDispatch = struct {
-        fn run(_: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), _: tools.Call, _: *tools.Sink) !tools.Result {
             return error.TestUnexpectedResult;
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ApproverImpl = struct {
+        approver: Approver = .{ .vt = &Approver.Bind(@This(), @This().check).vt },
         fn check(_: *@This(), _: CmdCache.Key, _: bool) !void {
             return error.ApprovalDenied;
         }
@@ -4906,16 +4849,10 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
 
     var store_impl = StoreImpl{};
     defer store_impl.deinit();
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var bash_dispatch = BashDispatch{};
     const entries = [_]tools.Entry{
@@ -4930,14 +4867,14 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
                 .timeout_ms = 1000,
                 .destructive = true,
             },
-            .dispatch = tools.Dispatch.from(BashDispatch, &bash_dispatch, BashDispatch.run),
+            .dispatch = &bash_dispatch.dispatch,
         },
     };
 
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
     var approver_impl = ApproverImpl{};
-    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+    
 
     _ = try run(.{
         .alloc = std.testing.allocator,
@@ -4945,16 +4882,16 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
         .prompt = "do it",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 1,
         .cmd_cache = &cache,
         .approval = .{
             .loc = .{ .cwd = "/tmp/pz" },
             .policy = .{ .version = policy.ver_current },
         },
-        .approver = approver,
+        .approver = &approver_impl.approver,
     });
 
     // Mode events: tool_call ('C') must precede tool_result ('R')
@@ -4981,6 +4918,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
 
 test "UX9 walkthrough: denied bash renders denial text in mode and store events" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -4989,6 +4927,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
         events: std.ArrayListUnmanaged(session.Event) = .{},
 
@@ -4996,13 +4935,8 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
             try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -5038,6 +4972,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
     // Capture mode events with text content for denial verification
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         denial_text: ?[]u8 = null,
         saw_tool_call: bool = false,
         saw_tool_result: bool = false,
@@ -5065,15 +5000,18 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
     };
 
     const BashDispatch = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         ran: bool = false,
 
-        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), _: tools.Call, _: *tools.Sink) !tools.Result {
             self.ran = true;
             return error.TestUnexpectedResult;
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ApproverImpl = struct {
+        approver: Approver = .{ .vt = &Approver.Bind(@This(), @This().check).vt },
         fn check(_: *@This(), _: CmdCache.Key, _: bool) !void {
             return error.ApprovalDenied;
         }
@@ -5096,16 +5034,10 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
     var store_impl = StoreImpl{};
     defer store_impl.deinit();
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
     defer mode_impl.deinit();
 
     var bash_dispatch = BashDispatch{};
@@ -5121,14 +5053,14 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
                 .timeout_ms = 1000,
                 .destructive = true,
             },
-            .dispatch = tools.Dispatch.from(BashDispatch, &bash_dispatch, BashDispatch.run),
+            .dispatch = &bash_dispatch.dispatch,
         },
     };
 
     var cache = CmdCache.init(std.testing.allocator);
     defer cache.deinit();
     var approver_impl = ApproverImpl{};
-    const approver = Approver.from(ApproverImpl, &approver_impl, ApproverImpl.check);
+    
 
     _ = try run(.{
         .alloc = std.testing.allocator,
@@ -5136,16 +5068,16 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
         .prompt = "do it",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 1,
         .cmd_cache = &cache,
         .approval = .{
             .loc = .{ .cwd = "/tmp/pz" },
             .policy = .{ .version = policy.ver_current },
         },
-        .approver = approver,
+        .approver = &approver_impl.approver,
     });
 
     // Tool dispatch must NOT have run
@@ -5178,6 +5110,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
 
 test "UX8b: agent tool returns structured result with status" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -5186,6 +5119,7 @@ test "UX8b: agent tool returns structured result with status" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
         tool_out: [256]u8 = [_]u8{0} ** 256,
         tool_out_len: usize = 0,
@@ -5203,13 +5137,8 @@ test "UX8b: agent tool returns structured result with status" {
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -5241,9 +5170,10 @@ test "UX8b: agent tool returns structured result with status" {
     };
 
     const AgentDispatch = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         out: [1]tools.Output = undefined,
 
-        fn run(self: *@This(), call: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), call: tools.Call, _: *tools.Sink) !tools.Result {
             self.out[0] = .{
                 .call_id = call.id,
                 .seq = 0,
@@ -5260,9 +5190,11 @@ test "UX8b: agent tool returns structured result with status" {
                 .final = .{ .ok = .{ .code = 0 } },
             };
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
@@ -5282,16 +5214,10 @@ test "UX8b: agent tool returns structured result with status" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var agent_dispatch = AgentDispatch{};
     const entries = [_]tools.Entry{
@@ -5309,7 +5235,7 @@ test "UX8b: agent tool returns structured result with status" {
                 .timeout_ms = 5000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(AgentDispatch, &agent_dispatch, AgentDispatch.run),
+            .dispatch = &agent_dispatch.dispatch,
         },
     };
 
@@ -5319,9 +5245,9 @@ test "UX8b: agent tool returns structured result with status" {
         .prompt = "spawn agent",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 2,
     });
 
@@ -5334,6 +5260,7 @@ test "UX8b: agent tool returns structured result with status" {
 
 test "UX8b: denied agent tool blocked by policy returns error result" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -5342,6 +5269,7 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
         tool_out: [256]u8 = [_]u8{0} ** 256,
         tool_out_len: usize = 0,
@@ -5359,13 +5287,8 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
             }
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(_: *@This()) void {}
@@ -5397,20 +5320,24 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
     };
 
     const AgentDispatch = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         ran: bool = false,
 
-        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), _: tools.Call, _: *tools.Sink) !tools.Result {
             self.ran = true;
             return error.TestUnexpectedResult;
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         fn push(_: *@This(), _: ModeEv) !void {}
     };
 
     // Policy that denies agent tool
     const AuthImpl = struct {
+        tool_auth: ToolAuth = .{ .vt = &ToolAuth.Bind(@This(), @This().check).vt },
         fn check(_: *@This(), _: []const u8, _: []const u8, kind: tools.Kind, _: []const u8, _: tools.Call.Args) !void {
             if (kind == .agent) return error.PolicyDenied;
         }
@@ -5432,16 +5359,10 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
     
 
     var store_impl = StoreImpl{};
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var agent_dispatch = AgentDispatch{};
     const entries = [_]tools.Entry{
@@ -5459,12 +5380,12 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
                 .timeout_ms = 5000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(AgentDispatch, &agent_dispatch, AgentDispatch.run),
+            .dispatch = &agent_dispatch.dispatch,
         },
     };
 
     var auth_impl = AuthImpl{};
-    const tool_auth = ToolAuth.from(AuthImpl, &auth_impl, AuthImpl.check);
+    
 
     _ = try run(.{
         .alloc = std.testing.allocator,
@@ -5472,11 +5393,11 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
         .prompt = "spawn",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 2,
-        .tool_auth = tool_auth,
+        .tool_auth = &auth_impl.tool_auth,
     });
 
     // Dispatch must NOT have run
@@ -5489,6 +5410,7 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
 
 test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     const ReaderImpl = struct {
+        reader: session.Reader = .{ .vt = &session.Reader.Bind(@This(), @This().next, @This().deinit).vt },
         fn next(_: *@This()) !?session.Event {
             return null;
         }
@@ -5497,6 +5419,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     };
 
     const StoreImpl = struct {
+        session_store: session.SessionStore = .{ .vt = &session.SessionStore.Bind(@This(), @This().append, @This().replay, @This().deinit).vt },
         rdr: ReaderImpl = .{},
         events: std.ArrayListUnmanaged(session.Event) = .{},
 
@@ -5504,13 +5427,8 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
             try self.events.append(std.testing.allocator, try ev.dupe(std.testing.allocator));
         }
 
-        fn replay(self: *@This(), _: []const u8) !session.Reader {
-            return session.Reader.from(
-                ReaderImpl,
-                &self.rdr,
-                ReaderImpl.next,
-                ReaderImpl.deinit,
-            );
+        fn replay(self: *@This(), _: []const u8) !*session.Reader {
+            return &self.rdr.reader;
         }
 
         fn deinit(self: *@This()) void {
@@ -5545,6 +5463,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     };
 
     const ModeImpl = struct {
+        mode_sink: ModeSink = .{ .vt = &ModeSink.Bind(@This(), @This().push).vt },
         denial_text: ?[]u8 = null,
 
         fn push(self: *@This(), ev: ModeEv) !void {
@@ -5568,16 +5487,19 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     };
 
     const WebDispatch = struct {
+            dispatch: tools.Dispatch = .{ .vt = &Bind.vt },
         ran: bool = false,
 
-        fn run(self: *@This(), _: tools.Call, _: tools.Sink) !tools.Result {
+        fn run(self: *@This(), _: tools.Call, _: *tools.Sink) !tools.Result {
             self.ran = true;
             return error.TestUnexpectedResult;
         }
+            const Bind = tools.Dispatch.Bind(@This(), @This().run);
     };
 
     // ToolAuth that records the denied call and returns PolicyDenied
     const AuthImpl = struct {
+        tool_auth: ToolAuth = .{ .vt = &ToolAuth.Bind(@This(), @This().check).vt },
         seen_kind: ?tools.Kind = null,
         seen_name: ?[]const u8 = null,
         seen_url: ?[]const u8 = null,
@@ -5607,17 +5529,11 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
 
     var store_impl = StoreImpl{};
     defer store_impl.deinit();
-    const store = session.SessionStore.from(
-        StoreImpl,
-        &store_impl,
-        StoreImpl.append,
-        StoreImpl.replay,
-        StoreImpl.deinit,
-    );
+    
 
     var mode_impl = ModeImpl{};
     defer mode_impl.deinit();
-    const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
+    
 
     var web_dispatch = WebDispatch{};
     const entries = [_]tools.Entry{
@@ -5632,12 +5548,12 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
                 .timeout_ms = 1000,
                 .destructive = false,
             },
-            .dispatch = tools.Dispatch.from(WebDispatch, &web_dispatch, WebDispatch.run),
+            .dispatch = &web_dispatch.dispatch,
         },
     };
 
     var auth_impl = AuthImpl{};
-    const tool_auth = ToolAuth.from(AuthImpl, &auth_impl, AuthImpl.check);
+    
 
     _ = try run(.{
         .alloc = std.testing.allocator,
@@ -5645,11 +5561,11 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
         .prompt = "do it",
         .model = "m",
         .provider = &provider_impl.provider,
-        .store = store,
+        .store = &store_impl.session_store,
         .reg = tools.Registry.init(entries[0..]),
-        .mode = mode,
+        .mode = &mode_impl.mode_sink,
         .max_turns = 1,
-        .tool_auth = tool_auth,
+        .tool_auth = &auth_impl.tool_auth,
     });
 
     // Web dispatch must NOT have run

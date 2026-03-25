@@ -1,7 +1,9 @@
 //! Test mock: atomic cancellation flag.
 const std = @import("std");
+const loop = @import("../core/loop.zig");
 
 pub const Flag = struct {
+    cancel_src: loop.CancelSrc = .{ .vt = &loop.CancelSrc.Bind(@This(), isCanceled).vt },
     canceled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn clear(self: *Flag) void {

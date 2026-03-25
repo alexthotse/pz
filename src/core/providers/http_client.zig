@@ -191,7 +191,7 @@ pub fn retryLoop(
     ar: std.mem.Allocator,
     sleeper: anytype,
     rebuildHdrs: *const fn (*auth_mod.Result, std.mem.Allocator) anyerror!std.ArrayListUnmanaged(std.http.Header),
-    cancel: ?providers.CancelPoll,
+    cancel: ?*providers.CancelPoll,
 ) !void {
     // Proactive refresh: check token expiry before first attempt
     try tryProactiveRefresh(alloc, auth, tag, ca_file, ar);
@@ -470,7 +470,7 @@ pub fn SseClient(comptime Cfg: type) type {
         http: std.http.Client,
         ca_file: ?[]u8,
         el: ?*EventLoop = null,
-        cancel: ?providers.CancelPoll = null,
+        cancel: ?*providers.CancelPoll = null,
         provider: providers.Provider = .{ .vt = &provider_vt },
 
         pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Self {
@@ -546,6 +546,7 @@ pub fn SseStream(comptime Cfg: type) type {
 
         // Embedded stream vtable
         stream: providers.Stream = .{ .vt = &stream_vt },
+        aborter: providers.Aborter = .{ .vt = &aborter_vt },
 
         // Shared fields
         alloc: std.mem.Allocator,
@@ -583,8 +584,21 @@ pub fn SseStream(comptime Cfg: type) type {
         const stream_vt = providers.Stream.Vt{
             .next = streamNext,
             .deinit = streamDeinit,
-            .abort = streamAbort,
+            .aborter = streamAborter,
         };
+
+        const aborter_vt = providers.Aborter.Bind(Self, doAbort).vt;
+
+        fn streamAborter(s: *providers.Stream) *providers.Aborter {
+            const self: *Self = @fieldParentPtr("stream", s);
+            return &self.aborter;
+        }
+
+        fn doAbort(self: *Self) void {
+            if (self.req.connection) |conn| {
+                std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
+            }
+        }
 
         fn streamNext(s: *providers.Stream) anyerror!?providers.Event {
             const self: *Self = @fieldParentPtr("stream", s);
@@ -606,12 +620,6 @@ pub fn SseStream(comptime Cfg: type) type {
             alloc.destroy(self);
         }
 
-        fn streamAbort(s: *providers.Stream) void {
-            const self: *Self = @fieldParentPtr("stream", s);
-            if (self.req.connection) |conn| {
-                std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
-            }
-        }
 
         pub fn initFields(alloc: std.mem.Allocator) Self {
             return .{
@@ -652,7 +660,7 @@ pub fn SseStream(comptime Cfg: type) type {
         }
 
         pub fn abort(self: *Self) void {
-            streamAbort(&self.stream);
+            doAbort(self);
         }
     };
 }

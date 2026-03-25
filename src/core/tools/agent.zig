@@ -3,7 +3,7 @@ const std = @import("std");
 const audit = @import("../audit.zig");
 const rpc = @import("../agent.zig");
 const tools = @import("../tools.zig");
-const vtable = @import("../vtable.zig");
+
 const shared = @import("shared.zig");
 const noop = @import("../../test/noop_sink.zig");
 
@@ -15,45 +15,51 @@ pub const Err = error{
 };
 
 pub const Hook = struct {
-    ctx: *anyopaque,
-    run_fn: *const fn (ctx: *anyopaque, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime run_fn: fn (ctx: *T, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult,
-    ) Hook {
-        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
+    pub const Vt = struct {
+        run: *const fn (self: *Hook, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult,
+    };
+
+    pub fn run(self: *Hook, args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
+        return self.vt.run(self, args);
     }
 
-    pub fn run(self: Hook, args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
-        return self.run_fn(self.ctx, args);
+    pub fn Bind(comptime T: type, comptime run_fn: fn (*T, tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult) type {
+        return struct {
+            pub const vt = Vt{
+                .run = runFn,
+            };
+            fn runFn(h: *Hook, args: tools.Call.AgentArgs) anyerror!rpc.ChildProc.RunResult {
+                const self: *T = @fieldParentPtr("hook", h);
+                return run_fn(self, args);
+            }
+        };
     }
 };
 
 /// Hook that yields incremental progress events while running.
 pub const StreamHook = struct {
-    ctx: *anyopaque,
-    run_fn: *const fn (
-        ctx: *anyopaque,
-        args: tools.Call.AgentArgs,
-        cb: rpc.ProgressCb,
-    ) anyerror!rpc.ChildProc.RunResult,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime run_fn: fn (
-            ctx: *T,
-            args: tools.Call.AgentArgs,
-            cb: rpc.ProgressCb,
-        ) anyerror!rpc.ChildProc.RunResult,
-    ) StreamHook {
-        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
+    pub const Vt = struct {
+        run: *const fn (self: *StreamHook, args: tools.Call.AgentArgs, cb: *rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult,
+    };
+
+    pub fn run(self: *StreamHook, args: tools.Call.AgentArgs, cb: *rpc.ProgressCb) !rpc.ChildProc.RunResult {
+        return self.vt.run(self, args, cb);
     }
 
-    pub fn run(self: StreamHook, args: tools.Call.AgentArgs, cb: rpc.ProgressCb) !rpc.ChildProc.RunResult {
-        return self.run_fn(self.ctx, args, cb);
+    pub fn Bind(comptime T: type, comptime run_fn: fn (*T, tools.Call.AgentArgs, *rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult) type {
+        return struct {
+            pub const vt = Vt{
+                .run = runFn,
+            };
+            fn runFn(sh: *StreamHook, args: tools.Call.AgentArgs, cb: *rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult {
+                const self: *T = @fieldParentPtr("stream_hook", sh);
+                return run_fn(self, args, cb);
+            }
+        };
     }
 };
 
@@ -61,11 +67,14 @@ pub const StreamHook = struct {
 /// Owns the spawned child process; caller must call `cleanup()` after
 /// the `RunResult` slices are no longer needed.
 pub const PolicySpawnCtx = struct {
+    stream_hook: StreamHook = .{ .vt = &StreamHookBind.vt },
     alloc: std.mem.Allocator,
     policy_hash: []const u8,
     child: ?*rpc.ChildProc = null,
 
-    pub fn run(self: *PolicySpawnCtx, args: tools.Call.AgentArgs, cb: rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult {
+    const StreamHookBind = StreamHook.Bind(PolicySpawnCtx, run);
+
+    pub fn run(self: *PolicySpawnCtx, args: tools.Call.AgentArgs, cb: *rpc.ProgressCb) anyerror!rpc.ChildProc.RunResult {
         const child = try self.alloc.create(rpc.ChildProc);
         errdefer self.alloc.destroy(child);
         child.* = try rpc.ChildProc.spawnAgent(self.alloc, args.agent_id, self.policy_hash);
@@ -93,18 +102,14 @@ pub const PolicySpawnCtx = struct {
             self.child = null;
         }
     }
-
-    pub fn asStreamHook(self: *PolicySpawnCtx) StreamHook {
-        return StreamHook.from(PolicySpawnCtx, self, PolicySpawnCtx.run);
-    }
 };
 
 pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64 = 0,
-    hook: ?Hook = null,
-    stream_hook: ?StreamHook = null,
+    hook: ?*Hook = null,
+    stream_hook: ?*StreamHook = null,
     /// Parent's verified policy hash. Child must match or spawn fails.
     policy_hash: ?[]const u8 = null,
 };
@@ -113,8 +118,8 @@ pub const Handler = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize,
     now_ms: i64,
-    hook: ?Hook,
-    stream_hook: ?StreamHook,
+    hook: ?*Hook,
+    stream_hook: ?*StreamHook,
     policy_hash: ?[]const u8,
 
     pub fn init(opts: Opts) Handler {
@@ -128,7 +133,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Handler, call: tools.Call, sink: tools.Sink) Err!tools.Result {
+    pub fn run(self: Handler, call: tools.Call, sink: *tools.Sink) Err!tools.Result {
         if (call.kind != .agent) return error.KindMismatch;
         if (std.meta.activeTag(call.args) != .agent) return error.KindMismatch;
 
@@ -144,15 +149,14 @@ pub const Handler = struct {
         // Prefer streaming hook for incremental progress.
         if (self.stream_hook) |sh| {
             var bridge = SinkBridge{ .sink = sink, .call_id = call.id, .at_ms = self.now_ms };
-            const cb = rpc.ProgressCb.from(SinkBridge, &bridge, SinkBridge.push);
-            const run_res = sh.run(args, cb) catch |run_err| switch (run_err) {
+            const run_res = sh.run(args, &bridge.cb) catch |run_err| switch (run_err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return fail(call, .io, @errorName(run_err)),
             };
             return finish(self, call, args.agent_id, run_res, bridge.dropped);
         }
 
-        const hook = self.hook orelse return fail(call, .internal, "agent tool unavailable");
+        var hook = self.hook orelse return fail(call, .internal, "agent tool unavailable");
         const run_res = hook.run(args) catch |run_err| switch (run_err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return fail(call, .io, @errorName(run_err)),
@@ -168,11 +172,14 @@ pub const Handler = struct {
 /// Bridges `ProgressEvent`s from a streaming hook into the tool `Sink`,
 /// emitting incremental `output` events so the TUI can render progress.
 const SinkBridge = struct {
-    sink: tools.Sink,
+    cb: rpc.ProgressCb = .{ .vt = &CbBind.vt },
+    sink: *tools.Sink,
     call_id: []const u8,
     at_ms: i64,
     seq: u32 = 0,
     dropped: u32 = 0,
+
+    const CbBind = rpc.ProgressCb.Bind(SinkBridge, push);
 
     fn push(self: *SinkBridge, ev: rpc.ProgressEvent) void {
         const chunk: []const u8 = switch (ev) {
@@ -315,6 +322,7 @@ test "agent handler renders info block and output" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const HookImpl = struct {
+        hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), args: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .out = .{
@@ -329,6 +337,7 @@ test "agent handler renders info block and output" {
                 },
             };
         }
+        const Bind = Hook.Bind(@This(), run);
     };
 
     var hook_impl = HookImpl{};
@@ -336,7 +345,7 @@ test "agent handler renders info block and output" {
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
         .now_ms = 44,
-        .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .hook = &hook_impl.hook,
         .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
@@ -378,6 +387,7 @@ test "agent handler truncates deterministically" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const HookImpl = struct {
+        hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .out = .{
@@ -392,6 +402,7 @@ test "agent handler truncates deterministically" {
                 },
             };
         }
+        const Bind = Hook.Bind(@This(), run);
     };
 
     var hook_impl = HookImpl{};
@@ -399,7 +410,7 @@ test "agent handler truncates deterministically" {
         .alloc = std.testing.allocator,
         .max_bytes = 32,
         .now_ms = 45,
-        .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .hook = &hook_impl.hook,
         .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
@@ -442,6 +453,7 @@ test "agent handler maps rpc error to failed final" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const HookImpl = struct {
+        hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .err = .{
@@ -452,6 +464,7 @@ test "agent handler maps rpc error to failed final" {
                 },
             };
         }
+        const Bind = Hook.Bind(@This(), run);
     };
 
     var hook_impl = HookImpl{};
@@ -459,7 +472,7 @@ test "agent handler maps rpc error to failed final" {
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
         .now_ms = 46,
-        .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .hook = &hook_impl.hook,
         .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
@@ -503,18 +516,20 @@ test "agent handler maps rpc error to failed final" {
 
 test "agent handler rejects missing policy hash" {
     const HookImpl = struct {
+        hook: Hook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AgentArgs) !rpc.ChildProc.RunResult {
             return .{
                 .done = .{ .id = "req-4", .stop = .done },
             };
         }
+        const Bind = Hook.Bind(@This(), run);
     };
     var hook_impl = HookImpl{};
     const h = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
         .now_ms = 47,
-        .hook = Hook.from(HookImpl, &hook_impl, HookImpl.run),
+        .hook = &hook_impl.hook,
         .policy_hash = null,
     });
     const call: tools.Call = .{
@@ -532,7 +547,8 @@ test "stream hook emits progress via sink bridge" {
     const oh = OhSnap{};
 
     const StreamImpl = struct {
-        fn run(_: *@This(), args: tools.Call.AgentArgs, cb: rpc.ProgressCb) !rpc.ChildProc.RunResult {
+        stream_hook: StreamHook = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), args: tools.Call.AgentArgs, cb: *rpc.ProgressCb) !rpc.ChildProc.RunResult {
             // Simulate incremental progress events.
             cb.push(.{ .out = .{ .agent_id = "s1", .text = args.prompt } });
             cb.push(.{ .done = .{ .agent_id = "s1", .status = .done } });
@@ -541,9 +557,11 @@ test "stream hook emits progress via sink bridge" {
                 .done = .{ .id = "req-s", .stop = .done },
             };
         }
+        const Bind = StreamHook.Bind(@This(), run);
     };
 
     const SinkCollector = struct {
+        sink: tools.Sink = .{ .vt = &SinkBind.vt },
         n: u8 = 0,
         streams: [4]tools.Output.Stream = undefined,
 
@@ -558,17 +576,17 @@ test "stream hook emits progress via sink bridge" {
                 else => {}, // .start, .finish not tracked in this test sink
             }
         }
+        const SinkBind = tools.Sink.Bind(@This(), push);
     };
 
     var stream_impl = StreamImpl{};
     var col = SinkCollector{};
-    const sink = tools.Sink.from(SinkCollector, &col, SinkCollector.push);
 
     const h = Handler.init(.{
         .alloc = std.testing.allocator,
         .max_bytes = 1024,
         .now_ms = 50,
-        .stream_hook = StreamHook.from(StreamImpl, &stream_impl, StreamImpl.run),
+        .stream_hook = &stream_impl.stream_hook,
         .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const call: tools.Call = .{
@@ -579,7 +597,7 @@ test "stream hook emits progress via sink bridge" {
         .at_ms = 50,
     };
 
-    const res = try h.run(call, sink);
+    const res = try h.run(call, &col.sink);
     defer h.deinitResult(res);
 
     // Verify 2 progress events were pushed through the sink bridge.

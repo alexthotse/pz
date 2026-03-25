@@ -1,6 +1,5 @@
 const std = @import("std");
 const core = @import("../../core.zig");
-const vtable = @import("../../core/vtable.zig");
 const tui_harness = @import("harness.zig");
 const tui_input = @import("input.zig");
 const tui_editor = @import("editor.zig");
@@ -8,15 +7,26 @@ const tui_overlay = @import("overlay.zig");
 const tui_term = @import("term.zig");
 
 pub const PauseCtl = struct {
-    ctx: *anyopaque,
-    set_fn: *const fn (*anyopaque, bool) void,
+    vt: *const Vt,
 
-    pub fn from(comptime T: type, ptr: *T, comptime method: fn (*T, bool) void) PauseCtl {
-        return .{ .ctx = ptr, .set_fn = vtable.wrap(T, method) };
+    pub const Vt = struct {
+        set_paused: *const fn (self: *PauseCtl, paused: bool) void,
+    };
+
+    pub fn setPaused(self: *PauseCtl, paused: bool) void {
+        self.vt.set_paused(self, paused);
     }
 
-    pub fn setPaused(self: PauseCtl, paused: bool) void {
-        self.set_fn(self.ctx, paused);
+    pub fn Bind(comptime T: type, comptime method: fn (*T, bool) void) type {
+        return struct {
+            pub const vt = Vt{
+                .set_paused = setPausedFn,
+            };
+            fn setPausedFn(pc: *PauseCtl, paused: bool) void {
+                const self: *T = @fieldParentPtr("pause_ctl", pc);
+                method(self, paused);
+            }
+        };
     }
 };
 
@@ -24,7 +34,7 @@ pub const AskUiCtx = struct {
     alloc: std.mem.Allocator,
     ui: *tui_harness.Ui,
     out: std.Io.AnyWriter,
-    pause: PauseCtl,
+    pause: *PauseCtl,
 
     pub const Answer = struct {
         id: []const u8,

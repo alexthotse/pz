@@ -1,7 +1,6 @@
 //! Structured audit log: events, severity, HMAC-chained integrity.
 const std = @import("std");
 const testing = std.testing;
-const vtable = @import("vtable.zig");
 const Allocator = std.mem.Allocator;
 const integrity = @import("audit_integrity.zig");
 const signing = @import("signing.zig");
@@ -237,49 +236,65 @@ pub const FrameHdr = struct {
     site: Site = .{},
 };
 
-pub const ConnectionVTable = struct {
-    sendRaw: *const fn (ctx: *anyopaque, raw: []const u8) anyerror!void,
-    deinit: *const fn (ctx: *anyopaque) void,
-};
-
 pub const Connection = struct {
-    ctx: *anyopaque,
-    vtable: *const ConnectionVTable,
+    vt: *const Vt,
 
-    pub fn from(
+    pub const Vt = struct {
+        send_raw: *const fn (self: *Connection, raw: []const u8) anyerror!void,
+        deinit: *const fn (self: *Connection) void,
+    };
+
+    pub fn sendRaw(self: *Connection, raw: []const u8) !void {
+        return self.vt.send_raw(self, raw);
+    }
+
+    pub fn deinit(self: *Connection) void {
+        self.vt.deinit(self);
+    }
+
+    pub fn Bind(
         comptime T: type,
-        ctx: *T,
-        comptime send_fn: fn (ctx: *T, raw: []const u8) anyerror!void,
-        comptime deinit_fn: fn (ctx: *T) void,
-    ) Connection {
-        const Gen = struct {
-            const vt = ConnectionVTable{
-                .sendRaw = vtable.wrap(T, send_fn),
-                .deinit = vtable.wrap(T, deinit_fn),
+        comptime send_fn: fn (*T, []const u8) anyerror!void,
+        comptime deinit_fn: fn (*T) void,
+    ) type {
+        return struct {
+            pub const vt = Vt{
+                .send_raw = sendRawFn,
+                .deinit = deinitFn,
             };
+            fn sendRawFn(c: *Connection, raw: []const u8) anyerror!void {
+                const self: *T = @fieldParentPtr("connection", c);
+                return send_fn(self, raw);
+            }
+            fn deinitFn(c: *Connection) void {
+                const self: *T = @fieldParentPtr("connection", c);
+                deinit_fn(self);
+            }
         };
-        return .{ .ctx = ctx, .vtable = &Gen.vt };
-    }
-
-    pub fn sendRaw(self: Connection, raw: []const u8) !void {
-        try self.vtable.sendRaw(self.ctx, raw);
-    }
-
-    pub fn deinit(self: Connection) void {
-        self.vtable.deinit(self.ctx);
     }
 };
 
 pub const Connector = struct {
-    ctx: *anyopaque,
-    connect: *const fn (ctx: *anyopaque) anyerror!Connection,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime connect_fn: fn (ctx: *T) anyerror!Connection,
-    ) Connector {
-        return .{ .ctx = ctx, .connect = vtable.wrap(T, connect_fn) };
+    pub const Vt = struct {
+        connect: *const fn (self: *Connector) anyerror!*Connection,
+    };
+
+    pub fn connect(self: *Connector) !*Connection {
+        return self.vt.connect(self);
+    }
+
+    pub fn Bind(comptime T: type, comptime connect_fn: fn (*T) anyerror!*Connection) type {
+        return struct {
+            pub const vt = Vt{
+                .connect = connectFn,
+            };
+            fn connectFn(cr: *Connector) anyerror!*Connection {
+                const self: *T = @fieldParentPtr("connector", cr);
+                return connect_fn(self);
+            }
+        };
     }
 };
 
@@ -289,7 +304,7 @@ pub const OverflowPolicy = enum {
 };
 
 pub const ForwardOpts = struct {
-    connector: Connector,
+    connector: *Connector,
     buf_cap: usize = 64,
     backoff_min_ms: u32 = 100,
     backoff_max_ms: u32 = 5_000,
@@ -504,8 +519,8 @@ const Ring = struct {
 
 pub const ReconnSender = struct {
     alloc: Allocator,
-    connr: Connector,
-    conn: ?Connection = null,
+    connr: *Connector,
+    conn: ?*Connection = null,
     ring: Ring,
     backoff_min_ms: u32,
     backoff_max_ms: u32,
@@ -613,7 +628,7 @@ pub const ReconnSender = struct {
             if (now_ms < retry_ms) return .{};
         }
 
-        self.conn = self.connr.connect(self.connr.ctx) catch |err| {
+        self.conn = self.connr.connect() catch |err| {
             self.noteFail(now_ms);
             return .{ .err = err };
         };
@@ -697,28 +712,21 @@ pub const SyslogShipper = struct {
 };
 
 pub const SenderConnector = struct {
+    connector: Connector = .{ .vt = &ConnBind.vt },
     alloc: Allocator,
     opts: syslog.SenderOpts,
 
-    pub fn connector(self: *SenderConnector) Connector {
-        return .{
-            .ctx = self,
-            .connect = &connect,
-        };
-    }
+    const ConnBind = Connector.Bind(SenderConnector, doConnect);
 
     const Peer = struct {
+        connection: Connection = .{ .vt = &PeerBind.vt },
         alloc: Allocator,
         sender: syslog.Sender,
     };
 
-    const peer_vt = ConnectionVTable{
-        .sendRaw = peerSendRaw,
-        .deinit = peerDeinit,
-    };
+    const PeerBind = Connection.Bind(Peer, peerSendRaw, peerDeinit);
 
-    fn connect(ctx: *anyopaque) !Connection {
-        const self: *SenderConnector = @ptrCast(@alignCast(ctx));
+    fn doConnect(self: *SenderConnector) !*Connection {
         const peer = try self.alloc.create(Peer);
         errdefer self.alloc.destroy(peer);
 
@@ -726,19 +734,14 @@ pub const SenderConnector = struct {
             .alloc = self.alloc,
             .sender = try syslog.Sender.init(self.alloc, self.opts),
         };
-        return .{
-            .ctx = peer,
-            .vtable = &peer_vt,
-        };
+        return &peer.connection;
     }
 
-    fn peerSendRaw(ctx: *anyopaque, raw: []const u8) !void {
-        const peer: *Peer = @ptrCast(@alignCast(ctx));
+    fn peerSendRaw(peer: *Peer, raw: []const u8) !void {
         try peer.sender.sendRaw(raw);
     }
 
-    fn peerDeinit(ctx: *anyopaque) void {
-        const peer: *Peer = @ptrCast(@alignCast(ctx));
+    fn peerDeinit(peer: *Peer) void {
         const alloc = peer.alloc;
         peer.sender.deinit();
         alloc.destroy(peer);
@@ -1697,6 +1700,8 @@ const SendStep = enum {
 };
 
 const MockNet = struct {
+    connector: Connector = .{ .vt = &ConnBind.vt },
+    connection: Connection = .{ .vt = &PeerBind.vt },
     alloc: Allocator,
     conn_steps: []const ConnStep,
     send_steps: []const SendStep,
@@ -1705,40 +1710,26 @@ const MockNet = struct {
     conn_calls: usize = 0,
     sent: std.ArrayListUnmanaged([]u8) = .empty,
 
+    const ConnBind = Connector.Bind(MockNet, doConnect);
+    const PeerBind = Connection.Bind(MockNet, doSendRaw, doConnDeinit);
+
     fn deinit(self: *MockNet) void {
         for (self.sent.items) |raw| self.alloc.free(raw);
         self.sent.deinit(self.alloc);
         self.* = undefined;
     }
 
-    fn connector(self: *MockNet) Connector {
-        return .{
-            .ctx = self,
-            .connect = &connect,
-        };
-    }
-
-    const vt = ConnectionVTable{
-        .sendRaw = sendRaw,
-        .deinit = deinitConn,
-    };
-
-    fn connect(ctx: *anyopaque) !Connection {
-        const self: *MockNet = @ptrCast(@alignCast(ctx));
+    fn doConnect(self: *MockNet) !*Connection {
         self.conn_calls += 1;
         const step = if (self.conn_idx < self.conn_steps.len) self.conn_steps[self.conn_idx] else .ok;
         self.conn_idx += 1;
         return switch (step) {
-            .ok => .{
-                .ctx = self,
-                .vtable = &vt,
-            },
+            .ok => &self.connection,
             .fail => MockErr.ConnectFail,
         };
     }
 
-    fn sendRaw(ctx: *anyopaque, raw: []const u8) !void {
-        const self: *MockNet = @ptrCast(@alignCast(ctx));
+    fn doSendRaw(self: *MockNet, raw: []const u8) !void {
         const step = if (self.send_idx < self.send_steps.len) self.send_steps[self.send_idx] else .ok;
         self.send_idx += 1;
         switch (step) {
@@ -1747,7 +1738,7 @@ const MockNet = struct {
         }
     }
 
-    fn deinitConn(_: *anyopaque) void {}
+    fn doConnDeinit(_: *MockNet) void {}
 };
 
 fn testEntry(seq: u64) Entry {
@@ -1790,7 +1781,7 @@ test "syslog shipper buffers disconnect and flushes in order" {
         .app_name = "pz",
         .procid = "17",
     }, .{
-        .connector = net.connector(),
+        .connector = &net.connector,
         .buf_cap = 4,
         .backoff_min_ms = 10,
         .backoff_max_ms = 40,
@@ -1849,7 +1840,7 @@ test "syslog shipper drops oldest on ring overflow" {
         .app_name = "pz",
         .procid = "17",
     }, .{
-        .connector = net.connector(),
+        .connector = &net.connector,
         .buf_cap = 2,
         .backoff_min_ms = 5,
         .backoff_max_ms = 20,
@@ -1898,7 +1889,7 @@ test "syslog shipper bounds reconnect backoff and resets after connect" {
         .app_name = "pz",
         .procid = "17",
     }, .{
-        .connector = net.connector(),
+        .connector = &net.connector,
         .buf_cap = 2,
         .backoff_min_ms = 5,
         .backoff_max_ms = 12,
@@ -2140,7 +2131,7 @@ test "fail_closed propagates through ReconnSender" {
     defer net.deinit();
 
     var rs = try ReconnSender.init(testing.allocator, .{
-        .connector = net.connector(),
+        .connector = &net.connector,
         .buf_cap = 2,
         .backoff_min_ms = 5,
         .backoff_max_ms = 20,

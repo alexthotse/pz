@@ -2,7 +2,7 @@
 const std = @import("std");
 const audit = @import("../audit.zig");
 const tools = @import("../tools.zig");
-const vtable = @import("../vtable.zig");
+
 const read = @import("read.zig");
 const write = @import("write.zig");
 const bash = @import("bash.zig");
@@ -135,19 +135,26 @@ const ask_schema =
 ;
 
 pub const AskHook = struct {
-    ctx: *anyopaque,
-    run_fn: *const fn (ctx: *anyopaque, args: tools.Call.AskArgs) anyerror![]u8,
+    vt: *const Vt,
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime run_fn: fn (ctx: *T, args: tools.Call.AskArgs) anyerror![]u8,
-    ) AskHook {
-        return .{ .ctx = ctx, .run_fn = vtable.wrap(T, run_fn) };
+    pub const Vt = struct {
+        run: *const fn (self: *AskHook, args: tools.Call.AskArgs) anyerror![]u8,
+    };
+
+    pub fn run(self: *AskHook, args: tools.Call.AskArgs) ![]u8 {
+        return self.vt.run(self, args);
     }
 
-    pub fn run(self: AskHook, args: tools.Call.AskArgs) ![]u8 {
-        return self.run_fn(self.ctx, args);
+    pub fn Bind(comptime T: type, comptime run_fn: fn (*T, tools.Call.AskArgs) anyerror![]u8) type {
+        return struct {
+            pub const vt = Vt{
+                .run = runFn,
+            };
+            fn runFn(h: *AskHook, args: tools.Call.AskArgs) anyerror![]u8 {
+                const self: *T = @fieldParentPtr("ask_hook", h);
+                return run_fn(self, args);
+            }
+        };
     }
 };
 
@@ -155,23 +162,26 @@ pub const Opts = struct {
     alloc: std.mem.Allocator,
     max_bytes: usize = default_max_bytes,
     tool_mask: u16 = mask_all,
-    agent_hook: ?agent_tool.Hook = null,
-    ask_hook: ?AskHook = null,
+    agent_hook: ?*agent_tool.Hook = null,
+    ask_hook: ?*AskHook = null,
     /// Parent's verified policy hash for agent sandbox inheritance.
     policy_hash: ?[]const u8 = null,
     home: ?[]const u8 = null,
 };
 
 pub const Runtime = struct {
+    dispatch: tools.Dispatch = .{ .vt = &DispatchBind.vt },
     alloc: std.mem.Allocator,
     max_bytes: usize,
     tool_mask: u16,
-    agent_hook: ?agent_tool.Hook,
-    ask_hook: ?AskHook,
+    agent_hook: ?*agent_tool.Hook,
+    ask_hook: ?*AskHook,
     policy_hash: ?[]const u8,
     skill_cache: skill.Cache,
     entries: [11]tools.Entry = undefined,
     selected: [11]tools.Entry = undefined,
+
+    const DispatchBind = tools.Dispatch.Bind(Runtime, dispatchRun);
 
     pub fn init(opts: Opts) Runtime {
         return .{
@@ -218,7 +228,7 @@ pub const Runtime = struct {
                     .timeout_ms = 2000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runRead),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "write",
@@ -234,7 +244,7 @@ pub const Runtime = struct {
                     .timeout_ms = 2000,
                     .destructive = true,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runWrite),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "bash",
@@ -250,7 +260,7 @@ pub const Runtime = struct {
                     .timeout_ms = 30000,
                     .destructive = true,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runBash),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "edit",
@@ -266,7 +276,7 @@ pub const Runtime = struct {
                     .timeout_ms = 2000,
                     .destructive = true,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runEdit),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "grep",
@@ -282,7 +292,7 @@ pub const Runtime = struct {
                     .timeout_ms = 10000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runGrep),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "find",
@@ -298,7 +308,7 @@ pub const Runtime = struct {
                     .timeout_ms = 10000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runFind),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "ls",
@@ -314,7 +324,7 @@ pub const Runtime = struct {
                     .timeout_ms = 2000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runLs),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "agent",
@@ -330,7 +340,7 @@ pub const Runtime = struct {
                     .timeout_ms = 120000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runAgent),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "ask",
@@ -347,7 +357,7 @@ pub const Runtime = struct {
                     .timeout_ms = 120000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runAsk),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "skill",
@@ -363,7 +373,7 @@ pub const Runtime = struct {
                     .timeout_ms = 2000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runSkill),
+                .dispatch = &self.dispatch,
             },
             .{
                 .name = "web",
@@ -379,7 +389,7 @@ pub const Runtime = struct {
                     .timeout_ms = 30000,
                     .destructive = false,
                 },
-                .dispatch = tools.Dispatch.from(Runtime, self, Runtime.runWeb),
+                .dispatch = &self.dispatch,
             },
         };
     }
@@ -435,7 +445,23 @@ pub const Runtime = struct {
         return self.selected[0..len];
     }
 
-    fn runRead(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn dispatchRun(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
+        return switch (call.kind) {
+            .read => self.runRead(call, sink),
+            .write => self.runWrite(call, sink),
+            .bash => self.runBash(call, sink),
+            .edit => self.runEdit(call, sink),
+            .grep => self.runGrep(call, sink),
+            .find => self.runFind(call, sink),
+            .ls => self.runLs(call, sink),
+            .agent => self.runAgent(call, sink),
+            .ask => self.runAsk(call, sink),
+            .skill => self.runSkill(call, sink),
+            .web => self.runWeb(call, sink),
+        };
+    }
+
+    fn runRead(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = read.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -444,14 +470,14 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runWrite(_: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runWrite(_: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = write.Handler.init(.{
             .now_ms = call.at_ms,
         });
         return h.run(call, sink);
     }
 
-    fn runBash(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runBash(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = bash.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -460,7 +486,7 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runEdit(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runEdit(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = edit.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -469,7 +495,7 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runGrep(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runGrep(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = grep.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -478,7 +504,7 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runFind(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runFind(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = find.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -487,7 +513,7 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runLs(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runLs(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = ls.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -496,17 +522,17 @@ pub const Runtime = struct {
         return h.run(call, sink);
     }
 
-    fn runAgent(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runAgent(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         // If no explicit hook is provided but we have a policy hash,
         // use the production spawner with streaming progress.
         var spawn_ctx: ?agent_tool.PolicySpawnCtx = null;
-        var stream_hook: ?agent_tool.StreamHook = null;
+        var sh_ptr: ?*agent_tool.StreamHook = null;
         if (self.agent_hook == null and self.policy_hash != null) {
             spawn_ctx = .{
                 .alloc = self.alloc,
                 .policy_hash = self.policy_hash.?,
             };
-            stream_hook = spawn_ctx.?.asStreamHook();
+            sh_ptr = &spawn_ctx.?.stream_hook;
         }
         defer if (spawn_ctx) |*ctx| ctx.cleanup();
         const h = agent_tool.Handler.init(.{
@@ -514,13 +540,13 @@ pub const Runtime = struct {
             .max_bytes = self.max_bytes,
             .now_ms = call.at_ms,
             .hook = self.agent_hook,
-            .stream_hook = stream_hook,
+            .stream_hook = sh_ptr,
             .policy_hash = self.policy_hash,
         });
         return h.run(call, sink);
     }
 
-    fn runAsk(self: *Runtime, call: tools.Call, _: tools.Sink) !tools.Result {
+    fn runAsk(self: *Runtime, call: tools.Call, _: *tools.Sink) !tools.Result {
         if (call.kind != .ask or std.meta.activeTag(call.args) != .ask) return error.InvalidArgs;
         if (call.args.ask.questions.len == 0) {
             return .{
@@ -593,7 +619,7 @@ pub const Runtime = struct {
         };
     }
 
-    fn runWeb(self: *Runtime, call: tools.Call, _: tools.Sink) !tools.Result {
+    fn runWeb(self: *Runtime, call: tools.Call, _: *tools.Sink) !tools.Result {
         if (call.kind != .web or std.meta.activeTag(call.args) != .web) return error.InvalidArgs;
         const req = call.args.web;
 
@@ -630,7 +656,7 @@ pub const Runtime = struct {
         };
     }
 
-    fn runSkill(self: *Runtime, call: tools.Call, sink: tools.Sink) !tools.Result {
+    fn runSkill(self: *Runtime, call: tools.Call, sink: *tools.Sink) !tools.Result {
         const h = skill.Handler.init(.{
             .alloc = self.alloc,
             .max_bytes = self.max_bytes,
@@ -859,6 +885,7 @@ test "agent tool uses runtime hook output" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const AgentImpl = struct {
+        hook: agent_tool.Hook = .{ .vt = &Bind.vt },
         seen: usize = 0,
 
         fn run(self: *@This(), args: tools.Call.AgentArgs) !@import("../agent.zig").ChildProc.RunResult {
@@ -876,13 +903,14 @@ test "agent tool uses runtime hook output" {
                 },
             };
         }
+        const Bind = agent_tool.Hook.Bind(@This(), run);
     };
 
     var impl = AgentImpl{};
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_agent,
-        .agent_hook = agent_tool.Hook.from(AgentImpl, &impl, AgentImpl.run),
+        .agent_hook = &impl.hook,
         .policy_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     });
     const reg = rt.registry();
@@ -1057,6 +1085,7 @@ test "ask tool uses hook output" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const AskImpl = struct {
+        ask_hook: AskHook = .{ .vt = &Bind.vt },
         alloc: std.mem.Allocator,
         seen: usize = 0,
 
@@ -1064,13 +1093,14 @@ test "ask tool uses hook output" {
             self.seen += args.questions.len;
             return self.alloc.dupe(u8, "{\"cancelled\":false,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}");
         }
+        const Bind = AskHook.Bind(@This(), run);
     };
 
     var impl = AskImpl{ .alloc = std.testing.allocator };
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
-        .ask_hook = AskHook.from(AskImpl, &impl, AskImpl.run),
+        .ask_hook = &impl.ask_hook,
     });
     const reg = rt.registry();
 
@@ -1139,16 +1169,18 @@ test "ask tool reports hook failure" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const AskImpl = struct {
+        ask_hook: AskHook = .{ .vt = &Bind.vt },
         fn run(_: *@This(), _: tools.Call.AskArgs) ![]u8 {
             return error.BadInput;
         }
+        const Bind = AskHook.Bind(@This(), run);
     };
 
     var impl = AskImpl{};
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
-        .ask_hook = AskHook.from(AskImpl, &impl, AskImpl.run),
+        .ask_hook = &impl.ask_hook,
     });
     const reg = rt.registry();
 
@@ -1206,18 +1238,20 @@ test "ask tool maps cancelled hook output to cancelled final" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const AskImpl = struct {
+        ask_hook: AskHook = .{ .vt = &Bind.vt },
         alloc: std.mem.Allocator,
 
         fn run(self: *@This(), _: tools.Call.AskArgs) ![]u8 {
             return self.alloc.dupe(u8, "{\"cancelled\":true,\"answers\":[{\"id\":\"scope\",\"answer\":\"A\",\"index\":0}]}");
         }
+        const Bind = AskHook.Bind(@This(), run);
     };
 
     var impl = AskImpl{ .alloc = std.testing.allocator };
     var rt = Runtime.init(.{
         .alloc = std.testing.allocator,
         .tool_mask = mask_ask,
-        .ask_hook = AskHook.from(AskImpl, &impl, AskImpl.run),
+        .ask_hook = &impl.ask_hook,
     });
     const reg = rt.registry();
 

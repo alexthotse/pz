@@ -685,14 +685,12 @@ pub const Manager = struct {
         defer el.deinit();
 
         // Dummy handler — we only use el.wait() for the timeout/wake, not callbacks.
-        const DummyCtx = struct {
-            fn onReady(_: *anyopaque, _: std.posix.fd_t, _: bool, _: bool) void {}
+        const DummyHandler = struct {
+            handler: event_loop.Handler = .{ .vt = &event_loop.Handler.Bind(@This(), onReady).vt },
+            fn onReady(_: *@This(), _: std.posix.fd_t, _: bool, _: bool) void {}
         };
-        var dummy: u8 = 0;
-        try el.watchSigchld(.{
-            .ctx = @ptrCast(&dummy),
-            .on_ready = DummyCtx.onReady,
-        });
+        var dummy_handler = DummyHandler{};
+        try el.watchSigchld(&dummy_handler.handler);
 
         for (active) |job| {
             const pid: std.posix.pid_t = @intCast(job.pid);

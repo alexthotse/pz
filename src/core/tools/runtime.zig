@@ -42,7 +42,7 @@ pub fn bind(
                 self: Registry,
                 name: []const u8,
                 call: Call,
-                sink: Sink,
+                sink: *Sink,
             ) (Err || anyerror)!Result {
                 const ent = self.byName(name) orelse return Err.NotFound;
                 if (call.kind != ent.kind) return Err.KindMismatch;
@@ -162,6 +162,7 @@ test "runtime emits start output finish in order" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const SinkImpl = struct {
+        sink: TRt.Sink = .{ .vt = &Bind.vt },
         start_seen: bool = false,
         evs: [8]TEv = undefined,
         ct: usize = 0,
@@ -172,14 +173,16 @@ test "runtime emits start output finish in order" {
             self.evs[self.ct] = ev;
             self.ct += 1;
         }
+        const Bind = TRt.Sink.Bind(@This(), push);
     };
 
     const DispatchImpl = struct {
+        dispatch: TRt.Dispatch = .{ .vt = &Bind.vt },
         start_seen: *bool,
         out: []const TOut,
         ct: usize = 0,
 
-        fn run(self: *@This(), call: TCall, _: TRt.Sink) !TResult {
+        fn run(self: *@This(), call: TCall, _: *TRt.Sink) !TResult {
             self.ct += 1;
             if (!self.start_seen.*) return error.StartNotSeen;
             return .{
@@ -187,10 +190,10 @@ test "runtime emits start output finish in order" {
                 .code = call.value + 5,
             };
         }
+        const Bind = TRt.Dispatch.Bind(@This(), run);
     };
 
     var sink_impl = SinkImpl{};
-    const sink = TRt.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
 
     const out = [_]TOut{
         .{
@@ -213,7 +216,7 @@ test "runtime emits start output finish in order" {
             .name = "beta",
             .kind = .beta,
             .spec = .{},
-            .dispatch = TRt.Dispatch.from(DispatchImpl, &dispatch_impl, DispatchImpl.run),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
     const reg = TRt.Registry.init(entries[0..]);
@@ -225,7 +228,7 @@ test "runtime emits start output finish in order" {
         .value = 2,
     };
 
-    const res = try reg.run("beta", call, sink);
+    const res = try reg.run("beta", call, &sink_impl.sink);
     const start = switch (sink_impl.evs[0]) {
         .start => |ev| ev,
         else => return error.TestUnexpectedResult,
@@ -276,6 +279,7 @@ test "runtime emits start and finish when handler has no output" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const SinkImpl = struct {
+        sink: TRt.Sink = .{ .vt = &Bind.vt },
         evs: [4]TEv = undefined,
         ct: usize = 0,
 
@@ -284,19 +288,21 @@ test "runtime emits start and finish when handler has no output" {
             self.evs[self.ct] = ev;
             self.ct += 1;
         }
+        const Bind = TRt.Sink.Bind(@This(), push);
     };
 
     const DispatchImpl = struct {
-        fn run(_: *@This(), _: TCall, _: TRt.Sink) !TResult {
+        dispatch: TRt.Dispatch = .{ .vt = &Bind.vt },
+        fn run(_: *@This(), _: TCall, _: *TRt.Sink) !TResult {
             return .{
                 .out = &.{},
                 .code = 0,
             };
         }
+        const Bind = TRt.Dispatch.Bind(@This(), run);
     };
 
     var sink_impl = SinkImpl{};
-    const sink = TRt.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
 
     var dispatch_impl = DispatchImpl{};
     const entries = [_]TRt.Entry{
@@ -304,7 +310,7 @@ test "runtime emits start and finish when handler has no output" {
             .name = "alpha",
             .kind = .alpha,
             .spec = .{},
-            .dispatch = TRt.Dispatch.from(DispatchImpl, &dispatch_impl, DispatchImpl.run),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
     const reg = TRt.Registry.init(entries[0..]);
@@ -314,7 +320,7 @@ test "runtime emits start and finish when handler has no output" {
         .kind = .alpha,
         .at_ms = 11,
         .value = 0,
-    }, sink);
+    }, &sink_impl.sink);
 
     var buf: [128]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -336,6 +342,7 @@ test "runtime preserves handler error type and does not emit finish" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const SinkImpl = struct {
+        sink: TRt.Sink = .{ .vt = &Bind.vt },
         start_seen: bool = false,
         evs: [4]TEv = undefined,
         ct: usize = 0,
@@ -346,19 +353,21 @@ test "runtime preserves handler error type and does not emit finish" {
             self.evs[self.ct] = ev;
             self.ct += 1;
         }
+        const Bind = TRt.Sink.Bind(@This(), push);
     };
 
     const DispatchImpl = struct {
+        dispatch: TRt.Dispatch = .{ .vt = &Bind.vt },
         start_seen: *bool,
 
-        fn run(self: *@This(), _: TCall, _: TRt.Sink) error{ StartNotSeen, HandlerFailed }!TResult {
+        fn run(self: *@This(), _: TCall, _: *TRt.Sink) error{ StartNotSeen, HandlerFailed }!TResult {
             if (!self.start_seen.*) return error.StartNotSeen;
             return error.HandlerFailed;
         }
+        const Bind = TRt.Dispatch.Bind(@This(), run);
     };
 
     var sink_impl = SinkImpl{};
-    const sink = TRt.Sink.from(SinkImpl, &sink_impl, SinkImpl.push);
 
     var dispatch_impl = DispatchImpl{
         .start_seen = &sink_impl.start_seen,
@@ -368,7 +377,7 @@ test "runtime preserves handler error type and does not emit finish" {
             .name = "alpha",
             .kind = .alpha,
             .spec = .{},
-            .dispatch = TRt.Dispatch.from(DispatchImpl, &dispatch_impl, DispatchImpl.run),
+            .dispatch = &dispatch_impl.dispatch,
         },
     };
     const reg = TRt.Registry.init(entries[0..]);
@@ -378,7 +387,7 @@ test "runtime preserves handler error type and does not emit finish" {
         .kind = .alpha,
         .at_ms = 12,
         .value = 0,
-    }, sink));
+    }, &sink_impl.sink));
 
     var buf: [128]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
