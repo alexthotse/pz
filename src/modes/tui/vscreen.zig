@@ -265,7 +265,7 @@ pub const VScreen = struct {
                     }
                 }
             },
-            else => {},
+            else => {}, // unhandled CSI sequences (scroll regions, insert/delete, cursor save/restore, etc.)
         }
 
         return i;
@@ -305,7 +305,7 @@ pub const VScreen = struct {
                 49 => self.style.bg = .default,
                 90...97 => self.style.fg = .{ .idx = @intCast(p - 90 + 8) },
                 100...107 => self.style.bg = .{ .idx = @intCast(p - 100 + 8) },
-                else => {},
+                else => {}, // unhandled SGR codes (strikethrough, overline, fonts, etc.)
             }
             i += 1;
         }

@@ -27,19 +27,22 @@ const EnvAuth = struct {
     api_key: ?[]const u8 = null,
 };
 
-fn readEnv(ar: std.mem.Allocator, key: []const u8) ?[]const u8 {
-    return std.process.getEnvVarOwned(ar, key) catch null;
+fn readEnv(ar: std.mem.Allocator, key: []const u8) error{OutOfMemory}!?[]const u8 {
+    return std.process.getEnvVarOwned(ar, key) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null, // env var not set
+    };
 }
 
-fn providerEnvAuth(ar: std.mem.Allocator, provider: Provider) EnvAuth {
+fn providerEnvAuth(ar: std.mem.Allocator, provider: Provider) error{OutOfMemory}!EnvAuth {
     return switch (provider) {
         .anthropic => .{
-            .oauth = readEnv(ar, anthropic_oauth_env),
-            .api_key = readEnv(ar, anthropic_api_key_env),
+            .oauth = try readEnv(ar, anthropic_oauth_env),
+            .api_key = try readEnv(ar, anthropic_api_key_env),
         },
         .openai => .{
             .oauth = null,
-            .api_key = readEnv(ar, openai_api_key_env),
+            .api_key = try readEnv(ar, openai_api_key_env),
         },
         .google => .{},
     };
@@ -142,7 +145,7 @@ fn loadForProviderHome(
     errdefer arena.deinit();
     const ar = arena.allocator();
 
-    if (!hooks.lock.auth) if (authFromEnv(providerEnvAuth(ar, provider))) |a| {
+    if (!hooks.lock.auth) if (authFromEnv(try providerEnvAuth(ar, provider))) |a| {
         return .{ .arena = arena, .auth = a };
     };
 

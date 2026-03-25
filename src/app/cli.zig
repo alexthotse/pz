@@ -39,7 +39,7 @@ pub const Command = union(enum) {
     pub fn deinit(self: *Command, alloc: std.mem.Allocator) void {
         switch (self.*) {
             .run => |*run| run.cfg.deinit(alloc),
-            else => {},
+            else => {}, // .help, .version, .changelog, .upgrade have no owned resources
         }
         self.* = undefined;
     }

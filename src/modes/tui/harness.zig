@@ -124,7 +124,7 @@ pub const Ui = struct {
         switch (key) {
             .up => if (self.wrapUp()) return .none,
             .down => if (self.wrapDown()) return .none,
-            else => {},
+            else => {}, // other keys delegated to editor.apply below
         }
         const act = try self.ed.apply(key);
         if (act == .submit) {
@@ -143,7 +143,7 @@ pub const Ui = struct {
         switch (ev) {
             .scroll_up => self.tr.scrollUp(3),
             .scroll_down => self.tr.scrollDown(3),
-            else => {},
+            else => {}, // .press, .release not handled in TUI
         }
     }
 

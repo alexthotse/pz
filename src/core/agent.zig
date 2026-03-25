@@ -627,7 +627,7 @@ pub const ChildProc = struct {
             switch (ev) {
                 .done => |done| return done,
                 .err => |rpc_err| return if (rpc_err.fatal) error.UnexpectedMsg else error.UnexpectedMsg,
-                else => {},
+                else => {}, // .ready, .out: intermediate events skipped while draining to completion
             }
         }
     }
@@ -722,7 +722,7 @@ fn killAndWait(child: *std.process.Child, el: ?*EventLoop) void {
     // Escalate to SIGKILL on the process group.
     std.posix.kill(-pid, std.posix.SIG.KILL) catch |err| switch (err) {
         error.ProcessNotFound => {},
-        else => {},
+        else => {}, // cleanup: SIGKILL best-effort, propagation impossible in deinit
     };
     _ = child.wait() catch {}; // cleanup: propagation impossible
 }
@@ -1207,7 +1207,7 @@ pub const BgAgent = struct {
     }
 
     fn setErr(self: *BgAgent, err: anyerror) void {
-        self.err_msg = std.fmt.allocPrint(self.alloc, "{s}", .{@errorName(err)}) catch null;
+        self.err_msg = std.fmt.allocPrint(self.alloc, "{s}", .{@errorName(err)}) catch null; // OOM: monitor thread, void return — error status still set below
         self.status.store(@intFromEnum(AgentStatus.err), .release);
     }
 

@@ -52,7 +52,7 @@ pub const Cfg = struct {
         return hdrs;
     }
 
-    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, is_oauth: bool) anyerror![]u8 {
+    pub fn buildBody(alloc: std.mem.Allocator, req: providers.Request, is_oauth: bool) ![]u8 {
         return buildBodyImpl(alloc, req, is_oauth);
     }
 
@@ -77,7 +77,10 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
 
     const parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
         .allocate = .alloc_always,
-    }) catch return null;
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
 
     const root = switch (parsed.value) {
         .object => |obj| obj,

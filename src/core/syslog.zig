@@ -394,7 +394,7 @@ fn splitFrame(raw: []const u8) !FrameView {
                 };
             },
             '"' => in_quote = true,
-            else => {},
+            else => {}, // non-special bytes: continue scanning for SD boundary
         }
     }
 
@@ -613,7 +613,7 @@ fn validateSdName(raw: []const u8) !void {
         if (c < 33 or c > 126) return error.InvalidStructuredData;
         switch (c) {
             '=', ']', '"' => return error.InvalidStructuredData,
-            else => {},
+            else => {}, // valid SD-NAME character (printable ASCII, not '=', ']', '"')
         }
     }
 }

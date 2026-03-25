@@ -228,12 +228,12 @@ pub const EventLoop = struct {
             }};
             _ = try kqueueWaitChanges(self.backend, &changelist, &.{}, null);
             // Block SIGCHLD so kqueue gets the event instead of the default handler
-            var mask = posix.empty_sigset;
+            var mask = std.mem.zeroes(posix.sigset_t);
             sigaddset(&mask, posix.SIG.CHLD);
             _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
         } else {
             // Linux: use signalfd
-            var mask = posix.empty_sigset;
+            var mask = std.mem.zeroes(posix.sigset_t);
             sigaddset(&mask, posix.SIG.CHLD);
             _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
             const sfd = std.os.linux.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
@@ -245,6 +245,12 @@ pub const EventLoop = struct {
     }
 
     pub fn deinit(self: *EventLoop) void {
+        // Unblock SIGCHLD if we blocked it via watchSigchld.
+        if (self.sigchld_handler != null) {
+            var mask = std.mem.zeroes(posix.sigset_t);
+            sigaddset(&mask, posix.SIG.CHLD);
+            _ = std.c.sigprocmask(posix.SIG.UNBLOCK, &mask, null);
+        }
         if (is_epoll) {
             for (self.timer_fds) |tfd| {
                 if (tfd >= 0) posix.close(tfd);

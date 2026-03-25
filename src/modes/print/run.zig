@@ -57,7 +57,7 @@ fn execVerbose(run_ctx: mode.Ctx, out: std.Io.AnyWriter, verbose: bool) run_err.
             .stop => |stop| {
                 stop_reason = core.providers.StopReason.merge(stop_reason, stop.reason);
             },
-            else => {},
+            else => {}, // .text, .thinking, .tool_call, .tool_result, .usage, .err forwarded via formatter.push
         }
 
         formatter.push(ev) catch return error.OutputFormat;

@@ -555,7 +555,7 @@ test "stream hook emits progress via sink bridge" {
                         self.n += 1;
                     }
                 },
-                else => {},
+                else => {}, // .start, .finish not tracked in this test sink
             }
         }
     };

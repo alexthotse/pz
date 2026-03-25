@@ -163,7 +163,7 @@ pub const AskUiCtx = struct {
                             defer self.alloc.free(partial);
                             return buildAskResult(self.alloc, true, partial);
                         },
-                        else => {},
+                        else => {}, // other keys fall through to navigation/selection below
                     }
 
                     if (typing_other) {
@@ -179,7 +179,7 @@ pub const AskUiCtx = struct {
                                     status_len = 0;
                                 }
                             },
-                            else => {},
+                            else => {}, // .none, .cancel, .interrupt, .cycle_*, .toggle_*, .kill_to_eol, .suspend: no-op in text input
                         }
                         continue;
                     }
@@ -252,7 +252,7 @@ pub const AskUiCtx = struct {
                                 }
                             },
                         },
-                        else => {},
+                        else => {}, // other keys (ctrl_*, alt_*, home, end, etc.) ignored in ask selection
                     }
                 },
                 .resize => {
@@ -262,7 +262,7 @@ pub const AskUiCtx = struct {
                 },
                 .none => continue,
                 .err => return error.TerminalSetupFailed,
-                else => {},
+                else => {}, // .mouse, .paste, .notify not used in ask UI
             }
         }
     }

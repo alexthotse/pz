@@ -182,7 +182,7 @@ pub const Editor = struct {
             self.jump_mode = false;
             switch (key) {
                 .char => |cp| self.jumpToChar(cp),
-                else => {},
+                else => {}, // non-char keys cancel jump mode without action
             }
             return .none;
         }

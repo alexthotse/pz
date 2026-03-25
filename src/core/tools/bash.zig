@@ -433,7 +433,7 @@ fn readFd(
 
 /// Terminate child: SIGTERM, poll grace period, escalate to SIGKILL.
 /// When `el` is non-null, uses event-loop wait instead of Thread.sleep.
-fn terminateAndReap(child: *std.process.Child, el: ?*EventLoop) anyerror!u32 {
+fn terminateAndReap(child: *std.process.Child, el: ?*EventLoop) !u32 {
     switch (pollChild(child)) {
         .status => |status| return status,
         .pending => {},
@@ -1307,7 +1307,7 @@ test "bash handler cancels running child and reaps TERM-resistant process" {
                     if (!self.done) self.out_before_done = true;
                 },
                 .finish => self.done = true,
-                else => {},
+                else => {}, // .start not tracked in this test sink
             }
         }
     };

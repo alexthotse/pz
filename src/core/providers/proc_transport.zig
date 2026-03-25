@@ -201,7 +201,7 @@ pub fn buildReq(alloc: std.mem.Allocator, req: providers.Request) Err![]u8 {
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
-fn writeReq(js: *std.json.Stringify, req: providers.Request) anyerror!void {
+fn writeReq(js: *std.json.Stringify, req: providers.Request) std.io.Writer.Error!void {
     try js.beginObject();
 
     try js.objectField("model");
@@ -282,7 +282,7 @@ fn writeReq(js: *std.json.Stringify, req: providers.Request) anyerror!void {
     try js.endObject();
 }
 
-fn writePart(js: *std.json.Stringify, part: providers.Part) anyerror!void {
+fn writePart(js: *std.json.Stringify, part: providers.Part) std.io.Writer.Error!void {
     try js.beginObject();
 
     switch (part) {

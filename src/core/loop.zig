@@ -523,7 +523,7 @@ const Hist = struct {
                 .output = tr.output,
                 .is_err = tr.is_err,
             }),
-            else => {},
+            else => {}, // .noop, .thinking, .usage, .stop, .err: not part of conversation history
         }
     }
 
@@ -532,7 +532,7 @@ const Hist = struct {
             .text => |text| try self.pushTextDup(.assistant, text),
             .tool_call => |tc| try self.pushToolCallDup(.assistant, tc),
             .tool_result => |tr| try self.pushToolResultDup(.tool, tr),
-            else => {},
+            else => {}, // .thinking, .usage, .stop, .err: not part of conversation history
         }
     }
 };
@@ -1310,7 +1310,7 @@ fn parseCallArgs(
     alloc: std.mem.Allocator,
     kind: tools.Kind,
     raw: []const u8,
-) (Err || anyerror)!tools.Call.Args {
+) Err!tools.Call.Args {
     return switch (kind) {
         .read => .{
             .read = try parseArgs(tools.Call.ReadArgs, alloc, raw),
@@ -1352,7 +1352,7 @@ fn parseArgs(
     comptime T: type,
     alloc: std.mem.Allocator,
     raw: []const u8,
-) (Err || anyerror)!T {
+) Err!T {
     return std.json.parseFromSliceLeaky(T, alloc, raw, .{
         .ignore_unknown_fields = true,
     }) catch |parse_err| switch (parse_err) {
@@ -1445,7 +1445,7 @@ fn hasToolResult(req: providers.Request, id: []const u8, out: []const u8) bool {
                     if (!std.mem.startsWith(u8, tr.output, "<untrusted-input kind=\"tool-result\"")) continue;
                     if (std.mem.indexOf(u8, tr.output, out) != null) return true;
                 },
-                else => {},
+                else => {}, // .text, .tool_call not inspected in tool-result search
             }
         }
     }
@@ -1541,7 +1541,7 @@ test "loop smoke composes replay provider tool and mode" {
                     std.mem.copyForwards(u8, self.tool_result_out[0..tr.output.len], tr.output);
                     self.tool_result_len = tr.output.len;
                 },
-                else => {},
+                else => {}, // test only inspects .tool_result events
             }
         }
 
@@ -1667,7 +1667,7 @@ test "loop smoke composes replay provider tool and mode" {
                             self.provider_tool_result_ct += 1;
                             try std.testing.expectEqualStrings("tool-ok", tr.output);
                         },
-                        else => {},
+                        else => {}, // .text, .thinking, .tool_call, .usage, .stop, .err: counted via provider_ct
                     }
                 },
                 .tool => |tev| switch (tev) {
@@ -2083,7 +2083,7 @@ test "loop cancellation emits canceled stop and exits early" {
                 .provider => |pev| {
                     if (pev == .stop and pev.stop.reason == .canceled) self.provider_canceled_ct += 1;
                 },
-                else => {},
+                else => {}, // test only inspects provider cancel events
             }
         }
     };
@@ -2642,7 +2642,7 @@ test "loop requires approval before bash escalation from malicious comment repla
                 try std.testing.expect(tr.is_err);
                 try std.testing.expect(std.mem.indexOf(u8, tr.output, "approval denied: bash `printf pwned` derived from untrusted input") != null);
             },
-            else => {},
+            else => {}, // test only inspects .tool_result events
         }
     }
     try std.testing.expect(saw_err);
@@ -2823,7 +2823,7 @@ test "loop requires approval before web post escalation from malicious page repl
                 try std.testing.expect(tr.is_err);
                 try std.testing.expect(std.mem.indexOf(u8, tr.output, "approval denied: web POST https://evil.test/submit derived from untrusted input") != null);
             },
-            else => {},
+            else => {}, // test only inspects .tool_result events
         }
     }
     try std.testing.expect(saw_err);
@@ -3233,7 +3233,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
                 1 => try self.store.reset(&compact_1),
                 2 => try self.store.reset(&compact_2),
                 3 => try self.store.reset(&compact_3),
-                else => {},
+                else => {}, // test only provides 3 compaction rounds
             }
         }
     };
@@ -3481,7 +3481,7 @@ test "loop runtime error append failure preserves original error and reports ses
                     self.session_write_err_ct += 1;
                     self.last_write_err = name;
                 },
-                else => {},
+                else => {}, // test only inspects .session_write_err events
             }
         }
     };
@@ -3560,7 +3560,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
                 .stop => |s| {
                     if (s.reason == .canceled) self.canceled_ct += 1;
                 },
-                else => {},
+                else => {}, // test only inspects .text and .stop events
             }
         }
 
@@ -3615,9 +3615,9 @@ test "mid-stream cancel delivers partial text then canceled stop" {
                     .stop => |s| {
                         if (s.reason == .canceled) self.canceled_ct += 1;
                     },
-                    else => {},
+                    else => {}, // .thinking, .tool_call, .tool_result, .usage, .err not tracked in this test
                 },
-                else => {},
+                else => {}, // .replay, .session, .tool, .session_write_err, .agent_status not tracked in this test
             }
         }
     };
@@ -3785,14 +3785,14 @@ test "loop cancel append failure still returns canceled turn and reports session
                     .stop => |s| {
                         if (s.reason == .canceled) self.canceled_ct += 1;
                     },
-                    else => {},
+                    else => {}, // .thinking, .tool_call, .tool_result, .usage, .err not tracked in this test
                 },
                 .session => self.session_ct += 1,
                 .session_write_err => |name| {
                     self.session_write_err_ct += 1;
                     self.last_write_err = name;
                 },
-                else => {},
+                else => {}, // .replay, .tool, .agent_status not tracked in this test
             }
         }
     };
@@ -3913,7 +3913,7 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
                 .stop => |s| {
                     if (s.reason == .canceled) self.canceled_ct += 1;
                 },
-                else => {},
+                else => {}, // test only inspects .text and .stop events
             }
         }
 
@@ -3938,9 +3938,9 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
                     .stop => |s| {
                         if (s.reason == .canceled) self.canceled_ct += 1;
                     },
-                    else => {},
+                    else => {}, // test only inspects provider cancel events
                 },
-                else => {},
+                else => {}, // test only inspects .provider events
             }
         }
     };
@@ -4063,7 +4063,7 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
                 .stop => |s| {
                     if (s.reason == .canceled) self.canceled_ct += 1;
                 },
-                else => {},
+                else => {}, // test only inspects .text and .stop events
             }
         }
 
@@ -4088,9 +4088,9 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
                     .stop => |s| {
                         if (s.reason == .canceled) self.canceled_ct += 1;
                     },
-                    else => {},
+                    else => {}, // test only inspects provider cancel events
                 },
-                else => {},
+                else => {}, // test only inspects .provider events
             }
         }
     };
@@ -4669,13 +4669,13 @@ test "loop text streaming append OOM reports session write error and continues" 
             switch (ev) {
                 .provider => |pev| switch (pev) {
                     .text => self.text_ct += 1,
-                    else => {},
+                    else => {}, // .thinking, .tool_call, .tool_result, .usage, .stop, .err not tracked in this test
                 },
                 .session_write_err => |name| {
                     self.session_write_err_ct += 1;
                     self.last_write_err = name;
                 },
-                else => {},
+                else => {}, // .replay, .session, .tool, .agent_status not tracked in this test
             }
         }
     };
@@ -4810,7 +4810,7 @@ test "loop prompt append OOM reports session write error and continues" {
                     self.session_write_err_ct += 1;
                     self.last_write_err = name;
                 },
-                else => {},
+                else => {}, // test only inspects .session_write_err events
             }
         }
     };
@@ -5052,7 +5052,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
             .tool_result => |tr| {
                 if (saw_call and tr.is_err) saw_result_after_call = true;
             },
-            else => {},
+            else => {}, // test only inspects .tool_call and .tool_result events
         }
     }
     try std.testing.expect(saw_call);
@@ -5136,9 +5136,9 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
                             self.denial_text = std.testing.allocator.dupe(u8, tr.output) catch null;
                         }
                     },
-                    else => {},
+                    else => {}, // .text, .thinking, .usage, .stop, .err not tracked in this test
                 },
-                else => {},
+                else => {}, // test only inspects .provider events
             }
         }
 
@@ -5255,7 +5255,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
             .tool_result => |tr| {
                 if (tr.is_err) store_denial = tr.output;
             },
-            else => {},
+            else => {}, // test only inspects .tool_result events
         }
     }
     const sd = store_denial orelse return error.TestUnexpectedResult;
@@ -5286,7 +5286,7 @@ test "UX8b: agent tool returns structured result with status" {
                     self.tool_out_len = n;
                     self.tool_is_err = tr.is_err;
                 },
-                else => {},
+                else => {}, // test only inspects .tool_result events
             }
         }
 
@@ -5449,7 +5449,7 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
                     self.tool_out_len = n;
                     self.tool_is_err = tr.is_err;
                 },
-                else => {},
+                else => {}, // test only inspects .tool_result events
             }
         }
 
@@ -5660,9 +5660,9 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
                             self.denial_text = std.testing.allocator.dupe(u8, tr.output) catch null;
                         }
                     },
-                    else => {},
+                    else => {}, // .text, .thinking, .tool_call, .usage, .stop, .err not tracked in this test
                 },
-                else => {},
+                else => {}, // test only inspects .provider events
             }
         }
 
@@ -5779,7 +5779,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
             .tool_result => |tr| {
                 if (tr.is_err) store_denial = tr.output;
             },
-            else => {},
+            else => {}, // test only inspects .tool_result events
         }
     }
     const sd = store_denial orelse return error.TestUnexpectedResult;

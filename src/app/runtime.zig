@@ -474,7 +474,7 @@ const PrintSink = struct {
                         if (stop.reason == .tool) return;
                         self.stop_reason = core.providers.StopReason.merge(self.stop_reason, stop.reason);
                     },
-                    else => {},
+                    else => {}, // .text, .thinking, .tool_call, .tool_result, .usage, .err forwarded via fmt.push
                 }
                 try self.fmt.push(pev);
             },
@@ -487,7 +487,7 @@ const PrintSink = struct {
                 try self.fmt.out.writeAll(msg);
                 try self.fmt.out.writeAll("]\n");
             },
-            else => {},
+            else => {}, // .replay, .session, .tool, .agent_status not used in print sink
         }
     }
 };
@@ -523,7 +523,7 @@ const TuiSink = struct {
                     try self.ui.tr.agentBlock(as.agent_id, phase);
                 };
             },
-            else => {},
+            else => {}, // .replay, .session, .tool not rendered in TUI sink
         }
         try self.ui.draw(self.out);
     }
@@ -937,7 +937,7 @@ const LiveTurn = struct {
                 if (self.last_err) |old| self.alloc.free(old);
                 self.last_err = self.alloc.dupe(u8, txt) catch null; // OOM: error still queued in evs, only convenience field lost
             },
-            else => {},
+            else => {}, // .text, .thinking, .tool_call, .tool_result, .usage: stored in evs list, no extra tracking needed
         }
         self.mu.unlock();
         self.nudge();
@@ -1121,7 +1121,7 @@ const LiveTurnSink = struct {
         switch (ev) {
             .provider => |pev| try self.live.enqueueProvider(pev),
             .agent_status => |as| try self.live.enqueueAgent(as.agent_id, as.phase),
-            else => {},
+            else => {}, // .replay, .session, .tool, .session_write_err not forwarded to live turn
         }
     }
 };
@@ -2642,7 +2642,7 @@ fn runTui(
                                 ui.ov.?.deinit(alloc);
                                 ui.ov = null;
                             },
-                            else => {},
+                            else => {}, // other keys ignored while overlay is active
                         }
                         try ui.draw(out);
                         continue;
@@ -2710,7 +2710,7 @@ fn runTui(
                                 try ui.draw(out);
                                 continue;
                             },
-                            else => {},
+                            else => {}, // other keys fall through to editor when picker is active
                         }
                     }
 
@@ -5020,7 +5020,7 @@ fn listUserMessages(alloc: std.mem.Allocator, session_dir: []const u8, sid: []co
         msgs.deinit(alloc);
     }
 
-    while (rdr.next() catch null) |ev| {
+    while (try rdr.next()) |ev| {
         if (ev.data == .prompt) {
             const text = ev.data.prompt.text;
             // Truncate to single line, max 80 chars for display
@@ -5185,7 +5185,7 @@ fn sessionStats(
                 .text => asst_msgs += 1,
                 .tool_call => tool_calls += 1,
                 .tool_result => tool_results += 1,
-                else => {},
+                else => {}, // .noop, .thinking, .usage, .stop, .err not counted in session stats
             }
         }
         lines = rdr.line();
@@ -5370,7 +5370,7 @@ fn applyResumeSid(
     session_dir_path: ?[]const u8,
     no_session: bool,
     token: ?[]const u8,
-) (SessionOpErr || anyerror)!void {
+) !void {
     const dir = try requireSessionDir(session_dir_path, no_session);
     const next_sid = try resolveResumeSid(alloc, dir, token);
     // Commit: swap only after all fallible ops succeed.
@@ -5521,7 +5521,7 @@ fn applyForkSid(
     session_dir_path: ?[]const u8,
     no_session: bool,
     token: ?[]const u8,
-) (SessionOpErr || anyerror)!void {
+) !void {
     const dir = try requireSessionDir(session_dir_path, no_session);
     const next_sid = if (token) |raw| blk: {
         try core.session.path.validateSid(raw);
@@ -5660,7 +5660,7 @@ fn buildSessionRow(
                     if (title == null) title = try sessionTitleAlloc(alloc, p.text);
                 },
                 .usage => |u| tot_tok +|= u.tot_tok,
-                else => {},
+                else => {}, // .noop, .text, .thinking, .tool_call, .tool_result, .stop, .err not needed for session list
             }
         }
     }
@@ -5772,10 +5772,10 @@ fn resolveSessionPlan(alloc: std.mem.Allocator, run_cmd: cli.Run) !core.session.
 }
 
 fn getApprovalLocAlloc(alloc: std.mem.Allocator) !core.loop.CmdCache.Loc {
-    if (runCmdTrimAlloc(alloc, &.{ "jj", "root" }, 4096)) |root| {
+    if (try runCmdTrimAlloc(alloc, &.{ "jj", "root" }, 4096)) |root| {
         return .{ .repo_root = root };
     }
-    if (runCmdTrimAlloc(alloc, &.{ "git", "rev-parse", "--show-toplevel" }, 4096)) |root| {
+    if (try runCmdTrimAlloc(alloc, &.{ "git", "rev-parse", "--show-toplevel" }, 4096)) |root| {
         return .{ .repo_root = root };
     }
     return .{ .cwd = try std.fs.cwd().realpathAlloc(alloc, ".") };
@@ -5814,10 +5814,10 @@ fn shortenHomePath(alloc: std.mem.Allocator, full: []const u8, home: ?[]const u8
 fn getGitBranch(alloc: std.mem.Allocator) ![]u8 {
     if (try getJjBranch(alloc)) |b| return b;
 
-    if (runCmdTrimAlloc(alloc, &.{ "git", "branch", "--show-current" }, 512)) |branch| {
+    if (try runCmdTrimAlloc(alloc, &.{ "git", "branch", "--show-current" }, 512)) |branch| {
         return branch;
     }
-    if (runCmdTrimAlloc(alloc, &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" }, 512)) |branch| {
+    if (try runCmdTrimAlloc(alloc, &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" }, 512)) |branch| {
         if (!std.mem.eql(u8, branch, "HEAD")) return branch;
         alloc.free(branch);
     }
@@ -5834,7 +5834,7 @@ fn getGitBranch(alloc: std.mem.Allocator) ![]u8 {
 }
 
 fn getJjBranch(alloc: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
-    const current = runCmdTrimAlloc(alloc, &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "bookmarks" }, 4096);
+    const current = try runCmdTrimAlloc(alloc, &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "bookmarks" }, 4096);
     if (current) |raw| {
         defer alloc.free(raw);
         if (parseJjBookmark(raw)) |name| {
@@ -5842,7 +5842,7 @@ fn getJjBranch(alloc: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
         }
     }
 
-    const parent = runCmdTrimAlloc(alloc, &.{ "jj", "log", "--no-graph", "-r", "@-", "-T", "bookmarks" }, 4096);
+    const parent = try runCmdTrimAlloc(alloc, &.{ "jj", "log", "--no-graph", "-r", "@-", "-T", "bookmarks" }, 4096);
     if (parent) |raw| {
         defer alloc.free(raw);
         if (parseJjBookmark(raw)) |name| {
@@ -5880,19 +5880,22 @@ fn looksLikeHexCommit(text: []const u8) bool {
 }
 
 // hardcoded argv, no user input -- policy gate not needed
-fn runCmdTrimAlloc(alloc: std.mem.Allocator, argv: []const []const u8, max_bytes: usize) ?[]u8 {
+fn runCmdTrimAlloc(alloc: std.mem.Allocator, argv: []const []const u8, max_bytes: usize) error{OutOfMemory}!?[]u8 {
     const result = std.process.Child.run(.{
         .allocator = alloc,
         .argv = argv,
         .max_output_bytes = max_bytes,
-    }) catch return null;
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null, // exec failure, command not found — expected for optional lookups
+    };
     defer alloc.free(result.stderr);
     defer alloc.free(result.stdout);
     if (result.term.Exited != 0) return null;
     const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
     if (trimmed.len == 0) return null;
     // Sanitize: external process output may contain invalid UTF-8
-    return sanitizeUtf8LossyAlloc(alloc, trimmed) catch null;
+    return try sanitizeUtf8LossyAlloc(alloc, trimmed);
 }
 
 test "parseJjBookmark extracts first bookmark" {
@@ -8142,7 +8145,7 @@ test "runtime tui non-tty /resume restores session without running provider turn
                 prompt_ct += 1;
                 if (std.mem.eql(u8, p.text, "/resume 100")) saw_resume_prompt = true;
             },
-            else => {},
+            else => {}, // test only inspects .prompt events
         }
     }
     try std.testing.expectEqual(@as(usize, 1), prompt_ct);
@@ -9060,7 +9063,7 @@ test "runtime tui overflow retries once with injected live stdin" {
         switch (ev.data) {
             .prompt => |p| try w.print("prompt:{s}\n", .{p.text}),
             .text => |t| try w.print("text:{s}\n", .{t.text}),
-            else => {},
+            else => {}, // test only inspects .prompt and .text events
         }
     }
     const plain_out = try tui_transcript.stripAnsi(std.testing.allocator, out_fbs.getWritten());
@@ -9210,7 +9213,7 @@ test "runtime tui consumes multiple prompts from input stream" {
                 if (prompt_ct == 1) try std.testing.expectEqualStrings("second", p.text);
                 prompt_ct += 1;
             },
-            else => {},
+            else => {}, // test only inspects .prompt events
         }
     }
     try std.testing.expectEqual(@as(usize, 2), prompt_ct);
@@ -9324,7 +9327,7 @@ fn expectLatestSessionReused(session_sel: anytype) !void {
             .prompt => |p| {
                 if (std.mem.eql(u8, p.text, "new-turn")) saw_new = true;
             },
-            else => {},
+            else => {}, // test only inspects .prompt events
         }
     }
     try std.testing.expect(saw_new);

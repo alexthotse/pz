@@ -1155,7 +1155,7 @@ fn applySgr(params: []const u8, base: frame.Style, cur: frame.Style) frame.Style
             49 => st.bg = base.bg,
             90...97 => st.fg = .{ .idx = @intCast(code - 90 + 8) },
             100...107 => st.bg = .{ .idx = @intCast(code - 100 + 8) },
-            else => {},
+            else => {}, // unhandled SGR codes (strikethrough, overline, fonts, etc.)
         }
     }
     return st;

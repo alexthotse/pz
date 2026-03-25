@@ -2,6 +2,8 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const core = @import("../core.zig");
+const event_loop = @import("../core/event_loop.zig");
+const EventLoop = event_loop.EventLoop;
 const journal_mod = @import("job_journal.zig");
 const sandbox = @import("../core/sandbox.zig");
 const shell = @import("../core/shell.zig");
@@ -618,7 +620,7 @@ pub const Manager = struct {
         ctx.mgr.onExit(ctx.job_id, ended_at_ms, wait_term);
     }
 
-    fn onExit(self: *Manager, id: u64, ended_at_ms: i64, wait_term: anyerror!std.process.Child.Term) void {
+    fn onExit(self: *Manager, id: u64, ended_at_ms: i64, wait_term: std.process.Child.WaitError!std.process.Child.Term) void {
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -676,9 +678,25 @@ pub const Manager = struct {
         const active = try self.journal.replayActive(self.alloc);
         defer journal_mod.deinitActives(self.alloc, active);
 
+        if (active.len == 0) return;
+
+        // Create a temporary event loop to wait for SIGCHLD instead of polling.
+        var el = try EventLoop.init();
+        defer el.deinit();
+
+        // Dummy handler — we only use el.wait() for the timeout/wake, not callbacks.
+        const DummyCtx = struct {
+            fn onReady(_: *anyopaque, _: std.posix.fd_t, _: bool, _: bool) void {}
+        };
+        var dummy: u8 = 0;
+        try el.watchSigchld(.{
+            .ctx = @ptrCast(&dummy),
+            .on_ready = DummyCtx.onReady,
+        });
+
         for (active) |job| {
             const pid: std.posix.pid_t = @intCast(job.pid);
-            // Send TERM, then poll with WNOHANG up to ~150ms.
+            // Send TERM, then wait for SIGCHLD with 150ms timeout.
             std.posix.kill(pid, std.posix.SIG.TERM) catch |err| switch (err) {
                 error.ProcessNotFound => {
                     try self.journal.appendCleanup(job.id, "startup_reap");
@@ -689,16 +707,7 @@ pub const Manager = struct {
                 },
             };
 
-            var reaped = false;
-            var polls: u32 = 0;
-            while (polls < 15) : (polls += 1) {
-                const res = std.posix.waitpid(pid, std.c.W.NOHANG);
-                if (res.pid != 0) {
-                    reaped = true;
-                    break;
-                }
-                std.Thread.sleep(10 * std.time.ns_per_ms);
-            }
+            const reaped = reapAfterSignal(&el, pid);
 
             if (!reaped) {
                 std.posix.kill(pid, std.posix.SIG.KILL) catch |err| switch (err) {
@@ -712,6 +721,28 @@ pub const Manager = struct {
             }
             try self.journal.appendCleanup(job.id, "startup_reap");
         }
+    }
+
+    /// Wait for a child to exit using SIGCHLD via the event loop (150ms timeout).
+    /// Returns true if the child was reaped, false if it's still alive.
+    fn reapAfterSignal(el: *EventLoop, pid: std.posix.pid_t) bool {
+        var remaining_ms: i32 = 150;
+        while (remaining_ms > 0) {
+            // Try non-blocking reap first.
+            const res = std.posix.waitpid(pid, std.c.W.NOHANG);
+            if (res.pid != 0) return true;
+
+            // Wait for SIGCHLD or timeout.
+            var ev_buf: [event_loop.max_events]event_loop.Event = undefined;
+            _ = el.wait(remaining_ms, &ev_buf) catch return false;
+
+            // After wake, try reaping again. Reduce timeout for next iteration
+            // in case SIGCHLD was for a different child.
+            remaining_ms -= 50;
+        }
+        // Final WNOHANG attempt after timeout.
+        const res = std.posix.waitpid(pid, std.c.W.NOHANG);
+        return res.pid != 0;
     }
 
     fn findIdxLocked(self: *Manager, id: u64) ?usize {

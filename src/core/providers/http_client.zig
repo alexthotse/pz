@@ -89,7 +89,7 @@ pub fn refreshAuth(
                 return;
             }
         },
-        else => {},
+        else => {}, // .api_key: no expiry to check, reload cannot help
     }
     reloaded.deinit();
     return error.RefreshFailed;
@@ -457,7 +457,7 @@ pub fn extractJsonErrMsg(body: []const u8) ?[]const u8 {
 ///   - `ext_deinit: fn(*Self, std.mem.Allocator) void` — cleanup
 ///   - `ext_reset: fn(*Self) void` — reset for test reuse
 ///   - `buildAuthHeaders: fn(*auth_mod.Result, std.mem.Allocator) anyerror!HdrList`
-///   - `buildBody: fn(std.mem.Allocator, providers.Request) anyerror![]u8`
+///   - `buildBody: fn(std.mem.Allocator, providers.Request) ![]u8`
 ///   - `parseSseData: fn(*Self, []const u8) anyerror!?providers.Event`
 pub fn SseClient(comptime Cfg: type) type {
     return struct {

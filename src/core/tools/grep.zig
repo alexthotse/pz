@@ -104,7 +104,7 @@ fn grepDir(
                 try grepDir(self, child, path, args, hit_ct, acc);
             },
             .file => try grepFile(self, dir, ent.name, path.items, args, hit_ct, acc),
-            else => {},
+            else => {}, // .sym_link, .named_pipe, .unix_domain_socket, .block_device, .character_device, .whiteout, .door skipped
         }
     }
 }

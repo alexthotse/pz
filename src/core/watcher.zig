@@ -265,13 +265,15 @@ pub const Watcher = struct {
         if (is_macos) return self.watchLoopKqueue(stop, snk);
         if (is_linux) return self.watchLoopInotify(stop, snk);
 
+        // Platform fallback: poll-based watcher for OSes without kqueue/inotify.
+        // macOS uses kqueue (watchLoopKqueue), Linux uses inotify (watchLoopInotify).
         while (!stop.load(.acquire)) {
             const now = std.time.nanoTimestamp();
             var i: usize = 0;
             while (i < self.paths.len) : (i += 1) {
                 try self.scanOne(i, now, snk);
             }
-            std.Thread.sleep(self.poll_ns);
+            std.Thread.sleep(self.poll_ns); // platform fallback: no native FS events
         }
     }
 
