@@ -1705,7 +1705,7 @@ fn execWithIoTuiHooks(
     // replayed audit entries are detected across process restarts.
     var seq_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const seq_path: ?[]const u8 = if (home) |h| blk: {
-        break :blk std.fmt.bufPrint(&seq_path_buf, "{s}/.pz/audit_seq", .{h}) catch null;
+        break :blk std.fmt.bufPrint(&seq_path_buf, "{s}/.pz/audit_seq", .{h}) catch unreachable; // max_path_bytes (4096) >> home + 16 chars
     } else null;
     var seq_tracker = core.audit_integrity.SeqTracker.init(alloc, seq_path);
     hooks.seq_tracker = &seq_tracker;
@@ -2321,7 +2321,7 @@ fn runTui(
         (!force_ver and std.mem.indexOf(u8, cli.version, "-dev") != null);
     var ver_check = version_check.Checker.init(alloc);
     var ver_notice_done = skip_ver;
-    if (!skip_ver) ver_check.spawn();
+    if (!skip_ver) try ver_check.spawn();
     defer ver_check.deinit();
 
     // Startup info matching pi's display

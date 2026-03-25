@@ -48,8 +48,8 @@ pub const Checker = struct {
         return .{ .alloc = alloc };
     }
 
-    pub fn spawn(self: *Checker) void {
-        self.thread = std.Thread.spawn(.{}, checkThread, .{self}) catch null;
+    pub fn spawn(self: *Checker) !void {
+        self.thread = try std.Thread.spawn(.{}, checkThread, .{self});
     }
 
     pub fn poll(self: *Checker) ?[]const u8 {
