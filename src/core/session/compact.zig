@@ -563,8 +563,8 @@ fn buildSummaryCall(
     };
 }
 
-fn collectSummaryText(alloc: std.mem.Allocator, provider: providers.Provider, req: providers.Request) ![]u8 {
-    var stream = try provider.start(req);
+fn collectSummaryText(alloc: std.mem.Allocator, provider: *providers.Provider, req: providers.Request) ![]u8 {
+    const stream = try provider.start(req);
     defer stream.deinit();
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -583,7 +583,7 @@ fn collectSummaryText(alloc: std.mem.Allocator, provider: providers.Provider, re
 
 pub fn generateSummaryWithProvider(
     alloc: std.mem.Allocator,
-    provider: providers.Provider,
+    provider: *providers.Provider,
     model: []const u8,
     events: []const schema.Event,
     budget: ?summary_types.SummaryBudget,
@@ -1311,7 +1311,9 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
     const oh = OhSnap{};
 
     const TestProvider = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
         const StreamCtx = struct {
+            stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
             alloc: std.mem.Allocator,
             idx: usize = 0,
 
@@ -1330,11 +1332,7 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
             }
         };
 
-        fn asProvider(self: *@This()) providers.Provider {
-            return providers.Provider.from(@This(), self, start);
-        }
-
-        fn start(self: *@This(), req: providers.Request) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             _ = self;
             try std.testing.expect(req.opts.thinking == .off);
             try std.testing.expectEqual(@as(?u32, 1024), req.opts.max_out);
@@ -1346,7 +1344,7 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
 
             const ctx = try std.testing.allocator.create(StreamCtx);
             ctx.* = .{ .alloc = std.testing.allocator };
-            return providers.Stream.from(StreamCtx, ctx, StreamCtx.next, StreamCtx.deinit);
+            return &ctx.stream;
         }
     };
 
@@ -1359,7 +1357,7 @@ test "generateSummaryWithProvider enforces thinking off and returns summary meta
         } } },
     };
     var provider = TestProvider{};
-    const got = (try generateSummaryWithProvider(std.testing.allocator, provider.asProvider(), "m", &events, null)) orelse return error.TestUnexpectedResult;
+    const got = (try generateSummaryWithProvider(std.testing.allocator, &provider.provider, "m", &events, null)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(got.summary);
     const meta_snap = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -1463,11 +1461,9 @@ test "generateSummaryWithProvider stops before provider when input cannot fit bu
     const alloc = std.testing.allocator;
 
     const NeverCalledProvider = struct {
-        fn asProvider(self: *@This()) providers.Provider {
-            return providers.Provider.from(@This(), self, start);
-        }
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
             _ = self;
             return error.TestUnexpectedResult;
         }
@@ -1480,7 +1476,7 @@ test "generateSummaryWithProvider stops before provider when input cannot fit bu
     var provider = NeverCalledProvider{};
     try std.testing.expectError(error.SummaryInputOverBudget, generateSummaryWithProvider(
         alloc,
-        provider.asProvider(),
+        &provider.provider,
         "m",
         &events,
         .{ .max_bytes = 32, .max_input_tokens = 32 },
@@ -1489,11 +1485,9 @@ test "generateSummaryWithProvider stops before provider when input cannot fit bu
 
 test "generateSummaryWithProvider returns provider error" {
     const FailingProvider = struct {
-        fn asProvider(self: *@This()) providers.Provider {
-            return providers.Provider.from(@This(), self, start);
-        }
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
             _ = self;
             return error.TransportFatal;
         }
@@ -1505,7 +1499,7 @@ test "generateSummaryWithProvider returns provider error" {
     var provider = FailingProvider{};
     try std.testing.expectError(error.TransportFatal, generateSummaryWithProvider(
         std.testing.allocator,
-        provider.asProvider(),
+        &provider.provider,
         "m",
         &events,
         null,

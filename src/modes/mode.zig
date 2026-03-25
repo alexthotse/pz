@@ -4,7 +4,7 @@ const core = @import("../core.zig");
 
 pub const Ctx = struct {
     alloc: std.mem.Allocator,
-    provider: core.providers.Provider,
+    provider: *core.providers.Provider,
     store: core.session.SessionStore,
     sid: []const u8,
     prompt: []const u8,

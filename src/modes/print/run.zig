@@ -192,6 +192,7 @@ test "exec runs prompt path and persists mapped provider events" {
     const oh = OhSnap{};
 
     const StreamImpl = struct {
+        stream: core.providers.Stream = .{ .vt = &core.providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         idx: usize = 0,
         deinit_ct: usize = 0,
         evs: []const core.providers.Event,
@@ -209,15 +210,16 @@ test "exec runs prompt path and persists mapped provider events" {
     };
 
     const ProviderImpl = struct {
+        provider: core.providers.Provider = .{ .vt = &core.providers.Provider.Bind(@This(), @This().start).vt },
         start_ct: usize = 0,
         model: []const u8 = "",
         msg_ct: usize = 0,
         part_ct: usize = 0,
         role: core.providers.Role = .assistant,
         prompt: []const u8 = "",
-        stream: StreamImpl,
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), req: core.providers.Request) !core.providers.Stream {
+        fn start(self: *@This(), req: core.providers.Request) !*core.providers.Stream {
             self.start_ct += 1;
             self.model = req.model;
             self.msg_ct = req.msgs.len;
@@ -234,12 +236,7 @@ test "exec runs prompt path and persists mapped provider events" {
                 }
             }
 
-            return core.providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+            return &self.stream_impl.stream;
         }
     };
 
@@ -316,15 +313,11 @@ test "exec runs prompt path and persists mapped provider events" {
     };
 
     var provider_impl = ProviderImpl{
-        .stream = .{
+        .stream_impl = .{
             .evs = in_evs[0..],
         },
     };
-    const provider = core.providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = core.session.SessionStore.from(
@@ -340,7 +333,7 @@ test "exec runs prompt path and persists mapped provider events" {
 
     const result = try execVerbose(.{
         .alloc = std.testing.allocator,
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .sid = "sid-1",
         .prompt = "ship-it",
@@ -356,7 +349,7 @@ test "exec runs prompt path and persists mapped provider events" {
             .part_ct = provider_impl.part_ct,
             .role = provider_impl.role,
             .prompt = provider_impl.prompt,
-            .deinit_ct = provider_impl.stream.deinit_ct,
+            .deinit_ct = provider_impl.stream_impl.deinit_ct,
         },
         .store = .{
             .replay_ct = store_impl.replay_ct,
@@ -464,6 +457,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     const oh = OhSnap{};
 
     const StreamImpl = struct {
+        stream: core.providers.Stream = .{ .vt = &core.providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         idx: usize = 0,
         fail_at: usize = 0,
         deinit_ct: usize = 0,
@@ -480,15 +474,11 @@ test "exec deinit stream and maps stream next error to typed print error" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl = .{},
+        provider: core.providers.Provider = .{ .vt = &core.providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl = .{},
 
-        fn start(self: *@This(), _: core.providers.Request) !core.providers.Stream {
-            return core.providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: core.providers.Request) !*core.providers.Stream {
+            return &self.stream_impl.stream;
         }
     };
 
@@ -524,11 +514,7 @@ test "exec deinit stream and maps stream next error to typed print error" {
     };
 
     var provider_impl = ProviderImpl{};
-    const provider = core.providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = core.session.SessionStore.from(
@@ -544,14 +530,14 @@ test "exec deinit stream and maps stream next error to typed print error" {
 
     try std.testing.expectError(error.StreamRead, execVerbose(.{
         .alloc = std.testing.allocator,
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .sid = "sid-2",
         .prompt = "prompt-2",
     }, out_fbs.writer().any(), true));
 
     const snap = RunErrSnap{
-        .deinit_ct = provider_impl.stream.deinit_ct,
+        .deinit_ct = provider_impl.stream_impl.deinit_ct,
         .append_ct = store_impl.append_ct,
         .prompt = switch (store_impl.evs[0].data) {
             .prompt => |out| out.text,
@@ -575,6 +561,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     const oh = OhSnap{};
 
     const StreamImpl = struct {
+        stream: core.providers.Stream = .{ .vt = &core.providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         idx: usize = 0,
         deinit_ct: usize = 0,
         evs: []const core.providers.Event,
@@ -592,15 +579,11 @@ test "exec maps max_out stop reason to deterministic typed error" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: core.providers.Provider = .{ .vt = &core.providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: core.providers.Request) !core.providers.Stream {
-            return core.providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: core.providers.Request) !*core.providers.Stream {
+            return &self.stream_impl.stream;
         }
     };
 
@@ -643,15 +626,11 @@ test "exec maps max_out stop reason to deterministic typed error" {
     };
 
     var provider_impl = ProviderImpl{
-        .stream = .{
+        .stream_impl = .{
             .evs = in_evs[0..],
         },
     };
-    const provider = core.providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = core.session.SessionStore.from(
@@ -667,7 +646,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
 
     const result = try execVerbose(.{
         .alloc = std.testing.allocator,
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .sid = "sid-3",
         .prompt = "prompt-3",
@@ -676,7 +655,7 @@ test "exec maps max_out stop reason to deterministic typed error" {
     try std.testing.expectEqual(run_err.Result{ .stop = .max_out }, result);
 
     const snap = RunStopSnap{
-        .deinit_ct = provider_impl.stream.deinit_ct,
+        .deinit_ct = provider_impl.stream_impl.deinit_ct,
         .append_ct = store_impl.append_ct,
         .output = out_fbs.getWritten(),
     };

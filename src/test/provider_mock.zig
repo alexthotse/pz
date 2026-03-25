@@ -8,10 +8,22 @@ pub const Step = union(enum) {
 };
 
 pub const ScriptedProvider = struct {
+    provider: providers.Provider = .{ .vt = &provider_vt },
+    stream: providers.Stream = .{ .vt = &stream_vt },
     steps: []const Step,
     idx: usize = 0,
     wake_r: std.posix.fd_t,
     wake_w: std.posix.fd_t,
+
+    const provider_vt = providers.Provider.Vt{
+        .start = providerStart,
+    };
+
+    const stream_vt = providers.Stream.Vt{
+        .next = streamNext,
+        .deinit = streamDeinit,
+        .abort = streamAbort,
+    };
 
     pub fn init(steps: []const Step) !ScriptedProvider {
         const pipe = try std.posix.pipe2(.{
@@ -31,26 +43,14 @@ pub const ScriptedProvider = struct {
         self.* = undefined;
     }
 
-    pub fn asProvider(self: *ScriptedProvider) providers.Provider {
-        return providers.Provider.from(
-            ScriptedProvider,
-            self,
-            ScriptedProvider.start,
-        );
-    }
-
-    fn start(self: *ScriptedProvider, _: providers.Request) !providers.Stream {
+    fn providerStart(p: *providers.Provider, _: providers.Request) !*providers.Stream {
+        const self: *ScriptedProvider = @fieldParentPtr("provider", p);
         self.reset();
-        return providers.Stream.fromAbortable(
-            ScriptedProvider,
-            self,
-            ScriptedProvider.next,
-            ScriptedProvider.streamDeinit,
-            ScriptedProvider.abort,
-        );
+        return &self.stream;
     }
 
-    fn next(self: *ScriptedProvider) !?providers.Event {
+    fn streamNext(s: *providers.Stream) anyerror!?providers.Event {
+        const self: *ScriptedProvider = @fieldParentPtr("stream", s);
         if (self.idx >= self.steps.len) return null;
         const step = self.steps[self.idx];
         self.idx += 1;
@@ -70,11 +70,16 @@ pub const ScriptedProvider = struct {
         };
     }
 
-    fn abort(self: *ScriptedProvider) void {
+    pub fn abort(self: *ScriptedProvider) void {
         _ = std.posix.write(self.wake_w, "\x01") catch {}; // test: error irrelevant
     }
 
-    fn streamDeinit(_: *ScriptedProvider) void {}
+    fn streamAbort(s: *providers.Stream) void {
+        const self: *ScriptedProvider = @fieldParentPtr("stream", s);
+        self.abort();
+    }
+
+    fn streamDeinit(_: *providers.Stream) void {}
 
     fn reset(self: *ScriptedProvider) void {
         self.idx = 0;
@@ -93,7 +98,7 @@ test "scripted provider emits events then aborts blocked stream" {
     var provider = try ScriptedProvider.init(steps[0..]);
     defer provider.deinit();
 
-    var stream = try provider.start(.{
+    var stream = try provider.provider.start(.{
         .model = "m",
         .provider = null,
         .msgs = &.{},

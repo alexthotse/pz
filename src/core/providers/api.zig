@@ -295,128 +295,104 @@ fn escapeAttrAlloc(alloc: std.mem.Allocator, raw: []const u8) error{OutOfMemory}
 }
 
 pub const Provider = struct {
-    ctx: *anyopaque,
     vt: *const Vt,
 
     pub const Vt = struct {
-        start: *const fn (ctx: *anyopaque, req: Request) anyerror!Stream,
+        start: *const fn (self: *Provider, req: Request) anyerror!*Stream,
     };
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime start_fn: fn (ctx: *T, req: Request) anyerror!Stream,
-    ) Provider {
-        const Wrap = struct {
-            fn start(raw: *anyopaque, req: Request) anyerror!Stream {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return start_fn(typed, req);
-            }
-
-            const vt = Vt{
-                .start = @This().start,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
+    pub fn start(self: *Provider, req: Request) !*Stream {
+        return self.vt.start(self, req);
     }
 
-    pub fn start(self: Provider, req: Request) !Stream {
-        return self.vt.start(self.ctx, req);
+    /// Generate a Provider.Vt that trampolines through @fieldParentPtr.
+    /// `T` must have a `provider: Provider` field.
+    pub fn Bind(comptime T: type, comptime start_fn: fn (*T, Request) anyerror!*Stream) type {
+        return struct {
+            pub const vt = Vt{
+                .start = startFn,
+            };
+            fn startFn(p: *Provider, req: Request) anyerror!*Stream {
+                const self: *T = @fieldParentPtr("provider", p);
+                return start_fn(self, req);
+            }
+        };
     }
 };
 
 pub const Stream = struct {
-    ctx: *anyopaque,
     vt: *const Vt,
 
     pub const Vt = struct {
-        next: *const fn (ctx: *anyopaque) anyerror!?Event,
-        deinit: *const fn (ctx: *anyopaque) void,
-        abort: ?*const fn (ctx: *anyopaque) void = null,
+        next: *const fn (self: *Stream) anyerror!?Event,
+        deinit: *const fn (self: *Stream) void,
+        abort: ?*const fn (self: *Stream) void = null,
     };
 
-    pub fn from(
-        comptime T: type,
-        ctx: *T,
-        comptime next_fn: fn (ctx: *T) anyerror!?Event,
-        comptime deinit_fn: fn (ctx: *T) void,
-    ) Stream {
-        const Wrap = struct {
-            fn next(raw: *anyopaque) anyerror!?Event {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return next_fn(typed);
-            }
-
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
-
-            const vt = Vt{
-                .next = @This().next,
-                .deinit = @This().deinit,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
     pub fn next(self: *Stream) !?Event {
-        return self.vt.next(self.ctx);
+        return self.vt.next(self);
     }
 
     pub fn deinit(self: *Stream) void {
-        self.vt.deinit(self.ctx);
+        self.vt.deinit(self);
     }
 
-    pub fn fromAbortable(
-        comptime T: type,
-        ctx: *T,
-        comptime next_fn: fn (ctx: *T) anyerror!?Event,
-        comptime deinit_fn: fn (ctx: *T) void,
-        comptime abort_fn: fn (ctx: *T) void,
-    ) Stream {
-        const Wrap = struct {
-            fn next(raw: *anyopaque) anyerror!?Event {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                return next_fn(typed);
-            }
-
-            fn deinit(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                deinit_fn(typed);
-            }
-
-            fn abort(raw: *anyopaque) void {
-                const typed: *T = @ptrCast(@alignCast(raw));
-                abort_fn(typed);
-            }
-
-            const vt = Vt{
-                .next = @This().next,
-                .deinit = @This().deinit,
-                .abort = @This().abort,
-            };
-        };
-
-        return .{
-            .ctx = ctx,
-            .vt = &Wrap.vt,
-        };
-    }
-
-    pub fn aborter(self: Stream) ?Aborter {
+    pub fn aborter(self: *Stream) ?Aborter {
         const abort_fn = self.vt.abort orelse return null;
         return .{
-            .ctx = self.ctx,
-            .abort_fn = abort_fn,
+            .ctx = self,
+            .abort_fn = @ptrCast(abort_fn),
+        };
+    }
+
+    /// Generate a Stream.Vt that trampolines through @fieldParentPtr.
+    /// `T` must have a `stream: Stream` field.
+    pub fn Bind(
+        comptime T: type,
+        comptime next_fn: fn (*T) anyerror!?Event,
+        comptime deinit_fn: fn (*T) void,
+    ) type {
+        return struct {
+            pub const vt = Vt{
+                .next = nextFn,
+                .deinit = deinitFn,
+            };
+            fn nextFn(s: *Stream) anyerror!?Event {
+                const self: *T = @fieldParentPtr("stream", s);
+                return next_fn(self);
+            }
+            fn deinitFn(s: *Stream) void {
+                const self: *T = @fieldParentPtr("stream", s);
+                deinit_fn(self);
+            }
+        };
+    }
+
+    /// Like Bind but also includes an abort trampoline.
+    pub fn BindAbortable(
+        comptime T: type,
+        comptime next_fn: fn (*T) anyerror!?Event,
+        comptime deinit_fn: fn (*T) void,
+        comptime abort_fn: fn (*T) void,
+    ) type {
+        return struct {
+            pub const vt = Vt{
+                .next = nextFn,
+                .deinit = deinitFn,
+                .abort = abortFn,
+            };
+            fn nextFn(s: *Stream) anyerror!?Event {
+                const self: *T = @fieldParentPtr("stream", s);
+                return next_fn(self);
+            }
+            fn deinitFn(s: *Stream) void {
+                const self: *T = @fieldParentPtr("stream", s);
+                deinit_fn(self);
+            }
+            fn abortFn(s: *Stream) void {
+                const self: *T = @fieldParentPtr("stream", s);
+                abort_fn(self);
+            }
         };
     }
 };

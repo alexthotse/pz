@@ -137,10 +137,10 @@ const NativeProviderRuntime = union(enum) {
         }
     }
 
-    fn asProvider(self: *NativeProviderRuntime) core.providers.Provider {
+    fn providerPtr(self: *NativeProviderRuntime) *core.providers.Provider {
         return switch (self.*) {
-            .anthropic => |*client| client.asProvider(),
-            .openai => |*client| client.asProvider(),
+            .anthropic => |*client| &client.provider,
+            .openai => |*client| &client.provider,
         };
     }
 
@@ -407,29 +407,22 @@ fn initSubagentStub(pol: *const RuntimePolicy, agent_id: []const u8) !core.agent
 }
 
 const MissingProvider = struct {
+    provider: core.providers.Provider = .{ .vt = &core.providers.Provider.Bind(@This(), @This().start).vt },
     alloc: std.mem.Allocator,
     msg: []const u8 = missing_provider_msg,
 
-    fn asProvider(self: *MissingProvider) core.providers.Provider {
-        return core.providers.Provider.from(MissingProvider, self, MissingProvider.start);
-    }
-
-    fn start(self: *MissingProvider, _: core.providers.Request) !core.providers.Stream {
+    fn start(self: *MissingProvider, _: core.providers.Request) !*core.providers.Stream {
         const stream = try self.alloc.create(MissingProviderStream);
         stream.* = .{
             .alloc = self.alloc,
             .msg = self.msg,
         };
-        return core.providers.Stream.from(
-            MissingProviderStream,
-            stream,
-            MissingProviderStream.next,
-            MissingProviderStream.deinit,
-        );
+        return &stream.stream;
     }
 };
 
 const MissingProviderStream = struct {
+    stream: core.providers.Stream = .{ .vt = &core.providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
     alloc: std.mem.Allocator,
     msg: []const u8,
     idx: u8 = 0,
@@ -1697,7 +1690,7 @@ fn execWithIoTuiHooks(
         .alloc = alloc,
         .msg = missing_provider_msg,
     };
-    var provider: core.providers.Provider = undefined;
+    var provider: *core.providers.Provider = undefined;
     var has_provider_rt = false;
     var has_native_rt = false;
     defer if (has_provider_rt) provider_rt.deinit();
@@ -1803,7 +1796,7 @@ fn execWithIoTuiHooks(
     if (run_cmd.cfg.provider_cmd) |provider_cmd| {
         try provider_rt.init(alloc, provider_cmd);
         has_provider_rt = true;
-        provider = provider_rt.client.asProvider();
+        provider = &provider_rt.client.provider;
     } else {
         const provider_name = resolveDefaultProvider(run_cmd.cfg.provider);
         if (parseNativeProviderKind(provider_name)) |native_kind| {
@@ -1811,14 +1804,14 @@ fn execWithIoTuiHooks(
                 native_rt = nr;
                 has_native_rt = true;
                 if (el) |*e| native_rt.setEventLoop(e);
-                provider = native_rt.asProvider();
+                provider = native_rt.providerPtr();
             } else |err| {
                 missing_provider.msg = missingProviderMsgForInitErr(native_kind, err);
-                provider = missing_provider.asProvider();
+                provider = &missing_provider.provider;
             }
         } else {
             missing_provider.msg = unsupported_native_provider_msg;
-            provider = missing_provider.asProvider();
+            provider = &missing_provider.provider;
         }
     }
 
@@ -1929,7 +1922,7 @@ fn runPrint(
     alloc: std.mem.Allocator,
     run_cmd: cli.Run,
     sid: []const u8,
-    provider: core.providers.Provider,
+    provider: *core.providers.Provider,
     store: core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
@@ -2104,7 +2097,7 @@ fn runJson(
     alloc: std.mem.Allocator,
     run_cmd: cli.Run,
     sid: []const u8,
-    provider: core.providers.Provider,
+    provider: *core.providers.Provider,
     store: core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
@@ -2180,7 +2173,7 @@ fn runTui(
     alloc: std.mem.Allocator,
     run_cmd: cli.Run,
     sid: *([]u8),
-    provider: core.providers.Provider,
+    provider: *core.providers.Provider,
     store: core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
@@ -3292,7 +3285,7 @@ fn runRpc(
     alloc: std.mem.Allocator,
     run_cmd: cli.Run,
     sid: *([]u8),
-    provider: core.providers.Provider,
+    provider: *core.providers.Provider,
     store: core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
@@ -7012,7 +7005,7 @@ fn pasteText(alloc: std.mem.Allocator, ui: *tui_harness.Ui, pol: *const RuntimeP
 
 const TurnCtx = struct {
     alloc: std.mem.Allocator,
-    provider: core.providers.Provider,
+    provider: *core.providers.Provider,
     store: core.session.SessionStore,
     pol: *const RuntimePolicy,
     tools_rt: *core.tools.builtin.Runtime,
@@ -8950,6 +8943,7 @@ test "runtime tui overflow retries once with injected live stdin" {
     defer std.posix.close(stdin_pipe[1]);
 
     const RetryStream = struct {
+        stream: core.providers.Stream = .{ .vt = &core.providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         alloc: std.mem.Allocator,
         evs: []const core.providers.Event,
         idx: usize = 0,
@@ -8967,6 +8961,7 @@ test "runtime tui overflow retries once with injected live stdin" {
     };
 
     const RetryProvider = struct {
+        provider: core.providers.Provider = .{ .vt = &core.providers.Provider.Bind(@This(), @This().start).vt },
         alloc: std.mem.Allocator,
         starts: u8 = 0,
         const first = [_]core.providers.Event{
@@ -8981,18 +8976,14 @@ test "runtime tui overflow retries once with injected live stdin" {
             },
         };
 
-        fn asProvider(self: *@This()) core.providers.Provider {
-            return core.providers.Provider.from(@This(), self, start);
-        }
-
-        fn start(self: *@This(), _: core.providers.Request) !core.providers.Stream {
+        fn start(self: *@This(), _: core.providers.Request) !*core.providers.Stream {
             self.starts += 1;
-            const stream = try self.alloc.create(RetryStream);
-            stream.* = .{
+            const s = try self.alloc.create(RetryStream);
+            s.* = .{
                 .alloc = self.alloc,
                 .evs = if (self.starts == 1) &first else &second,
             };
-            return core.providers.Stream.from(RetryStream, stream, RetryStream.next, RetryStream.deinit);
+            return &s.stream;
         }
     };
     var provider_impl = RetryProvider{ .alloc = std.testing.allocator };
@@ -9023,7 +9014,7 @@ test "runtime tui overflow retries once with injected live stdin" {
         std.testing.allocator,
         cfg,
         &sid,
-        provider_impl.asProvider(),
+        &provider_impl.provider,
         fs_store.asSessionStore(),
         &pol,
         &tools_rt,
@@ -10115,7 +10106,7 @@ test "TurnCtx.run binds approval context for destructive tools" {
 
     const tctx = TurnCtx{
         .alloc = std.testing.allocator,
-        .provider = scripted.asProvider(),
+        .provider = &scripted.provider,
         .store = store,
         .pol = &pol,
         .tools_rt = &tools_rt,

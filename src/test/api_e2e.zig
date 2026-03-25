@@ -66,11 +66,10 @@ test "real API: simple prompt returns text" {
     };
     defer client.deinit(); // owns auth arena
 
-    var prov = client.asProvider();
-    var stream = try prov.start(simpleReq("claude-sonnet-4-20250514"));
+    const stream = try client.provider.start(simpleReq("claude-sonnet-4-20250514"));
     defer stream.deinit();
 
-    const stats = try drainStream(&stream);
+    const stats = try drainStream(stream);
     // Skip if auth expired (no text, has error = auth failure)
     // API key auth is guaranteed by loadAuthOrSkip — errors are real failures.
     try std.testing.expect(stats.text > 0);
@@ -83,11 +82,10 @@ test "real API: invalid key returns auth error" {
     var client = try makeClientWithKey("sk-bogus-invalid-key-12345");
     defer client.deinit();
 
-    var prov = client.asProvider();
-    var stream = try prov.start(simpleReq("claude-sonnet-4-20250514"));
+    const stream = try client.provider.start(simpleReq("claude-sonnet-4-20250514"));
     defer stream.deinit();
 
-    const stats = try drainStream(&stream);
+    const stats = try drainStream(stream);
     // Invalid key: API returns error, not text
     try std.testing.expect(stats.text == 0);
     try std.testing.expect(stats.has_err);
@@ -103,11 +101,10 @@ test "real API: streaming delivers events" {
     };
     defer client.deinit();
 
-    var prov = client.asProvider();
-    var stream = try prov.start(simpleReq("claude-sonnet-4-20250514"));
+    const stream = try client.provider.start(simpleReq("claude-sonnet-4-20250514"));
     defer stream.deinit();
 
-    const stats = try drainStream(&stream);
+    const stats = try drainStream(stream);
     // API key auth is guaranteed by loadAuthOrSkip — errors are real failures.
     try std.testing.expect(stats.total > 1);
     try std.testing.expect(stats.text > 0);
@@ -123,11 +120,10 @@ test "real API: bad model returns error" {
     };
     defer client.deinit();
 
-    var prov = client.asProvider();
-    var stream = try prov.start(simpleReq("nonexistent-model-xyz"));
+    const stream = try client.provider.start(simpleReq("nonexistent-model-xyz"));
     defer stream.deinit();
 
-    const stats = try drainStream(&stream);
+    const stats = try drainStream(stream);
     try std.testing.expect(stats.text == 0);
     try std.testing.expect(stats.has_err);
 }

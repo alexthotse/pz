@@ -471,6 +471,7 @@ pub fn SseClient(comptime Cfg: type) type {
         ca_file: ?[]u8,
         el: ?*EventLoop = null,
         cancel: ?providers.CancelPoll = null,
+        provider: providers.Provider = .{ .vt = &provider_vt },
 
         pub fn init(alloc: std.mem.Allocator, hooks: auth_mod.Hooks) !Self {
             var auth_res = try auth_mod.loadForProviderWithHooks(alloc, Cfg.provider_tag, hooks);
@@ -495,11 +496,12 @@ pub fn SseClient(comptime Cfg: type) type {
             return self.auth.auth == .oauth;
         }
 
-        pub fn asProvider(self: *Self) providers.Provider {
-            return providers.Provider.from(Self, self, Self.start);
-        }
+        const provider_vt = providers.Provider.Vt{
+            .start = providerStart,
+        };
 
-        fn start(self: *Self, req: providers.Request) anyerror!providers.Stream {
+        fn providerStart(p: *providers.Provider, req: providers.Request) anyerror!*providers.Stream {
+            const self: *Self = @fieldParentPtr("provider", p);
             const stream = try self.alloc.create(Stream);
             stream.* = Stream.initFields(self.alloc);
             stream.el = self.el;
@@ -532,7 +534,7 @@ pub fn SseClient(comptime Cfg: type) type {
                 }
             }
 
-            return providers.Stream.fromAbortable(Stream, stream, Stream.next, Stream.deinit, Stream.abort);
+            return &stream.stream;
         }
     };
 }
@@ -541,6 +543,9 @@ pub fn SseClient(comptime Cfg: type) type {
 pub fn SseStream(comptime Cfg: type) type {
     return struct {
         const Self = @This();
+
+        // Embedded stream vtable
+        stream: providers.Stream = .{ .vt = &stream_vt },
 
         // Shared fields
         alloc: std.mem.Allocator,
@@ -574,6 +579,39 @@ pub fn SseStream(comptime Cfg: type) type {
 
         // Provider-specific fields
         ext: Cfg.ExtFields,
+
+        const stream_vt = providers.Stream.Vt{
+            .next = streamNext,
+            .deinit = streamDeinit,
+            .abort = streamAbort,
+        };
+
+        fn streamNext(s: *providers.Stream) anyerror!?providers.Event {
+            const self: *Self = @fieldParentPtr("stream", s);
+            return sseNext(self);
+        }
+
+        fn streamDeinit(s: *providers.Stream) void {
+            const self: *Self = @fieldParentPtr("stream", s);
+            if (self.el) |el| {
+                if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
+            }
+            const alloc = self.alloc;
+            self.nb_buf.deinit(alloc);
+            Cfg.ext_deinit(self, alloc);
+            self.tool_name.deinit(alloc);
+            self.tool_args.deinit(alloc);
+            self.req.deinit();
+            self.arena.deinit();
+            alloc.destroy(self);
+        }
+
+        fn streamAbort(s: *providers.Stream) void {
+            const self: *Self = @fieldParentPtr("stream", s);
+            if (self.req.connection) |conn| {
+                std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
+            }
+        }
 
         pub fn initFields(alloc: std.mem.Allocator) Self {
             return .{
@@ -610,23 +648,11 @@ pub fn SseStream(comptime Cfg: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.el) |el| {
-                if (self.conn_fd) |fd| el.unregister(fd) catch {}; // cleanup: propagation impossible
-            }
-            const alloc = self.alloc;
-            self.nb_buf.deinit(alloc);
-            Cfg.ext_deinit(self, alloc);
-            self.tool_name.deinit(alloc);
-            self.tool_args.deinit(alloc);
-            self.req.deinit();
-            self.arena.deinit();
-            alloc.destroy(self);
+            streamDeinit(&self.stream);
         }
 
         pub fn abort(self: *Self) void {
-            if (self.req.connection) |conn| {
-                std.posix.shutdown(conn.stream_reader.getStream().handle, .recv) catch {}; // cleanup: propagation impossible
-            }
+            streamAbort(&self.stream);
         }
     };
 }

@@ -348,7 +348,7 @@ pub const Opts = struct {
     prompt: []const u8,
     model: []const u8,
     provider_label: ?[]const u8 = null,
-    provider: providers.Provider,
+    provider: *providers.Provider,
     store: session.SessionStore,
     reg: tools.Registry,
     mode: ModeSink,
@@ -556,7 +556,7 @@ pub const LoopCtx = struct {
     turns: u16,
     tool_calls: u32,
     turn_arena: std.heap.ArenaAllocator,
-    stream: ?providers.Stream,
+    stream: ?*providers.Stream,
     saw_tool_call: bool,
     pending_tc: ?providers.ToolCall,
     turn_state: TurnState,
@@ -639,7 +639,7 @@ pub const LoopCtx = struct {
     }
 
     pub fn deinit(self: *LoopCtx) void {
-        if (self.stream) |*s| s.deinit();
+        if (self.stream) |s| s.deinit();
         self.turn_arena.deinit();
         for (self.req_tools) |t| self.opts.alloc.free(t.schema);
         self.opts.alloc.free(self.req_tools);
@@ -667,7 +667,7 @@ pub const LoopCtx = struct {
                     return failWithReport(self.opts, .provider_start, msg_err);
                 };
 
-                if (self.stream) |*s| s.deinit();
+                if (self.stream) |s| s.deinit();
                 self.stream = self.opts.provider.start(.{
                     .model = self.opts.model,
                     .provider = self.opts.provider_label,
@@ -1563,6 +1563,7 @@ test "loop smoke composes replay provider tool and mode" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event = &.{},
         idx: usize = 0,
         deinit_ct: usize = 0,
@@ -1580,12 +1581,13 @@ test "loop smoke composes replay provider tool and mode" {
     };
 
     const ProviderImpl = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
         start_ct: usize = 0,
         turn1: []const providers.Event,
         turn2: []const providers.Event,
-        stream: StreamImpl = .{},
+        stream_impl: StreamImpl = .{},
 
-        fn start(self: *@This(), req: providers.Request) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             self.start_ct += 1;
             try std.testing.expectEqual(@as(usize, 1), req.tools.len);
             try std.testing.expectEqualStrings("read", req.tools[0].name);
@@ -1596,23 +1598,18 @@ test "loop smoke composes replay provider tool and mode" {
                     try expectGuardMsg(req.msgs[0], null);
                     try expectMsgText(req.msgs[1], .user, "<untrusted-input kind=\"user-prompt\">\nprev\n</untrusted-input>");
                     try expectMsgText(req.msgs[2], .user, "<untrusted-input kind=\"user-prompt\">\nship-it\n</untrusted-input>");
-                    self.stream.evs = self.turn1;
-                    self.stream.idx = 0;
+                    self.stream_impl.evs = self.turn1;
+                    self.stream_impl.idx = 0;
                 },
                 2 => {
                     try std.testing.expect(hasToolResult(req, "call-1", "tool-ok"));
-                    self.stream.evs = self.turn2;
-                    self.stream.idx = 0;
+                    self.stream_impl.evs = self.turn2;
+                    self.stream_impl.idx = 0;
                 },
                 else => return error.TestUnexpectedResult,
             }
 
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+            return &self.stream_impl.stream;
         }
     };
 
@@ -1721,11 +1718,7 @@ test "loop smoke composes replay provider tool and mode" {
         .turn1 = turn1[0..],
         .turn2 = turn2[0..],
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{
         .replay_evs = replay[0..],
@@ -1776,7 +1769,7 @@ test "loop smoke composes replay provider tool and mode" {
         .sid = "sid-1",
         .prompt = "ship-it",
         .model = "m1",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = reg,
         .mode = mode,
@@ -1830,7 +1823,7 @@ test "loop smoke composes replay provider tool and mode" {
     ).expectEqual(Snap{
         .out = out,
         .provider_start_ct = provider_impl.start_ct,
-        .provider_deinit_ct = provider_impl.stream.deinit_ct,
+        .provider_deinit_ct = provider_impl.stream_impl.deinit_ct,
         .dispatch_run_ct = dispatch_impl.run_ct,
         .store_append_ct = store_impl.append_ct,
         .store_replay_sid = store_impl.replay_sid,
@@ -1877,6 +1870,7 @@ test "loop smoke finishes single turn with no tools" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         idx: usize = 0,
         evs: []const providers.Event,
         deinit_ct: usize = 0,
@@ -1894,23 +1888,19 @@ test "loop smoke finishes single turn with no tools" {
     };
 
     const ProviderImpl = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
         start_ct: usize = 0,
-        stream: StreamImpl,
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), req: providers.Request) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             self.start_ct += 1;
             try std.testing.expectEqual(@as(usize, 2), req.msgs.len);
             try expectGuardMsg(req.msgs[0], null);
             try expectMsgText(req.msgs[1], .user, "<untrusted-input kind=\"user-prompt\">\nhello\n</untrusted-input>");
             try std.testing.expectEqual(@as(usize, 0), req.tools.len);
 
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -1941,15 +1931,11 @@ test "loop smoke finishes single turn with no tools" {
         },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{
+        .stream_impl = .{
             .evs = evs[0..],
         },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -1974,7 +1960,7 @@ test "loop smoke finishes single turn with no tools" {
         .sid = "sid-2",
         .prompt = "hello",
         .model = "m2",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = reg,
         .mode = mode,
@@ -2007,7 +1993,7 @@ test "loop smoke finishes single turn with no tools" {
     ).expectEqual(Snap{
         .out = out,
         .provider_start_ct = provider_impl.start_ct,
-        .provider_deinit_ct = provider_impl.stream.deinit_ct,
+        .provider_deinit_ct = provider_impl.stream_impl.deinit_ct,
         .store_append_ct = store_impl.append_ct,
         .mode_replay_ct = mode_impl.replay_ct,
         .mode_session_ct = mode_impl.session_ct,
@@ -2048,6 +2034,7 @@ test "loop cancellation emits canceled stop and exits early" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -2062,16 +2049,12 @@ test "loop cancellation emits canceled stop and exits early" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -2101,15 +2084,11 @@ test "loop cancellation emits canceled stop and exits early" {
         },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{
+        .stream_impl = .{
             .evs = evs[0..],
         },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -2131,7 +2110,7 @@ test "loop cancellation emits canceled stop and exits early" {
         .sid = "sid-cancel",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -2194,7 +2173,8 @@ test "runTool forwards cancel source to dispatch" {
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Request) !providers.Stream {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        fn start(_: *@This(), _: providers.Request) !*providers.Stream {
             return error.Unused;
         }
     };
@@ -2252,11 +2232,7 @@ test "runTool forwards cancel source to dispatch" {
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
 
     var provider_impl = ProviderImpl{};
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -2275,7 +2251,7 @@ test "runTool forwards cancel source to dispatch" {
         .sid = "sid-tool-cancel",
         .prompt = "prompt",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -2329,7 +2305,8 @@ test "runTool approval hook binds repo policy session and cache state" {
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Request) !providers.Stream {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        fn start(_: *@This(), _: providers.Request) !*providers.Stream {
             return error.Unused;
         }
     };
@@ -2396,7 +2373,7 @@ test "runTool approval hook binds repo policy session and cache state" {
     var mode_impl = ModeImpl{};
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
     var provider_impl = ProviderImpl{};
-    const provider = providers.Provider.from(ProviderImpl, &provider_impl, ProviderImpl.start);
+    
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(StoreImpl, &store_impl, StoreImpl.append, StoreImpl.replay, StoreImpl.deinit);
     var cache = CmdCache.init(std.testing.allocator);
@@ -2416,7 +2393,7 @@ test "runTool approval hook binds repo policy session and cache state" {
         .sid = "sid-approve",
         .prompt = "prompt",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -2502,6 +2479,7 @@ test "loop requires approval before bash escalation from malicious comment repla
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -2516,14 +2494,15 @@ test "loop requires approval before bash escalation from malicious comment repla
     };
 
     const ProviderImpl = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
         req_snap: ?[]u8 = null,
-        stream: StreamImpl = .{
+        stream_impl: StreamImpl = .{
             .evs = &.{},
         },
 
-        fn start(self: *@This(), req: providers.Request) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             self.req_snap = try fmtReqMsgs(std.testing.allocator, req.msgs);
-            self.stream = .{
+            self.stream_impl = .{
                 .evs = &.{
                     .{
                         .tool_call = .{
@@ -2537,7 +2516,7 @@ test "loop requires approval before bash escalation from malicious comment repla
                     },
                 },
             };
-            return providers.Stream.from(StreamImpl, &self.stream, StreamImpl.next, StreamImpl.deinit);
+            return &self.stream_impl.stream;
         }
     };
 
@@ -2584,7 +2563,7 @@ test "loop requires approval before bash escalation from malicious comment repla
 
     var provider_impl = ProviderImpl{};
     defer if (provider_impl.req_snap) |snap| std.testing.allocator.free(snap);
-    const provider = providers.Provider.from(ProviderImpl, &provider_impl, ProviderImpl.start);
+    
 
     var mode_impl = ModeImpl{};
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
@@ -2616,7 +2595,7 @@ test "loop requires approval before bash escalation from malicious comment repla
         .sid = "sid-comment",
         .prompt = "ship",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -2683,6 +2662,7 @@ test "loop requires approval before web post escalation from malicious page repl
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -2697,14 +2677,15 @@ test "loop requires approval before web post escalation from malicious page repl
     };
 
     const ProviderImpl = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
         req_snap: ?[]u8 = null,
-        stream: StreamImpl = .{
+        stream_impl: StreamImpl = .{
             .evs = &.{},
         },
 
-        fn start(self: *@This(), req: providers.Request) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             self.req_snap = try fmtReqMsgs(std.testing.allocator, req.msgs);
-            self.stream = .{
+            self.stream_impl = .{
                 .evs = &.{
                     .{
                         .tool_call = .{
@@ -2718,7 +2699,7 @@ test "loop requires approval before web post escalation from malicious page repl
                     },
                 },
             };
-            return providers.Stream.from(StreamImpl, &self.stream, StreamImpl.next, StreamImpl.deinit);
+            return &self.stream_impl.stream;
         }
     };
 
@@ -2765,7 +2746,7 @@ test "loop requires approval before web post escalation from malicious page repl
 
     var provider_impl = ProviderImpl{};
     defer if (provider_impl.req_snap) |snap| std.testing.allocator.free(snap);
-    const provider = providers.Provider.from(ProviderImpl, &provider_impl, ProviderImpl.start);
+    
 
     var mode_impl = ModeImpl{};
     const mode = ModeSink.from(ModeImpl, &mode_impl, ModeImpl.push);
@@ -2797,7 +2778,7 @@ test "loop requires approval before web post escalation from malicious page repl
         .sid = "sid-page",
         .prompt = "continue",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -2859,6 +2840,7 @@ test "loop compaction trigger runs at configured append cadence" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -2873,16 +2855,12 @@ test "loop compaction trigger runs at configured append cadence" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -2907,15 +2885,11 @@ test "loop compaction trigger runs at configured append cadence" {
         },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{
+        .stream_impl = .{
             .evs = evs[0..],
         },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -2937,7 +2911,7 @@ test "loop compaction trigger runs at configured append cadence" {
         .sid = "sid-comp",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -3098,6 +3072,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event = &.{},
         idx: usize = 0,
 
@@ -3112,27 +3087,23 @@ test "loop reloads history from compacted replay across repeated compactions" {
     };
 
     const ProviderImpl = struct {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
         turn1: []const providers.Event,
         turn2: []const providers.Event,
-        stream: StreamImpl = .{},
+        stream_impl: StreamImpl = .{},
         start_ct: usize = 0,
         req_snap: [2]?[]u8 = .{ null, null },
 
-        fn start(self: *@This(), req: providers.Request) !providers.Stream {
+        fn start(self: *@This(), req: providers.Request) !*providers.Stream {
             const slot = self.start_ct;
             if (slot >= self.req_snap.len) return error.TestUnexpectedResult;
             self.req_snap[slot] = try fmtReqMsgs(std.testing.allocator, req.msgs);
             self.start_ct += 1;
-            self.stream = .{
+            self.stream_impl = .{
                 .evs = if (self.start_ct == 1) self.turn1 else self.turn2,
                 .idx = 0,
             };
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+            return &self.stream_impl.stream;
         }
     };
 
@@ -3259,11 +3230,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
     defer for (provider_impl.req_snap) |snap| {
         if (snap) |s| std.testing.allocator.free(s);
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var dispatch_impl = DispatchImpl{};
     const entries = [_]tools.Entry{
@@ -3302,7 +3269,7 @@ test "loop reloads history from compacted replay across repeated compactions" {
         .sid = "sid-hist-compact",
         .prompt = "live-user",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -3350,8 +3317,6 @@ test "loop reloads history from compacted replay across repeated compactions" {
 }
 
 test "loop unified runtime error reporting appends stage-tagged error event" {
-    const StartErr = error{StartBoom};
-
     const ReaderImpl = struct {
         fn next(_: *@This()) !?session.Event {
             return null;
@@ -3391,7 +3356,8 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Request) StartErr!providers.Stream {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        fn start(_: *@This(), _: providers.Request) anyerror!*providers.Stream {
             return error.StartBoom;
         }
     };
@@ -3401,11 +3367,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
     };
 
     var provider_impl = ProviderImpl{};
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -3424,7 +3386,7 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
         .sid = "sid-err",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -3436,8 +3398,6 @@ test "loop unified runtime error reporting appends stage-tagged error event" {
 }
 
 test "loop runtime error append failure preserves original error and reports session write error" {
-    const StartErr = error{StartBoom};
-
     const ReaderImpl = struct {
         fn next(_: *@This()) !?session.Event {
             return null;
@@ -3466,7 +3426,8 @@ test "loop runtime error append failure preserves original error and reports ses
     };
 
     const ProviderImpl = struct {
-        fn start(_: *@This(), _: providers.Request) StartErr!providers.Stream {
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        fn start(_: *@This(), _: providers.Request) anyerror!*providers.Stream {
             return error.StartBoom;
         }
     };
@@ -3487,11 +3448,7 @@ test "loop runtime error append failure preserves original error and reports ses
     };
 
     var provider_impl = ProviderImpl{};
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -3510,7 +3467,7 @@ test "loop runtime error append failure preserves original error and reports ses
         .sid = "sid-err-write",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -3577,6 +3534,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -3591,16 +3549,12 @@ test "mid-stream cancel delivers partial text then canceled stop" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -3645,13 +3599,9 @@ test "mid-stream cancel delivers partial text then canceled stop" {
         },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -3673,7 +3623,7 @@ test "mid-stream cancel delivers partial text then canceled stop" {
         .sid = "sid-midcancel",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -3744,6 +3694,7 @@ test "loop cancel append failure still returns canceled turn and reports session
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -3758,16 +3709,12 @@ test "loop cancel append failure still returns canceled turn and reports session
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -3814,13 +3761,9 @@ test "loop cancel append failure still returns canceled turn and reports session
         },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -3842,7 +3785,7 @@ test "loop cancel append failure still returns canceled turn and reports session
         .sid = "sid-midcancel-write",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -3966,7 +3909,6 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
     };
     var provider_impl = try provider_mock.ScriptedProvider.init(steps[0..]);
     defer provider_impl.deinit();
-    const provider = provider_impl.asProvider();
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -3996,7 +3938,7 @@ test "abort slot cancels blocked provider stream quickly and preserves partial t
         .sid = "sid-block-cancel",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -4114,7 +4056,6 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
     };
     var provider_impl = try provider_mock.ScriptedProvider.init(steps[0..]);
     defer provider_impl.deinit();
-    const provider = provider_impl.asProvider();
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -4144,7 +4085,7 @@ test "P0-2 cancel latency: streaming every 50ms cancels within 200ms with partia
         .sid = "sid-p02-cancel",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -4633,6 +4574,7 @@ test "loop text streaming append OOM reports session write error and continues" 
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -4647,16 +4589,12 @@ test "loop text streaming append OOM reports session write error and continues" 
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -4685,13 +4623,9 @@ test "loop text streaming append OOM reports session write error and continues" 
         .{ .stop = .{ .reason = .done } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -4710,7 +4644,7 @@ test "loop text streaming append OOM reports session write error and continues" 
         .sid = "sid-text-oom",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -4773,6 +4707,7 @@ test "loop prompt append OOM reports session write error and continues" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -4787,16 +4722,12 @@ test "loop prompt append OOM reports session write error and continues" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -4820,13 +4751,9 @@ test "loop prompt append OOM reports session write error and continues" {
         .{ .stop = .{ .reason = .done } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -4845,7 +4772,7 @@ test "loop prompt append OOM reports session write error and continues" {
         .sid = "sid-prompt-oom",
         .prompt = "hello",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(&.{}),
         .mode = mode,
@@ -4906,6 +4833,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -4920,16 +4848,12 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -4976,13 +4900,9 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
         .{ .stop = .{ .reason = .tool } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     defer store_impl.deinit();
@@ -5024,7 +4944,7 @@ test "denied tool events appear in causal order: tool_call before denied tool_re
         .sid = "sid-deny-order",
         .prompt = "do it",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -5092,6 +5012,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -5106,16 +5027,12 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -5173,13 +5090,9 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
         .{ .stop = .{ .reason = .tool } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     defer store_impl.deinit();
@@ -5222,7 +5135,7 @@ test "UX9 walkthrough: denied bash renders denial text in mode and store events"
         .sid = "sid-ux9-deny",
         .prompt = "do it",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -5303,6 +5216,7 @@ test "UX8b: agent tool returns structured result with status" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -5317,16 +5231,12 @@ test "UX8b: agent tool returns structured result with status" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -5367,13 +5277,9 @@ test "UX8b: agent tool returns structured result with status" {
         .{ .stop = .{ .reason = .done } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const prov = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -5412,7 +5318,7 @@ test "UX8b: agent tool returns structured result with status" {
         .sid = "sid-agent",
         .prompt = "spawn agent",
         .model = "m",
-        .provider = prov,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -5466,6 +5372,7 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -5480,16 +5387,12 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -5524,13 +5427,9 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
         .{ .stop = .{ .reason = .done } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const prov = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     const store = session.SessionStore.from(
@@ -5572,7 +5471,7 @@ test "UX8b: denied agent tool blocked by policy returns error result" {
         .sid = "sid-deny-agent",
         .prompt = "spawn",
         .model = "m",
-        .provider = prov,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,
@@ -5621,6 +5520,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     };
 
     const StreamImpl = struct {
+        stream: providers.Stream = .{ .vt = &providers.Stream.Bind(@This(), @This().next, @This().deinit).vt },
         evs: []const providers.Event,
         idx: usize = 0,
 
@@ -5635,16 +5535,12 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
     };
 
     const ProviderImpl = struct {
-        stream: StreamImpl,
+        provider: providers.Provider = .{ .vt = &providers.Provider.Bind(@This(), @This().start).vt },
+        stream_impl: StreamImpl,
 
-        fn start(self: *@This(), _: providers.Request) !providers.Stream {
-            self.stream.idx = 0;
-            return providers.Stream.from(
-                StreamImpl,
-                &self.stream,
-                StreamImpl.next,
-                StreamImpl.deinit,
-            );
+        fn start(self: *@This(), _: providers.Request) !*providers.Stream {
+            self.stream_impl.idx = 0;
+            return &self.stream_impl.stream;
         }
     };
 
@@ -5705,13 +5601,9 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
         .{ .stop = .{ .reason = .tool } },
     };
     var provider_impl = ProviderImpl{
-        .stream = .{ .evs = evs[0..] },
+        .stream_impl = .{ .evs = evs[0..] },
     };
-    const provider = providers.Provider.from(
-        ProviderImpl,
-        &provider_impl,
-        ProviderImpl.start,
-    );
+    
 
     var store_impl = StoreImpl{};
     defer store_impl.deinit();
@@ -5752,7 +5644,7 @@ test "UX9: denied web tool emits audit via tool_auth and blocks dispatch" {
         .sid = "sid-ux9-web-audit",
         .prompt = "do it",
         .model = "m",
-        .provider = provider,
+        .provider = &provider_impl.provider,
         .store = store,
         .reg = tools.Registry.init(entries[0..]),
         .mode = mode,

@@ -29,6 +29,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
         pol: Policy,
         slp: ?*Slp = null,
         cancel: ?providers.CancelPoll = null,
+        provider: providers.Provider = .{ .vt = &provider_vt },
 
         const Self = @This();
 
@@ -46,11 +47,12 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
             };
         }
 
-        pub fn asProvider(self: *Self) providers.Provider {
-            return providers.Provider.from(Self, self, Self.start);
-        }
+        const provider_vt = providers.Provider.Vt{
+            .start = providerStart,
+        };
 
-        fn start(self: *Self, req: providers.Request) anyerror!providers.Stream {
+        fn providerStart(p: *providers.Provider, req: providers.Request) anyerror!*providers.Stream {
+            const self: *Self = @fieldParentPtr("provider", p);
             const req_wire = try proc_wire.buildReq(self.alloc, req);
             defer self.alloc.free(req_wire);
 
@@ -77,7 +79,7 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
                 .out = out,
             };
 
-            return providers.Stream.from(BufStream, st, BufStream.next, BufStream.deinit);
+            return &st.stream;
         }
 
         const ChunkCtx = struct {
@@ -118,11 +120,18 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
         };
 
         const BufStream = struct {
+            stream: providers.Stream = .{ .vt = &buf_stream_vt },
             alloc: std.mem.Allocator,
             out: RunResult,
             idx: usize = 0,
 
-            fn next(self: *BufStream) anyerror!?providers.Event {
+            const buf_stream_vt = providers.Stream.Vt{
+                .next = bufNext,
+                .deinit = bufDeinit,
+            };
+
+            fn bufNext(s: *providers.Stream) anyerror!?providers.Event {
+                const self: *BufStream = @fieldParentPtr("stream", s);
                 if (self.idx >= self.out.evs.len) return null;
 
                 const ev = self.out.evs[self.idx];
@@ -130,7 +139,8 @@ pub fn Client(comptime RawTr: type, comptime Map: type, comptime Slp: type) type
                 return ev;
             }
 
-            fn deinit(self: *BufStream) void {
+            fn bufDeinit(s: *providers.Stream) void {
+                const self: *BufStream = @fieldParentPtr("stream", s);
                 self.out.deinit();
                 self.alloc.destroy(self);
             }
@@ -648,7 +658,7 @@ test "first provider retries transient start and streams parsed events" {
         .msgs = &.{},
     };
 
-    var stream = try cli.asProvider().start(req);
+    var stream = try cli.provider.start(req);
     defer stream.deinit();
 
     const ev0 = (try stream.next()) orelse return error.TestUnexpectedResult;
@@ -714,7 +724,7 @@ test "first provider maps fatal transport errors without retry" {
         .msgs = &.{},
     };
 
-    try std.testing.expectError(error.TransportFatal, cli.asProvider().start(req));
+    try std.testing.expectError(error.TransportFatal, cli.provider.start(req));
     const snap = try std.fmt.allocPrint(std.testing.allocator, "starts={d}\nwaits={d}\nmap_calls={d}\n", .{
         tr.start_ct,
         waits.len,
@@ -765,7 +775,7 @@ test "first provider retries on transient chunk read failures" {
         .msgs = &.{},
     };
 
-    var stream = try cli.asProvider().start(req);
+    var stream = try cli.provider.start(req);
     defer stream.deinit();
 
     const ev0 = (try stream.next()) orelse return error.TestUnexpectedResult;
