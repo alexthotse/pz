@@ -326,8 +326,7 @@ const PolicyToolAuth = struct {
     alloc: std.mem.Allocator,
     pol: *const RuntimePolicy,
     sid: []const u8,
-    emit_audit_ctx: ?*anyopaque = null,
-    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    audit_emitter: ?*core.audit.Emitter = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
     seq: *u64,
 
@@ -347,11 +346,11 @@ const PolicyToolAuth = struct {
     }
 
     fn emitDeny(self: *@This(), call_id: []const u8, name: []const u8, kind: core.tools.Kind, parsed_args: core.tools.Call.Args) !void {
-        const emit = self.emit_audit orelse return;
+        const e = self.audit_emitter orelse return;
         const seq = self.seq.*;
         self.seq.* +%= 1;
         const info = toolAuditInfo(kind, parsed_args);
-        try emit(self.emit_audit_ctx.?, self.alloc, .{
+        try e.emit(self.alloc, .{
             .ts_ms = self.now_ms(),
             .sid = self.sid,
             .seq = seq,
@@ -1326,8 +1325,7 @@ const RpcReq = struct {
 };
 
 const AuditHooks = struct {
-    emit_audit_ctx: ?*anyopaque = null,
-    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    audit_emitter: ?*core.audit.Emitter = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
     auth_home: ?[]const u8 = null,
     auth_lock: core.policy.Lock = .{},
@@ -1341,17 +1339,17 @@ const AuditHooks = struct {
             .home_override = self.auth_home,
             .ca_file = self.ca_file,
             .lock = self.auth_lock,
-            .emit_audit_ctx = self.emit_audit_ctx,
-            .emit_audit = self.emit_audit,
+            .audit_emitter = self.audit_emitter,
             .now_ms = self.now_ms,
         };
     }
 };
 
-/// Live audit forwarder: wraps SyslogShipper to implement emit_audit callback.
+/// Live audit forwarder: wraps SyslogShipper via Emitter interface.
 /// Events are syslog-framed, buffered to a durable Ring spool on disconnect,
 /// and flushed in order on reconnect.
 const AuditShipper = struct {
+    emitter: core.audit.Emitter = .{ .vt = &core.audit.Emitter.Bind(@This(), emitAudit).vt },
     alloc: std.mem.Allocator,
     shipper: core.audit.SyslogShipper,
     sender_conn: core.audit.SenderConnector,
@@ -1395,14 +1393,8 @@ const AuditShipper = struct {
         self.shipper.deinit();
     }
 
-    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
-        const self: *AuditShipper = @ptrCast(@alignCast(ctx));
-        _ = alloc;
+    fn emitAudit(self: *AuditShipper, _: std.mem.Allocator, ent: core.audit.Entry) !void {
         _ = try self.shipper.send(ent, self.now_ms());
-    }
-
-    fn emitFn(self: *AuditShipper) struct { ctx: *anyopaque, f: *const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void } {
-        return .{ .ctx = self, .f = &emit };
     }
 };
 
@@ -1422,10 +1414,10 @@ const RuntimeCtlAudit = struct {
     };
 
     fn emit(self: *RuntimeCtlAudit, alloc: std.mem.Allocator, req: Req) !void {
-        const emit_fn = self.hooks.emit_audit orelse return;
+        const e = self.hooks.audit_emitter orelse return;
         const seq = self.seq;
         self.seq +%= 1;
-        try emit_fn(self.hooks.emit_audit_ctx.?, alloc, .{
+        try e.emit(alloc, .{
             .ts_ms = self.hooks.now_ms(),
             .sid = "runtime",
             .seq = seq,
@@ -1457,10 +1449,10 @@ const PolicyToolAudit = struct {
     seq: *u64,
 
     fn emit(self: PolicyToolAudit, call: core.tools.Call, name: []const u8) !void {
-        const emit_fn = self.hooks.emit_audit orelse return;
+        const e = self.hooks.audit_emitter orelse return;
         const seq = self.seq.*;
         self.seq.* +%= 1;
-        try emit_fn(self.hooks.emit_audit_ctx.?, self.alloc, .{
+        try e.emit(self.alloc, .{
             .ts_ms = self.hooks.now_ms(),
             .sid = self.sid,
             .seq = seq,
@@ -1525,8 +1517,7 @@ fn runtimeUpgradeResName() core.audit.Str {
 
 fn exportAuditHooks(hooks: AuditHooks) core.session.@"export".AuditHooks {
     return .{
-        .emit_audit_ctx = hooks.emit_audit_ctx,
-        .emit_audit = hooks.emit_audit,
+        .audit_emitter = hooks.audit_emitter,
         .now_ms = hooks.now_ms,
     };
 }
@@ -1534,8 +1525,7 @@ fn exportAuditHooks(hooks: AuditHooks) core.session.@"export".AuditHooks {
 fn updateAuditHooks(hooks: AuditHooks, home: ?[]const u8) update_mod.AuditHooks {
     return .{
         .home = home,
-        .emit_audit_ctx = hooks.emit_audit_ctx,
-        .emit_audit = hooks.emit_audit,
+        .audit_emitter = hooks.audit_emitter,
         .now_ms = hooks.now_ms,
     };
 }
@@ -1729,7 +1719,7 @@ fn execWithIoTuiHooks(
     defer if (spool_dir) |*d| d.close();
     defer if (has_audit_shipper) audit_shipper.deinit();
 
-    if (hooks.emit_audit == null) {
+    if (hooks.audit_emitter == null) {
         if (run_cmd.cfg.syslog_fwd) |fwd| {
             if (parseSyslogTransport(fwd.transport)) |transport| {
                 const overflow: core.audit.OverflowPolicy = switch (run_cmd.cfg.audit_overflow) {
@@ -1768,9 +1758,7 @@ fn execWithIoTuiHooks(
                     .now_ms = hooks.now_ms,
                 });
                 has_audit_shipper = true;
-                const fns = audit_shipper.emitFn();
-                hooks.emit_audit_ctx = fns.ctx;
-                hooks.emit_audit = fns.f;
+                hooks.audit_emitter = &audit_shipper.emitter;
             } else return error.InvalidSyslogTransport;
         }
     }
@@ -1963,8 +1951,7 @@ fn runPrint(
         .alloc = alloc,
         .pol = pol,
         .sid = sid,
-        .emit_audit_ctx = audit_hooks.emit_audit_ctx,
-        .emit_audit = audit_hooks.emit_audit,
+        .audit_emitter = audit_hooks.audit_emitter,
         .now_ms = audit_hooks.now_ms,
         .seq = &tool_audit_seq,
     };
@@ -2282,8 +2269,7 @@ fn runTui(
         .tmp_dir = run_cmd.tmp_dir,
         .pz_state_dir = run_cmd.state_dir,
         .xdg_state_home = run_cmd.xdg_state_home,
-        .emit_audit_ctx = audit_hooks.emit_audit_ctx,
-        .emit_audit = audit_hooks.emit_audit,
+        .audit_emitter = audit_hooks.audit_emitter,
         .now_ms = audit_hooks.now_ms,
     });
     defer bg_mgr.deinit();
@@ -3350,8 +3336,7 @@ fn runRpc(
         .tmp_dir = run_cmd.tmp_dir,
         .pz_state_dir = run_cmd.state_dir,
         .xdg_state_home = run_cmd.xdg_state_home,
-        .emit_audit_ctx = audit_hooks.emit_audit_ctx,
-        .emit_audit = audit_hooks.emit_audit,
+        .audit_emitter = audit_hooks.audit_emitter,
         .now_ms = audit_hooks.now_ms,
     });
     defer bg_mgr.deinit();
@@ -7067,8 +7052,7 @@ const TurnCtx = struct {
             .alloc = self.alloc,
             .pol = self.pol,
             .sid = opts.sid,
-            .emit_audit_ctx = self.audit_hooks.emit_audit_ctx,
-            .emit_audit = self.audit_hooks.emit_audit,
+            .audit_emitter = self.audit_hooks.audit_emitter,
             .now_ms = self.audit_hooks.now_ms,
             .seq = &tool_audit_seq,
         };
@@ -8287,6 +8271,7 @@ fn writeRuntimePolicy(dir: std.fs.Dir, doc: core.policy.Doc) !void {
 }
 
 const AuditRows = struct {
+    emitter: core.audit.Emitter = .{ .vt = &core.audit.Emitter.Bind(@This(), emitAudit).vt },
     rows: std.ArrayList([]u8) = .empty,
 
     fn deinit(self: *AuditRows, alloc: std.mem.Allocator) void {
@@ -8294,8 +8279,7 @@ const AuditRows = struct {
         self.rows.deinit(alloc);
     }
 
-    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
-        const self: *AuditRows = @ptrCast(@alignCast(ctx));
+    fn emitAudit(self: *AuditRows, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
         const raw = try core.audit.encodeAlloc(alloc, ent);
         errdefer alloc.free(raw);
         try self.rows.append(alloc, raw);
@@ -8603,8 +8587,7 @@ fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
         eofReader(),
         out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 141;
@@ -10272,8 +10255,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
     var rows = AuditRows{};
     defer rows.deinit(std.testing.allocator);
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 999;
@@ -10674,8 +10656,7 @@ test "runtime rpc auth commands emit audited success and failure records" {
         in_fbs.reader().any(),
         out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 321;
@@ -10717,8 +10698,7 @@ test "runtime rpc auth commands emit audited success and failure records" {
         fail_in_fbs.reader().any(),
         fail_out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 321;
@@ -11227,8 +11207,7 @@ test "runtime rpc bg commands emit audited redacted control records" {
         in_fbs.reader().any(),
         out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 654;
@@ -11742,8 +11721,7 @@ test "runtime tui auth commands emit audited success and failure records" {
         in_fbs.reader().any(),
         out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 432;
@@ -11781,8 +11759,7 @@ test "runtime tui auth commands emit audited success and failure records" {
         fail_in_fbs.reader().any(),
         fail_out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 432;
@@ -12286,8 +12263,7 @@ test "runtime tui bg commands emit audited redacted control records" {
         in_fbs.reader().any(),
         out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 765;
@@ -12762,8 +12738,7 @@ test "runtime reload audit snapshots start success and failure" {
     defer rows.deinit(std.testing.allocator);
 
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 777;
@@ -12895,8 +12870,7 @@ test "runtime rpc control commands emit audited redacted control records" {
         in_fbs.reader().any(),
         out_fbs.writer().any(),
         .{
-            .emit_audit_ctx = &rows,
-            .emit_audit = AuditRows.emit,
+            .audit_emitter = &rows.emitter,
             .now_ms = struct {
                 fn f() i64 {
                     return 888;
@@ -13018,8 +12992,7 @@ test "UX8 walkthrough: bg run spawns job, bg list shows it, bg show shows detail
     var rows = AuditRows{};
     defer rows.deinit(std.testing.allocator);
     var ctl_audit = RuntimeCtlAudit{ .hooks = .{
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 500;

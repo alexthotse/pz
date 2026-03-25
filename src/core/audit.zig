@@ -198,6 +198,30 @@ pub const Entry = struct {
     attrs: []const Attribute = &.{},
 };
 
+pub const Emitter = struct {
+    vt: *const Vt,
+
+    pub const Vt = struct {
+        emit: *const fn (self: *Emitter, alloc: Allocator, ent: Entry) anyerror!void,
+    };
+
+    pub fn emit(self: *Emitter, alloc: Allocator, ent: Entry) !void {
+        return self.vt.emit(self, alloc, ent);
+    }
+
+    pub fn Bind(comptime T: type, comptime emit_fn: fn (*T, Allocator, Entry) anyerror!void) type {
+        return struct {
+            pub const vt = Vt{
+                .emit = emitTrampoline,
+            };
+            fn emitTrampoline(e: *Emitter, alloc: Allocator, ent: Entry) anyerror!void {
+                const self: *T = @fieldParentPtr("emitter", e);
+                return emit_fn(self, alloc, ent);
+            }
+        };
+    }
+};
+
 pub fn kindOf(ent: Entry) EventKind {
     return std.meta.activeTag(ent.data);
 }

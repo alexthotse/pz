@@ -88,8 +88,7 @@ pub const Manager = struct {
         pz_state_dir: ?[]const u8 = null,
         xdg_state_home: ?[]const u8 = null,
         recover: bool = true,
-        emit_audit_ctx: ?*anyopaque = null,
-        emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+        audit_emitter: ?*core.audit.Emitter = null,
         now_ms: *const fn () i64 = nowMs,
         policy: ?core.policy.Policy = null,
     };
@@ -105,8 +104,7 @@ pub const Manager = struct {
     journal: journal_mod.Journal,
     tmp_dir: []const u8 = "/tmp",
     home: ?[]const u8 = null,
-    emit_audit_ctx: ?*anyopaque = null,
-    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    audit_emitter: ?*core.audit.Emitter = null,
     now_ms: *const fn () i64 = nowMs,
     policy: ?core.policy.Policy = null,
     audit_seq: u64 = 1,
@@ -116,7 +114,6 @@ pub const Manager = struct {
     }
 
     pub fn initWithOpts(alloc: std.mem.Allocator, opts: Opts) !Manager {
-        if (opts.emit_audit != null and opts.emit_audit_ctx == null) return error.InvalidArgs;
         const pipe = try std.posix.pipe2(.{
             .NONBLOCK = true,
             .CLOEXEC = true,
@@ -138,8 +135,7 @@ pub const Manager = struct {
             }),
             .tmp_dir = opts.tmp_dir,
             .home = opts.home,
-            .emit_audit_ctx = opts.emit_audit_ctx,
-            .emit_audit = opts.emit_audit,
+            .audit_emitter = opts.audit_emitter,
             .now_ms = opts.now_ms,
             .policy = opts.policy,
         };
@@ -790,13 +786,13 @@ pub const Manager = struct {
     }
 
     fn emitControlAudit(self: *Manager, req: ControlAudit) !void {
-        const emit = self.emit_audit orelse return;
+        const e = self.audit_emitter orelse return;
         self.audit_mu.lock();
         const seq = self.audit_seq;
         self.audit_seq +%= 1;
         self.audit_mu.unlock();
 
-        try emit(self.emit_audit_ctx.?, self.alloc, .{
+        try e.emit(self.alloc, .{
             .ts_ms = self.now_ms(),
             .sid = "bg",
             .seq = seq,
@@ -900,19 +896,19 @@ fn toChainSnap(ok: anytype) ChainSnap {
 }
 
 const AuditCap = struct {
+    emitter: core.audit.Emitter = .{ .vt = &core.audit.Emitter.Bind(@This(), emitAudit).vt },
     rows: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
         for (self.rows.items) |row| alloc.free(row);
         self.rows.deinit(alloc);
     }
-};
 
-fn captureAudit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
-    const cap: *AuditCap = @ptrCast(@alignCast(ctx));
-    const raw = try core.audit.encodeAlloc(alloc, ent);
-    try cap.rows.append(alloc, raw);
-}
+    fn emitAudit(self: *@This(), alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+        const raw = try core.audit.encodeAlloc(alloc, ent);
+        try self.rows.append(alloc, raw);
+    }
+};
 
 fn scrubBgAudit(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
     var out = try alloc.dupe(u8, raw);
@@ -1323,8 +1319,7 @@ test "bg manager audit emits start and success entries for control ops" {
     defer cap.deinit(std.testing.allocator);
 
     var mgr = try Manager.initWithOpts(std.testing.allocator, .{
-        .emit_audit_ctx = &cap,
-        .emit_audit = captureAudit,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 123;
@@ -1374,8 +1369,7 @@ test "bg manager audit emits failure entries for invalid start and missing stop"
     defer cap.deinit(std.testing.allocator);
 
     var mgr = try Manager.initWithOpts(std.testing.allocator, .{
-        .emit_audit_ctx = &cap,
-        .emit_audit = captureAudit,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 456;
@@ -1407,8 +1401,7 @@ test "bg manager syslog e2e ships redacted chained success audit over udp" {
     defer cap.deinit(std.testing.allocator);
 
     var mgr = try Manager.initWithOpts(std.testing.allocator, .{
-        .emit_audit_ctx = &cap,
-        .emit_audit = captureAudit,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 123;
@@ -1491,8 +1484,7 @@ test "bg manager syslog e2e ships redacted chained failure audit over tcp" {
     defer cap.deinit(std.testing.allocator);
 
     var mgr = try Manager.initWithOpts(std.testing.allocator, .{
-        .emit_audit_ctx = &cap,
-        .emit_audit = captureAudit,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 456;

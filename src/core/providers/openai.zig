@@ -169,7 +169,10 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
 }
 
 fn onOutputItemAdded(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const item = ev.item orelse return null;
     const item_type = item.type orelse return null;
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
@@ -187,7 +190,10 @@ fn onOutputItemAdded(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?p
 
 fn onToolArgsDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     if (!self.in_tool) return null;
-    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const delta = ev.delta orelse return null;
     try self.tool_args.appendSlice(self.alloc, delta);
     return null;
@@ -195,7 +201,10 @@ fn onToolArgsDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?pro
 
 fn onToolArgsDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     if (!self.in_tool) return null;
-    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const args = ev.arguments orelse return null;
     self.tool_args.clearRetainingCapacity();
     try self.tool_args.appendSlice(self.alloc, args);
@@ -203,7 +212,10 @@ fn onToolArgsDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?prov
 }
 
 fn onOutputItemDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const item = ev.item orelse return null;
     const item_type = item.type orelse return null;
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
@@ -239,19 +251,28 @@ fn onOutputItemDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?pr
 }
 
 fn onTextDelta(ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const delta = ev.delta orelse return null;
     return .{ .text = delta };
 }
 
 fn onReasoningDelta(ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const delta = ev.delta orelse return null;
     return .{ .thinking = delta };
 }
 
 fn onCompleted(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(CompletedEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(CompletedEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const response = ev.response orelse return null;
     const usage = response.usage;
 
@@ -290,7 +311,10 @@ fn onFailed(self: *Stream) !?providers.Event {
 }
 
 fn onError(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(ErrorEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(ErrorEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const msg = ev.message orelse if (ev.@"error") |eo| eo.message orelse "unknown error" else "unknown error";
     self.done = true;
     self.pending = .{ .stop = .{ .reason = .err } };

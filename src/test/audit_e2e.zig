@@ -9,6 +9,7 @@ const bg = @import("../app/bg.zig");
 const syslog_mock = @import("syslog_mock.zig");
 
 const Rows = struct {
+    emitter: audit.Emitter = .{ .vt = &audit.Emitter.Bind(@This(), emitAudit).vt },
     rows: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *Rows, alloc: std.mem.Allocator) void {
@@ -17,8 +18,7 @@ const Rows = struct {
         self.* = undefined;
     }
 
-    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
-        const self: *Rows = @ptrCast(@alignCast(ctx));
+    fn emitAudit(self: *Rows, alloc: std.mem.Allocator, ent: audit.Entry) !void {
         try self.appendEntry(alloc, ent);
     }
 
@@ -305,8 +305,7 @@ fn addAuthRows(rows: *Rows) !void {
 
     try auth.saveApiKeyWithHooks(testing.allocator, .openai, "sk-openai-secret", .{
         .home_override = home,
-        .emit_audit_ctx = rows,
-        .emit_audit = Rows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 211;
@@ -317,8 +316,7 @@ fn addAuthRows(rows: *Rows) !void {
 
 fn addBgRows(rows: *Rows) !void {
     var mgr = try bg.Manager.initWithOpts(testing.allocator, .{
-        .emit_audit_ctx = rows,
-        .emit_audit = Rows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 311;

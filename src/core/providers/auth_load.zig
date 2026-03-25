@@ -403,7 +403,7 @@ pub fn emitAuthAudit(
     sev: audit.Severity,
     msg: audit.Str,
 ) !void {
-    if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, .{
+    if (hooks.audit_emitter) |e| try e.emit(alloc, .{
         .ts_ms = hooks.now_ms(),
         .sid = "auth",
         .seq = seq,
@@ -428,6 +428,7 @@ pub fn emitAuthAudit(
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const AuditRows = struct {
+    emitter: audit.Emitter = .{ .vt = &audit.Emitter.Bind(@This(), emitAudit).vt },
     rows: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
@@ -435,8 +436,7 @@ const AuditRows = struct {
         self.rows.deinit(alloc);
     }
 
-    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
+    fn emitAudit(self: *@This(), alloc: std.mem.Allocator, ent: audit.Entry) !void {
         const raw = try audit.encodeAlloc(alloc, ent);
         try self.rows.append(alloc, raw);
     }
@@ -480,8 +480,7 @@ test "auth audit covers api key save" {
     var rows = AuditRows{};
     defer rows.deinit(std.testing.allocator);
     try saveApiKeyHomeWithHooks(std.testing.allocator, home, .openai, "sk-openai", .{
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 11;
@@ -511,8 +510,7 @@ test "auth audit covers logout" {
     var rows = AuditRows{};
     defer rows.deinit(std.testing.allocator);
     try logoutHomeWithHooks(std.testing.allocator, home, .anthropic, .{
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 44;

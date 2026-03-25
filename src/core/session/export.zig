@@ -8,8 +8,7 @@ const sid_path = @import("path.zig");
 
 /// Optional callbacks for audit emission during export.
 pub const AuditHooks = struct {
-    emit_audit_ctx: ?*anyopaque = null,
-    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,
+    audit_emitter: ?*audit.Emitter = null,
     now_ms: *const fn () i64 = nowMs,
 };
 
@@ -246,7 +245,7 @@ fn exportOutcomeAudit(sid: []const u8, dest: []const u8, ts_ms: i64, out: audit.
 }
 
 fn emitAudit(alloc: std.mem.Allocator, hooks: AuditHooks, ent: audit.Entry) !void {
-    if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, ent);
+    if (hooks.audit_emitter) |e| try e.emit(alloc, ent);
 }
 
 const nowMs = std.time.milliTimestamp;
@@ -499,11 +498,17 @@ test "export audit emits start and success entries" {
     const writer_mod = @import("writer.zig");
 
     const Capture = struct {
+        emitter: audit.Emitter = .{ .vt = &audit.Emitter.Bind(@This(), capture).vt },
         rows: std.ArrayListUnmanaged([]u8) = .empty,
 
         fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
             for (self.rows.items) |row| alloc.free(row);
             self.rows.deinit(alloc);
+        }
+
+        fn capture(self: *@This(), alloc: std.mem.Allocator, ent: audit.Entry) !void {
+            const raw = try audit.encodeAlloc(alloc, ent);
+            try self.rows.append(alloc, raw);
         }
     };
 
@@ -524,14 +529,7 @@ test "export audit emits start and success entries" {
     defer std.testing.allocator.free(dest);
 
     const path = try toMarkdownWith(std.testing.allocator, tmp.dir, "ex2", dest, .{
-        .emit_audit_ctx = &cap,
-        .emit_audit = struct {
-            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
-                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
-                const raw = try audit.encodeAlloc(alloc, ent);
-                try cap_ptr.rows.append(alloc, raw);
-            }
-        }.f,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 123;
@@ -558,11 +556,17 @@ test "export audit emits failure entry on write failure" {
     const writer_mod = @import("writer.zig");
 
     const Capture = struct {
+        emitter: audit.Emitter = .{ .vt = &audit.Emitter.Bind(@This(), capture).vt },
         rows: std.ArrayListUnmanaged([]u8) = .empty,
 
         fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
             for (self.rows.items) |row| alloc.free(row);
             self.rows.deinit(alloc);
+        }
+
+        fn capture(self: *@This(), alloc: std.mem.Allocator, ent: audit.Entry) !void {
+            const raw = try audit.encodeAlloc(alloc, ent);
+            try self.rows.append(alloc, raw);
         }
     };
 
@@ -582,14 +586,7 @@ test "export audit emits failure entry on write failure" {
     defer std.testing.allocator.free(bad);
 
     try std.testing.expectError(error.FileNotFound, toMarkdownWith(std.testing.allocator, tmp.dir, "ex3", bad, .{
-        .emit_audit_ctx = &cap,
-        .emit_audit = struct {
-            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
-                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
-                const raw = try audit.encodeAlloc(alloc, ent);
-                try cap_ptr.rows.append(alloc, raw);
-            }
-        }.f,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 456;

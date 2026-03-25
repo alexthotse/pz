@@ -63,8 +63,7 @@ pub const Hooks = struct {
     get_home: *const fn (std.mem.Allocator, []const u8) anyerror![]u8 = std.process.getEnvVarOwned,
     exchange_code: *const fn (std.mem.Allocator, *const OAuthSpec, []const u8, []const u8, []const u8, []const u8, Self) anyerror!OAuth = oauth_flow.exchangeAuthorizationCode,
     refresh_fetch: *const fn (std.mem.Allocator, Provider, OAuth, Self) anyerror!OAuth = oauth_flow.fetchRefreshedOAuthForProvider,
-    emit_audit_ctx: ?*anyopaque = null,
-    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, audit.Entry) anyerror!void = null,
+    audit_emitter: ?*audit.Emitter = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
 };
 

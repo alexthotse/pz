@@ -112,8 +112,7 @@ pub const AuditHooks = struct {
     check_default_key: *const fn () bool = checkDefaultKeyRelease,
     resolve_release_url: *const fn (std.mem.Allocator, ?[]const u8) anyerror![]const u8 = resolveReleaseUrl,
     home: ?[]const u8 = null,
-    emit_audit_ctx: ?*anyopaque = null,
-    emit_audit: ?*const fn (*anyopaque, std.mem.Allocator, core.audit.Entry) anyerror!void = null,
+    audit_emitter: ?*core.audit.Emitter = null,
     now_ms: *const fn () i64 = std.time.milliTimestamp,
 };
 
@@ -476,7 +475,7 @@ fn emitUpdateAudit(
     msg: core.audit.Str,
     argv: ?core.audit.Str,
 ) !void {
-    if (hooks.emit_audit) |emit| try emit(hooks.emit_audit_ctx.?, alloc, .{
+    if (hooks.audit_emitter) |e| try e.emit(alloc, .{
         .ts_ms = hooks.now_ms(),
         .sid = "upgrade",
         .seq = seq,
@@ -1613,11 +1612,17 @@ test "update audit emits start and deny entries on policy block" {
     const oh = OhSnap{};
 
     const Capture = struct {
+        emitter: core.audit.Emitter = .{ .vt = &core.audit.Emitter.Bind(@This(), emitAudit).vt },
         rows: std.ArrayListUnmanaged([]u8) = .empty,
 
         fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
             for (self.rows.items) |row| alloc.free(row);
             self.rows.deinit(alloc);
+        }
+
+        fn emitAudit(self: *@This(), alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+            const raw = try core.audit.encodeAlloc(alloc, ent);
+            try self.rows.append(alloc, raw);
         }
     };
 
@@ -1630,14 +1635,7 @@ test "update audit emits start and deny entries on policy block" {
                 return error.UpgradeDisabledByPolicy;
             }
         }.f,
-        .emit_audit_ctx = &cap,
-        .emit_audit = struct {
-            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
-                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
-                const raw = try core.audit.encodeAlloc(alloc, ent);
-                try cap_ptr.rows.append(alloc, raw);
-            }
-        }.f,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 123;
@@ -1661,11 +1659,17 @@ test "update audit emits start and success entries when already current" {
     const oh = OhSnap{};
 
     const Capture = struct {
+        emitter: core.audit.Emitter = .{ .vt = &core.audit.Emitter.Bind(@This(), emitAudit).vt },
         rows: std.ArrayListUnmanaged([]u8) = .empty,
 
         fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
             for (self.rows.items) |row| alloc.free(row);
             self.rows.deinit(alloc);
+        }
+
+        fn emitAudit(self: *@This(), alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
+            const raw = try core.audit.encodeAlloc(alloc, ent);
+            try self.rows.append(alloc, raw);
         }
     };
 
@@ -1678,14 +1682,7 @@ test "update audit emits start and success entries when already current" {
                 return .{ .ok = try alloc.dupe(u8, "{\"tag_name\":\"" ++ cli.version ++ "\",\"assets\":[]}") };
             }
         }.f,
-        .emit_audit_ctx = &cap,
-        .emit_audit = struct {
-            fn f(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
-                const cap_ptr: *Capture = @ptrCast(@alignCast(ctx));
-                const raw = try core.audit.encodeAlloc(alloc, ent);
-                try cap_ptr.rows.append(alloc, raw);
-            }
-        }.f,
+        .audit_emitter = &cap.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 456;
@@ -1868,8 +1865,7 @@ test "update e2e verify fail stays local and audits deterministically" {
         .self_exe_path = FailHooks.selfExePath,
         .install_binary = FailHooks.installBinary,
         .check_update_host = FailHooks.checkHost,
-        .emit_audit_ctx = &cap,
-        .emit_audit = AuditCap.emit,
+        .audit_emitter = &cap.emitter,
         .now_ms = FailHooks.nowMs,
     });
     try server.join(thr);
@@ -2014,8 +2010,7 @@ test "update e2e verify success installs via local redirects and audits determin
         .self_exe_path = SuccessHooks.selfExePath,
         .install_binary = SuccessHooks.installBinary,
         .check_update_host = SuccessHooks.checkHost,
-        .emit_audit_ctx = &cap,
-        .emit_audit = AuditCap.emit,
+        .audit_emitter = &cap.emitter,
         .now_ms = SuccessHooks.nowMs,
     });
     try server.join(thr);
@@ -2066,6 +2061,7 @@ test "update e2e verify success installs via local redirects and audits determin
 }
 
 const AuditCap = struct {
+    emitter: core.audit.Emitter = .{ .vt = &core.audit.Emitter.Bind(@This(), emitAudit).vt },
     rows: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
@@ -2073,8 +2069,7 @@ const AuditCap = struct {
         self.rows.deinit(alloc);
     }
 
-    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
+    fn emitAudit(self: *@This(), alloc: std.mem.Allocator, ent: core.audit.Entry) !void {
         const raw = try core.audit.encodeAlloc(alloc, ent);
         try self.rows.append(alloc, raw);
     }

@@ -704,6 +704,7 @@ fn isInvalidGrant(body: []const u8) bool {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const AuditRows = struct {
+    emitter: audit.Emitter = .{ .vt = &audit.Emitter.Bind(@This(), emitAudit).vt },
     rows: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
@@ -711,8 +712,7 @@ const AuditRows = struct {
         self.rows.deinit(alloc);
     }
 
-    fn emit(ctx: *anyopaque, alloc: std.mem.Allocator, ent: audit.Entry) !void {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
+    fn emitAudit(self: *@This(), alloc: std.mem.Allocator, ent: audit.Entry) !void {
         const raw = try audit.encodeAlloc(alloc, ent);
         try self.rows.append(alloc, raw);
     }
@@ -1075,8 +1075,7 @@ test "auth audit covers oauth login and persistence" {
                 };
             }
         }.f,
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 22;
@@ -1132,8 +1131,7 @@ test "auth audit covers oauth refresh and persistence" {
                 };
             }
         }.f,
-        .emit_audit_ctx = &rows,
-        .emit_audit = AuditRows.emit,
+        .audit_emitter = &rows.emitter,
         .now_ms = struct {
             fn f() i64 {
                 return 33;

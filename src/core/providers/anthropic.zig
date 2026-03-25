@@ -152,7 +152,10 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
 }
 
 fn onMessageStart(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(MsgStartEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(MsgStartEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const msg = ev.message orelse return null;
     const usage = msg.usage orelse return null;
     self.in_tok = usage.input_tokens orelse 0;
@@ -162,7 +165,10 @@ fn onMessageStart(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?prov
 }
 
 fn onBlockStart(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(BlockStartEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(BlockStartEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const cb = ev.content_block orelse return null;
     const cb_type = cb.type orelse return null;
 
@@ -179,7 +185,10 @@ fn onBlockStart(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?provid
 }
 
 fn onBlockDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(BlockDeltaEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(BlockDeltaEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     const delta = ev.delta orelse return null;
     const delta_type = delta.type orelse return null;
 
@@ -214,7 +223,10 @@ fn onBlockStop(self: *Stream) !?providers.Event {
 }
 
 fn onMessageDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
-    const ev = (std.json.parseFromSlice(MsgDeltaEv, ar, data, json_opts) catch return null).value;
+    const ev = (std.json.parseFromSlice(MsgDeltaEv, ar, data, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    }).value;
     if (ev.usage) |usage| {
         self.out_tok = usage.output_tokens orelse 0;
     }
