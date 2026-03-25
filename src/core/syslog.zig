@@ -508,7 +508,10 @@ pub const TlsConn = union(enum) {
 
     pub fn send(self: TlsConn, data: []const u8) !void {
         switch (self) {
-            .real => |state| state.client.writer.writeAll(data) catch return error.TlsSendFailed,
+            .real => |state| {
+                state.client.writer.writeAll(data) catch return error.TlsSendFailed;
+                state.client.writer.flush() catch return error.TlsSendFailed;
+            },
             .mock => |m| try m.send_fn(data),
         }
     }
@@ -529,6 +532,7 @@ fn tlsHandshake(fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) !TlsCon
     const stream = std.net.Stream{ .handle = fd };
 
     var ca_bundle: std.crypto.Certificate.Bundle = .{};
+    defer ca_bundle.deinit(alloc);
     if (opts.ca_file) |path| {
         ca_bundle.addCertsFromFilePathAbsolute(alloc, path) catch return error.TlsHandshakeFailed;
     } else {

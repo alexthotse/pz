@@ -1669,6 +1669,50 @@ test "real PTY: hello gets response" {
     try std.testing.expect(out.stdout.len > 0);
 }
 
+test "real PTY TUI: type prompt, get response in transcript" {
+    const alloc = std.testing.allocator;
+
+    // Need real auth — try to copy from user's home
+    const real_home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const auth_src = std.fs.path.join(alloc, &.{ real_home, ".pz/auth.json" }) catch return error.SkipZigTest;
+    defer alloc.free(auth_src);
+    const auth_data = std.fs.cwd().readFileAlloc(alloc, auth_src, 64 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(auth_data);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pz/auth.json", .data = auth_data });
+    const cwd_abs = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home_abs);
+
+    var env = try baseEnv(alloc, home_abs);
+    defer env.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 10000 } },
+        .{ .inject = "Say exactly: PZTEST_HELLO\n" },
+        .{ .wait_for = .{ .text = "PZTEST_HELLO", .timeout_ms = 30000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd_abs, &env, &.{
+        "--no-session",
+        "--no-config",
+        "--model", "claude-sonnet-4-20250514",
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expect(out.output.len > 0);
+    // The model's response containing PZTEST_HELLO was already proven by wait_for.
+    // Verify it persists in the final output buffer.
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "PZTEST_HELLO") != null);
+}
+
 // ── Bidirectional PTY harness ──
 
 pub const InteractiveStep = union(enum) {

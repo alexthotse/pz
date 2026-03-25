@@ -312,7 +312,7 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
 
     while (true) {
         // Try to extract a complete line from the nonblocking buffer first.
-        if (extractNbLine(self)) |raw| {
+        if (try extractNbLine(self)) |raw| {
             if (try processSseLine(self, raw)) |ev| return ev;
             continue;
         }
@@ -348,7 +348,7 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
                 }
                 self.nb_buf.appendSlice(self.alloc, read_buf[0..n]) catch return error.OutOfMemory;
                 // Extract and process lines from the buffer
-                while (extractNbLine(self)) |raw| {
+                while (try extractNbLine(self)) |raw| {
                     if (try processSseLine(self, raw)) |ev| return ev;
                 }
                 continue;
@@ -380,15 +380,18 @@ pub fn sseNext(self: anytype) anyerror!?providers.Event {
 }
 
 /// Extract one complete line from the nonblocking buffer.
-/// Returns the line (without trailing \n/\r\n) or null if no complete line.
-fn extractNbLine(self: anytype) ?[]const u8 {
+/// Returns an arena-owned copy (safe after buffer shift) or null if no complete line.
+fn extractNbLine(self: anytype) error{OutOfMemory}!?[]const u8 {
     const buf = self.nb_buf.items;
     const nl = std.mem.indexOfScalar(u8, buf, '\n') orelse return null;
-    const line = std.mem.trimRight(u8, buf[0..nl], "\r");
+    const line_src = std.mem.trimRight(u8, buf[0..nl], "\r");
+    // Copy to arena BEFORE shifting — the source slice points into nb_buf
+    // which copyForwards will overwrite.
+    const line = try self.arena.allocator().dupe(u8, line_src);
     // Shift remaining bytes to front
-    const rest = buf[nl + 1 ..];
-    std.mem.copyForwards(u8, self.nb_buf.items[0..rest.len], rest);
-    self.nb_buf.items.len = rest.len;
+    const rest_len = buf.len - nl - 1;
+    std.mem.copyForwards(u8, self.nb_buf.items[0..rest_len], buf[nl + 1 ..]);
+    self.nb_buf.items.len = rest_len;
     return line;
 }
 
