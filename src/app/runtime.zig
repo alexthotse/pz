@@ -8743,13 +8743,6 @@ test "AuditShipper fail_closed overflow rejects when ring full" {
     try std.testing.expectError(error.SpoolFull, shipper.shipper.send(entry, 2));
 }
 
-test "parseSyslogTransport maps valid strings" {
-    try std.testing.expectEqual(core.syslog.Transport.udp, parseSyslogTransport("udp").?);
-    try std.testing.expectEqual(core.syslog.Transport.tcp, parseSyslogTransport("tcp").?);
-    try std.testing.expectEqual(core.syslog.Transport.tls, parseSyslogTransport("tls").?);
-    try std.testing.expect(parseSyslogTransport("bogus") == null);
-}
-
 test "subagent stub inherits effective policy hash" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

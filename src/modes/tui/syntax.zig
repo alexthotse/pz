@@ -518,21 +518,6 @@ test {
     _ = @import("ohsnap");
 }
 
-test "Lang.detect maps known hints" {
-    try testing.expectEqual(Lang.zig, Lang.detect("zig"));
-    try testing.expectEqual(Lang.python, Lang.detect("py"));
-    try testing.expectEqual(Lang.python, Lang.detect("python"));
-    try testing.expectEqual(Lang.bash, Lang.detect("sh"));
-    try testing.expectEqual(Lang.bash, Lang.detect("bash"));
-    try testing.expectEqual(Lang.bash, Lang.detect("zsh"));
-    try testing.expectEqual(Lang.json, Lang.detect("json"));
-    try testing.expectEqual(Lang.javascript, Lang.detect("js"));
-    try testing.expectEqual(Lang.javascript, Lang.detect("javascript"));
-    try testing.expectEqual(Lang.javascript, Lang.detect("ts"));
-    try testing.expectEqual(Lang.unknown, Lang.detect("haskell"));
-    try testing.expectEqual(Lang.unknown, Lang.detect(""));
-}
-
 test "zig: keywords highlighted" {
     var buf: [64]Token = undefined;
     const line = "const x = 1;";

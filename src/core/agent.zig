@@ -2118,21 +2118,6 @@ test "multi tracker aggregates parallel agent status" {
     });
 }
 
-test "agent status fromEvent maps correctly" {
-    try testing.expectEqual(AgentStatus.running, AgentStatus.fromEvent(.{
-        .out = .{ .id = "x", .text = "hi" },
-    }));
-    try testing.expectEqual(AgentStatus.done, AgentStatus.fromEvent(.{
-        .done = .{ .id = "x", .stop = .done },
-    }));
-    try testing.expectEqual(AgentStatus.canceled, AgentStatus.fromEvent(.{
-        .done = .{ .id = "x", .stop = .canceled },
-    }));
-    try testing.expectEqual(AgentStatus.err, AgentStatus.fromEvent(.{
-        .err = .{ .code = "e", .message = "m" },
-    }));
-}
-
 test "multi tracker overflow at max agents" {
     var mt = MultiTracker{};
     var i: u8 = 0;

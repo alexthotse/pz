@@ -127,7 +127,7 @@ pub const Sender = struct {
     hooks: Hooks,
     fd: std.posix.socket_t,
     addr: std.net.Address,
-    tls_state: ?*anyopaque = null,
+    tls_conn: ?TlsConn = null,
 
     pub fn init(alloc: std.mem.Allocator, opts: SenderOpts) !Sender {
         if (opts.host.len == 0) return error.InvalidHost;
@@ -149,12 +149,12 @@ pub const Sender = struct {
             .hooks = opts.hooks,
             .fd = conn.fd,
             .addr = conn.addr,
-            .tls_state = conn.tls_state,
+            .tls_conn = conn.tls_conn,
         };
     }
 
     pub fn deinit(self: *Sender) void {
-        if (self.tls_state) |st| self.hooks.tls_close(st);
+        if (self.tls_conn) |tc| tc.close();
         self.hooks.close_socket(self.fd);
         self.alloc.free(self.host);
         self.* = undefined;
@@ -180,11 +180,11 @@ pub const Sender = struct {
 
     fn refresh(self: *Sender) !void {
         const conn = try openConn(self.hooks, self.alloc, self.host, self.port, self.transport, self.allow_private, self.deadline_s, self.tls_opts);
-        if (self.tls_state) |st| self.hooks.tls_close(st);
+        if (self.tls_conn) |tc| tc.close();
         self.hooks.close_socket(self.fd);
         self.fd = conn.fd;
         self.addr = conn.addr;
-        self.tls_state = conn.tls_state;
+        self.tls_conn = conn.tls_conn;
     }
 
     fn sendUdp(self: *Sender, raw: []const u8) !void {
@@ -201,18 +201,18 @@ pub const Sender = struct {
     }
 
     fn sendTls(self: *Sender, raw: []const u8) !void {
-        const st = self.tls_state orelse return error.TlsNotEstablished;
+        const tc = self.tls_conn orelse return error.TlsNotEstablished;
         var prefix_buf: [32]u8 = undefined;
         const prefix = try std.fmt.bufPrint(&prefix_buf, "{d} ", .{raw.len});
-        try self.hooks.tls_send(st, prefix);
-        try self.hooks.tls_send(st, raw);
+        try tc.send(prefix);
+        try tc.send(raw);
     }
 };
 
 const Conn = struct {
     fd: std.posix.socket_t,
     addr: std.net.Address,
-    tls_state: ?*anyopaque,
+    tls_conn: ?TlsConn,
 };
 
 /// Shared socket+connect+TLS logic used by both init and refresh.
@@ -231,12 +231,12 @@ fn openConn(hooks: Hooks, alloc: std.mem.Allocator, host: []const u8, port: u16,
         try hooks.set_deadlines(fd, deadline_s);
     }
 
-    var tls_state: ?*anyopaque = null;
+    var tls_conn: ?TlsConn = null;
     if (transport == .tls) {
-        tls_state = try hooks.tls_handshake(fd, host, tls_opts);
+        tls_conn = try hooks.tls_handshake(fd, host, tls_opts);
     }
 
-    return .{ .fd = fd, .addr = addr, .tls_state = tls_state };
+    return .{ .fd = fd, .addr = addr, .tls_conn = tls_conn };
 }
 
 fn checkHostAllowed(host: []const u8, egress: policy.Policy, tool: ?[]const u8) error{HostDenied}!void {
@@ -256,9 +256,7 @@ const Hooks = struct {
     send_udp: *const fn (fd: std.posix.socket_t, raw: []const u8, addr: std.net.Address) anyerror!void = sendUdpRaw,
     send_tcp: *const fn (fd: std.posix.socket_t, raw: []const u8) anyerror!void = sendAll,
     close_socket: *const fn (fd: std.posix.socket_t) void = closeSocket,
-    tls_handshake: *const fn (fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) anyerror!*anyopaque = tlsHandshake,
-    tls_send: *const fn (state: *anyopaque, data: []const u8) anyerror!void = tlsSend,
-    tls_close: *const fn (state: *anyopaque) void = tlsClose,
+    tls_handshake: *const fn (fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) anyerror!TlsConn = tlsHandshake,
 };
 
 const udp_max_len: usize = 1024;
@@ -487,7 +485,6 @@ fn sendAll(fd: std.posix.socket_t, raw: []const u8) !void {
     }
 }
 
-/// TLS state heap-allocated so it can be returned as *anyopaque through Hooks.
 const TlsState = struct {
     client: std.crypto.tls.Client,
     stream: std.net.Stream,
@@ -497,7 +494,37 @@ const TlsState = struct {
     write_buf: [4096]u8,
 };
 
-fn tlsHandshake(fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) !*anyopaque {
+pub const MockTls = struct {
+    send_fn: *const fn ([]const u8) anyerror!void = noopSend,
+    close_fn: *const fn () void = noopClose,
+
+    fn noopSend(_: []const u8) anyerror!void {}
+    fn noopClose() void {}
+};
+
+pub const TlsConn = union(enum) {
+    real: *TlsState,
+    mock: MockTls,
+
+    pub fn send(self: TlsConn, data: []const u8) !void {
+        switch (self) {
+            .real => |state| state.client.writer.writeAll(data) catch return error.TlsSendFailed,
+            .mock => |m| try m.send_fn(data),
+        }
+    }
+
+    pub fn close(self: TlsConn) void {
+        switch (self) {
+            .real => |state| {
+                state.client.end() catch {}; // cleanup: close_notify best-effort in deinit
+                std.heap.page_allocator.destroy(state);
+            },
+            .mock => |m| m.close_fn(),
+        }
+    }
+};
+
+fn tlsHandshake(fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) !TlsConn {
     const alloc = std.heap.page_allocator;
     const stream = std.net.Stream{ .handle = fd };
 
@@ -526,19 +553,7 @@ fn tlsHandshake(fd: std.posix.socket_t, host: []const u8, opts: TlsOpts) !*anyop
             .read_buffer = &state.read_buf,
         },
     ) catch return error.TlsHandshakeFailed;
-    return @ptrCast(state);
-}
-
-fn tlsSend(raw_state: *anyopaque, data: []const u8) !void {
-    const state: *TlsState = @ptrCast(@alignCast(raw_state));
-    // Write through TLS client's plaintext writer (encrypts transparently)
-    state.client.writer.writeAll(data) catch return error.TlsSendFailed;
-}
-
-fn tlsClose(raw_state: *anyopaque) void {
-    const state: *TlsState = @ptrCast(@alignCast(raw_state));
-    state.client.end() catch {}; // cleanup: close_notify best-effort
-    std.heap.page_allocator.destroy(state);
+    return .{ .real = state };
 }
 
 fn noopDeadlines(_: std.posix.socket_t, _: i64) anyerror!void {}
@@ -1004,12 +1019,8 @@ test "sender allows private address when allow_private set" {
 
 test "tls sender invokes handshake and send hooks" {
     const Wrap = struct {
-        var state = TlsMockState{};
-
-        const TlsMockState = struct {
-            handshake_ct: usize = 0,
-            closed: bool = false,
-        };
+        var handshake_ct: usize = 0;
+        var closed: bool = false;
 
         fn resolve(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
             return std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port);
@@ -1020,18 +1031,18 @@ test "tls sender invokes handshake and send hooks" {
         fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
         fn closeSocket(_: std.posix.socket_t) void {}
 
-        fn handshake(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
-            state.handshake_ct += 1;
-            return @ptrCast(&state);
+        fn handshake(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !TlsConn {
+            handshake_ct += 1;
+            return .{ .mock = .{ .close_fn = mockClose } };
         }
 
-        fn tlsClose(ptr: *anyopaque) void {
-            _ = ptr;
-            state.closed = true;
+        fn mockClose() void {
+            closed = true;
         }
     };
 
-    Wrap.state = .{};
+    Wrap.handshake_ct = 0;
+    Wrap.closed = false;
 
     var sender = try Sender.init(std.testing.allocator, .{
         .transport = .tls,
@@ -1046,24 +1057,19 @@ test "tls sender invokes handshake and send hooks" {
             .send_tcp = Wrap.sendTcp,
             .close_socket = Wrap.closeSocket,
             .tls_handshake = Wrap.handshake,
-            .tls_close = Wrap.tlsClose,
         },
     });
     defer sender.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), Wrap.state.handshake_ct);
-    try std.testing.expect(sender.tls_state != null);
+    try std.testing.expectEqual(@as(usize, 1), Wrap.handshake_ct);
+    try std.testing.expect(sender.tls_conn != null);
 }
 
 test "tls sender re-handshakes on refresh" {
     const Wrap = struct {
-        var state = State{};
-
-        const State = struct {
-            handshake_ct: usize = 0,
-            send_fail: bool = true,
-            closed_ct: usize = 0,
-        };
+        var handshake_ct: usize = 0;
+        var send_fail: bool = true;
+        var closed_ct: usize = 0;
 
         fn resolve(_: std.mem.Allocator, _: []const u8, port: u16) !std.net.Address {
             return std.net.Address.initIp4(.{ 34, 117, 59, 81 }, port);
@@ -1074,24 +1080,26 @@ test "tls sender re-handshakes on refresh" {
         fn sendTcp(_: std.posix.socket_t, _: []const u8) !void {}
         fn closeSocket(_: std.posix.socket_t) void {}
 
-        fn handshake(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !*anyopaque {
-            state.handshake_ct += 1;
-            return @ptrCast(&state);
+        fn handshake(_: std.posix.socket_t, _: []const u8, _: TlsOpts) !TlsConn {
+            handshake_ct += 1;
+            return .{ .mock = .{ .send_fn = mockSend, .close_fn = mockClose } };
         }
 
-        fn tlsSend(_: *anyopaque, _: []const u8) !void {
-            if (state.send_fail) {
-                state.send_fail = false;
+        fn mockSend(_: []const u8) anyerror!void {
+            if (send_fail) {
+                send_fail = false;
                 return error.ConnectionReset;
             }
         }
 
-        fn tlsClose(_: *anyopaque) void {
-            state.closed_ct += 1;
+        fn mockClose() void {
+            closed_ct += 1;
         }
     };
 
-    Wrap.state = .{};
+    Wrap.handshake_ct = 0;
+    Wrap.send_fail = true;
+    Wrap.closed_ct = 0;
 
     var sender = try Sender.init(std.testing.allocator, .{
         .transport = .tls,
@@ -1106,8 +1114,6 @@ test "tls sender re-handshakes on refresh" {
             .send_tcp = Wrap.sendTcp,
             .close_socket = Wrap.closeSocket,
             .tls_handshake = Wrap.handshake,
-            .tls_send = Wrap.tlsSend,
-            .tls_close = Wrap.tlsClose,
         },
     });
     defer sender.deinit();
@@ -1120,8 +1126,8 @@ test "tls sender re-handshakes on refresh" {
         .msg = "tls-retry",
     });
 
-    try std.testing.expectEqual(@as(usize, 2), Wrap.state.handshake_ct);
-    try std.testing.expectEqual(@as(usize, 1), Wrap.state.closed_ct);
+    try std.testing.expectEqual(@as(usize, 2), Wrap.handshake_ct);
+    try std.testing.expectEqual(@as(usize, 1), Wrap.closed_ct);
 }
 
 test "private address check on refresh after re-resolution" {

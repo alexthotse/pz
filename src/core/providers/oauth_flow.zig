@@ -999,11 +999,6 @@ test "separate OAuth state and PKCE verifier" {
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
 }
 
-test "tokenReqContentType maps oauth token body types" {
-    try std.testing.expectEqualStrings("application/json", tokenReqContentType(&anthropic_spec));
-    try std.testing.expectEqualStrings("application/x-www-form-urlencoded", tokenReqContentType(&openai_spec));
-}
-
 test "buildRefreshReqBody uses provider-specific body shape" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

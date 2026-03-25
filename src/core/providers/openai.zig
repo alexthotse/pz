@@ -57,29 +57,77 @@ pub const Cfg = struct {
 pub const Client = hc.SseClient(Cfg);
 const Stream = hc.SseStream(Cfg);
 
-const objGet = hc.objGet;
-const strGet = hc.strGet;
-const jsonU64 = hc.jsonU64;
 const sanitizeUtf8 = hc.sanitizeUtf8;
 const writeJsonLossy = hc.writeJsonLossy;
+
+// ── SSE typed structs ──────────────────────────────────────────────────
+
+const json_opts: std.json.ParseOptions = .{
+    .ignore_unknown_fields = true,
+    .allocate = .alloc_always,
+};
+
+const Envelope = struct {
+    type: []const u8,
+};
+
+const Item = struct {
+    type: ?[]const u8 = null,
+    call_id: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    arguments: ?[]const u8 = null,
+};
+
+const ItemEv = struct {
+    item: ?Item = null,
+};
+
+const DeltaEv = struct {
+    delta: ?[]const u8 = null,
+    arguments: ?[]const u8 = null,
+};
+
+const InputTokensDetails = struct {
+    cached_tokens: ?u64 = null,
+};
+
+const OaiUsage = struct {
+    input_tokens: ?u64 = null,
+    output_tokens: ?u64 = null,
+    total_tokens: ?u64 = null,
+    input_tokens_details: ?InputTokensDetails = null,
+};
+
+const Response = struct {
+    status: ?[]const u8 = null,
+    usage: ?OaiUsage = null,
+};
+
+const CompletedEv = struct {
+    response: ?Response = null,
+};
+
+const ErrorObj = struct {
+    message: ?[]const u8 = null,
+};
+
+const ErrorEv = struct {
+    message: ?[]const u8 = null,
+    @"error": ?ErrorObj = null,
+};
 
 // ── SSE parsing ────────────────────────────────────────────────────────
 
 fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
     const ar = self.arena.allocator();
-    const parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
-        .allocate = .alloc_always,
-    }) catch |err| switch (err) {
+
+    const env = std.json.parseFromSlice(Envelope, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
 
-    const root = switch (parsed.value) {
-        .object => |obj| obj,
-        else => return null,
-    };
+    const ev_type = env.value.type;
 
-    const ev_type = strGet(root, "type") orelse return null;
     const EventType = enum {
         output_item_added,
         output_item_done,
@@ -107,64 +155,68 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
 
     const resolved = event_map.get(ev_type) orelse return null;
     return switch (resolved) {
-        .output_item_added => onOutputItemAdded(self, root),
-        .output_item_done => onOutputItemDone(self, root),
-        .tool_args_delta => onToolArgsDelta(self, root),
-        .tool_args_done => onToolArgsDone(self, root),
-        .output_text_delta => onTextDelta(root),
-        .refusal_delta => onTextDelta(root),
-        .reasoning_delta => onReasoningDelta(root),
-        .completed => onCompleted(self, root),
+        .output_item_added => onOutputItemAdded(self, ar, data),
+        .output_item_done => onOutputItemDone(self, ar, data),
+        .tool_args_delta => onToolArgsDelta(self, ar, data),
+        .tool_args_done => onToolArgsDone(self, ar, data),
+        .output_text_delta => onTextDelta(ar, data),
+        .refusal_delta => onTextDelta(ar, data),
+        .reasoning_delta => onReasoningDelta(ar, data),
+        .completed => onCompleted(self, ar, data),
         .failed => onFailed(self),
-        .error_ev => onError(self, root),
+        .error_ev => onError(self, ar, data),
     };
 }
 
-fn onOutputItemAdded(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const item = objGet(root, "item") orelse return null;
-    const item_type = strGet(item, "type") orelse return null;
+fn onOutputItemAdded(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch return null).value;
+    const item = ev.item orelse return null;
+    const item_type = item.type orelse return null;
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
 
     self.ext.tool_call_id.clearRetainingCapacity();
     self.tool_name.clearRetainingCapacity();
     self.tool_args.clearRetainingCapacity();
 
-    if (strGet(item, "call_id")) |call_id| try self.ext.tool_call_id.appendSlice(self.alloc, call_id);
-    if (strGet(item, "name")) |name| try self.tool_name.appendSlice(self.alloc, name);
-    if (strGet(item, "arguments")) |args| try self.tool_args.appendSlice(self.alloc, args);
+    if (item.call_id) |call_id| try self.ext.tool_call_id.appendSlice(self.alloc, call_id);
+    if (item.name) |name| try self.tool_name.appendSlice(self.alloc, name);
+    if (item.arguments) |args| try self.tool_args.appendSlice(self.alloc, args);
     self.in_tool = true;
     return null;
 }
 
-fn onToolArgsDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+fn onToolArgsDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     if (!self.in_tool) return null;
-    const delta = strGet(root, "delta") orelse return null;
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const delta = ev.delta orelse return null;
     try self.tool_args.appendSlice(self.alloc, delta);
     return null;
 }
 
-fn onToolArgsDone(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
+fn onToolArgsDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
     if (!self.in_tool) return null;
-    const args = strGet(root, "arguments") orelse return null;
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const args = ev.arguments orelse return null;
     self.tool_args.clearRetainingCapacity();
     try self.tool_args.appendSlice(self.alloc, args);
     return null;
 }
 
-fn onOutputItemDone(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const item = objGet(root, "item") orelse return null;
-    const item_type = strGet(item, "type") orelse return null;
+fn onOutputItemDone(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(ItemEv, ar, data, json_opts) catch return null).value;
+    const item = ev.item orelse return null;
+    const item_type = item.type orelse return null;
     if (!std.mem.eql(u8, item_type, "function_call")) return null;
 
-    if (strGet(item, "call_id")) |call_id| {
+    if (item.call_id) |call_id| {
         self.ext.tool_call_id.clearRetainingCapacity();
         try self.ext.tool_call_id.appendSlice(self.alloc, call_id);
     }
-    if (strGet(item, "name")) |name| {
+    if (item.name) |name| {
         self.tool_name.clearRetainingCapacity();
         try self.tool_name.appendSlice(self.alloc, name);
     }
-    if (strGet(item, "arguments")) |args| {
+    if (item.arguments) |args| {
         self.tool_args.clearRetainingCapacity();
         try self.tool_args.appendSlice(self.alloc, args);
     }
@@ -178,41 +230,44 @@ fn onOutputItemDone(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
     self.in_tool = false;
     self.ext.saw_tool_call = true;
 
-    const ar = self.arena.allocator();
+    const stream_ar = self.arena.allocator();
     return .{ .tool_call = .{
-        .id = try ar.dupe(u8, id),
-        .name = try ar.dupe(u8, name),
-        .args = try ar.dupe(u8, args),
+        .id = try stream_ar.dupe(u8, id),
+        .name = try stream_ar.dupe(u8, name),
+        .args = try stream_ar.dupe(u8, args),
     } };
 }
 
-fn onTextDelta(root: std.json.ObjectMap) !?providers.Event {
-    const delta = strGet(root, "delta") orelse return null;
+fn onTextDelta(ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const delta = ev.delta orelse return null;
     return .{ .text = delta };
 }
 
-fn onReasoningDelta(root: std.json.ObjectMap) !?providers.Event {
-    const delta = strGet(root, "delta") orelse return null;
+fn onReasoningDelta(ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(DeltaEv, ar, data, json_opts) catch return null).value;
+    const delta = ev.delta orelse return null;
     return .{ .thinking = delta };
 }
 
-fn onCompleted(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const response = objGet(root, "response") orelse return null;
-    const usage = objGet(response, "usage");
+fn onCompleted(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(CompletedEv, ar, data, json_opts) catch return null).value;
+    const response = ev.response orelse return null;
+    const usage = response.usage;
 
-    const in_tok = if (usage) |u| jsonU64(u.get("input_tokens")) else 0;
-    const out_tok = if (usage) |u| jsonU64(u.get("output_tokens")) else 0;
-    const total_tok = if (usage) |u| jsonU64(u.get("total_tokens")) else 0;
+    const in_tok = if (usage) |u| u.input_tokens orelse 0 else 0;
+    const out_tok = if (usage) |u| u.output_tokens orelse 0 else 0;
+    const total_tok = if (usage) |u| u.total_tokens orelse 0 else 0;
     const cache_read = if (usage) |u| blk: {
-        const details = objGet(u, "input_tokens_details") orelse break :blk 0;
-        break :blk jsonU64(details.get("cached_tokens"));
+        const details = u.input_tokens_details orelse break :blk @as(u64, 0);
+        break :blk details.cached_tokens orelse 0;
     } else 0;
 
     self.in_tok = in_tok;
     self.out_tok = out_tok;
     self.cache_read = cache_read;
 
-    var stop_reason = mapStopStatus(strGet(response, "status"));
+    var stop_reason = mapStopStatus(response.status);
     if (self.ext.saw_tool_call and stop_reason == .done) stop_reason = .tool;
 
     self.pending = .{ .stop = .{ .reason = stop_reason } };
@@ -234,14 +289,9 @@ fn onFailed(self: *Stream) !?providers.Event {
     return .{ .err = "response failed" };
 }
 
-fn onError(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const err_obj = objGet(root, "error");
-    const msg = if (strGet(root, "message")) |m|
-        m
-    else if (err_obj) |eo|
-        strGet(eo, "message") orelse "unknown error"
-    else
-        "unknown error";
+fn onError(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(ErrorEv, ar, data, json_opts) catch return null).value;
+    const msg = ev.message orelse if (ev.@"error") |eo| eo.message orelse "unknown error" else "unknown error";
     self.done = true;
     self.pending = .{ .stop = .{ .reason = .err } };
     return .{ .err = msg };

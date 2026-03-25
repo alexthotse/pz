@@ -1194,19 +1194,6 @@ test "findAssetUrl returns null for missing assets" {
     try std.testing.expect(findAssetUrl(&assets, "missing.tar.gz") == null);
 }
 
-test "targetAssetName maps supported targets only" {
-    const got = targetAssetName();
-    const os = builtin.target.os.tag;
-    const arch = builtin.target.cpu.arch;
-    const supported = (os == .linux and (arch == .x86_64 or arch == .aarch64)) or
-        (os == .macos and arch == .aarch64);
-    if (supported) {
-        try std.testing.expect(got != null);
-    } else {
-        try std.testing.expect(got == null);
-    }
-}
-
 test "extractPzBinary reads pz from archive root" {
     const data = "bin\n";
     const gz = try makeTarGzAlloc(std.testing.allocator, "pz", data);

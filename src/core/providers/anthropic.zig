@@ -64,33 +64,73 @@ pub const Cfg = struct {
 pub const Client = hc.SseClient(Cfg);
 const Stream = hc.SseStream(Cfg);
 
-const objGet = hc.objGet;
-const strGet = hc.strGet;
-const jsonU64 = hc.jsonU64;
 const sanitizeUtf8 = hc.sanitizeUtf8;
 const writeJsonLossy = hc.writeJsonLossy;
+
+// ── SSE typed structs ──────────────────────────────────────────────────
+
+const json_opts: std.json.ParseOptions = .{
+    .ignore_unknown_fields = true,
+    .allocate = .alloc_always,
+};
+
+const Envelope = struct {
+    type: []const u8,
+};
+
+const Usage = struct {
+    input_tokens: ?u64 = null,
+    output_tokens: ?u64 = null,
+    cache_read_input_tokens: ?u64 = null,
+    cache_creation_input_tokens: ?u64 = null,
+};
+
+const MsgStartMsg = struct {
+    usage: ?Usage = null,
+};
+
+const MsgStartEv = struct {
+    message: ?MsgStartMsg = null,
+};
+
+const ContentBlock = struct {
+    type: ?[]const u8 = null,
+    id: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+};
+
+const BlockStartEv = struct {
+    content_block: ?ContentBlock = null,
+};
+
+const Delta = struct {
+    type: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    thinking: ?[]const u8 = null,
+    partial_json: ?[]const u8 = null,
+    stop_reason: ?[]const u8 = null,
+};
+
+const BlockDeltaEv = struct {
+    delta: ?Delta = null,
+};
+
+const MsgDeltaEv = struct {
+    delta: ?Delta = null,
+    usage: ?Usage = null,
+};
 
 // ── SSE parsing ────────────────────────────────────────────────────────
 
 fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
     const ar = self.arena.allocator();
 
-    const parsed = std.json.parseFromSlice(std.json.Value, ar, data, .{
-        .allocate = .alloc_always,
-    }) catch |err| switch (err) {
+    const env = std.json.parseFromSlice(Envelope, ar, data, json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
 
-    const root = switch (parsed.value) {
-        .object => |obj| obj,
-        else => return null,
-    };
-
-    const ev_type = switch (root.get("type") orelse return null) {
-        .string => |s| s,
-        else => return null,
-    };
+    const ev_type = env.value.type;
 
     const SseEvType = enum { message_start, content_block_start, content_block_delta, content_block_stop, message_delta };
     const ev_map = std.StaticStringMap(SseEvType).initComptime(.{
@@ -103,26 +143,28 @@ fn parseSseDataImpl(self: *Stream, data: []const u8) !?providers.Event {
 
     const resolved = ev_map.get(ev_type) orelse return null;
     return switch (resolved) {
-        .message_start => onMessageStart(self, root),
-        .content_block_start => onBlockStart(self, root),
-        .content_block_delta => onBlockDelta(self, root),
+        .message_start => onMessageStart(self, ar, data),
+        .content_block_start => onBlockStart(self, ar, data),
+        .content_block_delta => onBlockDelta(self, ar, data),
         .content_block_stop => onBlockStop(self),
-        .message_delta => onMessageDelta(self, root),
+        .message_delta => onMessageDelta(self, ar, data),
     };
 }
 
-fn onMessageStart(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const msg = objGet(root, "message") orelse return null;
-    const usage = objGet(msg, "usage") orelse return null;
-    self.in_tok = jsonU64(usage.get("input_tokens"));
-    self.cache_read = jsonU64(usage.get("cache_read_input_tokens"));
-    self.ext.cache_write = jsonU64(usage.get("cache_creation_input_tokens"));
+fn onMessageStart(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(MsgStartEv, ar, data, json_opts) catch return null).value;
+    const msg = ev.message orelse return null;
+    const usage = msg.usage orelse return null;
+    self.in_tok = usage.input_tokens orelse 0;
+    self.cache_read = usage.cache_read_input_tokens orelse 0;
+    self.ext.cache_write = usage.cache_creation_input_tokens orelse 0;
     return null;
 }
 
-fn onBlockStart(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const cb = objGet(root, "content_block") orelse return null;
-    const cb_type = strGet(cb, "type") orelse return null;
+fn onBlockStart(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(BlockStartEv, ar, data, json_opts) catch return null).value;
+    const cb = ev.content_block orelse return null;
+    const cb_type = cb.type orelse return null;
 
     if (!std.mem.eql(u8, cb_type, "tool_use")) return null;
 
@@ -130,15 +172,16 @@ fn onBlockStart(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
     self.tool_name.clearRetainingCapacity();
     self.tool_args.clearRetainingCapacity();
 
-    if (strGet(cb, "id")) |id| try self.ext.tool_id.appendSlice(self.alloc, id);
-    if (strGet(cb, "name")) |name| try self.tool_name.appendSlice(self.alloc, name);
+    if (cb.id) |id| try self.ext.tool_id.appendSlice(self.alloc, id);
+    if (cb.name) |name| try self.tool_name.appendSlice(self.alloc, name);
     self.in_tool = true;
     return null;
 }
 
-fn onBlockDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    const delta = objGet(root, "delta") orelse return null;
-    const delta_type = strGet(delta, "type") orelse return null;
+fn onBlockDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(BlockDeltaEv, ar, data, json_opts) catch return null).value;
+    const delta = ev.delta orelse return null;
+    const delta_type = delta.type orelse return null;
 
     const DeltaType = enum { text_delta, thinking_delta, input_json_delta };
     const delta_map = std.StaticStringMap(DeltaType).initComptime(.{
@@ -149,10 +192,10 @@ fn onBlockDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
 
     const dt = delta_map.get(delta_type) orelse return null;
     switch (dt) {
-        .text_delta => if (strGet(delta, "text")) |text| return .{ .text = text },
-        .thinking_delta => if (strGet(delta, "thinking")) |text| return .{ .thinking = text },
+        .text_delta => if (delta.text) |text| return .{ .text = text },
+        .thinking_delta => if (delta.thinking) |text| return .{ .thinking = text },
         .input_json_delta => if (self.in_tool) {
-            if (strGet(delta, "partial_json")) |pj|
+            if (delta.partial_json) |pj|
                 try self.tool_args.appendSlice(self.alloc, pj);
         },
     }
@@ -170,12 +213,13 @@ fn onBlockStop(self: *Stream) !?providers.Event {
     } };
 }
 
-fn onMessageDelta(self: *Stream, root: std.json.ObjectMap) !?providers.Event {
-    if (objGet(root, "usage")) |usage| {
-        self.out_tok = jsonU64(usage.get("output_tokens"));
+fn onMessageDelta(self: *Stream, ar: std.mem.Allocator, data: []const u8) !?providers.Event {
+    const ev = (std.json.parseFromSlice(MsgDeltaEv, ar, data, json_opts) catch return null).value;
+    if (ev.usage) |usage| {
+        self.out_tok = usage.output_tokens orelse 0;
     }
-    const delta = objGet(root, "delta") orelse return null;
-    const reason_str = strGet(delta, "stop_reason") orelse return null;
+    const delta = ev.delta orelse return null;
+    const reason_str = delta.stop_reason orelse return null;
 
     const usage_ev: providers.Event = .{ .usage = .{
         .in_tok = self.in_tok,
