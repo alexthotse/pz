@@ -38,14 +38,17 @@ pub fn parseVersion(raw: []const u8) ?Semver {
 }
 
 /// Background version checker. Stack-allocatable.
+/// Uses page_allocator internally — the caller's allocator is NOT used from
+/// the background thread (arena allocators are not thread-safe).
 pub const Checker = struct {
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: ?[]u8 = null,
-    alloc: std.mem.Allocator,
     thread: ?std.Thread = null,
 
-    pub fn init(alloc: std.mem.Allocator) Checker {
-        return .{ .alloc = alloc };
+    pub const thread_alloc = std.heap.page_allocator;
+
+    pub fn init() Checker {
+        return .{};
     }
 
     pub fn spawn(self: *Checker) !void {
@@ -63,11 +66,11 @@ pub const Checker = struct {
 
     pub fn deinit(self: *Checker) void {
         if (self.thread) |t| t.join();
-        if (self.result) |r| self.alloc.free(r);
+        if (self.result) |r| thread_alloc.free(r);
     }
 
     fn checkThread(self: *Checker) void {
-        self.result = checkLatest(self.alloc) catch null;
+        self.result = checkLatest(thread_alloc) catch null;
         self.done.store(true, .release);
     }
 };

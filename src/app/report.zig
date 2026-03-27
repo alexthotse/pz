@@ -271,6 +271,78 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
             .next = "delete ~/.pz/auth.json and run /login",
         },
     },
+    .{
+        "ConnectionRefused", Rule{
+            .summary = "could not connect to API server",
+            .next = "check your network connection and try again",
+        },
+    },
+    .{
+        "ConnectionResetByPeer", Rule{
+            .summary = "connection dropped by server",
+            .next = "try again; if it persists, the API may be experiencing issues",
+        },
+    },
+    .{
+        "NetworkUnreachable", Rule{
+            .summary = "network is unreachable",
+            .next = "check your internet connection",
+        },
+    },
+    .{
+        "HostUnreachable", Rule{
+            .summary = "API server is unreachable",
+            .next = "check your internet connection and DNS",
+        },
+    },
+    .{
+        "TlsAlertHandshakeFailure", Rule{
+            .summary = "TLS handshake failed",
+            .next = "check if a firewall or proxy is blocking HTTPS connections",
+        },
+    },
+    .{
+        "CertificateAuthorityBundleMissing", Rule{
+            .summary = "CA certificate bundle not found",
+            .next = "install system CA certificates or set PZ_CA_FILE",
+        },
+    },
+    .{
+        "Canceled", Rule{
+            .summary = "request was canceled",
+            .next = "press Enter to send a new prompt",
+        },
+    },
+    .{
+        "TransportTransient", Rule{
+            .summary = "temporary API error",
+            .next = "try again; the API may be under heavy load",
+        },
+    },
+    .{
+        "UnexpectedStatus", Rule{
+            .summary = "unexpected HTTP status from API",
+            .next = "try again; if it persists, the API may have changed",
+        },
+    },
+    .{
+        "OutOfMemory", Rule{
+            .summary = "out of memory",
+            .next = "reduce conversation size with /compact or start a new session",
+        },
+    },
+    .{
+        "ProviderNotConfigured", Rule{
+            .summary = "no provider configured",
+            .next = "run /login or set ANTHROPIC_API_KEY to configure a provider",
+        },
+    },
+    .{
+        "MissingProviderStream", Rule{
+            .summary = "no provider available",
+            .next = "run /login to authenticate or set an API key",
+        },
+    },
 });
 
 fn lookup(err: anyerror) Rule {
@@ -285,10 +357,16 @@ pub fn short(err: anyerror) []const u8 {
     return lookup(err).summary;
 }
 
+/// Look up a user-friendly message from a raw error name string.
+/// Returns summary + actionable next step.
+pub fn fromName(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
+    const r = rule_map.get(name) orelse return std.fmt.allocPrint(alloc, "{s}", .{name});
+    return std.fmt.allocPrint(alloc, "{s} — {s}", .{ r.summary, r.next });
+}
+
 pub fn inlineMsg(alloc: std.mem.Allocator, err: anyerror) ![]u8 {
-    const name = @errorName(err);
     const r = lookup(err);
-    return std.fmt.allocPrint(alloc, "{s} ({s})", .{ r.summary, name });
+    return std.fmt.allocPrint(alloc, "{s}", .{r.summary});
 }
 
 pub fn cli(alloc: std.mem.Allocator, op: []const u8, err: anyerror) ![]u8 {
@@ -324,9 +402,8 @@ test "report falls back to error name when unknown" {
     try std.testing.expect(std.mem.indexOf(u8, msg, "TestUnexpectedResult") != null);
 }
 
-test "report inline includes summary and code" {
+test "report inline shows friendly summary" {
     const msg = try inlineMsg(std.testing.allocator, error.SessionDisabled);
     defer std.testing.allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "session persistence is disabled") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "SessionDisabled") != null);
 }

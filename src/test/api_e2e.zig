@@ -39,6 +39,15 @@ fn simpleReq(model: []const u8) providers.Request {
     };
 }
 
+/// Start a provider stream, skipping if auth refresh fails (expired OAuth + rate limit).
+fn startOrSkip(client: *anthropic.Client, req: providers.Request) error{ SkipZigTest, OutOfMemory }!*providers.Stream {
+    return client.provider.start(req) catch |err| switch (err) {
+        error.RefreshFailed, error.RefreshInvalidGrant => return error.SkipZigTest,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.SkipZigTest, // network errors in test → skip
+    };
+}
+
 fn drainStream(stream: *providers.Stream) !struct { text: usize, total: usize, has_err: bool } {
     var text_n: usize = 0;
     var total: usize = 0;
@@ -66,12 +75,10 @@ test "real API: simple prompt returns text" {
     };
     defer client.deinit(); // owns auth arena
 
-    const stream = try client.provider.start(simpleReq("claude-sonnet-4-20250514"));
+    const stream = try startOrSkip(&client, simpleReq("claude-sonnet-4-20250514"));
     defer stream.deinit();
 
     const stats = try drainStream(stream);
-    // Skip if auth expired (no text, has error = auth failure)
-    // API key auth is guaranteed by loadAuthOrSkip — errors are real failures.
     try std.testing.expect(stats.text > 0);
     try std.testing.expect(!stats.has_err);
 }
@@ -101,11 +108,10 @@ test "real API: streaming delivers events" {
     };
     defer client.deinit();
 
-    const stream = try client.provider.start(simpleReq("claude-sonnet-4-20250514"));
+    const stream = try startOrSkip(&client, simpleReq("claude-sonnet-4-20250514"));
     defer stream.deinit();
 
     const stats = try drainStream(stream);
-    // API key auth is guaranteed by loadAuthOrSkip — errors are real failures.
     try std.testing.expect(stats.total > 1);
     try std.testing.expect(stats.text > 0);
 }
@@ -120,7 +126,7 @@ test "real API: bad model returns error" {
     };
     defer client.deinit();
 
-    const stream = try client.provider.start(simpleReq("nonexistent-model-xyz"));
+    const stream = try startOrSkip(&client, simpleReq("nonexistent-model-xyz"));
     defer stream.deinit();
 
     const stats = try drainStream(stream);

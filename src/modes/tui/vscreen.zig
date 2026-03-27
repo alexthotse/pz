@@ -16,7 +16,7 @@ pub const VScreen = struct {
     row: usize = 0,
     col: usize = 0,
     style: Style = .{},
-    pending: [32]u8 = undefined,
+    pending: [64]u8 = undefined,
     pending_len: u8 = 0,
 
     pub fn init(alloc: std.mem.Allocator, w: usize, h: usize) !VScreen {
@@ -81,10 +81,11 @@ pub const VScreen = struct {
         self.pending_len = 0;
         // Process merged prefix.
         self.feedInner(self.pending[0..merged_len]);
-        // If feedInner stashed new pending bytes from the merged buf, those
-        // are already in self.pending. Process remaining new data.
+        // If feedInner stashed new pending bytes (incomplete escape in the
+        // merged buffer), the remaining data is a continuation. Use feed()
+        // to merge the new pending bytes with the continuation data.
         if (avail < data.len) {
-            self.feedInner(data[avail..]);
+            self.feed(data[avail..]);
         }
     }
 

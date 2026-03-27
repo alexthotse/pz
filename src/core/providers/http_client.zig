@@ -112,7 +112,7 @@ pub fn tryProactiveRefresh(
     refreshAuth(alloc, auth, tag, ca_file, ar) catch |err| {
         // Token is expired and refresh failed — no point sending it
         if (now >= auth.auth.oauth.expires) return err;
-        std.log.warn("proactive oauth refresh failed: {}", .{err});
+        // Proactive refresh failed but token not yet expired — continue with current token.
     };
 }
 

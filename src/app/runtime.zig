@@ -2319,7 +2319,7 @@ fn runTui(
     const skip_ver = (!force_ver and builtin.is_test) or
         std.posix.getenv("PZ_SKIP_VERSION_CHECK") != null or
         (!force_ver and std.mem.indexOf(u8, cli.version, "-dev") != null);
-    var ver_check = version_check.Checker.init(alloc);
+    var ver_check = version_check.Checker.init();
     var ver_notice_done = skip_ver;
     if (!skip_ver) try ver_check.spawn();
     defer ver_check.deinit();
@@ -2673,7 +2673,7 @@ fn runTui(
                                         ui.ed.cur = new_cur;
                                     }
                                 } else if (cp.arg_src != null) {
-                                    // Arg mode: replace arg in editor
+                                    // Arg mode: complete arg + submit on Enter.
                                     if (cp.selectedArg()) |arg| {
                                         const text = ui.ed.text();
                                         const sp = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
@@ -2682,8 +2682,21 @@ fn runTui(
                                         try ui.ed.buf.appendSlice(ui.ed.alloc, arg);
                                         ui.ed.cur = ui.ed.buf.items.len;
                                     }
+                                    if (key == .enter) {
+                                        ui.picker = null;
+                                        ui.clearPathItems();
+                                        break; // complete + submit
+                                    }
                                 } else {
-                                    // Cmd mode: fill command name
+                                    // Cmd mode: if editor already has arguments (space after /cmd),
+                                    // submit directly instead of autocompleting.
+                                    const text = ui.ed.text();
+                                    if (std.mem.indexOfScalar(u8, text, ' ') != null) {
+                                        ui.picker = null;
+                                        ui.clearPathItems();
+                                        break; // fall through to submit handling below
+                                    }
+                                    // No arguments yet: fill command name
                                     const cmd = cp.selected();
                                     ui.ed.buf.items.len = 0;
                                     try ui.ed.buf.appendSlice(ui.ed.alloc, "/");
@@ -3097,7 +3110,7 @@ fn runTui(
                         retried_overflow = false;
                         if (done.err_name) |name| {
                             if (compact_out != .stopped) {
-                                const msg = try std.fmt.allocPrint(alloc, "[turn failed: {s}]", .{name});
+                                const msg = try report.fromName(alloc, name);
                                 defer alloc.free(msg);
                                 try ui.tr.infoText(msg);
                             }
@@ -14496,8 +14509,8 @@ test "UX10: version check notice appears when update available" {
     defer ui.deinit();
 
     // Simulate a completed version check with a newer version.
-    var checker = version_check.Checker.init(alloc);
-    checker.result = try alloc.dupe(u8, "v99.0.0");
+    var checker = version_check.Checker.init();
+    checker.result = try version_check.Checker.thread_alloc.dupe(u8, "v99.0.0");
     checker.done.store(true, .release);
     defer checker.deinit();
 
@@ -14525,8 +14538,8 @@ test "UX10: version check notice skips when already done" {
     var ui = try tui_harness.Ui.init(alloc, 80, 12, "m", "p");
     defer ui.deinit();
 
-    var checker = version_check.Checker.init(alloc);
-    checker.result = try alloc.dupe(u8, "v99.0.0");
+    var checker = version_check.Checker.init();
+    checker.result = try version_check.Checker.thread_alloc.dupe(u8, "v99.0.0");
     checker.done.store(true, .release);
     defer checker.deinit();
 

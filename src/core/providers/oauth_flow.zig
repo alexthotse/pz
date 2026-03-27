@@ -393,10 +393,6 @@ pub fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provid
     const resp_body = try rdr.allocRemaining(ar, .limited(65536));
 
     if (resp.head.status != .ok) {
-        // Try to extract error detail from response body
-        const detail = extractRefreshErr(ar, resp_body, @intFromEnum(resp.head.status));
-        const redacted = audit.redactTextAlloc(ar, detail, .mask) catch detail;
-        std.log.warn("oauth refresh failed: {s}", .{redacted});
         if (isInvalidGrant(resp_body)) return error.RefreshInvalidGrant;
         return error.RefreshFailed;
     }
