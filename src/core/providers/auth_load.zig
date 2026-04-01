@@ -184,7 +184,7 @@ pub fn loadFileAuthForProvider(alloc: std.mem.Allocator, home: []const u8, provi
     // Strict parsing for primary path; allow unknown fields for legacy compat
     const parsed = std.json.parseFromSlice(AuthFile, ar, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = is_legacy,
+        .ignore_unknown_fields = true,
     }) catch return error.AuthCorrupt;
     const entry = switch (provider) {
         .anthropic => parsed.value.anthropic,

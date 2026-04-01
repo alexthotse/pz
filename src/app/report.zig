@@ -343,6 +343,12 @@ const rule_map = std.StaticStringMap(Rule).initComptime(.{
             .next = "run /login to authenticate or set an API key",
         },
     },
+    .{
+        "TokenExchangeFailed", Rule{
+            .summary = "OAuth authorization failed",
+            .next = "try /login again; if it persists, check console.anthropic.com for account issues",
+        },
+    },
 });
 
 fn lookup(err: anyerror) Rule {

@@ -5,6 +5,7 @@ pub const Opts = struct {
     bind_ip: []const u8 = "127.0.0.1",
     redirect_host: []const u8 = "127.0.0.1",
     path: []const u8 = "/callback",
+    success_redirect_url: ?[]const u8 = null,
     /// Per-connection read deadline in milliseconds.
     read_deadline_ms: u32 = 5_000,
 };
@@ -25,6 +26,7 @@ pub const Listener = struct {
     server: std.net.Server,
     redirect_uri: []u8,
     path: []u8,
+    success_redirect_url: ?[]u8,
     read_deadline_ms: u32,
 
     pub fn init(alloc: std.mem.Allocator, opts: Opts) !Listener {
@@ -42,12 +44,18 @@ pub const Listener = struct {
 
         const path = try alloc.dupe(u8, opts.path);
         errdefer alloc.free(path);
+        const success_redirect_url = if (opts.success_redirect_url) |url|
+            try alloc.dupe(u8, url)
+        else
+            null;
+        errdefer if (success_redirect_url) |url| alloc.free(url);
 
         return .{
             .alloc = alloc,
             .server = server,
             .redirect_uri = redirect_uri,
             .path = path,
+            .success_redirect_url = success_redirect_url,
             .read_deadline_ms = opts.read_deadline_ms,
         };
     }
@@ -56,6 +64,7 @@ pub const Listener = struct {
         self.server.deinit();
         self.alloc.free(self.redirect_uri);
         self.alloc.free(self.path);
+        if (self.success_redirect_url) |url| self.alloc.free(url);
         self.* = undefined;
     }
 
@@ -153,7 +162,11 @@ pub const Listener = struct {
             return error.InvalidOAuthCallbackRequest;
         }
 
-        try writeHtml(conn.stream.handle, "200 OK", callback_ok_body);
+        if (self.success_redirect_url) |url| {
+            try writeRedirect(conn.stream.handle, url);
+        } else {
+            try writeHtml(conn.stream.handle, "200 OK", callback_ok_body);
+        }
         return out;
     }
 };
@@ -234,6 +247,18 @@ fn writeHtml(fd: std.posix.fd_t, status: []const u8, body: []const u8) !void {
     _ = std.posix.write(fd, body) catch {}; // cleanup: propagation impossible
 }
 
+fn writeRedirect(fd: std.posix.fd_t, location: []const u8) !void {
+    const body = "<!doctype html><html><body><h1>Redirecting…</h1></body></html>";
+    var header: [512]u8 = undefined;
+    const hdr = try std.fmt.bufPrint(
+        &header,
+        "HTTP/1.1 302 Found\r\nLocation: {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ location, body.len },
+    );
+    _ = std.posix.write(fd, hdr) catch {}; // cleanup: propagation impossible
+    _ = std.posix.write(fd, body) catch {}; // cleanup: propagation impossible
+}
+
 const callback_ok_body =
     "<!doctype html><html><body><h1>Login complete</h1><p>You can return to pz.</p></body></html>";
 const callback_error_body =
@@ -247,6 +272,22 @@ fn sendTestCallback(port: u16, req: []const u8) void {
     _ = std.posix.write(stream.handle, req) catch return;
     var sink: [256]u8 = undefined;
     _ = std.posix.read(stream.handle, &sink) catch {}; // cleanup: propagation impossible
+}
+
+fn sendTestCallbackReadAlloc(alloc: std.mem.Allocator, port: u16, req: []const u8) ![]u8 {
+    const addr = try std.net.Address.parseIp("127.0.0.1", port);
+    var stream = try std.net.tcpConnectToAddress(addr);
+    defer stream.close();
+    _ = try std.posix.write(stream.handle, req);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const n = try std.posix.read(stream.handle, &buf);
+        if (n == 0) break;
+        try out.appendSlice(alloc, buf[0..n]);
+    }
+    return try out.toOwnedSlice(alloc);
 }
 
 test "parseCodeStateQuery decodes URL-encoded params" {
@@ -267,6 +308,32 @@ test "listener captures callback code and state" {
 
     const req = "GET /callback?code=abc&state=def HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     const t = try std.Thread.spawn(.{}, sendTestCallback, .{ listener.port(), req });
+    defer t.join();
+
+    var got = try listener.waitForCodeState(std.testing.allocator, 3000);
+    defer got.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("abc", got.code);
+    try std.testing.expectEqualStrings("def", got.state);
+}
+
+test "listener redirects browser to success url after valid callback" {
+    var listener = try Listener.init(std.testing.allocator, .{
+        .success_redirect_url = "https://console.anthropic.com/oauth/code/success?app=claude-code",
+    });
+    defer listener.deinit();
+
+    const req = "GET /callback?code=abc&state=def HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(p: u16) void {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            const resp = sendTestCallbackReadAlloc(std.testing.allocator, p, req) catch return;
+            defer std.testing.allocator.free(resp);
+            std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 302 Found") != null) catch return;
+            std.testing.expect(std.mem.indexOf(u8, resp, "Location: https://console.anthropic.com/oauth/code/success?app=claude-code") != null) catch return;
+        }
+    }.run, .{listener.port()});
     defer t.join();
 
     var got = try listener.waitForCodeState(std.testing.allocator, 3000);

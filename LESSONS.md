@@ -7,6 +7,9 @@ Hard-won patterns and anti-patterns from building pz. **Update this file at the 
 ## Session Notes (2026-03-24)
 
 ### Worked Well
+- When CLI and RPC share the same OAuth callback protocol, keep one shared runner for browser launch, callback wait, manual fallback hint, and completion; endpoint differences belong in `OAuthSpec`, not duplicated control flow.
+- For auth/browser regressions, disabling `openBrowser()` under `builtin.is_test` is not enough; PTY/e2e runs spawn the real `pz` binary, so `zig build test` must inject an env guard into every run artifact.
+- For provider OAuth breakage, diff the first-party client’s exact authorize host, scope set, JSON field order, refresh payload, and `Accept`/`Content-Type` headers; “roughly OAuth-correct” is not enough.
 - Adding random entropy strings to parallel agent prompts breaks convergence — same-model agents with identical prompts find the same things and miss the same blind spots.
 - Converting all `runPzPtySteps` tests to `runPtyInteractive` with wait-for-text sync eliminated an entire class of timing flakes (10 tests converted, 0 remaining callers).
 - Adversarial plan review with 6 specialized agents (plan-critic, edge-case, reviewer, scout, auditor, destructor) on disjoint surfaces finds issues a single reviewer misses — 2 reviews × 10 rounds found 2 Critical + 59 Major issues.

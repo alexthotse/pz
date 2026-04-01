@@ -316,13 +316,7 @@ fn buildBodyImpl(alloc: std.mem.Allocator, req: providers.Request, is_oauth: boo
     // Thinking configuration
     switch (req.opts.thinking) {
         .off => {},
-        .adaptive => if (supportsThinking(req.model)) {
-            try js.objectField("thinking");
-            try js.beginObject();
-            try js.objectField("type");
-            try js.write("adaptive");
-            try js.endObject();
-        },
+        .adaptive => {},
         .budget => if (supportsThinking(req.model)) {
             const budget = if (req.opts.thinking_budget > 0) req.opts.thinking_budget else 4096;
             try js.objectField("thinking");
@@ -930,7 +924,7 @@ test "buildBody thinking adaptive" {
     defer testing.allocator.free(body);
     try expectSnap(@src(), body,
         \\[]u8
-        \\  "{"model":"claude-opus-4-20250514","max_tokens":16384,"stream":true,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":[{"type":"text","text":"think"}]}]}"
+        \\  "{"model":"claude-opus-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"think"}]}]}"
     );
 }
 

@@ -32,6 +32,8 @@ const openai_oauth_extra_authorize = [_]OAuthParam{
     .{ .key = "originator", .value = "pz" },
 };
 
+const axios_json_accept = "application/json, text/plain, */*";
+
 pub const anthropic_spec = OAuthSpec{
     .provider = .anthropic,
     .client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
@@ -39,12 +41,16 @@ pub const anthropic_spec = OAuthSpec{
     .token_host = "console.anthropic.com",
     .token_path = "/v1/oauth/token",
     .default_redirect_uri = "https://console.anthropic.com/oauth/code/callback",
-    .scopes = "org:create_api_key user:profile user:inference",
+    .success_redirect_url = "https://console.anthropic.com/oauth/code/success?app=claude-code",
+    .scopes = "org:create_api_key user:profile user:inference user:sessions:claude_code",
+    .refresh_scope = "user:profile user:inference user:sessions:claude_code",
     .local_callback_path = "/callback",
+    .local_redirect_host = "localhost",
     .start_action = "start anthropic oauth",
     .complete_action = "complete anthropic oauth",
     .api_key_prefix = "sk-ant-",
     .token_body = .json_with_state,
+    .token_accept = axios_json_accept,
     .extra_authorize = &.{.{ .key = "code", .value = "true" }},
 };
 
@@ -57,6 +63,7 @@ pub const openai_spec = OAuthSpec{
     .default_redirect_uri = "http://127.0.0.1:1455/auth/callback",
     .scopes = "openid profile email offline_access",
     .local_callback_path = "/auth/callback",
+    .local_redirect_host = "127.0.0.1",
     .start_action = "start openai oauth",
     .complete_action = "complete openai oauth",
     .api_key_prefix = "sk-",
@@ -78,6 +85,8 @@ pub fn oauthLoginInfo(provider: Provider) ?auth.OAuthLoginInfo {
     const spec = oauthSpec(provider) orelse return null;
     return .{
         .callback_path = spec.local_callback_path,
+        .redirect_host = spec.local_redirect_host,
+        .success_redirect_url = spec.success_redirect_url,
         .start_action = spec.start_action,
         .complete_action = spec.complete_action,
     };
@@ -130,16 +139,16 @@ fn beginOAuthWithSpec(
     var query = std.ArrayList(u8).empty;
     defer query.deinit(alloc);
 
-    try appendQueryParam(alloc, &query, "response_type", "code");
+    for (spec.extra_authorize) |extra| {
+        try appendQueryParam(alloc, &query, extra.key, extra.value);
+    }
     try appendQueryParam(alloc, &query, "client_id", spec.client_id);
+    try appendQueryParam(alloc, &query, "response_type", "code");
     try appendQueryParam(alloc, &query, "redirect_uri", oauth_redirect_uri);
     try appendQueryParam(alloc, &query, "scope", spec.scopes);
     try appendQueryParam(alloc, &query, "code_challenge", challenge);
     try appendQueryParam(alloc, &query, "code_challenge_method", "S256");
     try appendQueryParam(alloc, &query, "state", state);
-    for (spec.extra_authorize) |extra| {
-        try appendQueryParam(alloc, &query, extra.key, extra.value);
-    }
 
     const url = try std.fmt.allocPrint(alloc, "{s}?{s}", .{ spec.authorize_url, query.items });
     errdefer alloc.free(url);
@@ -285,6 +294,9 @@ pub fn parseOAuthInput(alloc: std.mem.Allocator, input: []const u8) !OAuthCodeIn
 /// Launch URL in the user's default browser.
 /// Uses absolute paths to avoid PATH-resolved shellout attacks.
 pub fn openBrowser(alloc: std.mem.Allocator, url: []const u8) !void {
+    if (builtin.is_test) return error.UnsupportedPlatform;
+    if (std.process.hasEnvVarConstant("PZ_DISABLE_BROWSER_OPEN")) return error.UnsupportedPlatform;
+
     const argv: []const []const u8 = switch (builtin.os.tag) {
         .macos => &.{ "/usr/bin/open", url },
         .linux => blk: {
@@ -366,11 +378,18 @@ pub fn fetchRefreshedOAuthForProvider(alloc: std.mem.Allocator, provider: Provid
         .path = .{ .raw = spec.token_path },
     };
 
+    var headers: [2]std.http.Header = undefined;
+    var header_len: usize = 0;
+    headers[header_len] = .{ .name = "Content-Type", .value = req_body.content_type };
+    header_len += 1;
+    if (spec.token_accept) |accept| {
+        headers[header_len] = .{ .name = "Accept", .value = accept };
+        header_len += 1;
+    }
+
     var send_buf: [1024]u8 = undefined;
     var req = try http.request(.POST, uri, .{
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = req_body.content_type },
-        },
+        .extra_headers = headers[0..header_len],
         .keep_alive = false,
     });
     defer req.deinit();
@@ -414,7 +433,7 @@ fn pkceVerifier(alloc: std.mem.Allocator) ![]u8 {
 
 /// Independent CSRF token for OAuth state parameter (not reusing PKCE verifier).
 fn csrfToken(alloc: std.mem.Allocator) ![]u8 {
-    var raw: [16]u8 = undefined;
+    var raw: [32]u8 = undefined;
     std.crypto.random.bytes(&raw);
     const enc_len = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
     const out = try alloc.alloc(u8, enc_len);
@@ -434,7 +453,7 @@ fn pkceChallenge(alloc: std.mem.Allocator, verifier: []const u8) ![]u8 {
 // ── URL encoding helpers ───────────────────────────────────────────────
 
 fn encodeQueryComponentAlloc(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    return url_codec.encodeComponentAlloc(alloc, raw, false);
+    return url_codec.encodeComponentAlloc(alloc, raw, true);
 }
 
 fn appendQueryParam(alloc: std.mem.Allocator, out: *std.ArrayList(u8), key: []const u8, value: []const u8) !void {
@@ -462,7 +481,7 @@ const TokenReq = struct {
 fn tokenReqContentType(spec: *const OAuthSpec) []const u8 {
     return switch (spec.token_body) {
         .json_with_state => "application/json",
-        .form_no_state => "application/x-www-form-urlencoded",
+        .form_no_state, .form_with_state => "application/x-www-form-urlencoded",
     };
 }
 
@@ -478,21 +497,21 @@ fn buildTokenReqBody(
         .json_with_state => blk: {
             const Body = struct {
                 grant_type: []const u8,
-                client_id: []const u8,
                 code: []const u8,
-                state: []const u8,
                 redirect_uri: []const u8,
+                client_id: []const u8,
                 code_verifier: []const u8,
+                state: []const u8,
             };
             break :blk .{
                 .content_type = tokenReqContentType(spec),
                 .body = try std.json.Stringify.valueAlloc(ar, Body{
                     .grant_type = "authorization_code",
-                    .client_id = spec.client_id,
                     .code = code,
-                    .state = state,
                     .redirect_uri = oauth_redirect_uri,
+                    .client_id = spec.client_id,
                     .code_verifier = verifier,
+                    .state = state,
                 }, .{}),
             };
         },
@@ -509,6 +528,20 @@ fn buildTokenReqBody(
                 ),
             };
         },
+        .form_with_state => blk: {
+            const code_enc = try encodeFormComponentAlloc(ar, code);
+            const state_enc = try encodeFormComponentAlloc(ar, state);
+            const verifier_enc = try encodeFormComponentAlloc(ar, verifier);
+            const redirect_enc = try encodeFormComponentAlloc(ar, oauth_redirect_uri);
+            break :blk .{
+                .content_type = tokenReqContentType(spec),
+                .body = try std.fmt.allocPrint(
+                    ar,
+                    "grant_type=authorization_code&client_id={s}&code={s}&state={s}&code_verifier={s}&redirect_uri={s}",
+                    .{ spec.client_id, code_enc, state_enc, verifier_enc, redirect_enc },
+                ),
+            };
+        },
     };
 }
 
@@ -519,21 +552,38 @@ fn buildRefreshReqBody(
 ) !TokenReq {
     return switch (spec.token_body) {
         .json_with_state => blk: {
+            if (spec.refresh_scope) |scope| {
+                const Body = struct {
+                    grant_type: []const u8,
+                    refresh_token: []const u8,
+                    client_id: []const u8,
+                    scope: []const u8,
+                };
+                break :blk .{
+                    .content_type = tokenReqContentType(spec),
+                    .body = try std.json.Stringify.valueAlloc(ar, Body{
+                        .grant_type = "refresh_token",
+                        .refresh_token = refresh_token,
+                        .client_id = spec.client_id,
+                        .scope = scope,
+                    }, .{}),
+                };
+            }
             const Body = struct {
                 grant_type: []const u8,
-                client_id: []const u8,
                 refresh_token: []const u8,
+                client_id: []const u8,
             };
             break :blk .{
                 .content_type = tokenReqContentType(spec),
                 .body = try std.json.Stringify.valueAlloc(ar, Body{
                     .grant_type = "refresh_token",
-                    .client_id = spec.client_id,
                     .refresh_token = refresh_token,
+                    .client_id = spec.client_id,
                 }, .{}),
             };
         },
-        .form_no_state => blk: {
+        .form_no_state, .form_with_state => blk: {
             const refresh_enc = try encodeFormComponentAlloc(ar, refresh_token);
             break :blk .{
                 .content_type = tokenReqContentType(spec),
@@ -601,11 +651,18 @@ pub fn exchangeAuthorizationCode(
         .path = .{ .raw = spec.token_path },
     };
 
+    var headers: [2]std.http.Header = undefined;
+    var header_len: usize = 0;
+    headers[header_len] = .{ .name = "Content-Type", .value = token_req.content_type };
+    header_len += 1;
+    if (spec.token_accept) |accept| {
+        headers[header_len] = .{ .name = "Accept", .value = accept };
+        header_len += 1;
+    }
+
     var send_buf: [1024]u8 = undefined;
     var req = try http.request(.POST, uri, .{
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = token_req.content_type },
-        },
+        .extra_headers = headers[0..header_len],
         .keep_alive = false,
     });
     defer req.deinit();
@@ -621,13 +678,16 @@ pub fn exchangeAuthorizationCode(
     var redir_buf: [0]u8 = .{};
     var resp = try req.receiveHead(&redir_buf);
 
-    if (resp.head.status != .ok) return error.TokenExchangeFailed;
-
     var transfer_buf: [16384]u8 = undefined;
     var decomp: std.http.Decompress = undefined;
     var decomp_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const rdr = resp.readerDecompressing(&transfer_buf, &decomp, &decomp_buf);
     const resp_body = try rdr.allocRemaining(ar, .limited(65536));
+
+    if (resp.head.status != .ok) {
+        if (isInvalidGrant(resp_body)) return error.RefreshInvalidGrant;
+        return error.TokenExchangeFailed;
+    }
 
     return parseOAuthTokenResponse(alloc, ar, resp_body, error.TokenExchangeFailed);
 }
@@ -732,6 +792,10 @@ test "oauth helpers expose provider capabilities and metadata" {
         \\core.providers.auth.OAuthLoginInfo
         \\  .callback_path: []const u8
         \\    "/callback"
+        \\  .redirect_host: []const u8
+        \\    "localhost"
+        \\  .success_redirect_url: ?[]const u8
+        \\    "https://console.anthropic.com/oauth/code/success?app=claude-code"
         \\  .start_action: []const u8
         \\    "start anthropic oauth"
         \\  .complete_action: []const u8
@@ -743,6 +807,10 @@ test "oauth helpers expose provider capabilities and metadata" {
         \\core.providers.auth.OAuthLoginInfo
         \\  .callback_path: []const u8
         \\    "/auth/callback"
+        \\  .redirect_host: []const u8
+        \\    "127.0.0.1"
+        \\  .success_redirect_url: ?[]const u8
+        \\    null
         \\  .start_action: []const u8
         \\    "start openai oauth"
         \\  .complete_action: []const u8
@@ -752,25 +820,26 @@ test "oauth helpers expose provider capabilities and metadata" {
     try std.testing.expect(oauthLoginInfo(.google) == null);
 }
 
-test "beginOAuth builds authorization URL with separate state and verifier" {
+test "beginOAuth builds anthropic authorization URL with separate state and verifier" {
     var flow = try beginOAuth(std.testing.allocator, .anthropic);
     defer flow.deinit(std.testing.allocator);
 
     try std.testing.expect(std.mem.startsWith(u8, flow.url, "https://claude.ai/oauth/authorize?"));
+    try std.testing.expect(std.mem.indexOf(u8, flow.url, "code=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flow.url, "scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "code_challenge=") != null);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
     try std.testing.expect(flow.state.len > 0);
     try std.testing.expect(flow.verifier.len > 16);
-    // state and verifier are independent tokens
-    try std.testing.expect(!std.mem.eql(u8, flow.state, flow.verifier));
+    try std.testing.expect(!std.mem.eql(u8, flow.verifier, flow.state));
 }
 
 test "beginOAuthWithRedirect encodes localhost callback URI" {
-    var flow = try beginOAuthWithRedirect(std.testing.allocator, .anthropic, "http://127.0.0.1:54321/callback");
+    var flow = try beginOAuthWithRedirect(std.testing.allocator, .anthropic, "http://localhost:54321/callback");
     defer flow.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.indexOf(u8, flow.url, "redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flow.url, "redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fcallback") != null);
 }
 
 test "beginOAuthWithRedirect encodes callback URI and codex params" {
@@ -982,16 +1051,14 @@ test "completeOAuthWithHooks uses provided verifier not state" {
     try std.testing.expectEqualStrings("my-pkce-verifier", got_verifier);
 }
 
-test "separate OAuth state and PKCE verifier" {
+test "anthropic OAuth state and PKCE verifier stay separate" {
     var flow = try beginOAuth(std.testing.allocator, .anthropic);
     defer flow.deinit(std.testing.allocator);
 
-    // state and verifier must be distinct tokens
+    try std.testing.expect(std.mem.startsWith(u8, flow.url, "https://claude.ai/oauth/authorize?"));
     try std.testing.expect(!std.mem.eql(u8, flow.state, flow.verifier));
-    // state is shorter (16 bytes base64 = 22 chars) vs verifier (32 bytes = 43 chars)
     try std.testing.expect(flow.state.len > 0);
-    try std.testing.expect(flow.verifier.len > flow.state.len);
-    // URL contains state= param
+    try std.testing.expectEqual(flow.verifier.len, flow.state.len);
     try std.testing.expect(std.mem.indexOf(u8, flow.url, "state=") != null);
 }
 
@@ -1002,13 +1069,35 @@ test "buildRefreshReqBody uses provider-specific body shape" {
 
     const anth = try buildRefreshReqBody(ar, &anthropic_spec, "rt-1");
     try std.testing.expectEqualStrings("application/json", anth.content_type);
-    try std.testing.expect(std.mem.indexOf(u8, anth.body, "\"grant_type\":\"refresh_token\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, anth.body, "\"refresh_token\":\"rt-1\"") != null);
+    try std.testing.expectEqualStrings(
+        "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"rt-1\",\"client_id\":\"9d1c250a-e61b-44d9-88ed-5944d1962f5e\",\"scope\":\"user:profile user:inference user:sessions:claude_code\"}",
+        anth.body,
+    );
 
     const oa = try buildRefreshReqBody(ar, &openai_spec, "rt 2");
     try std.testing.expectEqualStrings("application/x-www-form-urlencoded", oa.content_type);
     try std.testing.expect(std.mem.indexOf(u8, oa.body, "grant_type=refresh_token") != null);
     try std.testing.expect(std.mem.indexOf(u8, oa.body, "refresh_token=rt+2") != null);
+}
+
+test "buildTokenReqBody anthropic uses json contract" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    const req = try buildTokenReqBody(
+        ar,
+        &anthropic_spec,
+        "abc123",
+        "state456",
+        "http://localhost:54321/callback",
+        "verifier789",
+    );
+    try std.testing.expectEqualStrings("application/json", req.content_type);
+    try std.testing.expectEqualStrings(
+        "{\"grant_type\":\"authorization_code\",\"code\":\"abc123\",\"redirect_uri\":\"http://localhost:54321/callback\",\"client_id\":\"9d1c250a-e61b-44d9-88ed-5944d1962f5e\",\"code_verifier\":\"verifier789\",\"state\":\"state456\"}",
+        req.body,
+    );
 }
 
 test "buildTokenReqBody form body escapes reserved characters" {

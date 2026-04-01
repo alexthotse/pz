@@ -70,6 +70,7 @@ pub const Hooks = struct {
 pub const OAuthTokenBody = enum {
     json_with_state,
     form_no_state,
+    form_with_state,
 };
 
 pub const OAuthParam = struct {
@@ -84,12 +85,16 @@ pub const OAuthSpec = struct {
     token_host: []const u8,
     token_path: []const u8,
     default_redirect_uri: []const u8,
+    success_redirect_url: ?[]const u8 = null,
     scopes: []const u8,
+    refresh_scope: ?[]const u8 = null,
     local_callback_path: []const u8,
+    local_redirect_host: []const u8,
     start_action: []const u8,
     complete_action: []const u8,
     api_key_prefix: ?[]const u8 = null,
     token_body: OAuthTokenBody,
+    token_accept: ?[]const u8 = null,
     extra_authorize: []const OAuthParam = &.{},
 };
 
@@ -127,6 +132,8 @@ pub const AuthFile = struct {
 
 pub const OAuthLoginInfo = struct {
     callback_path: []const u8,
+    redirect_host: []const u8,
+    success_redirect_url: ?[]const u8,
     start_action: []const u8,
     complete_action: []const u8,
 };

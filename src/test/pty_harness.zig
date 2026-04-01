@@ -1738,7 +1738,8 @@ test "real PTY TUI: type prompt, get response in transcript" {
     var out = try runPtyInteractive(alloc, cwd_abs, &env, &.{
         "--no-session",
         "--no-config",
-        "--model", "claude-sonnet-4-20250514",
+        "--model",
+        "claude-sonnet-4-20250514",
     }, &steps);
     defer out.deinit(alloc);
 
@@ -1746,6 +1747,53 @@ test "real PTY TUI: type prompt, get response in transcript" {
     // The model's response containing PZTEST_HELLO was already proven by wait_for.
     // Verify it persists in the final output buffer.
     try std.testing.expect(std.mem.indexOf(u8, out.output, "PZTEST_HELLO") != null);
+}
+
+test "real PTY TUI: cached anthropic oauth token gets response in transcript" {
+    const alloc = std.testing.allocator;
+
+    const real_home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    var auth_res = core.providers.auth.loadForProviderWithHooks(alloc, .anthropic, .{
+        .home_override = real_home,
+    }) catch return error.SkipZigTest;
+    defer auth_res.deinit();
+    if (auth_res.auth != .oauth) return error.SkipZigTest;
+
+    const auth_src = std.fs.path.join(alloc, &.{ real_home, ".pz/auth.json" }) catch return error.SkipZigTest;
+    defer alloc.free(auth_src);
+    const auth_data = std.fs.cwd().readFileAlloc(alloc, auth_src, 64 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(auth_data);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.pz");
+    try tmp.dir.writeFile(.{ .sub_path = "home/.pz/auth.json", .data = auth_data });
+    const cwd_abs = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd_abs);
+    const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home_abs);
+
+    var env = try baseEnv(alloc, home_abs);
+    defer env.deinit();
+
+    const steps = [_]InteractiveStep{
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 10000 } },
+        .{ .inject = "Say exactly: PZTEST_OAUTH\n" },
+        .{ .wait_for = .{ .text = "PZTEST_OAUTH", .timeout_ms = 30000 } },
+        .{ .inject = "\x03\x03" },
+        .{ .sleep = 500 },
+    };
+
+    var out = try runPtyInteractive(alloc, cwd_abs, &env, &.{
+        "--no-session",
+        "--no-config",
+        "--model",
+        "claude-sonnet-4-20250514",
+    }, &steps);
+    defer out.deinit(alloc);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.output, "PZTEST_OAUTH") != null);
 }
 
 // ── Bidirectional PTY harness ──
@@ -2055,29 +2103,29 @@ fn runPtyInteractive(
                 const already_found = (try screen.hasText(wf.text)) or
                     std.mem.indexOf(u8, screen.plain.items, wf.text) != null;
                 if (!already_found) {
-                while (true) {
-                    var buf: [4096]u8 = undefined;
-                    const n = std.posix.read(master_fd, &buf) catch |err| switch (err) {
-                        error.WouldBlock => {
-                            if (std.time.milliTimestamp() >= deadline) {
-                                const grid = screen.textGrid() catch "";
-                                const plain_tail = if (screen.plain.items.len > 500) screen.plain.items[screen.plain.items.len - 500 ..] else screen.plain.items;
-                                const has_partial = std.mem.indexOf(u8, screen.plain.items, wf.text[0..@min(3, wf.text.len)]);
-                                std.debug.print("wait_for timeout: needle=\"{s}\" plain_len={d} partial_at={?d}\nplain_tail:\n{s}\ngrid:\n{s}\n", .{ wf.text, screen.plain.items.len, has_partial, plain_tail, grid });
-                                if (grid.len > 0) alloc.free(grid);
-                                return error.WaitForTimeout;
-                            }
-                            std.Thread.sleep(10 * std.time.ns_per_ms);
-                            continue;
-                        },
-                        error.InputOutput, error.BrokenPipe => break,
-                        else => return err,
-                    };
-                    if (n == 0) break;
-                    try screen.feed(buf[0..n]);
-                    if (try screen.hasText(wf.text)) break;
-                    if (std.mem.indexOf(u8, screen.plain.items, wf.text) != null) break;
-                }
+                    while (true) {
+                        var buf: [4096]u8 = undefined;
+                        const n = std.posix.read(master_fd, &buf) catch |err| switch (err) {
+                            error.WouldBlock => {
+                                if (std.time.milliTimestamp() >= deadline) {
+                                    const grid = screen.textGrid() catch "";
+                                    const plain_tail = if (screen.plain.items.len > 500) screen.plain.items[screen.plain.items.len - 500 ..] else screen.plain.items;
+                                    const has_partial = std.mem.indexOf(u8, screen.plain.items, wf.text[0..@min(3, wf.text.len)]);
+                                    std.debug.print("wait_for timeout: needle=\"{s}\" plain_len={d} partial_at={?d}\nplain_tail:\n{s}\ngrid:\n{s}\n", .{ wf.text, screen.plain.items.len, has_partial, plain_tail, grid });
+                                    if (grid.len > 0) alloc.free(grid);
+                                    return error.WaitForTimeout;
+                                }
+                                std.Thread.sleep(10 * std.time.ns_per_ms);
+                                continue;
+                            },
+                            error.InputOutput, error.BrokenPipe => break,
+                            else => return err,
+                        };
+                        if (n == 0) break;
+                        try screen.feed(buf[0..n]);
+                        if (try screen.hasText(wf.text)) break;
+                        if (std.mem.indexOf(u8, screen.plain.items, wf.text) != null) break;
+                    }
                 }
                 // Force VScreen snapshot into plain buffer after wait_for succeeds.
                 // The text may have been found in VScreen grid but not yet in plain
@@ -3113,4 +3161,3 @@ test "pty: unknown slash command shows error in transcript" {
     try std.testing.expect(out.snapshots.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, out.snapshots[0].grid, "unknown command: /frobnicate") != null);
 }
-

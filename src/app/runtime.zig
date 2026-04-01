@@ -137,6 +137,45 @@ const NativeProviderRuntime = union(enum) {
         }
     }
 
+    /// Returns the provider tag if the current auth is expired OAuth.
+    fn expiredOAuthProvider(self: *NativeProviderRuntime) ?core.providers.auth.Provider {
+        const auth = switch (self.*) {
+            .anthropic => |*c| c.auth.auth,
+            .openai => |*c| c.auth.auth,
+        };
+        switch (auth) {
+            .oauth => |oauth| {
+                if (std.time.milliTimestamp() >= oauth.expires) {
+                    return switch (self.*) {
+                        .anthropic => .anthropic,
+                        .openai => .openai,
+                    };
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    /// Replace auth after a successful login flow.
+    fn reloadAuth(self: *NativeProviderRuntime, alloc: std.mem.Allocator, hooks: core.providers.auth.Hooks) !void {
+        const tag: core.providers.auth.Provider = switch (self.*) {
+            .anthropic => .anthropic,
+            .openai => .openai,
+        };
+        const new_auth = try core.providers.auth.loadForProviderWithHooks(alloc, tag, hooks);
+        switch (self.*) {
+            .anthropic => |*c| {
+                c.auth.deinit();
+                c.auth = new_auth;
+            },
+            .openai => |*c| {
+                c.auth.deinit();
+                c.auth = new_auth;
+            },
+        }
+    }
+
     fn providerPtr(self: *NativeProviderRuntime) *core.providers.Provider {
         return switch (self.*) {
             .anthropic => |*client| &client.provider,
@@ -1792,6 +1831,7 @@ fn execWithIoTuiHooks(
     const reader = if (in) |r| r else std.fs.File.stdin().deprecatedReader().any();
 
     // Init provider
+    var needs_login: ?NativeProviderKind = null;
     if (run_cmd.cfg.provider_cmd) |provider_cmd| {
         try provider_rt.init(alloc, provider_cmd);
         has_provider_rt = true;
@@ -1805,6 +1845,9 @@ fn execWithIoTuiHooks(
                 if (el) |*e| native_rt.setEventLoop(e);
                 provider = native_rt.providerPtr();
             } else |err| {
+                if (err == error.AuthNotFound and run_cmd.mode == .tui) {
+                    needs_login = native_kind;
+                }
                 missing_provider.msg = missingProviderMsgForInitErr(native_kind, err);
                 provider = &missing_provider.provider;
             }
@@ -1894,6 +1937,7 @@ fn execWithIoTuiHooks(
                 hooks,
                 tui_hooks,
                 if (has_native_rt) &native_rt else null,
+                needs_login,
             ),
             .rpc => try runRpc(
                 alloc,
@@ -1937,7 +1981,6 @@ fn runPrint(
     defer sink_impl.deinit();
     sink_impl.fmt.verbose = run_cmd.verbose;
 
-    
     var reg: PolicyToolRegistry = undefined;
     var tool_audit_seq: u64 = 1;
     const tool_audit = PolicyToolAudit{
@@ -2114,7 +2157,7 @@ fn runJson(
         .alloc = alloc,
         .out = out,
     };
-    
+
     const popts = run_cmd.thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
@@ -2188,6 +2231,7 @@ fn runTui(
     audit_hooks: AuditHooks,
     tui_hooks: TuiHooks,
     native_rt: ?*NativeProviderRuntime,
+    needs_login: ?NativeProviderKind,
 ) !void {
     const home = run_cmd.home;
     var ctl_audit = RuntimeCtlAudit{ .hooks = audit_hooks };
@@ -2244,7 +2288,6 @@ fn runTui(
         .ui = &ui,
         .out = out,
     };
-    
 
     const stdin_fd = tui_hooks.stdin_fd;
     const is_tty = tui_hooks.live orelse std.posix.isatty(stdin_fd);
@@ -2257,7 +2300,7 @@ fn runTui(
 
     var watcher = try InputWatcher.init(stdin_fd);
     defer watcher.deinit();
-    
+
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
     const approval_bind = try loadApprovalBindAlloc(alloc, home);
@@ -2291,7 +2334,7 @@ fn runTui(
         .hook = &prompt_ask_ctx.ask_hook,
         .cache = &cmd_cache,
     };
-    
+
     const tctx = TurnCtx{
         .alloc = alloc,
         .provider = provider,
@@ -2342,6 +2385,43 @@ fn runTui(
 
     try ui.draw(out);
     try maybeShowVersionUpdate(alloc, &ui, &ver_check, &ver_notice_done, out);
+
+    // Auto-login: start OAuth flow on startup if auth is missing or expired.
+    // Skip when using --provider-cmd (tests) or --no-config (no real auth expected).
+    if (run_cmd.cfg.provider_cmd == null) {
+        const login_prov: ?core.providers.auth.Provider = if (native_rt) |nrt|
+            nrt.expiredOAuthProvider()
+        else if (needs_login) |kind| switch (kind) {
+            .anthropic => .anthropic,
+            .openai => .openai,
+        } else null;
+
+        if (login_prov) |prov| {
+            try ui.tr.infoText("starting login...");
+            ui.tr.scrollToBottom();
+            try ui.draw(out);
+            var login_buf: [4096]u8 = undefined;
+            var login_fbs = std.io.fixedBufferStream(&login_buf);
+            runLoginFlow(alloc, login_fbs.writer().any(), .{
+                .prov = prov,
+                .prov_name = core.providers.auth.providerName(prov),
+                .key = "",
+            }, audit_hooks.auth()) catch |err| {
+                const em = try report.fromName(alloc, @errorName(err));
+                defer alloc.free(em);
+                try ui.tr.infoText(em);
+            };
+            const login_out = login_fbs.getWritten();
+            if (login_out.len > 0) {
+                try infoTextSafe(alloc, &ui, login_out);
+            }
+            if (native_rt) |nrt| {
+                nrt.reloadAuth(alloc, audit_hooks.auth()) catch {};
+            }
+            try ui.draw(out);
+        }
+    }
+
     if (run_cmd.prompt) |prompt| {
         var init_cmd_buf: [4096]u8 = undefined;
         var init_cmd_fbs = std.io.fixedBufferStream(&init_cmd_buf);
@@ -2468,8 +2548,7 @@ fn runTui(
         var live_sink_impl = LiveTurnSink{
             .live = &live_turn,
         };
-        
-        
+
         var live_cmd_cache = core.loop.CmdCache.init(alloc);
         defer live_cmd_cache.deinit();
         const live_approval_bind = try loadApprovalBindAlloc(alloc, home);
@@ -2501,7 +2580,7 @@ fn runTui(
             .hook = tools_rt.ask_hook.?,
             .cache = &live_cmd_cache,
         };
-        
+
         live_tctx.approver = &live_approver_impl.approver;
         var pending = PendingQueue{};
         defer pending.deinit(alloc);
@@ -3323,7 +3402,7 @@ fn runRpc(
         .alloc = alloc,
         .out = out,
     };
-    
+
     const popts = run_cmd.thinking.toProviderOpts();
     var cmd_cache = core.loop.CmdCache.init(alloc);
     defer cmd_cache.deinit();
@@ -4020,8 +4099,12 @@ fn runLoginFlow(
     const oauth_info = core.providers.auth.oauthLoginInfo(req.prov);
     if (kind == .oauth_start) {
         const info = oauth_info orelse return error.OAuthNotSupported;
+        const oauth_name = core.providers.auth.providerName(req.prov);
+
         var listener = core.providers.oauth_callback.Listener.init(alloc, .{
             .path = info.callback_path,
+            .redirect_host = info.redirect_host,
+            .success_redirect_url = info.success_redirect_url,
         }) catch |err| {
             const em = try report.cli(alloc, "start local oauth callback server", err);
             defer alloc.free(em);
@@ -4030,7 +4113,6 @@ fn runLoginFlow(
         };
         defer listener.deinit();
 
-        const oauth_name = core.providers.auth.providerName(req.prov);
         var flow = core.providers.auth.beginOAuthWithRedirect(alloc, req.prov, listener.redirect_uri) catch |err| {
             const em = try report.cli(alloc, info.start_action, err);
             defer alloc.free(em);
@@ -4039,43 +4121,20 @@ fn runLoginFlow(
         };
         defer flow.deinit(alloc);
 
-        if (core.providers.auth.openBrowser(alloc, flow.url)) {
-            try writeTextLine(alloc, out, "opened browser for {s} oauth\n", .{oauth_name});
-        } else |_| {
-            try out.writeAll("could not open browser automatically\n");
-            try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
-        }
-        try out.writeAll("waiting for oauth callback...\n");
-
-        var callback = listener.waitForCodeState(alloc, 5 * 60 * 1000) catch |err| {
-            const em = try report.cli(alloc, "wait for oauth callback", err);
-            defer alloc.free(em);
-            try out.writeAll(em);
-            // Store the PKCE verifier so manual `/login <provider> <url>` can use it.
-            storePendingVerifier(alloc, req.prov, flow.verifier);
-            try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
-            try out.writeAll("if your browser showed localhost callback URL, run:\n");
-            try writeTextLine(alloc, out, "  /login {s} <callback-url>\n", .{oauth_name});
-            return;
+        runOAuthCallbackLogin(alloc, out, req.prov, oauth_name, &listener, &flow, hooks) catch |err| switch (err) {
+            error.OAuthCallbackTimeout => {
+                const em = try report.cli(alloc, "wait for oauth callback", err);
+                defer alloc.free(em);
+                try out.writeAll(em);
+                return;
+            },
+            else => {
+                const em = try report.cli(alloc, info.complete_action, err);
+                defer alloc.free(em);
+                try out.writeAll(em);
+                return;
+            },
         };
-        defer callback.deinit(alloc);
-
-        core.providers.auth.completeOAuthFromLocalCallbackWithHooks(
-            alloc,
-            req.prov,
-            callback,
-            listener.redirect_uri,
-            flow.state,
-            flow.verifier,
-            hooks,
-        ) catch |err| {
-            const em = try report.cli(alloc, info.complete_action, err);
-            defer alloc.free(em);
-            try out.writeAll(em);
-            return;
-        };
-        clearPendingVerifier();
-        try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
         return;
     }
     if (kind == .oauth_complete) {
@@ -4104,43 +4163,67 @@ fn runLoginFlow(
     try writeTextLine(alloc, out, "API key saved for {s}\n", .{req.prov_name});
 }
 
+fn runOAuthCallbackLogin(
+    alloc: std.mem.Allocator,
+    out: std.Io.AnyWriter,
+    prov: core.providers.auth.Provider,
+    oauth_name: []const u8,
+    listener: *core.providers.oauth_callback.Listener,
+    flow: *const core.providers.auth.OAuthStart,
+    hooks: core.providers.auth.Hooks,
+) !void {
+    if (core.providers.auth.openBrowser(alloc, flow.url)) {
+        try writeTextLine(alloc, out, "opened browser for {s} oauth\n", .{oauth_name});
+    } else |_| {
+        try out.writeAll("could not open browser automatically\n");
+        try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
+    }
+    try out.writeAll("waiting for oauth callback...\n");
+
+    var callback = listener.waitForCodeState(alloc, 5 * 60 * 1000) catch |err| {
+        if (err != error.OAuthCallbackTimeout) return err;
+        storePendingVerifier(alloc, prov, flow.verifier);
+        try writeTextLine(alloc, out, "auth url: {s}\n", .{flow.url});
+        try out.writeAll("if your browser showed localhost callback URL, run:\n");
+        try writeTextLine(alloc, out, "  /login {s} <callback-url>\n", .{oauth_name});
+        return err;
+    };
+    defer callback.deinit(alloc);
+
+    try core.providers.auth.completeOAuthFromLocalCallbackWithHooks(
+        alloc,
+        prov,
+        callback,
+        listener.redirect_uri,
+        flow.state,
+        flow.verifier,
+        hooks,
+    );
+    clearPendingVerifier();
+    try writeTextLine(alloc, out, "{s} oauth login complete\n", .{oauth_name});
+}
+
 fn runRpcLogin(alloc: std.mem.Allocator, req: RpcReq, hooks: core.providers.auth.Hooks) ![]u8 {
     const auth_req = try parseAuthReq(req.arg orelse req.text orelse "", req.provider);
     const kind = classifyLoginInput(auth_req.prov, auth_req.key);
     const oauth_info = core.providers.auth.oauthLoginInfo(auth_req.prov);
     if (kind == .oauth_start) {
         const info = oauth_info orelse return error.OAuthNotSupported;
+        const oauth_name = core.providers.auth.providerName(auth_req.prov);
+
         var listener = try core.providers.oauth_callback.Listener.init(alloc, .{
             .path = info.callback_path,
+            .redirect_host = info.redirect_host,
+            .success_redirect_url = info.success_redirect_url,
         });
         defer listener.deinit();
 
-        const oauth_name = core.providers.auth.providerName(auth_req.prov);
         var flow = try core.providers.auth.beginOAuthWithRedirect(alloc, auth_req.prov, listener.redirect_uri);
         defer flow.deinit(alloc);
 
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(alloc);
-        if (core.providers.auth.openBrowser(alloc, flow.url)) {
-            try writeTextLine(alloc, out.writer(alloc).any(), "opened browser for {s} oauth\n", .{oauth_name});
-        } else |_| {
-            try out.appendSlice(alloc, "could not open browser automatically\n");
-            try writeTextLine(alloc, out.writer(alloc).any(), "auth url: {s}\n", .{flow.url});
-        }
-        try out.appendSlice(alloc, "waiting for oauth callback...\n");
-
-        var callback = try listener.waitForCodeState(alloc, 5 * 60 * 1000);
-        defer callback.deinit(alloc);
-        try core.providers.auth.completeOAuthFromLocalCallbackWithHooks(
-            alloc,
-            auth_req.prov,
-            callback,
-            listener.redirect_uri,
-            flow.state,
-            flow.verifier,
-            hooks,
-        );
-        try writeTextLine(alloc, out.writer(alloc).any(), "{s} oauth login complete\n", .{oauth_name});
+        try runOAuthCallbackLogin(alloc, out.writer(alloc).any(), auth_req.prov, oauth_name, &listener, &flow, hooks);
         return out.toOwnedSlice(alloc);
     }
     if (kind == .oauth_complete) {
@@ -9046,6 +9129,7 @@ test "runtime tui overflow retries once with injected live stdin" {
             .stop_after_completions = 1,
             .submit_text = "ping",
         },
+        null,
         null,
     );
 

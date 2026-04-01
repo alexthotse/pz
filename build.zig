@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
     });
     configTestMod(exe_tests.root_module, ohsnap_mod, zcheck_mod, null);
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    run_exe_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");
 
     const suite_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -140,6 +141,7 @@ pub fn build(b: *std.Build) void {
     });
     configTestMod(suite_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_suite_tests = b.addRunArtifact(suite_tests);
+    run_suite_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
@@ -171,6 +173,7 @@ pub fn build(b: *std.Build) void {
     });
     configTestMod(perf_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_perf_tests = b.addRunArtifact(perf_tests);
+    run_perf_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");
     const perf_step = b.step("perf", "Run performance budget tests");
     perf_step.dependOn(&run_perf_tests.step);
 
