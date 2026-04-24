@@ -15,7 +15,12 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
     @cInclude("sys/wait.h");
     @cInclude("unistd.h");
-    @cInclude("util.h");
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .macos) {
+        @cInclude("util.h");
+    } else if (builtin.os.tag == .linux) {
+        @cInclude("pty.h");
+    }
 });
 
 const RunOut = struct {

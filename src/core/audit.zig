@@ -499,7 +499,7 @@ const Ring = struct {
 
     const SpoolEntry = struct { seq: u64, name: [32]u8, len: usize };
 
-    fn restoreSpool(self: *Ring) !void {
+    pub fn restoreSpool(self: *Ring) !void {
         const dir = self.spool_dir orelse return;
         if (self.slots.len == 0) return;
 

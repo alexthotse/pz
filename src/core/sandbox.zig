@@ -40,7 +40,7 @@ pub fn prepareBash(
     raw_cwd: ?[]const u8,
     cmd: []const u8,
 ) Err!BashPlan {
-    if (builtin.os.tag != .macos) @compileError("bash sandbox requires macOS");
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) @compileError("bash sandbox requires macOS or linux");
 
     const root = std.fs.cwd().realpathAlloc(alloc, ".") catch |err| return mapFsErr(err);
     defer alloc.free(root);

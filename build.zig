@@ -50,9 +50,9 @@ pub fn build(b: *std.Build) void {
         const vcs_hash_raw = b.runAllowFail(
             &.{ "jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short()" },
             &code,
-            .ignore,
+            .Ignore,
         ) catch "dev";
-        const vcs_hash = std.mem.trimEnd(u8, vcs_hash_raw, &[_]u8{ ' ', '\n', '\r' });
+        const vcs_hash = std.mem.trimRight(u8, vcs_hash_raw, " \n\r");
         addSharedOpt(opts_pair, []const u8, "git_hash", vcs_hash);
         // State tracker key: hash for dev (matches line-start in VCS log).
         addSharedOpt(opts_pair, []const u8, "build_id", vcs_hash);
@@ -63,14 +63,14 @@ pub fn build(b: *std.Build) void {
                 "log",
                 "--no-graph",
                 "-r",
-                "ancestors(@, 50)",
+                "::@",
                 "-T",
                 "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
             },
             &code,
-            .ignore,
+            .Ignore,
         ) catch "";
-        const vcs_log = std.mem.trimEnd(u8, vcs_log_raw, &[_]u8{ ' ', '\n', '\r' });
+        const vcs_log = std.mem.trimRight(u8, vcs_log_raw, " \n\r");
         addSharedOpt(opts_pair, []const u8, "changelog", vcs_log);
     }
     addSharedOpt(opts_pair, []const u8, "policy_pk_hex", policy_pk_hex);
@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.linkLibC();
     exe.root_module.addOptions("build_options", options);
     b.installArtifact(exe);
     test_options.addOptionPath("pz_bin_path", exe.getEmittedBin());
@@ -113,6 +114,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    agent_exit_harness.linkLibC();
     agent_exit_harness.root_module.addImport("core_agent", core_agent_mod);
     const agent_child_harness = b.addExecutable(.{
         .name = "agent-child-harness",
@@ -122,12 +124,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    agent_child_harness.linkLibC();
     agent_child_harness.root_module.addImport("core_agent", core_agent_mod);
     test_options.addOptionPath("agent_child_harness_path", agent_child_harness.getEmittedBin());
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    exe_tests.linkLibC();
     configTestMod(exe_tests.root_module, ohsnap_mod, zcheck_mod, null);
     const run_exe_tests = b.addRunArtifact(exe_tests);
     run_exe_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");
@@ -139,6 +143,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    suite_tests.linkLibC();
     configTestMod(suite_tests.root_module, ohsnap_mod, zcheck_mod, test_options);
     const run_suite_tests = b.addRunArtifact(suite_tests);
     run_suite_tests.setEnvironmentVariable("PZ_DISABLE_BROWSER_OPEN", "1");

@@ -239,9 +239,9 @@ pub const EventLoop = struct {
             _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
         } else {
             // Linux: use signalfd
-            var mask = std.mem.zeroes(posix.sigset_t);
+            var mask = std.mem.zeroes(std.os.linux.sigset_t);
             sigaddset(&mask, posix.SIG.CHLD);
-            _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
+            _ = std.c.sigprocmask(posix.SIG.BLOCK, @ptrCast(&mask), null);
             const sfd = std.os.linux.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
             if (std.posix.errno(sfd) != .SUCCESS) return error.SignalFdFailed;
             self.sigchld_fd = @intCast(sfd);
@@ -253,9 +253,9 @@ pub const EventLoop = struct {
     pub fn deinit(self: *EventLoop) void {
         // Unblock SIGCHLD if we blocked it via watchSigchld.
         if (self.sigchld_handler != null) {
-            var mask = std.mem.zeroes(posix.sigset_t);
+            var mask = std.mem.zeroes(std.os.linux.sigset_t);
             sigaddset(&mask, posix.SIG.CHLD);
-            _ = std.c.sigprocmask(posix.SIG.UNBLOCK, &mask, null);
+            _ = std.c.sigprocmask(posix.SIG.UNBLOCK, @ptrCast(&mask), null);
         }
         if (is_epoll) {
             for (self.timer_fds) |tfd| {
@@ -498,7 +498,7 @@ fn epollWait(epfd: posix.fd_t, events: []std.os.linux.epoll_event, timeout_ms: i
 }
 
 fn timerfdCreate() !posix.fd_t {
-    const rc = std.os.linux.timerfd_create(std.os.linux.CLOCK.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+    const rc = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
     if (std.posix.errno(rc) != .SUCCESS) return error.TimerCreateFailed;
     return @intCast(rc);
 }
@@ -507,10 +507,10 @@ fn timerfdSet(fd: posix.fd_t, ms: u32) !void {
     const secs: i64 = @divTrunc(ms, 1000);
     const nsecs: i64 = @rem(ms, 1000) * 1_000_000;
     const spec = std.os.linux.itimerspec{
-        .interval = .{ .sec = 0, .nsec = 0 }, // one-shot
-        .value = .{ .sec = secs, .nsec = nsecs },
+        .it_interval = .{ .sec = 0, .nsec = 0 }, // one-shot
+        .it_value = .{ .sec = @intCast(secs), .nsec = @intCast(nsecs) },
     };
-    const rc = std.os.linux.timerfd_settime(@intCast(fd), 0, &spec, null);
+    const rc = std.os.linux.timerfd_settime(@intCast(fd), .{}, &spec, null);
     if (std.posix.errno(rc) != .SUCCESS) return error.TimerSetFailed;
 }
 
@@ -519,7 +519,7 @@ fn drainTimerfd(fd: posix.fd_t) void {
     _ = posix.read(fd, &buf) catch {}; // cleanup: drain expiration count
 }
 
-fn sigaddset(set: *posix.sigset_t, sig: u6) void {
+fn sigaddset(set: anytype, sig: u6) void {
     if (is_epoll) {
         std.os.linux.sigaddset(set, sig);
     } else {

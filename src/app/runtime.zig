@@ -7847,7 +7847,7 @@ fn frameRowBoxAlloc(alloc: std.mem.Allocator, frm: *const tui_frame.Frame, y: us
 test "showResumeOverlay lists sessions and supports arrow navigation" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     try tmp.dir.writeFile(.{
@@ -7930,7 +7930,7 @@ test "showResumeOverlay fixed-width snapshot aligns age and token columns" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
 
@@ -8004,7 +8004,7 @@ test "showResumeOverlay fixed-width snapshot aligns age and token columns" {
 }
 
 test "showResumeOverlay returns false when no sessions exist" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
@@ -8018,7 +8018,7 @@ test "showResumeOverlay returns false when no sessions exist" {
 }
 
 test "restoreSessionIntoUi replays session history and resets stale ui state" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
 
@@ -8106,7 +8106,7 @@ test "restoreSessionIntoUi replays session history and resets stale ui state" {
 }
 
 test "restoreSessionIntoUi ignores empty blocks when rendering bottom row" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
 
@@ -8159,7 +8159,7 @@ test "restoreSessionIntoUi ignores empty blocks when rendering bottom row" {
 }
 
 test "runtime tui non-tty /resume restores session without running provider turn" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8497,7 +8497,7 @@ fn jsonVisText(obj: std.json.ObjectMap, key: ?[]const u8) ?[]const u8 {
 test "runtime print mode skips session persistence by default" {
     // P29c: headless modes (print/json) use NullStore when session == .auto.
     // No session file should be created on disk.
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8534,7 +8534,7 @@ test "runtime print mode skips session persistence by default" {
 }
 
 test "runtime executes tool calls through loop registry in print mode" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8575,7 +8575,7 @@ test "runtime executes tool calls through loop registry in print mode" {
 }
 
 test "runtime blocks tool dispatch under verified policy" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8633,7 +8633,7 @@ test "runtime blocks tool dispatch under verified policy" {
 }
 
 fn verifyDeniedBashAuditSyslog(transport: core.syslog.Transport) !void {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8746,7 +8746,7 @@ test "runtime denied bash audit ships through tcp syslog" {
 test "AuditShipper buffers events during disconnect and flushes on reconnect" {
     // Verifies the runtime's AuditShipper struct wires SyslogShipper correctly:
     // events are buffered during collector outage and flushed in order on reconnect.
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Use a failing connector to simulate collector outage.
@@ -8834,7 +8834,7 @@ test "AuditShipper fail_closed overflow rejects when ring full" {
 }
 
 test "subagent stub inherits effective policy hash" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeRuntimePolicy(tmp.dir, .{
@@ -8865,7 +8865,7 @@ test "subagent stub inherits effective policy hash" {
 }
 
 test "subagent spawn fails closed under verified policy" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeRuntimePolicy(tmp.dir, .{
@@ -8887,7 +8887,7 @@ test "subagent spawn fails closed under verified policy" {
 }
 
 test "runtime print requires explicit approval for privileged escalation from untrusted content" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8929,7 +8929,7 @@ test "runtime print requires explicit approval for privileged escalation from un
     try std.testing.expect(std.mem.indexOf(u8, written, "blocked") != null);
 }
 test "runtime forwards provider label to provider request" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -8965,7 +8965,7 @@ test "runtime forwards provider label to provider request" {
 }
 
 test "runtime executes tui mode path with provided prompt" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9011,7 +9011,7 @@ test "runtime executes tui mode path with provided prompt" {
 test "runtime tui overflow retries once with injected live stdin" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9177,7 +9177,7 @@ test "runtime tui overflow retries once with injected live stdin" {
 }
 
 test "runtime tui reports error when no provider available" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9208,7 +9208,7 @@ test "runtime tui reports error when no provider available" {
 }
 
 test "runtime print reports unsupported native provider without provider_cmd" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9241,7 +9241,7 @@ test "runtime print reports unsupported native provider without provider_cmd" {
 }
 
 test "runtime tui consumes multiple prompts from input stream" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9302,7 +9302,7 @@ test "runtime tui consumes multiple prompts from input stream" {
 }
 
 test "runtime tui rejects blank-only stdin input" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9338,7 +9338,7 @@ test "runtime tui rejects blank-only stdin input" {
 }
 
 fn expectLatestSessionReused(session_sel: anytype) !void {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9424,7 +9424,7 @@ test "runtime resume (-r) reuses latest session id and appends new turn" {
 }
 
 test "runtime explicit session path resumes that session id" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9470,7 +9470,7 @@ test "runtime explicit session path resumes that session id" {
 }
 
 test "runtime no session mode does not persist jsonl files" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9504,7 +9504,7 @@ test "runtime no session mode does not persist jsonl files" {
 }
 
 test "runtime tool mask filters builtins used by loop registry" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9552,7 +9552,7 @@ test "runtime tool mask filters builtins used by loop registry" {
 }
 
 test "runtime json mode emits JSON lines for loop events" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9585,7 +9585,7 @@ test "runtime json mode emits JSON lines for loop events" {
 }
 
 test "runtime print mode uses configured model and provider" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9622,7 +9622,7 @@ test "runtime print mode uses configured model and provider" {
 }
 
 test "runtime json mode uses configured model and stdin prompts" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9665,7 +9665,7 @@ test "runtime json mode uses configured model and stdin prompts" {
 }
 
 test "runtime json mode errors on empty stdin when no prompt is supplied" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9702,7 +9702,7 @@ test "runtime json mode errors on empty stdin when no prompt is supplied" {
 test "execWithIo cleans orphan compact temp files on startup" {
     // Use --continue to opt into durable session, which opens sess dir
     // and cleans orphan temp files.
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9848,7 +9848,7 @@ test "runBashMode include write failure is non-fatal for bash output" {
 }
 
 test "runtime rpc mode handles session model prompt and quit commands" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9903,7 +9903,7 @@ test "runtime rpc mode handles session model prompt and quit commands" {
 }
 
 test "runtime tui slash commands execute without prompt turns" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -9949,7 +9949,7 @@ test "runtime tui slash commands execute without prompt turns" {
 }
 
 test "discoverSkills returns skill metadata with source" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz/skills/release");
@@ -9981,7 +9981,7 @@ test "discoverSkills returns skill metadata with source" {
 }
 
 test "handleSlashCommand falls through for user-invocable skills" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz/skills/release");
@@ -10045,7 +10045,7 @@ test "handleSlashCommand falls through for user-invocable skills" {
 }
 
 test "handleSlashCommand blocks non-user-invocable skills" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz/skills/release");
@@ -10109,7 +10109,7 @@ test "handleSlashCommand blocks non-user-invocable skills" {
 }
 
 test "TurnCtx.run binds approval context for destructive tools" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var root = try tmp.dir.openDir(".", .{});
@@ -10242,7 +10242,7 @@ test "TurnCtx.run binds approval context for destructive tools" {
 }
 
 test "handleSlashCommand blocks builtins under verified policy" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeRuntimePolicy(tmp.dir, .{
@@ -10304,7 +10304,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -10508,7 +10508,7 @@ test "handleSlashCommand export share and upgrade emit audited redacted records"
 }
 
 test "runtime tui bg command starts and lists background jobs" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -10550,7 +10550,7 @@ test "runtime snapshot for slash + bg flow" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     const sess_abs = try tmp.dir.realpathAlloc(std.testing.allocator, "sess");
@@ -10606,7 +10606,7 @@ test "runtime snapshot for slash + bg flow" {
 }
 
 test "runtime rpc accepts type envelope aliases and echoes ids" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -10657,7 +10657,7 @@ test "runtime rpc accepts type envelope aliases and echoes ids" {
 }
 
 test "runtime rpc bg command starts lists and stops jobs" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -10708,7 +10708,7 @@ test "runtime rpc auth commands emit audited success and failure records" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -11267,7 +11267,7 @@ test "runtime rpc bg commands emit audited redacted control records" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -11777,7 +11777,7 @@ test "runtime tui auth commands emit audited success and failure records" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -12328,7 +12328,7 @@ test "runtime tui bg commands emit audited redacted control records" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -12907,7 +12907,7 @@ test "runtime rpc control commands emit audited redacted control records" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -13271,7 +13271,7 @@ test "runtime bg command run show list workflow" {
 }
 
 test "runtime tui tools command updates tool availability per turn" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -13318,7 +13318,7 @@ test "runtime tui tools command updates tool availability per turn" {
 }
 
 test "runtime rpc tools command updates tool availability per turn" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -13407,7 +13407,7 @@ test "showLogoutOverlay builds overlay and frees on deinit" {
 }
 
 test "slash logout without explicit provider frees logged-in list cleanly" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     try tmp.dir.makePath("home");
@@ -13568,7 +13568,7 @@ test "buildSystemPrompt rejects explicit prompt under policy lock" {
 }
 
 test "buildSystemPrompt rejects context under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{ .sub_path = "AGENTS.md", .data = "ctx" });
@@ -13687,7 +13687,7 @@ test "autoCompact draws compacting notice before compactor runs" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -13754,7 +13754,7 @@ test "autoCompact reports summary budget stop metadata" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -13926,7 +13926,7 @@ fn slashHelper(
 
 test "UX6: /new creates clean session with new sid" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -13960,7 +13960,7 @@ test "UX6: /new creates clean session with new sid" {
 
 test "UX6: /name persists session title" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
@@ -13996,7 +13996,7 @@ test "UX6: /name persists session title" {
 
 test "UX6: /name without arg shows usage" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14028,7 +14028,7 @@ test "UX6: /name without arg shows usage" {
 
 test "UX6: /resume with no arg returns select_session" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14059,7 +14059,7 @@ test "UX6: /resume with no arg returns select_session" {
 
 test "UX6: /resume with sid switches to that session" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
@@ -14103,7 +14103,7 @@ test "UX6: /resume with sid switches to that session" {
 
 test "UX6: /fork with no arg returns select_fork" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14134,7 +14134,7 @@ test "UX6: /fork with no arg returns select_fork" {
 
 test "UX6: /fork with sid copies session" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
@@ -14178,7 +14178,7 @@ test "UX6: /fork with sid copies session" {
 
 test "UX6: /compact on disabled session shows notice" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14211,7 +14211,7 @@ test "UX6: /compact on disabled session shows notice" {
 
 test "UX6: /export on disabled session shows error" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14243,7 +14243,7 @@ test "UX6: /export on disabled session shows error" {
 
 test "UX6: /export writes file for valid session" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sess");
     const sess_abs = try tmp.dir.realpathAlloc(alloc, "sess");
@@ -14288,7 +14288,7 @@ test "UX6: /export writes file for valid session" {
 
 test "UX7: /login with no arg returns select_login overlay" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14319,7 +14319,7 @@ test "UX7: /login with no arg returns select_login overlay" {
 
 test "UX7: /login unknown provider shows error" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14351,7 +14351,7 @@ test "UX7: /login unknown provider shows error" {
 
 test "UX7: /logout with unknown provider shows error" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14383,7 +14383,7 @@ test "UX7: /logout with unknown provider shows error" {
 
 test "UX7: /model with arg changes active model" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14416,7 +14416,7 @@ test "UX7: /model with arg changes active model" {
 
 test "UX7: /model with no arg returns select_model" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14447,7 +14447,7 @@ test "UX7: /model with no arg returns select_model" {
 
 test "UX6: /share calls share_gist and prints url" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -14497,7 +14497,7 @@ test "UX6: /share calls share_gist and prints url" {
 
 test "UX6: /resume failure leaves prior sid intact" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -14541,7 +14541,7 @@ test "UX6: /resume failure leaves prior sid intact" {
 
 test "UX7: /provider with arg switches active provider" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14639,7 +14639,7 @@ test "UX10: version check notice skips when already done" {
 
 test "UX11: manual /compact shows compacting notice" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -14693,7 +14693,7 @@ test "UX11: manual /compact shows compacting notice" {
 
 test "UX11: compaction preserves history after compact" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -14743,7 +14743,7 @@ test "UX11: compaction preserves history after compact" {
 
 test "UX11: compaction failure is non-fatal" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");
@@ -14922,7 +14922,7 @@ test "UX3 /settings triggers overlay" {
 
 test "UX3 /session returns session info" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14956,7 +14956,7 @@ test "UX3 /session returns session info" {
 
 test "UX3 /changelog returns changelog text" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -14988,7 +14988,7 @@ test "UX3 /changelog returns changelog text" {
 
 test "UX3 /copy returns copy action" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();
@@ -15019,7 +15019,7 @@ test "UX3 /copy returns copy action" {
 
 test "UX3 /quit returns quit action" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var root = try tmp.dir.openDir(".", .{});
     defer root.close();

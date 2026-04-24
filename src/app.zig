@@ -8,21 +8,13 @@ pub const report = @import("app/report.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const update = @import("app/update.zig");
 
-pub fn run(init: std.process.Init) !void {
+pub fn run() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
     const alloc = arena.allocator();
-    
-    var args_it = try init.minimal.args.iterateAllocator(alloc);
-    defer args_it.deinit();
-
-    var argv_list = std.ArrayList([]const u8).init(alloc);
-    defer argv_list.deinit();
-    while (args_it.next()) |arg| {
-        try argv_list.append(arg);
-    }
-    const argv = argv_list.items;
+    const argv = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, argv);
     var env = try config.Env.fromProcess(alloc);
     defer env.deinit(alloc);
     var out = std.fs.File.stdout().deprecatedWriter();

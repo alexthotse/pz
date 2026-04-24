@@ -762,7 +762,7 @@ fn markOpenFdsCloexec() !void {
         switch (std.posix.errno(flags_rc)) {
             .SUCCESS => {
                 const flags: c_int = @intCast(flags_rc);
-                _ = std.posix.system.fcntl(raw_fd, std.posix.F.SETFD, flags | @as(c_int, std.posix.FD_CLOEXEC));
+                _ = std.posix.system.fcntl(raw_fd, std.posix.F.SETFD, @as(usize, @intCast(flags)) | @as(usize, std.posix.FD_CLOEXEC));
             },
             .BADF => {},
             else => |err| return std.posix.unexpectedErrno(err),
