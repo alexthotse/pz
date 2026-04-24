@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const AwaySummary = @import("away_summary.zig").AwaySummary;
+pub const HistoryPicker = @import("history_picker.zig").HistoryPicker;
 pub const HookPrompts = @import("hook_prompts.zig").HookPrompts;
 pub const KairosBrief = @import("kairos_brief.zig").KairosBrief;
 pub const KairosChannels = @import("kairos_channels.zig").KairosChannels;
@@ -9,6 +10,7 @@ pub const MessageActions = @import("message_actions.zig").MessageActions;
 pub const NewInit = @import("new_init.zig").NewInit;
 pub const QuickSearch = @import("quick_search.zig").QuickSearch;
 pub const ShotStats = @import("shot_stats.zig").ShotStats;
+pub const TokenBudget = @import("token_budget.zig").TokenBudget;
 pub const Ultraplan = @import("ultraplan.zig").Ultraplan;
 pub const VoiceMode = @import("voice_mode.zig").VoiceMode;
 pub const AgentMemorySnapshot = @import("agent_memory_snapshot.zig").AgentMemorySnapshot;

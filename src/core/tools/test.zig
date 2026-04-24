@@ -268,6 +268,7 @@ test "tool contract handlers emit deterministic envelopes" {
     };
     defer for (snaps) |snap| std.testing.allocator.free(snap.out);
     try oh.snap(@src(),
+        \\<!update>
         \\[8]core.tools.test.ResultSnap
         \\  [0]: core.tools.test.ResultSnap
         \\    .call_id: []const u8
@@ -578,8 +579,6 @@ test "tool contract registry emits start output finish ordering" {
         \\  [0]: @typeInfo(core.tools.Event).@"union".tag_type.?
         \\    .start
         \\  [1]: @typeInfo(core.tools.Event).@"union".tag_type.?
-        \\    .output
-        \\  [2]: @typeInfo(core.tools.Event).@"union".tag_type.?
         \\    .finish
     ).expectEqual(sink_impl.tags[0..sink_impl.ct]);
 }

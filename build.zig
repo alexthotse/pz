@@ -103,8 +103,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-    const run_step = b.step("run", "Run pz");
+    const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const gen_features_exe = b.addExecutable(.{
+        .name = "gen_features",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_features.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_gen_features = b.addRunArtifact(gen_features_exe);
+    const gen_features_step = b.step("gen-features", "Generate boilerplate code for all SPEC.md features");
+    gen_features_step.dependOn(&run_gen_features.step);
 
     const agent_exit_harness = b.addExecutable(.{
         .name = "agent-exit-harness",

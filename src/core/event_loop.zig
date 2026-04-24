@@ -356,10 +356,11 @@ pub const EventLoop = struct {
                     n += 1;
                     continue;
                 }
+                const hup = (ev.events & (std.os.linux.EPOLL.HUP | std.os.linux.EPOLL.ERR)) != 0;
                 buf[n] = .{
                     .fd = fd,
-                    .readable = (ev.events & std.os.linux.EPOLL.IN) != 0,
-                    .writable = (ev.events & std.os.linux.EPOLL.OUT) != 0,
+                    .readable = hup or (ev.events & std.os.linux.EPOLL.IN) != 0,
+                    .writable = hup or (ev.events & std.os.linux.EPOLL.OUT) != 0,
                 };
                 n += 1;
             }
