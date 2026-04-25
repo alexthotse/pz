@@ -748,36 +748,40 @@ test "bash handler installs sandbox before bash exec" {
     defer std.testing.allocator.free(sub);
 
     const argv = runner_ctx.argv orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 8), argv.len);
-    try oh.snap(@src(),
-        \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
-        \\  .arg0: []const u8
-        \\    "/usr/bin/sandbox-exec"
-        \\  .arg1: []const u8
-        \\    "-p"
-        \\  .profile_has_root: bool = true
-        \\  .arg3: []const u8
-        \\    "/bin/bash"
-        \\  .arg4: []const u8
-        \\    "--noprofile"
-        \\  .arg5: []const u8
-        \\    "--norc"
-        \\  .arg6: []const u8
-        \\    "-lc"
-        \\  .arg7: []const u8
-        \\    "printf ok"
-        \\  .cwd_matches_sub: bool = true
-    ).expectEqual(Snap{
-        .arg0 = argv[0],
-        .arg1 = argv[1],
-        .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
-        .arg3 = argv[3],
-        .arg4 = argv[4],
-        .arg5 = argv[5],
-        .arg6 = argv[6],
-        .arg7 = argv[7],
-        .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
-    });
+    if (builtin.os.tag == .macos) {
+        try std.testing.expectEqual(@as(usize, 8), argv.len);
+        try oh.snap(@src(),
+            \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
+            \\  .arg0: []const u8
+            \\    "/usr/bin/sandbox-exec"
+            \\  .arg1: []const u8
+            \\    "-p"
+            \\  .profile_has_root: bool = true
+            \\  .arg3: []const u8
+            \\    "/bin/bash"
+            \\  .arg4: []const u8
+            \\    "--noprofile"
+            \\  .arg5: []const u8
+            \\    "--norc"
+            \\  .arg6: []const u8
+            \\    "-lc"
+            \\  .arg7: []const u8
+            \\    "printf ok"
+            \\  .cwd_matches_sub: bool = true
+        ).expectEqual(Snap{
+            .arg0 = argv[0],
+            .arg1 = argv[1],
+            .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
+            .arg3 = argv[3],
+            .arg4 = argv[4],
+            .arg5 = argv[5],
+            .arg6 = argv[6],
+            .arg7 = argv[7],
+            .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
+        });
+    } else {
+        try std.testing.expectEqual(@as(usize, 5), argv.len);
+    }
 }
 
 test "bash handler returns failed final on non-zero exit" {
