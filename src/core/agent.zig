@@ -1993,7 +1993,7 @@ test "spoolToFile writes artifact and returns tail" {
     _ = try child.connect();
     _ = try child.runReq(.{ .id = "job-spool", .prompt = "noise" });
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const sr = try child.spoolToFile(tmp.dir, 32);

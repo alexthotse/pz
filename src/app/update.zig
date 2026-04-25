@@ -1221,7 +1221,7 @@ test "extractPzBinary errors when archive has no pz binary" {
 }
 
 test "installBinary atomically replaces executable bytes" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -1334,7 +1334,7 @@ test "formatPolicyFailure reports denied upgrade path" {
 }
 
 test "checkUpdateHostAllowed rejects host absent from policy" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -1352,7 +1352,7 @@ test "checkUpdateHostAllowed rejects host absent from policy" {
 }
 
 test "checkUpdateHostAllowed accepts explicitly allowed host" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -1404,7 +1404,7 @@ test "update uses runtime CA bundle for metadata archive and signature fetches" 
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const cert_path = try app_tls.writeTestCert(tmp.dir, "ca.pem");
@@ -1536,7 +1536,7 @@ test "update invalid runtime CA bundle fails before transport" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
@@ -2299,7 +2299,7 @@ test "UX10: httpGetResult follows 302 redirect and returns final body" {
 }
 
 test "UX10: initClient with ca_file loads bundle and disables rescan" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const cert_path = try app_tls.writeTestCert(tmp.dir, "ca.pem");

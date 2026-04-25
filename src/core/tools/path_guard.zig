@@ -476,7 +476,7 @@ fn isConfined(path: []const u8, root: []const u8) bool {
 test "resolveConfined allows path within root" {
     if (native_os == .windows or native_os == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sub/deep");
@@ -497,7 +497,7 @@ test "resolveConfined allows path within root" {
 test "resolveConfined denies symlink chain escaping root" {
     if (native_os == .windows or native_os == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Create root/jail and an outside directory
@@ -524,7 +524,7 @@ test "resolveConfined denies symlink chain escaping root" {
 test "resolveConfined denies dotdot escape" {
     if (native_os == .windows or native_os == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("jail/sub");
@@ -544,7 +544,7 @@ test "resolveConfined denies dotdot escape" {
 test "openFile denies hardlinked leaf" {
     if (native_os == .windows or native_os == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -558,7 +558,7 @@ test "openFile denies hardlinked leaf" {
 test "createFile denies hardlinked leaf before truncation" {
     if (native_os == .windows or native_os == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -584,7 +584,7 @@ test "openFile denies replaced leaf after open" {
         const Bind = RaceHook.Bind(@This(), run);
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -614,7 +614,7 @@ test "createFile denies replaced leaf before truncation" {
         const Bind = RaceHook.Bind(@This(), run);
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

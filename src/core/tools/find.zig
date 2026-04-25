@@ -132,7 +132,7 @@ fn nextEnt(it: *std.fs.Dir.Iterator) Err!?std.fs.Dir.Entry {
 test "find handler lists matching paths in sorted order" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -215,7 +215,7 @@ test "find handler validates args and handles missing roots" {
 }
 
 test "find handler truncates on high hit count instead of erroring" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

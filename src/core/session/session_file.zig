@@ -64,7 +64,7 @@ pub fn cleanOrphanTmpFiles(dir: std.fs.Dir) void {
 }
 
 test "deinit without close deletes the file" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var sf = try File.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
@@ -79,7 +79,7 @@ test "deinit without close deletes the file" {
 }
 
 test "close then deinit preserves the file" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var sf = try File.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
@@ -94,7 +94,7 @@ test "close then deinit preserves the file" {
 test "session file uses 0600 mode" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var sf = try File.init(std.testing.allocator, tmp.dir, "test-sess.jsonl");
@@ -106,7 +106,7 @@ test "session file uses 0600 mode" {
 }
 
 test "cleanOrphanTmpFiles removes compact.tmp files" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Create orphan tmp files and a normal session file.
@@ -134,7 +134,7 @@ test "cleanOrphanTmpFiles removes compact.tmp files" {
 }
 
 test "createSessionFile uses session id plus extension" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var sf = try createSessionFile(std.testing.allocator, tmp.dir, "s1", ".jsonl.compact.tmp");

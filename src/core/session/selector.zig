@@ -164,7 +164,7 @@ test "latest selector picks newest session and falls back deterministically" {
         sid: []const u8,
         same_dir: bool,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -194,7 +194,7 @@ test "latest selector picks newest session and falls back deterministically" {
 }
 
 test "id selector resolves exact id and unique prefix" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -221,7 +221,7 @@ test "id selector resolves exact id and unique prefix" {
 }
 
 test "id selector rejects ambiguous prefix" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -246,7 +246,7 @@ test "path selector resolves sid and directory from jsonl path" {
         sid: []const u8,
         same_dir: bool,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("sess");

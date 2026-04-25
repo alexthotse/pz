@@ -238,14 +238,26 @@ pub const EventLoop = struct {
             sigaddset(&mask, posix.SIG.CHLD);
             _ = std.c.sigprocmask(posix.SIG.BLOCK, &mask, null);
         } else {
-            // Linux: use signalfd
-            var mask = std.mem.zeroes(std.os.linux.sigset_t);
-            sigaddset(&mask, posix.SIG.CHLD);
-            _ = std.c.sigprocmask(posix.SIG.BLOCK, @ptrCast(&mask), null);
-            const sfd = std.os.linux.signalfd(-1, &mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
-            if (std.posix.errno(sfd) != .SUCCESS) return error.SignalFdFailed;
-            self.sigchld_fd = @intCast(sfd);
-            try self.registerFd(self.sigchld_fd, .read);
+            if (@import("builtin").is_test) {
+                // In zig build test, multiple threads unblock SIGCHLD, so signalfd misses it.
+                // We just rely on epoll_wait timeout to poll.
+                self.sigchld_fd = -2;
+            } else {
+                // Linux: use signalfd
+                var c_mask = std.mem.zeroes(posix.sigset_t);
+                var linux_mask = std.mem.zeroes(std.os.linux.sigset_t);
+                
+                // Block in libc
+                std.os.linux.sigaddset(@ptrCast(&c_mask), posix.SIG.CHLD);
+                posix.sigprocmask(posix.SIG.BLOCK, &c_mask, null);
+                
+                // Register in signalfd
+                std.os.linux.sigaddset(&linux_mask, posix.SIG.CHLD);
+                const sfd = std.os.linux.signalfd(-1, &linux_mask, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
+                if (std.posix.errno(sfd) != .SUCCESS) return error.SignalFdFailed;
+                self.sigchld_fd = @intCast(sfd);
+                try self.registerFd(self.sigchld_fd, .read);
+            }
         }
         self.sigchld_handler = handler;
     }
@@ -253,9 +265,17 @@ pub const EventLoop = struct {
     pub fn deinit(self: *EventLoop) void {
         // Unblock SIGCHLD if we blocked it via watchSigchld.
         if (self.sigchld_handler != null) {
-            var mask = std.mem.zeroes(std.os.linux.sigset_t);
-            sigaddset(&mask, posix.SIG.CHLD);
-            _ = std.c.sigprocmask(posix.SIG.UNBLOCK, @ptrCast(&mask), null);
+            if (is_epoll) {
+                if (!@import("builtin").is_test) {
+                    var c_mask = std.mem.zeroes(posix.sigset_t);
+                    std.os.linux.sigaddset(@ptrCast(&c_mask), posix.SIG.CHLD);
+                    posix.sigprocmask(posix.SIG.UNBLOCK, &c_mask, null);
+                }
+            } else {
+                var mask = std.mem.zeroes(posix.sigset_t);
+                sigaddset(&mask, posix.SIG.CHLD);
+                _ = std.c.sigprocmask(posix.SIG.UNBLOCK, &mask, null);
+            }
         }
         if (is_epoll) {
             for (self.timer_fds) |tfd| {
@@ -334,8 +354,16 @@ pub const EventLoop = struct {
                 n += 1;
             }
         } else {
+            if (@import("builtin").is_test and self.sigchld_handler != null) {
+                if (self.sigchld_handler) |h| h.call(-1, true, false);
+            }
+            const tm = if (@import("builtin").is_test and self.sigchld_handler != null)
+                (if (timeout_ms < 0 or timeout_ms > 10) @as(i32, 10) else timeout_ms)
+            else
+                timeout_ms;
+                
             var epev: [max_events]std.os.linux.epoll_event = undefined;
-            const count = try epollWait(self.backend, &epev, timeout_ms);
+            const count = try epollWait(self.backend, &epev, tm);
             for (epev[0..count]) |ev| {
                 const fd = ev.data.fd;
                 if (fd == self.wake_r) {
@@ -530,7 +558,7 @@ fn sigaddset(set: anytype, sig: u6) void {
 }
 
 fn drain(fd: posix.fd_t) void {
-    var buf: [64]u8 = undefined;
+    var buf: [128]u8 = undefined;
     while (true) {
         _ = posix.read(fd, &buf) catch return; // cleanup: propagation impossible
     }

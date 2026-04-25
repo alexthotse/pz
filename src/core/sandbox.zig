@@ -288,7 +288,7 @@ fn mapFsErr(err: anyerror) Err {
 }
 
 test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sub");
 
@@ -323,9 +323,9 @@ test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace
 }
 
 test "prepareBash denies cwd escapes" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var outer = std.testing.tmpDir(.{});
+    var outer = std.testing.tmpDir(.{ .iterate = true });
     defer outer.cleanup();
 
     const path_guard = @import("tools/path_guard.zig");

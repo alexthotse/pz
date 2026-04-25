@@ -482,9 +482,10 @@ fn signalChild(pid: std.posix.pid_t, sig: @TypeOf(std.posix.SIG.TERM)) !void {
 }
 
 fn pollChild(child: *std.process.Child) WaitPoll {
+    if (child.id == -1) return .pending;
     const res = std.posix.waitpid(child.id, std.c.W.NOHANG);
     if (res.pid == 0) return .pending;
-    child.id = undefined;
+    child.id = -1;
     return .{ .status = res.status };
 }
 
@@ -708,7 +709,7 @@ test "bash handler installs sandbox before bash exec" {
             self.* = undefined;
         }
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sub");
     const path_guard = @import("path_guard.zig");
@@ -987,7 +988,7 @@ test "bash handler denies wrapped protected state access" {
 test "bash handler denies file reads outside workspace inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const secret = try std.fs.cwd().realpathAlloc(std.testing.allocator, "README.md");
     defer std.testing.allocator.free(secret);
@@ -1038,7 +1039,7 @@ test "bash handler denies file reads outside workspace inside sandbox" {
 test "bash handler denies process exec outside workspace inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const script_rel = ".zig-cache/p30a-run.sh";
     defer std.fs.cwd().deleteFile(script_rel) catch {}; // test: error irrelevant
@@ -1125,7 +1126,7 @@ test "bash handler denies network connects inside sandbox" {
         }
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const path_guard = @import("path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
@@ -1179,7 +1180,7 @@ test "bash handler denies network connects inside sandbox" {
 test "bash handler allows workspace file actions inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const path_guard = @import("path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);

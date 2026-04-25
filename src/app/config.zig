@@ -211,7 +211,7 @@ const SettingsCfg = struct {
 };
 
 test "pz state save and load are home-overrideable" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home");
@@ -230,7 +230,7 @@ test "pz state save and load are home-overrideable" {
 test "pz state save locks dir and file modes" {
     if (@import("builtin").os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home");
@@ -594,7 +594,7 @@ fn dupEnv(alloc: std.mem.Allocator, key: []const u8) error{OutOfMemory}!?[]const
 }
 
 test "config uses defaults when no sources are present" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const parsed = try args.parse(&.{});
@@ -611,7 +611,7 @@ test "config uses defaults when no sources are present" {
 }
 
 test "config precedence is file then env then flags" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeAutoCfg(tmp.dir, "{\"mode\":\"print\",\"model\":\"file-model\",\"session_dir\":\"file-sessions\",\"theme\":\"light\",\"provider_cmd\":\"file-cmd\"}");
@@ -638,7 +638,7 @@ test "config precedence is file then env then flags" {
 }
 
 test "config no-config bypasses file source" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeAutoCfg(tmp.dir, "{\"mode\":\"print\",\"model\":\"file-model\"}");
@@ -655,7 +655,7 @@ test "config no-config bypasses file source" {
 }
 
 test "config no-config suppresses global settings" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -676,7 +676,7 @@ test "config no-config suppresses global settings" {
 }
 
 test "config explicit path loads file" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -701,7 +701,7 @@ test "config explicit path loads file" {
 }
 
 test "config rejects invalid env mode and invalid file mode" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const parsed = try args.parse(&.{});
@@ -724,7 +724,7 @@ test "config rejects invalid env mode and invalid file mode" {
 }
 
 test "config accepts interactive alias for mode" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const parsed = try args.parse(&.{});
@@ -736,7 +736,7 @@ test "config accepts interactive alias for mode" {
 }
 
 test "config auto imports global settings from home" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -777,7 +777,7 @@ test "config auto imports global settings from home" {
 }
 
 test "config local auto file overrides global settings" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -819,7 +819,7 @@ test "config local auto file overrides global settings" {
 }
 
 test "config policy ca_file overrides local config" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeAutoCfg(tmp.dir, "{\"ca_file\":\"local-ca.pem\"}");
@@ -841,7 +841,7 @@ test "config policy ca_file overrides local config" {
 }
 
 test "config rejects ca_file config under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeAutoCfg(tmp.dir, "{\"ca_file\":\"local-ca.pem\"}");
@@ -859,7 +859,7 @@ test "config rejects ca_file config under policy lock" {
 }
 
 test "config rejects explicit file override under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -877,7 +877,7 @@ test "config rejects explicit file override under policy lock" {
 }
 
 test "config rejects no-config under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -894,7 +894,7 @@ test "config rejects no-config under policy lock" {
 }
 
 test "config rejects auto settings files under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -912,7 +912,7 @@ test "config rejects auto settings files under policy lock" {
 }
 
 test "config rejects env overrides under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -931,7 +931,7 @@ test "config rejects env overrides under policy lock" {
 }
 
 test "config rejects cli overrides under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -948,7 +948,7 @@ test "config rejects cli overrides under policy lock" {
 }
 
 test "config rejects system prompt override under policy lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -965,7 +965,7 @@ test "config rejects system prompt override under policy lock" {
 }
 
 test "config loads enabled_models from --models flag" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const parsed = try args.parse(&.{ "--models", "claude-opus-4-6,claude-haiku-4-5" });
@@ -980,7 +980,7 @@ test "config loads enabled_models from --models flag" {
 }
 
 test "config loads enabled_models from file" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeAutoCfg(tmp.dir, "{\"models\":\"model-a, model-b, model-c\"}");
@@ -998,7 +998,7 @@ test "config loads enabled_models from file" {
 }
 
 test "config cli --models overrides file models" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try writeAutoCfg(tmp.dir, "{\"models\":\"file-model\"}");
@@ -1013,7 +1013,7 @@ test "config cli --models overrides file models" {
 }
 
 test "config works with null HOME (env isolation)" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const parsed = try args.parse(&.{});

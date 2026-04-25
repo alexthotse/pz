@@ -617,7 +617,7 @@ test "watcher init rejects empty path set" {
 }
 
 test "watchLoop emits debounced write event" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -670,7 +670,7 @@ test "watchLoop emits debounced write event" {
 }
 
 test "watchLoop flushes write storm after max window" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -724,7 +724,7 @@ test "watchLoop flushes write storm after max window" {
 }
 
 test "watchLoop emits delete event" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -776,7 +776,7 @@ test "watchLoop emits delete event" {
 }
 
 test "watchLoop emits write event when missing path appears" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
@@ -829,7 +829,7 @@ test "watchLoop emits write event when missing path appears" {
 test "watchLoop emits rename event on macOS" {
     if (!is_macos) return error.SkipZigTest;
 
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
