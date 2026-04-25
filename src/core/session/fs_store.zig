@@ -77,7 +77,7 @@ const OwnedReplay = struct {
 };
 
 test "fs store append and replay roundtrip" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const dir = try tmp.dir.openDir(".", .{});
@@ -116,7 +116,7 @@ test "fs store append and replay roundtrip" {
 }
 
 test "fs store replay missing sid returns file-not-found error" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const dir = try tmp.dir.openDir(".", .{});

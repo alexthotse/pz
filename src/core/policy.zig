@@ -1605,7 +1605,7 @@ test "verifySignedPolicy rejects unsigned doc" {
 }
 
 test "loadResolved sets locked when signed policy present" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("cwd/.pz");
@@ -1635,7 +1635,7 @@ test "loadResolved not locked without policy files" {
 }
 
 test "loadResolved rejects unsigned file in lock mode" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1707,7 +1707,7 @@ test "loadApprovalBind falls back to version without signed policy" {
 test "loadApprovalBind hashes verified home and cwd policy docs" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1783,7 +1783,7 @@ test "loadResolved merges verified bundles and hashes effective doc" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -2296,7 +2296,7 @@ test "property: random byte mutations to signed policy payload fail verification
 }
 
 test "signed deny cannot be weakened by unsigned allow" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -2530,7 +2530,7 @@ test "fresh policy accepted before expiry" {
 }
 
 test "generation rollback rejected via GenerationState" {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Write a state file with generation=10

@@ -41,7 +41,7 @@ test "loadCaFileAlloc returns null when unset" {
 }
 
 test "initClient loads custom ca bundle and disables rescan" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const cert_path = try writeTestCert(tmp.dir, "ca.pem");
@@ -55,7 +55,7 @@ test "initClient loads custom ca bundle and disables rescan" {
 }
 
 test "initClient fails closed on invalid custom ca bundle" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });

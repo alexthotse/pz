@@ -72,7 +72,7 @@ test "write handler overwrites file with deterministic timestamps" {
         res: tools.Result,
         file: []const u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -126,7 +126,7 @@ test "write handler overwrites file with deterministic timestamps" {
 }
 
 test "write handler appends when append is true" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -180,7 +180,7 @@ test "write handler returns invalid args for empty path" {
 }
 
 test "write handler returns not found for missing parent" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -245,7 +245,7 @@ test "write handler denies replaced target before truncation" {
         const Bind = path_guard.RaceHook.Bind(@This(), run);
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

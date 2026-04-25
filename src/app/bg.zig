@@ -1288,7 +1288,7 @@ test "bg manager stop sends termination signal" {
 }
 
 test "bg manager recovers and clears stale journal launch entries" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const state_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(state_dir);

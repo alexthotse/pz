@@ -297,7 +297,7 @@ fn addManualRows(rows: *Rows) !void {
 }
 
 fn addAuthRows(rows: *Rows) !void {
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(testing.allocator, ".");

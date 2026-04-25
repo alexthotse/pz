@@ -101,7 +101,7 @@ fn lessItem(_: void, a: Item, b: Item) bool {
 test "ls handler lists entries in deterministic order and marks directories" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -187,7 +187,7 @@ test "ls handler rejects missing path and wrong kind" {
 test "ls handler emits truncation metadata when output exceeds limit" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

@@ -1025,7 +1025,7 @@ test "completeOAuthWithHooks rejects empty verifier" {
 }
 
 test "completeOAuthWithHooks uses provided verifier not state" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(home);
@@ -1141,7 +1141,7 @@ test "refreshOAuthForProvider rejects unsupported provider" {
 test "auth audit covers oauth login and persistence" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -1193,7 +1193,7 @@ test "auth audit covers oauth login and persistence" {
 test "auth audit covers oauth refresh and persistence" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -1238,7 +1238,7 @@ test "auth audit covers oauth refresh and persistence" {
 }
 
 test "completeOAuthWithHooks passes ca_file to exchange_code" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -1261,7 +1261,7 @@ test "completeOAuthWithHooks passes ca_file to exchange_code" {
 }
 
 test "refreshOAuthForProviderWithHooks passes ca_file to refresh_fetch" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -1292,7 +1292,7 @@ test "refreshOAuthForProviderWithHooks passes ca_file to refresh_fetch" {
 }
 
 test "initHttpClient fails closed on invalid ca bundle" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{ .sub_path = "bad.pem", .data = "-----BEGIN CERTIFICATE-----\nnot-base64\n" });
@@ -1334,7 +1334,7 @@ test "beginOAuth produces authorize URL with PKCE code_challenge" {
 test "completeOAuthWithHooks with mock exchange returns valid tokens and persists" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -1390,7 +1390,7 @@ test "completeOAuthWithHooks rejects missing state in input" {
 test "refreshOAuthForProviderWithHooks with mock 200 returns new tokens" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -1475,7 +1475,7 @@ test "refreshOAuthForProviderWithHooks propagates network error" {
 }
 
 test "proactive refresh triggers when now > expires" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(home);

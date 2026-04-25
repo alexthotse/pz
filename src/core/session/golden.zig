@@ -35,7 +35,7 @@ fn freeRows(alloc: std.mem.Allocator, rows: [][]u8) void {
 }
 
 test "session replay golden fixture is stable" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{
         .sub_path = "gold.jsonl",
@@ -57,7 +57,7 @@ test "session replay golden fixture is stable" {
 }
 
 test "session replay golden fixture is deterministic across runs" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{
         .sub_path = "gold.jsonl",

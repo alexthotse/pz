@@ -21,6 +21,7 @@ pub fn main() !void {
 
     const alloc = arena.allocator();
     const argv = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, argv);
     if (argv.len != 5) return error.InvalidArgs;
 
     const mode = std.meta.stringToEnum(Mode, argv[1]) orelse return error.InvalidArgs;

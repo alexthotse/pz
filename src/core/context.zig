@@ -248,7 +248,7 @@ test "assembleParts truncates when budget exceeded" {
 }
 
 test "readFile wraps context content as untrusted input" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -274,9 +274,9 @@ test "readFile wraps context content as untrusted input" {
 test "readFile rejects symlinked AGENTS leaf" {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var outer = std.testing.tmpDir(.{});
+    var outer = std.testing.tmpDir(.{ .iterate = true });
     defer outer.cleanup();
 
     try outer.dir.writeFile(.{ .sub_path = "secret.md", .data = "nope" });
@@ -293,7 +293,7 @@ test "readFile rejects symlinked AGENTS leaf" {
 test "discoverPaths walks real cwd ancestry, not symlink aliases" {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("real/sub");
@@ -330,7 +330,7 @@ test "discoverPaths walks real cwd ancestry, not symlink aliases" {
 }
 
 test "load returns null when policy locks context" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");

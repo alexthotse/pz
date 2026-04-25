@@ -77,7 +77,7 @@ pub const Writer = struct {
 
 test "jsonl append preserves event order" {
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var writer = try Writer.init(std.testing.allocator, tmp.dir, .{
@@ -145,7 +145,7 @@ test "jsonl append preserves event order" {
 }
 
 test "writer rejects invalid flush policy" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expectError(
@@ -157,7 +157,7 @@ test "writer rejects invalid flush policy" {
 }
 
 test "writer rejects invalid session id" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var writer = try Writer.init(std.testing.allocator, tmp.dir, .{

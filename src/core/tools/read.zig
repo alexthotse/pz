@@ -116,7 +116,7 @@ fn readSelected(self: Handler, path: []const u8, from_line: u32, to_line: ?u32) 
 test "read handler returns selected lines with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -247,7 +247,7 @@ test "read handler truncates oversized output instead of failing TooLarge" {
         is_meta: bool,
         has_trunc_meta: bool,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -307,7 +307,7 @@ test "read handler can target a line in very large file without TooLarge" {
         chunk: []const u8,
         trunc: bool,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -365,7 +365,7 @@ test "read handler can target a line in very large file without TooLarge" {
 test "read handler denies hardlinked file" {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

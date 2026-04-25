@@ -802,7 +802,7 @@ test "builtin runtime registry exposes all core tools" {
 test "builtin runtime uses call timestamp in result envelope" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

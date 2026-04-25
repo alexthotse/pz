@@ -276,7 +276,7 @@ test "export session to markdown" {
     const oh = OhSnap{};
     const writer_mod = @import("writer.zig");
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
@@ -353,7 +353,7 @@ test "export session to markdown" {
 test "export default path uses sid.md" {
     const writer_mod = @import("writer.zig");
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
@@ -380,7 +380,7 @@ test "export markdown redacts secrets and neutralizes markdown" {
     const oh = OhSnap{};
     const writer_mod = @import("writer.zig");
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
@@ -441,7 +441,7 @@ test "export markdown replaces invalid utf8 from persisted tool output" {
     const oh = OhSnap{};
     const writer_mod = @import("writer.zig");
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
@@ -512,7 +512,7 @@ test "export audit emits start and success entries" {
         }
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{
@@ -570,7 +570,7 @@ test "export audit emits failure entry on write failure" {
         }
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer_mod.Writer.init(std.testing.allocator, tmp.dir, .{

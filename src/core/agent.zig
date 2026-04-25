@@ -762,7 +762,7 @@ fn markOpenFdsCloexec() !void {
         switch (std.posix.errno(flags_rc)) {
             .SUCCESS => {
                 const flags: c_int = @intCast(flags_rc);
-                _ = std.posix.system.fcntl(raw_fd, std.posix.F.SETFD, flags | @as(c_int, std.posix.FD_CLOEXEC));
+                _ = std.posix.system.fcntl(raw_fd, std.posix.F.SETFD, @as(usize, @intCast(flags)) | @as(usize, std.posix.FD_CLOEXEC));
             },
             .BADF => {},
             else => |err| return std.posix.unexpectedErrno(err),
@@ -1993,7 +1993,7 @@ test "spoolToFile writes artifact and returns tail" {
     _ = try child.connect();
     _ = try child.runReq(.{ .id = "job-spool", .prompt = "noise" });
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const sr = try child.spoolToFile(tmp.dir, 32);

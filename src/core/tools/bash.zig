@@ -482,9 +482,10 @@ fn signalChild(pid: std.posix.pid_t, sig: @TypeOf(std.posix.SIG.TERM)) !void {
 }
 
 fn pollChild(child: *std.process.Child) WaitPoll {
+    if (child.id == -1) return .pending;
     const res = std.posix.waitpid(child.id, std.c.W.NOHANG);
     if (res.pid == 0) return .pending;
-    child.id = undefined;
+    child.id = -1;
     return .{ .status = res.status };
 }
 
@@ -708,7 +709,7 @@ test "bash handler installs sandbox before bash exec" {
             self.* = undefined;
         }
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sub");
     const path_guard = @import("path_guard.zig");
@@ -747,36 +748,40 @@ test "bash handler installs sandbox before bash exec" {
     defer std.testing.allocator.free(sub);
 
     const argv = runner_ctx.argv orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 8), argv.len);
-    try oh.snap(@src(),
-        \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
-        \\  .arg0: []const u8
-        \\    "/usr/bin/sandbox-exec"
-        \\  .arg1: []const u8
-        \\    "-p"
-        \\  .profile_has_root: bool = true
-        \\  .arg3: []const u8
-        \\    "/bin/bash"
-        \\  .arg4: []const u8
-        \\    "--noprofile"
-        \\  .arg5: []const u8
-        \\    "--norc"
-        \\  .arg6: []const u8
-        \\    "-lc"
-        \\  .arg7: []const u8
-        \\    "printf ok"
-        \\  .cwd_matches_sub: bool = true
-    ).expectEqual(Snap{
-        .arg0 = argv[0],
-        .arg1 = argv[1],
-        .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
-        .arg3 = argv[3],
-        .arg4 = argv[4],
-        .arg5 = argv[5],
-        .arg6 = argv[6],
-        .arg7 = argv[7],
-        .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
-    });
+    if (builtin.os.tag == .macos) {
+        try std.testing.expectEqual(@as(usize, 8), argv.len);
+        try oh.snap(@src(),
+            \\core.tools.bash.test.bash handler installs sandbox before bash exec.Snap
+            \\  .arg0: []const u8
+            \\    "/usr/bin/sandbox-exec"
+            \\  .arg1: []const u8
+            \\    "-p"
+            \\  .profile_has_root: bool = true
+            \\  .arg3: []const u8
+            \\    "/bin/bash"
+            \\  .arg4: []const u8
+            \\    "--noprofile"
+            \\  .arg5: []const u8
+            \\    "--norc"
+            \\  .arg6: []const u8
+            \\    "-lc"
+            \\  .arg7: []const u8
+            \\    "printf ok"
+            \\  .cwd_matches_sub: bool = true
+        ).expectEqual(Snap{
+            .arg0 = argv[0],
+            .arg1 = argv[1],
+            .profile_has_root = std.mem.indexOf(u8, argv[2], root) != null,
+            .arg3 = argv[3],
+            .arg4 = argv[4],
+            .arg5 = argv[5],
+            .arg6 = argv[6],
+            .arg7 = argv[7],
+            .cwd_matches_sub = std.mem.eql(u8, sub, runner_ctx.cwd.?),
+        });
+    } else {
+        try std.testing.expectEqual(@as(usize, 5), argv.len);
+    }
 }
 
 test "bash handler returns failed final on non-zero exit" {
@@ -987,7 +992,7 @@ test "bash handler denies wrapped protected state access" {
 test "bash handler denies file reads outside workspace inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const secret = try std.fs.cwd().realpathAlloc(std.testing.allocator, "README.md");
     defer std.testing.allocator.free(secret);
@@ -1038,7 +1043,7 @@ test "bash handler denies file reads outside workspace inside sandbox" {
 test "bash handler denies process exec outside workspace inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const script_rel = ".zig-cache/p30a-run.sh";
     defer std.fs.cwd().deleteFile(script_rel) catch {}; // test: error irrelevant
@@ -1125,7 +1130,7 @@ test "bash handler denies network connects inside sandbox" {
         }
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const path_guard = @import("path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);
@@ -1179,7 +1184,7 @@ test "bash handler denies network connects inside sandbox" {
 test "bash handler allows workspace file actions inside sandbox" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const path_guard = @import("path_guard.zig");
     var cwd_guard = try path_guard.CwdGuard.enter(tmp.dir);

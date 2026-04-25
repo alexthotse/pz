@@ -499,7 +499,7 @@ const Ring = struct {
 
     const SpoolEntry = struct { seq: u64, name: [32]u8, len: usize };
 
-    fn restoreSpool(self: *Ring) !void {
+    pub fn restoreSpool(self: *Ring) !void {
         const dir = self.spool_dir orelse return;
         if (self.slots.len == 0) return;
 
@@ -2090,7 +2090,7 @@ test "fail_closed overflow rejects push when ring full" {
 }
 
 test "durable spool persists and restores events" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Write events into a ring with spool
@@ -2121,7 +2121,7 @@ test "durable spool persists and restores events" {
 }
 
 test "durable spool restores only up to ring capacity" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Write 5 events into a ring with cap 8

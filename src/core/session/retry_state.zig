@@ -76,7 +76,7 @@ pub fn load(
 test "retry state persists and restores counters after reload" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const in = State{
@@ -105,14 +105,14 @@ test "retry state persists and restores counters after reload" {
 }
 
 test "retry state load returns null when file is absent" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expect((try load(std.testing.allocator, tmp.dir, "missing")) == null);
 }
 
 test "retry state rejects invalid counters" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expectError(error.InvalidRetryState, save(
@@ -127,7 +127,7 @@ test "retry state rejects invalid counters" {
 }
 
 test "retry state rejects torn file without trailing newline" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{

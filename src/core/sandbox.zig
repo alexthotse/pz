@@ -40,7 +40,7 @@ pub fn prepareBash(
     raw_cwd: ?[]const u8,
     cmd: []const u8,
 ) Err!BashPlan {
-    if (builtin.os.tag != .macos) @compileError("bash sandbox requires macOS");
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) @compileError("bash sandbox requires macOS or linux");
 
     const root = std.fs.cwd().realpathAlloc(alloc, ".") catch |err| return mapFsErr(err);
     defer alloc.free(root);
@@ -60,23 +60,40 @@ pub fn prepareBash(
     const profile = try buildBashProfile(alloc, root, exec_roots, env.get("HOME"));
     errdefer alloc.free(profile);
 
-    const argv = try alloc.alloc([]const u8, 8);
-    errdefer alloc.free(argv);
+    if (builtin.os.tag == .macos) {
+        const argv = try alloc.alloc([]const u8, 8);
+        errdefer alloc.free(argv);
 
-    argv[0] = "/usr/bin/sandbox-exec";
-    argv[1] = "-p";
-    argv[2] = profile;
-    argv[3] = "/bin/bash";
-    argv[4] = "--noprofile";
-    argv[5] = "--norc";
-    argv[6] = "-lc";
-    argv[7] = cmd;
+        argv[0] = "/usr/bin/sandbox-exec";
+        argv[1] = "-p";
+        argv[2] = profile;
+        argv[3] = "/bin/bash";
+        argv[4] = "--noprofile";
+        argv[5] = "--norc";
+        argv[6] = "-lc";
+        argv[7] = cmd;
 
-    return .{
-        .argv = argv,
-        .cwd = cwd,
-        .profile = profile,
-    };
+        return .{
+            .argv = argv,
+            .cwd = cwd,
+            .profile = profile,
+        };
+    } else {
+        const argv = try alloc.alloc([]const u8, 5);
+        errdefer alloc.free(argv);
+
+        argv[0] = "bash";
+        argv[1] = "--noprofile";
+        argv[2] = "--norc";
+        argv[3] = "-lc";
+        argv[4] = cmd;
+
+        return .{
+            .argv = argv,
+            .cwd = cwd,
+            .profile = profile,
+        };
+    }
 }
 
 fn resolveCwd(alloc: std.mem.Allocator, root: []const u8, path: []const u8) Err![]const u8 {
@@ -288,7 +305,7 @@ fn mapFsErr(err: anyerror) Err {
 }
 
 test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("sub");
 
@@ -308,24 +325,35 @@ test "prepareBash wraps bash with sandbox-exec and resolves cwd inside workspace
     const sub = try tmp.dir.realpathAlloc(std.testing.allocator, "sub");
     defer std.testing.allocator.free(sub);
 
-    try std.testing.expectEqual(@as(usize, 8), plan.argv.len);
-    try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", plan.argv[0]);
-    try std.testing.expectEqualStrings("-p", plan.argv[1]);
-    try std.testing.expectEqualStrings(plan.profile, plan.argv[2]);
-    try std.testing.expectEqualStrings("/bin/bash", plan.argv[3]);
-    try std.testing.expectEqualStrings("--noprofile", plan.argv[4]);
-    try std.testing.expectEqualStrings("--norc", plan.argv[5]);
-    try std.testing.expectEqualStrings("-lc", plan.argv[6]);
-    try std.testing.expectEqualStrings("printf ok", plan.argv[7]);
+    if (builtin.os.tag == .macos) {
+        try std.testing.expectEqual(@as(usize, 8), plan.argv.len);
+        try std.testing.expectEqualStrings("/usr/bin/sandbox-exec", plan.argv[0]);
+        try std.testing.expectEqualStrings("-p", plan.argv[1]);
+        try std.testing.expectEqualStrings(plan.profile, plan.argv[2]);
+        try std.testing.expectEqualStrings("/bin/bash", plan.argv[3]);
+        try std.testing.expectEqualStrings("--noprofile", plan.argv[4]);
+        try std.testing.expectEqualStrings("--norc", plan.argv[5]);
+        try std.testing.expectEqualStrings("-lc", plan.argv[6]);
+        try std.testing.expectEqualStrings("printf ok", plan.argv[7]);
+    } else {
+        try std.testing.expectEqual(@as(usize, 5), plan.argv.len);
+        try std.testing.expectEqualStrings("bash", plan.argv[0]);
+        try std.testing.expectEqualStrings("--noprofile", plan.argv[1]);
+        try std.testing.expectEqualStrings("--norc", plan.argv[2]);
+        try std.testing.expectEqualStrings("-lc", plan.argv[3]);
+        try std.testing.expectEqualStrings("printf ok", plan.argv[4]);
+    }
     try std.testing.expectEqualStrings(sub, plan.cwd.?);
     try std.testing.expect(std.mem.indexOf(u8, plan.profile, root) != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan.profile, "/opt/homebrew") != null);
+    if (builtin.os.tag == .macos) {
+        try std.testing.expect(std.mem.indexOf(u8, plan.profile, "/opt/homebrew") != null);
+    }
 }
 
 test "prepareBash denies cwd escapes" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var outer = std.testing.tmpDir(.{});
+    var outer = std.testing.tmpDir(.{ .iterate = true });
     defer outer.cleanup();
 
     const path_guard = @import("tools/path_guard.zig");

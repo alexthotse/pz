@@ -356,7 +356,7 @@ test "snapshot: verify stops at first tampered line" {
 }
 
 test "seq tracker persists and rejects replayed seq" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(dir);

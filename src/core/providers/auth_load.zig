@@ -445,7 +445,7 @@ const AuditRows = struct {
 test "saveApiKeyHome writes provider auth without process HOME" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -471,7 +471,7 @@ test "saveApiKeyHome writes provider auth without process HOME" {
 test "auth audit covers api key save" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -500,7 +500,7 @@ test "auth audit covers api key save" {
 test "auth audit covers logout" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -530,7 +530,7 @@ test "auth audit covers logout" {
 test "listLoggedInHome returns stored providers without leaks" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -560,7 +560,7 @@ test "listLoggedInHome returns stored providers without leaks" {
 test "auth lock still allows canonical file auth" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -599,7 +599,7 @@ test "auth lock still allows canonical file auth" {
 }
 
 test "saveApiKeyWithHooks rejects home override under auth lock" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -646,7 +646,7 @@ test "authFromEnv uses api key when oauth token is missing" {
 test "loadFileAuth parses anthropic api_key entry" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -676,7 +676,7 @@ test "loadFileAuth parses anthropic api_key entry" {
 }
 
 test "loadFileAuth returns AuthNotFound when file is missing" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -691,7 +691,7 @@ test "loadFileAuth returns AuthNotFound when file is missing" {
 test "findAuthFile migrates legacy .pi auth to .pz" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Create legacy auth only (no .pz/auth.json)
@@ -728,7 +728,7 @@ test "findAuthFile migrates legacy .pi auth to .pz" {
 test "loadFileAuthForProvider parses openai oauth entry" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -764,7 +764,7 @@ test "loadFileAuthForProvider parses openai oauth entry" {
 }
 
 test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -789,7 +789,7 @@ test "loadFileAuthForProvider returns AuthNotFound when provider missing" {
 }
 
 test "loadFileAuthForProvider fails closed on corrupt auth" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "not json" });
@@ -801,7 +801,7 @@ test "loadFileAuthForProvider fails closed on corrupt auth" {
 }
 
 test "loadFileAuthForProvider rejects unknown fields" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "{\"anthropic\":{\"type\":\"api_key\",\"key\":\"k\"},\"bogus\":1}" });
@@ -813,7 +813,7 @@ test "loadFileAuthForProvider rejects unknown fields" {
 }
 
 test "listLoggedInHome fails closed on corrupt auth" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath(".pz");
     try tmp.dir.writeFile(.{ .sub_path = ".pz/auth.json", .data = "garbage" });
@@ -823,7 +823,7 @@ test "listLoggedInHome fails closed on corrupt auth" {
 }
 
 test "logout removes provider entry from auth file" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -846,7 +846,7 @@ test "logout removes provider entry from auth file" {
 
 test "P0-3 regression: listLoggedInHome deallocs cleanly with no providers" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(alloc, ".");
@@ -859,7 +859,7 @@ test "P0-3 regression: listLoggedInHome deallocs cleanly with no providers" {
 
 test "P0-3 regression: listLoggedInHome deallocs cleanly with all providers" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const home = try tmp.dir.realpathAlloc(alloc, ".");
@@ -876,7 +876,7 @@ test "P0-3 regression: listLoggedInHome deallocs cleanly with all providers" {
 
 test "P0-3 regression: listLoggedInHome deallocs cleanly on corrupt auth" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");

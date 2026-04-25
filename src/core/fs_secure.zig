@@ -206,7 +206,7 @@ pub fn cleanupAgentArtifacts(dir: std.fs.Dir) void {
 test "cleanupAgentArtifacts removes orphans" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // Create some artifact files and a non-artifact.
@@ -228,7 +228,7 @@ test "cleanupAgentArtifacts removes orphans" {
 test "ensureDirAt locks directory mode to 0700" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try ensureDirAt(tmp.dir, "state");
@@ -239,7 +239,7 @@ test "ensureDirAt locks directory mode to 0700" {
 test "ensureDirPath creates nested absolute directories" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -257,7 +257,7 @@ test "ensureDirPath creates nested absolute directories" {
 test "createFileAt locks file mode to 0600" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var file = try createFileAt(tmp.dir, "state.json", .{ .truncate = true });
@@ -270,7 +270,7 @@ test "createFileAt locks file mode to 0600" {
 test "openConfined rejects symlinks" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var f = try tmp.dir.createFile("real.txt", .{});
@@ -283,7 +283,7 @@ test "openConfined rejects symlinks" {
 test "openConfined rejects path traversal" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expectError(error.AccessDenied, openConfined(tmp.dir, "..", .{}));
@@ -294,7 +294,7 @@ test "openConfined rejects path traversal" {
 test "createConfined rejects symlinks" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.symLink("target.txt", "link.txt", .{});
@@ -304,7 +304,7 @@ test "createConfined rejects symlinks" {
 test "openConfined rejects hardlinks" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var f = try tmp.dir.createFile("orig.txt", .{});
@@ -319,7 +319,7 @@ test "openConfined rejects hardlinks" {
 test "atomicWriteAt creates file atomically" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try atomicWriteAt(tmp.dir, "out.json", "{\"ok\":true}\n");
@@ -335,7 +335,7 @@ test "atomicWriteAt creates file atomically" {
 test "atomicWriteAt overwrites existing file" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try atomicWriteAt(tmp.dir, "f.txt", "old");
@@ -349,7 +349,7 @@ test "atomicWriteAt overwrites existing file" {
 test "atomicWriteAt rejects path traversal" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expectError(error.AccessDenied, atomicWriteAt(tmp.dir, "../escape", "x"));
@@ -359,7 +359,7 @@ test "atomicWriteAt rejects path traversal" {
 test "atomicWriteAtFn streams large data" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const Ctx = struct {
@@ -379,7 +379,7 @@ test "atomicWriteAtFn streams large data" {
 test "createConfined enforces 0600 mode" {
     if (builtin.os.tag == .windows) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var f = try createConfined(tmp.dir, "sec.txt", .{});

@@ -14,6 +14,7 @@ pub fn run() !void {
 
     const alloc = arena.allocator();
     const argv = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, argv);
     var env = try config.Env.fromProcess(alloc);
     defer env.deinit(alloc);
     var out = std.fs.File.stdout().deprecatedWriter();

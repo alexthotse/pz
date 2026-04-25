@@ -15,7 +15,12 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
     @cInclude("sys/wait.h");
     @cInclude("unistd.h");
-    @cInclude("util.h");
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .macos) {
+        @cInclude("util.h");
+    } else if (builtin.os.tag == .linux) {
+        @cInclude("pty.h");
+    }
 });
 
 const RunOut = struct {
@@ -216,7 +221,7 @@ fn runPzPtySteps(
     const pz_bin = try pzBinAlloc(alloc);
     defer alloc.free(pz_bin);
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const step_paths = try alloc.alloc([]u8, steps.len);
@@ -298,7 +303,7 @@ fn streamHasText(alloc: std.mem.Allocator, data: []const u8, needle: []const u8)
 
 test "real pz PTY startup renders tui frame and quits cleanly" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -328,7 +333,7 @@ test "real pz PTY startup renders tui frame and quits cleanly" {
 
 test "real pz PTY startup survives live version check" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -378,7 +383,7 @@ test "real pz PTY startup survives live version check" {
 }
 
 test "real pz binary print mode works without tui" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -421,7 +426,7 @@ test "real pz binary print mode works without tui" {
 }
 
 test "real pz binary print mode uses config model and provider" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -474,7 +479,7 @@ test "real pz binary print mode uses config model and provider" {
 }
 
 test "real pz binary json mode consumes stdin prompts" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -522,7 +527,7 @@ test "real pz binary json mode consumes stdin prompts" {
 }
 
 test "real pz binary json mode rejects empty stdin without prompt" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -560,7 +565,7 @@ test "real pz binary json mode rejects empty stdin without prompt" {
 }
 
 test "real pz binary upgrade honors verified policy" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -599,7 +604,7 @@ test "real pz binary upgrade honors verified policy" {
 }
 
 test "real pz PTY renders slash help over the live terminal path" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -657,7 +662,7 @@ test "real pz PTY renders slash help over the live terminal path" {
 }
 
 test "real pz PTY walkthrough opens command settings login and resume surfaces" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -689,21 +694,21 @@ test "real pz PTY walkthrough opens command settings login and resume surfaces" 
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/help\n\n" },
-        .{ .wait_for = .{ .text = "/changelog", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "/changelog", .timeout_ms = 100 } },
         .{ .inject = "/settings\n\n" },
-        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 100 } },
         .{ .inject = "\x1b" },
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "/login\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "Login", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Login", .timeout_ms = 100 } },
         .{ .inject = "\x1b" },
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "/resume\n\n" },
-        .{ .wait_for = .{ .text = "Resume Session", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Resume Session", .timeout_ms = 100 } },
         .{ .inject = "\x1b" },
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "/provider openai\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "provider set to openai", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "provider set to openai", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -725,7 +730,7 @@ test "real pz PTY walkthrough opens command settings login and resume surfaces" 
 }
 
 test "real pz PTY walkthrough edits prompt and covers session bg and compaction" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -752,13 +757,13 @@ test "real pz PTY walkthrough edits prompt and covers session bg and compaction"
         .{ .inject = "pingg\x7f\n" },
         .{ .wait_for = .{ .text = "ack:ping", .timeout_ms = 15000 } },
         .{ .inject = "/session\n\n" },
-        .{ .wait_for = .{ .text = "Session", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Session", .timeout_ms = 100 } },
         .{ .inject = "/bg run printf done\n" },
-        .{ .wait_for = .{ .text = "bg started id=1", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "bg started id=1", .timeout_ms = 100 } },
         .{ .inject = "/bg list\n\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "id pid state code log cmd", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "id pid state code log cmd", .timeout_ms = 100 } },
         .{ .inject = "/compact\n\n" },
-        .{ .wait_for = .{ .text = "compacted in=", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "compacted in=", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -797,7 +802,7 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -820,17 +825,17 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/wat\n\n" },
-        .{ .wait_for = .{ .text = "unknown command", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "unknown command", .timeout_ms = 100 } },
         .{ .inject = "/tools nope\n" },
-        .{ .wait_for = .{ .text = "invalid tools", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "invalid tools", .timeout_ms = 100 } },
         .{ .inject = "/login bogus\n" },
-        .{ .wait_for = .{ .text = "unknown provider", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "unknown provider", .timeout_ms = 100 } },
         .{ .inject = "/bg stop 42\n" },
-        .{ .wait_for = .{ .text = "bg not found", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "bg not found", .timeout_ms = 100 } },
         .{ .inject = "/share\n\n" },
-        .{ .wait_for = .{ .text = "blocked by policy", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "blocked by policy", .timeout_ms = 100 } },
         .{ .inject = "/compact\n\n" },
-        .{ .wait_for = .{ .text = "session persistence is disabled", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "session persistence is disabled", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -880,7 +885,7 @@ test "real pz PTY failure walkthrough covers command provider bg compact and pol
 }
 
 test "real pz PTY /login anthropic passes args through picker" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
@@ -893,7 +898,7 @@ test "real pz PTY /login anthropic passes args through picker" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/login anthropic\n" },
-        .{ .wait_for = .{ .text = "oauth", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "oauth", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -913,7 +918,7 @@ test "real pz PTY /login anthropic passes args through picker" {
 // ── T7c: headless pipeline walkthrough coverage ──
 
 test "T7c pipeline denied-policy tool exits with error" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -973,7 +978,7 @@ test "T7c pipeline denied-policy tool exits with error" {
 }
 
 test "T7c pipeline non-default model propagates to provider" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1020,7 +1025,7 @@ test "T7c pipeline non-default model propagates to provider" {
 }
 
 test "T7c pipeline json mode missing prompt exits with error" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1061,7 +1066,7 @@ test "T7c pipeline json mode missing prompt exits with error" {
 // ── T7b: thin PTY auth/login overlay surface ──
 
 test "T7b PTY auth login overlay renders provider list" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1076,9 +1081,9 @@ test "T7b PTY auth login overlay renders provider list" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/login\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "Login", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Login", .timeout_ms = 100 } },
         .{ .inject = "\x1b" }, // ESC to dismiss
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1099,7 +1104,7 @@ test "T7b PTY auth login overlay renders provider list" {
 // ── UX1-UX6: keyboard-driven PTY walkthrough tests ──
 
 test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1113,7 +1118,7 @@ test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
 
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
-        .{ .wait_for = .{ .text = "claude-opus-4-6", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "claude-opus-4-6", .timeout_ms = 100 } },
         .{ .inject = "\x03" }, // ctrl-c once (clear)
         .{ .sleep = 400 },
         .{ .inject = "\x03" }, // ctrl-c again (quit)
@@ -1134,7 +1139,7 @@ test "UX1 PTY startup shows version, hints, cwd and quits cleanly" {
 }
 
 test "UX2 PTY input: type text, ctrl-u kills line, ctrl-c quits" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1149,7 +1154,7 @@ test "UX2 PTY input: type text, ctrl-u kills line, ctrl-c quits" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "hello" },
-        .{ .wait_for = .{ .text = "hello", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "hello", .timeout_ms = 100 } },
         .{ .inject = "\x15" }, // ctrl-u (kill line)
         .{ .sleep = 200 },
         .{ .inject = "\x03\x03" }, // ctrl-c twice (quit)
@@ -1170,7 +1175,7 @@ test "UX2 PTY input: type text, ctrl-u kills line, ctrl-c quits" {
 }
 
 test "UX3 PTY commands: /help and /hotkeys render output" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1185,9 +1190,9 @@ test "UX3 PTY commands: /help and /hotkeys render output" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/help\n\n" },
-        .{ .wait_for = .{ .text = "/changelog", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "/changelog", .timeout_ms = 100 } },
         .{ .inject = "/hotkeys\n\n" },
-        .{ .wait_for = .{ .text = "Keyboard shortcuts", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Keyboard shortcuts", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1206,7 +1211,7 @@ test "UX3 PTY commands: /help and /hotkeys render output" {
 }
 
 test "UX4 PTY overlays: /settings opens and esc closes" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1221,9 +1226,9 @@ test "UX4 PTY overlays: /settings opens and esc closes" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/settings\n\n" },
-        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 100 } },
         .{ .inject = "\x1b" }, // ESC to close overlay
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1242,7 +1247,7 @@ test "UX4 PTY overlays: /settings opens and esc closes" {
 }
 
 test "UX5 PTY settings: toggle item with down+enter" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1257,13 +1262,13 @@ test "UX5 PTY settings: toggle item with down+enter" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/settings\n\n" },
-        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 100 } },
         .{ .inject = "\x1b[B" }, // down arrow
         .{ .sleep = 400 },
         .{ .inject = "\n" }, // enter to toggle
-        .{ .wait_for = .{ .text = "Show tool output", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Show tool output", .timeout_ms = 100 } },
         .{ .inject = "\x1b" }, // ESC to close
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1282,7 +1287,7 @@ test "UX5 PTY settings: toggle item with down+enter" {
 }
 
 test "UX6 PTY sessions: /new creates and /name sets name" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1301,9 +1306,9 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/new\n\n" },
-        .{ .wait_for = .{ .text = "new session", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "new session", .timeout_ms = 100 } },
         .{ .inject = "/name test-session\n\n" },
-        .{ .wait_for = .{ .text = "session named", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "session named", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1335,7 +1340,7 @@ test "UX6 PTY sessions: /new creates and /name sets name" {
 // ── UX7: Auth overlay surfaces ──
 
 test "UX7 PTY auth login and model overlays" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1350,13 +1355,13 @@ test "UX7 PTY auth login and model overlays" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/login\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "Login", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Login", .timeout_ms = 100 } },
         .{ .inject = "\x1b" }, // ESC dismiss
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "/model\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "Select Model", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Select Model", .timeout_ms = 100 } },
         .{ .inject = "\x1b" }, // ESC dismiss
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1377,7 +1382,7 @@ test "UX7 PTY auth login and model overlays" {
 // ── UX8: Background job management ──
 
 test "UX8 PTY bg list shows status" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1392,7 +1397,7 @@ test "UX8 PTY bg list shows status" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/bg list\n\x1b\x00\n" },
-        .{ .wait_for = .{ .text = "no background jobs", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "no background jobs", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1417,7 +1422,7 @@ test "UX8 PTY bg list shows status" {
 // ── UX9: Security policy denial ──
 
 test "UX9 PTY policy denies bash tool" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1473,7 +1478,7 @@ test "UX9 PTY policy denies bash tool" {
 
 test "UX10 PTY version update notice renders in TUI" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1529,7 +1534,7 @@ test "UX10 PTY version update notice renders in TUI" {
 // ── UX11: Compaction ──
 
 test "UX11 PTY compact with no session shows disabled notice" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1544,7 +1549,7 @@ test "UX11 PTY compact with no session shows disabled notice" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/compact\n\n" },
-        .{ .wait_for = .{ .text = "session persistence is disabled", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "session persistence is disabled", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1563,7 +1568,7 @@ test "UX11 PTY compact with no session shows disabled notice" {
 }
 
 test "UX11 PTY compact with active session shows compaction result" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1588,7 +1593,7 @@ test "UX11 PTY compact with active session shows compaction result" {
         .{ .inject = "ping\n" },
         .{ .wait_for = .{ .text = "ack", .timeout_ms = 15000 } },
         .{ .inject = "/compact\n\n" },
-        .{ .wait_for = .{ .text = "compacted in=", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "compacted in=", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -1618,7 +1623,7 @@ test "real-env PTY: pz starts and exits without crash" {
     const pz_bin = try pzBinAlloc(alloc);
     defer alloc.free(pz_bin);
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(cwd);
@@ -1649,7 +1654,7 @@ test "real PTY: hello gets response" {
     const api_key = std.posix.getenv("ANTHROPIC_API_KEY") orelse return error.SkipZigTest;
     const alloc = std.testing.allocator;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pi/agent");
@@ -1714,7 +1719,7 @@ test "real PTY TUI: type prompt, get response in transcript" {
     const auth_data = std.fs.cwd().readFileAlloc(alloc, auth_src, 64 * 1024) catch return error.SkipZigTest;
     defer alloc.free(auth_data);
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -1764,7 +1769,7 @@ test "real PTY TUI: cached anthropic oauth token gets response in transcript" {
     const auth_data = std.fs.cwd().readFileAlloc(alloc, auth_src, 64 * 1024) catch return error.SkipZigTest;
     defer alloc.free(auth_data);
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -2236,7 +2241,7 @@ const InteractiveEnv = struct {
 };
 
 fn setupInteractiveEnv(alloc: std.mem.Allocator) !InteractiveEnv {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     errdefer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -2245,7 +2250,13 @@ fn setupInteractiveEnv(alloc: std.mem.Allocator) !InteractiveEnv {
     const home_abs = try tmp.dir.realpathAlloc(alloc, "home");
     errdefer alloc.free(home_abs);
 
-    const env = try baseEnv(alloc, home_abs);
+    var env = try baseEnv(alloc, home_abs);
+    if (std.posix.getenv("ANTHROPIC_API_KEY")) |api_key| {
+        try env.put("ANTHROPIC_API_KEY", api_key);
+    } else {
+        // Mock it so the tests don't get stuck on the login screen
+        try env.put("ANTHROPIC_API_KEY", "sk-ant-mock-key");
+    }
     return .{
         .tmp = tmp,
         .cwd_abs = cwd_abs,
@@ -2258,7 +2269,7 @@ fn setupInteractiveEnv(alloc: std.mem.Allocator) !InteractiveEnv {
 test "runPtyInteractive: fake provider round-trip with wait_for and snapshot" {
     const alloc = std.testing.allocator;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath("home/.pz");
@@ -2510,7 +2521,7 @@ test "pty: bracketed paste during stream" {
 
 test "PTY walkthrough: full prompt to response" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2523,7 +2534,7 @@ test "PTY walkthrough: full prompt to response" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "hello\n" },
-        .{ .wait_for = .{ .text = "hello", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "hello", .timeout_ms = 100 } },
         .{ .wait_for = .{ .text = "Hello from fake provider", .timeout_ms = 10000 } },
         .{ .snapshot = "after_response" },
         .{ .inject = "\x03\x03" },
@@ -2541,7 +2552,7 @@ test "PTY walkthrough: full prompt to response" {
 
 test "PTY walkthrough: streaming renders incrementally" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2584,7 +2595,7 @@ test "PTY walkthrough: streaming renders incrementally" {
 
 test "UX1 walkthrough: startup renders all sections" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2627,7 +2638,7 @@ test "UX1 walkthrough: startup renders all sections" {
 
 test "UX2 walkthrough: prompt gets response in transcript" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2665,7 +2676,7 @@ test "UX2 walkthrough: prompt gets response in transcript" {
 
 test "UX3 walkthrough: help and clear" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2679,7 +2690,7 @@ test "UX3 walkthrough: help and clear" {
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         // Open help.
         .{ .inject = "/help\n\n" },
-        .{ .wait_for = .{ .text = "Commands", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Commands", .timeout_ms = 100 } },
         .{ .snapshot = "help_visible" },
         // Clear transcript.
         .{ .inject = "/clear\n\n" },
@@ -2704,7 +2715,7 @@ test "UX3 walkthrough: help and clear" {
 
 test "UX4 walkthrough: settings overlay opens and closes" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2717,10 +2728,10 @@ test "UX4 walkthrough: settings overlay opens and closes" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/settings\n\n" },
-        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "Settings", .timeout_ms = 100 } },
         .{ .snapshot = "settings_open" },
         .{ .inject = "\x1b" }, // ESC to close overlay
-        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "drop files", .timeout_ms = 100 } },
         .{ .snapshot = "settings_closed" },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
@@ -2740,7 +2751,7 @@ test "UX4 walkthrough: settings overlay opens and closes" {
 
 test "PTY walkthrough: cancel mid-stream" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2770,7 +2781,7 @@ test "PTY walkthrough: cancel mid-stream" {
 
 test "PTY walkthrough: tool call renders" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2814,7 +2825,7 @@ test "PTY walkthrough: tool call renders" {
 
 test "PTY walkthrough: compaction after response" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     try tmp.dir.makePath("sess");
@@ -2848,7 +2859,7 @@ test "PTY walkthrough: compaction after response" {
 
 test "PTY walkthrough: multi-turn conversation" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2891,7 +2902,7 @@ test "PTY walkthrough: multi-turn conversation" {
 
 test "UX5 walkthrough: tool output hidden when toggled off" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -2955,7 +2966,7 @@ test "UX5 walkthrough: tool output hidden when toggled off" {
 
 test "UX6 walkthrough: new and name" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     try tmp.dir.makePath("sess");
@@ -2995,7 +3006,7 @@ test "UX6 walkthrough: new and name" {
 
 test "UX7 walkthrough: missing auth shows guidance" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -3030,7 +3041,7 @@ test "UX7 walkthrough: missing auth shows guidance" {
 
 test "UX8 walkthrough: bg run and list" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.makePath("home/.pz");
     const cwd = try tmp.dir.realpathAlloc(alloc, ".");
@@ -3043,10 +3054,10 @@ test "UX8 walkthrough: bg run and list" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/bg run echo BG_HELLO\n" },
-        .{ .wait_for = .{ .text = "bg started", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "bg started", .timeout_ms = 100 } },
         .{ .sleep = 500 },
         .{ .inject = "/bg list\n" },
-        .{ .wait_for = .{ .text = "echo BG_HELLO", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "echo BG_HELLO", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -3126,7 +3137,7 @@ test "pty: /bg run with extra args submits without picker interference" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/bg run echo BG_TEST_OK\n" },
-        .{ .wait_for = .{ .text = "bg started", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "bg started", .timeout_ms = 100 } },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },
     };
@@ -3147,7 +3158,7 @@ test "pty: unknown slash command shows error in transcript" {
     const steps = [_]InteractiveStep{
         .{ .wait_for = .{ .text = "drop files", .timeout_ms = 8000 } },
         .{ .inject = "/frobnicate\n\n" },
-        .{ .wait_for = .{ .text = "unknown command", .timeout_ms = 5000 } },
+        .{ .wait_for = .{ .text = "unknown command", .timeout_ms = 100 } },
         .{ .snapshot = "after_unknown_cmd" },
         .{ .inject = "\x03\x03" },
         .{ .sleep = 500 },

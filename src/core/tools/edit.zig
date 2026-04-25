@@ -124,7 +124,7 @@ fn replaceAllAlloc(
 test "edit handler replaces first match with deterministic timestamps" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -174,7 +174,7 @@ test "edit handler replaces first match with deterministic timestamps" {
 }
 
 test "edit handler replaces all matches when all is true" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -212,7 +212,7 @@ test "edit handler replaces all matches when all is true" {
 }
 
 test "edit handler returns not found when old text is absent" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();
@@ -318,7 +318,7 @@ test "edit handler returns kind mismatch for wrong call kind" {
 test "edit handler denies hardlinked file" {
     if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .wasi) return;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var cwd = try path_guard.CwdGuard.enter(tmp.dir);
     defer cwd.deinit();

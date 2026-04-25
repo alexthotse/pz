@@ -617,7 +617,7 @@ test "compaction rewrites stream and preserves semantic events" {
         before: [][]u8,
         after: [][]u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const writer = @import("writer.zig");
@@ -700,14 +700,14 @@ test "compaction rewrites stream and preserves semantic events" {
 }
 
 test "compaction checkpoint returns null when absent" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expect((try loadCheckpoint(std.testing.allocator, tmp.dir, "missing")) == null);
 }
 
 test "compaction checkpoint rejects torn file without trailing newline" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(.{
@@ -957,7 +957,7 @@ test "multi-event roundtrip preserves all event types" {
         after: [][]u8,
     };
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const writer = @import("writer.zig");
@@ -1075,7 +1075,7 @@ test "double compact is idempotent" {
         after1: [][]u8,
         after2: [][]u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const writer = @import("writer.zig");
@@ -1129,7 +1129,7 @@ test "double compact is idempotent" {
 test "large event survives compaction" {
     const OhSnap = @import("ohsnap");
     const oh = OhSnap{};
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const writer = @import("writer.zig");
@@ -1172,7 +1172,7 @@ test "large event survives compaction" {
 }
 
 test "empty session compacts to zero lines" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const path = try sid_path.sidJsonlAlloc(std.testing.allocator, "e1");
@@ -1512,7 +1512,7 @@ test "P0-1 regression: compaction run has no leaks across multi-event stream" {
     const writer = @import("writer.zig");
     const alloc = std.testing.allocator;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var wr = try writer.Writer.init(alloc, tmp.dir, .{

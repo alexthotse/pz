@@ -167,7 +167,7 @@ test "jsonl replay preserves event stream exactly" {
     const ReplaySnap = struct {
         rows: [][]u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const events = [_]Event{
@@ -243,7 +243,7 @@ test "nextDup keeps prior event stable across later reads" {
     const ReplaySnap = struct {
         rows: [][]u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const events = [_]Event{
@@ -312,7 +312,7 @@ fn expectMalformedReplay(dir: std.fs.Dir) !void {
 }
 
 test "jsonl replay fails malformed line deterministically" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     {
@@ -339,7 +339,7 @@ test "jsonl replay fails malformed line deterministically" {
 }
 
 test "jsonl replay rejects unsupported event version" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     {
@@ -355,7 +355,7 @@ test "jsonl replay rejects unsupported event version" {
 }
 
 test "jsonl replay rejects invalid session id" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expectError(error.InvalidSessionId, ReplayReader.init(
@@ -373,7 +373,7 @@ test "jsonl replay rejects invalid session id" {
 }
 
 test "jsonl replay rejects zero max line bytes" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try std.testing.expectError(error.InvalidMaxLineBytes, ReplayReader.init(
@@ -385,7 +385,7 @@ test "jsonl replay rejects zero max line bytes" {
 }
 
 test "jsonl replay rejects final line without trailing newline" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     {
@@ -415,7 +415,7 @@ test "jsonl replay keeps committed rows and rejects torn tail" {
     const ReplaySnap = struct {
         rows: [][]u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const ev = Event{
@@ -454,7 +454,7 @@ test "jsonl replay keeps committed rows and rejects torn tail" {
 }
 
 test "jsonl replay enforces max line bytes in streaming mode" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     {
@@ -480,7 +480,7 @@ test "jsonl replay property preserves text stream across io buffer splits" {
     const zc = @import("zcheck");
     try zc.check(struct {
         fn prop(args: struct { a: u16, b: u16, c: u16 }) bool {
-            var tmp = std.testing.tmpDir(.{});
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
             defer tmp.cleanup();
 
             const alloc = std.testing.allocator;
@@ -532,7 +532,7 @@ test "jsonl replay property rejects encoded lines above max bytes" {
     const zc = @import("zcheck");
     try zc.check(struct {
         fn prop(args: struct { len: u16, slack: u8 }) bool {
-            var tmp = std.testing.tmpDir(.{});
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
             defer tmp.cleanup();
 
             const alloc = std.testing.allocator;
@@ -571,7 +571,7 @@ test "jsonl replay property survives crap-and-mutate of valid rows" {
 
     try zc.check(struct {
         fn prop(args: struct { len: u16, seed: u64, slack: u8 }) bool {
-            var tmp = std.testing.tmpDir(.{});
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
             defer tmp.cleanup();
 
             const alloc = std.testing.allocator;
@@ -617,7 +617,7 @@ test "fuzz session reader survives arbitrary JSONL lines" {
     try std.testing.fuzz({}, struct {
         fn f(_: void, input: []const u8) anyerror!void {
             const alloc = std.testing.allocator;
-            var tmp = std.testing.tmpDir(.{});
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
             defer tmp.cleanup();
 
             {
@@ -651,7 +651,7 @@ test "P0-1 regression: no UAF across multi-event compaction replay" {
     // arena before allocating a new one. A UAF would surface as a use of freed
     // memory detected by std.testing.allocator (GeneralPurposeAllocator).
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     const events = [_]Event{

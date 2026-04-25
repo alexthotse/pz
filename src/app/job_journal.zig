@@ -288,7 +288,7 @@ test "journal replay tracks active launches only" {
         pid: i32,
         cmd: []const u8,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(abs);
@@ -322,7 +322,7 @@ test "journal replay tracks active launches only" {
 }
 
 test "journal cleanup removes active launch" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(abs);
@@ -348,7 +348,7 @@ test "journal replay ignores malformed lines" {
         len: usize,
         id: u64,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(abs);
@@ -387,7 +387,7 @@ test "journal init creates nested absolute state dirs" {
         has_dir: bool,
         ends_with_jobs: bool,
     };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(abs);

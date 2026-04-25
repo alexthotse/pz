@@ -131,7 +131,7 @@ pub const version_text = "pz " ++ version ++ " (" ++ git_hash ++ ")\n";
 pub const changelog_text = changelog ++ "\n";
 
 test "cli returns help and version commands" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var help_cmd = try parse(std.testing.allocator, tmp.dir, &.{"--help"}, .{});
@@ -150,7 +150,7 @@ test "cli returns help and version commands" {
 }
 
 test "cli returns upgrade command" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var cmd = try parse(std.testing.allocator, tmp.dir, &.{"--upgrade"}, .{});
@@ -159,7 +159,7 @@ test "cli returns upgrade command" {
 }
 
 test "cli mode dispatch uses config mode when mode flag absent" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -182,7 +182,7 @@ test "cli mode dispatch uses config mode when mode flag absent" {
 }
 
 test "cli config-driven json mode does not require prompt" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -206,7 +206,7 @@ test "cli config-driven json mode does not require prompt" {
 }
 
 test "cli mode dispatch applies mode flag over config and env" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");
@@ -227,7 +227,7 @@ test "cli mode dispatch applies mode flag over config and env" {
 }
 
 test "cli propagates session and tool selections to run command" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var cmd = try parse(std.testing.allocator, tmp.dir, &.{ "--continue", "--tools", "read,bash" }, .{});
@@ -248,7 +248,7 @@ test "cli propagates session and tool selections to run command" {
 }
 
 test "cli parse carries ca_file from config" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     try tmp.dir.makePath(".pz");

@@ -25,7 +25,7 @@ test "T5d invalid UTF-8 in tool output survives persist and export" {
     };
 
     // 2. Persist via writer (encodes with UTF-8 sanitization).
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     var w = try writer_mod.Writer.init(alloc, tmp.dir, .{});

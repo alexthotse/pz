@@ -1,0 +1,11 @@
+test
++- run test failure
+error: while executing test 'app.runtime.test.runtime blocks tool dispatch under verified policy', the following command terminated with signal 9 (expected exited with code 0):
+./.zig-cache/o/ac178a9a45048fd2bcabcdca6201b47b/test --cache-dir=./.zig-cache --seed=0xd346b5b6 --listen=-
+
+Build Summary: 12/14 steps succeeded; 1 failed; 1556/1556 tests passed
+test transitive failure
++- run test failure
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/998d8d203ecedf077d45f23f30c15d92/build /usr/local/zig/zig /usr/local/zig/lib /workspace .zig-cache /root/.cache/zig --seed 0xd346b5b6 -Z25a442ac49be0e09 test -- --test-filter tool contract handlers emit deterministic envelopes

@@ -8,6 +8,7 @@ pub fn main() !void {
 
     const alloc = arena.allocator();
     const argv = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, argv);
     if (argv.len != 2) return error.InvalidArgs;
 
     if (std.mem.eql(u8, argv[1], "version")) {
